@@ -21,6 +21,7 @@ from minecraft_ai.runtime import (
     _authorized_game_chat,
     _active_operator_messages,
     _first_feasible_recovery,
+    _observed_scene_recovery,
     _operator_target_facts,
     _selected_operator_message_id,
     _semantic_deadline_ms,
@@ -105,6 +106,36 @@ def test_operator_console_response_never_authorizes_game_chat() -> None:
     decision = CognitionDecision(say="Working on it.")
 
     assert _authorized_game_chat(decision, board) is None
+
+
+def test_verified_death_scene_routes_to_learned_respawn_option() -> None:
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:death",
+            width=1280,
+            height=720,
+            facts=(
+                PerceptionFact(
+                    key="scene.death",
+                    value=True,
+                    confidence=0.995,
+                    observed_ns=now,
+                    source="safety:bedrock-hud-v1:not-training-label",
+                ),
+            ),
+        )
+    )
+
+    recovery = _observed_scene_recovery(build_bootstrap_skill_library(), board)
+
+    assert recovery is not None
+    assert recovery.skill_id == "respawn_after_death"
+    assert recovery.policy_ref == "gui"
+    assert recovery.policy_instruction == "respawn"
 
 
 def test_skill_library_uses_smoothed_context_score_and_lifecycle() -> None:

@@ -119,6 +119,26 @@ def _first_feasible_recovery(
     return None
 
 
+def _observed_scene_recovery(
+    skills: SkillLibrary,
+    blackboard: PerceptionBlackboard,
+) -> SkillSpec | None:
+    """Route verified blocking UI events to learned closed-loop options.
+
+    This tactical event router selects an option contract only. It deliberately
+    contains no GUI coordinates or actuator sequence; the configured learned
+    policy must still perceive, act, and satisfy the option's visual outcome.
+    """
+    death = blackboard.fact("scene.death", min_confidence=0.9)
+    if death is None or not bool(death.value):
+        return None
+    skill_id = "respawn_after_death"
+    if skill_id not in skills.specs:
+        return None
+    candidate = skills.get(skill_id)
+    return candidate if conditions_satisfied(candidate.preconditions, blackboard) else None
+
+
 def _active_operator_messages(
     messages: tuple[OperatorMessage, ...],
 ) -> tuple[OperatorMessage, ...]:
@@ -365,6 +385,7 @@ class AgentRuntime:
         self._consume_cognition()
         self._start_cognition_if_due()
         self._request_semantics_if_due(frame.frame_id)
+        self._route_observed_scene_recovery()
 
         active = self.executor.run
         if active is None or active.outcome != SkillOutcome.RUNNING:
@@ -406,6 +427,33 @@ class AgentRuntime:
                     run_id=uuid.uuid4().hex,
                     context_key=result.run.context_key,
                 )
+
+    def _route_observed_scene_recovery(self) -> None:
+        """Preempt stale world work when a verified blocking scene event arrives."""
+        recovery = _observed_scene_recovery(self.skills, self.blackboard)
+        if recovery is None:
+            return
+        running = self.executor.run
+        if (
+            running is not None
+            and running.outcome == SkillOutcome.RUNNING
+            and running.skill_id == recovery.skill_id
+        ):
+            return
+        context_key = "scene-recovery"
+        if running is not None and running.outcome == SkillOutcome.RUNNING:
+            context_key = running.context_key
+            cancelled = self.executor.cancel()
+            if cancelled.action is not None:
+                self._send_motor(cancelled.action)
+            self._recent_skill_runs.appendleft(cancelled.run)
+            self._execution_revision += 1
+        self.executor.start(
+            recovery,
+            run_id=uuid.uuid4().hex,
+            context_key=context_key,
+        )
+        self._cognition_requested = True
 
     def _lease_heartbeat(self) -> None:
         """Keep the motor lease alive independently of inference/cognition latency."""

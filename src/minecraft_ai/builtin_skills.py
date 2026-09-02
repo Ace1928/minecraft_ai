@@ -187,6 +187,24 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             policy_instruction="click button",
         ),
         SkillSpec(
+            skill_id="respawn_after_death",
+            version=1,
+            name="Respawn after death",
+            description=(
+                "Use the learned GUI policy to activate Bedrock's visible Respawn control, "
+                "then verify that a playable world frame returns before resuming any project"
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            preconditions=(SkillCondition(key="scene.death", operator="truthy"),),
+            success_conditions=(SkillCondition(key="scene.playable", operator="truthy"),),
+            expected_effects=("respawned", "playable_scene_restored"),
+            max_duration_ms=15_000,
+            # This remains a learned UI option: the contract supplies no screen
+            # coordinate, click macro, or privileged game-state action.
+            policy_ref="gui",
+            policy_instruction="respawn",
+        ),
+        SkillSpec(
             skill_id="close_open_inventory",
             version=1,
             name="Close open inventory",
