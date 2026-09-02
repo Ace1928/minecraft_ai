@@ -8,9 +8,12 @@ import socket
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Iterator
+
+import fcntl
 
 from platformdirs import user_runtime_dir
 
@@ -29,6 +32,7 @@ APP_NAME = "minecraft-ai"
 RUNTIME_DIR = Path(user_runtime_dir(APP_NAME))
 CONTROL_FILE = RUNTIME_DIR / "control.json"
 STATUS_FILE = RUNTIME_DIR / "supervisor-state.json"
+LOCK_FILE = RUNTIME_DIR / "supervisor.lock"
 
 
 @dataclass(frozen=True)
@@ -40,7 +44,8 @@ class ControlEndpoint:
     session_id: str
 
     @classmethod
-    def load(cls, path: Path = CONTROL_FILE) -> ControlEndpoint:
+    def load(cls, path: Path | None = None) -> ControlEndpoint:
+        path = CONTROL_FILE if path is None else path
         raw = json.loads(path.read_text(encoding="utf-8"))
         return cls(
             host=str(raw["host"]),
@@ -303,6 +308,10 @@ class Supervisor:
             }
 
     def serve_forever(self) -> None:
+        with _exclusive_runtime_lock():
+            self._serve_forever_owned()
+
+    def _serve_forever_owned(self) -> None:
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
         self.start()
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -346,10 +355,10 @@ class Supervisor:
                 close = getattr(self.backend, "close", None)
                 if callable(close):
                     close()
-                self._remove_control_file_if_owned()
                 if self.state != SupervisorState.STOPPED:
                     self.state = SupervisorState.STOPPED
                 self._persist_status()
+                self._remove_control_file_if_owned()
 
     def _handle_connection(self, conn: socket.socket) -> None:
         try:
@@ -406,19 +415,49 @@ class Supervisor:
             _send_json_line(conn, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
     def _persist_status(self) -> None:
+        # Pure in-process Supervisor instances (including unit tests) do not own
+        # public runtime state. A serving process may publish only while its
+        # exact PID/session endpoint is still the registered owner, preventing
+        # an older supervisor from clobbering a newer live session on exit.
+        if not self._owns_control_file():
+            return
         RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
         _atomic_json_write(STATUS_FILE, self.status(), mode=0o600)
 
-    def _remove_control_file_if_owned(self) -> None:
+    def _owns_control_file(self) -> bool:
+        endpoint = self._endpoint
+        if endpoint is None:
+            return False
         try:
             current = ControlEndpoint.load(CONTROL_FILE)
         except Exception:
-            return
-        if current.pid == os.getpid() and current.session_id == self.session_id:
+            return False
+        return current.pid == endpoint.pid and current.session_id == endpoint.session_id
+
+    def _remove_control_file_if_owned(self) -> None:
+        if self._owns_control_file():
             try:
                 CONTROL_FILE.unlink()
             except FileNotFoundError:
                 pass
+
+
+@contextmanager
+def _exclusive_runtime_lock() -> Iterator[None]:
+    """Permit exactly one supervisor process to own the public control plane."""
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    handle: BinaryIO = LOCK_FILE.open("a+b")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("another minecraft-ai supervisor already owns the runtime") from exc
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def send_command(command: str, **payload: Any) -> dict[str, Any]:
