@@ -198,14 +198,26 @@ class IsolatedX11InputBackend:
             raise IsolationError("chat text must contain 1..256 characters")
         if any(ord(char) < 32 or ord(char) > 126 for char in text):
             raise IsolationError("isolated chat actuator currently supports printable ASCII only")
+        previous_keys = set(self._held_keys)
+        previous_buttons = set(self._held_buttons)
         self.release_all()
-        self._tap_key("t")
-        self._display.sync()
-        time.sleep(0.04)
-        for char in text:
-            self._type_ascii(char)
-        self._tap_key("enter")
-        self._display.sync()
+        try:
+            self._tap_key("t")
+            self._display.sync()
+            time.sleep(0.04)
+            for char in text:
+                self._type_ascii(char)
+            self._tap_key("enter")
+        finally:
+            for key in sorted(previous_keys):
+                self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))
+            for button in sorted(previous_buttons):
+                button_id = _BUTTONS.get(button)
+                if button_id is not None:
+                    self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
+            self._held_keys = previous_keys
+            self._held_buttons = previous_buttons
+            self._display.sync()
 
     def _type_ascii(self, char: str) -> None:
         if char == " ":
