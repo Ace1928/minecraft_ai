@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
+
 from minecraft_ai.execution import SkillExecutor
-from minecraft_ai.motor import BootstrapMotorPolicy
+from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.skills import SkillCondition, SkillOutcome, SkillSpec
 
@@ -26,7 +28,7 @@ def _fact(key: str, value: str | int | float | bool) -> PerceptionFact:
         key=key,
         value=value,
         confidence=1.0,
-        observed_ns=100,
+        observed_ns=time.monotonic_ns(),
         source="test",
         expires_after_ms=1_000_000,
     )
@@ -67,7 +69,11 @@ def test_skill_success_releases_held_input() -> None:
         success_conditions=(SkillCondition(key="done", operator="truthy"),),
     )
     executor.start(spec, run_id="r1", now_ns=100)
-    running = executor.tick(_board(_fact("done", False)), sequence=1, now_ns=200)
+    running = executor.tick(
+        _board(_fact("done", False), _fact("target.visible", True)),
+        sequence=1,
+        now_ns=200,
+    )
     assert running.action is not None
     assert "w" in running.action.keys_down
     assert "left" in running.action.buttons_down
@@ -120,3 +126,45 @@ def test_cancel_release_advances_sequence_before_next_skill() -> None:
     ).action
     assert next_action is not None
     assert next_action.sequence == 2
+
+
+def test_exploration_has_no_implicit_camera_sweeps_or_periodic_jumps() -> None:
+    policy = BootstrapMotorPolicy()
+    board = _board(_fact("scene.playable", True))
+    intent = MotorIntent(skill_id="explore", mode="explore")
+
+    actions = [policy.act(board, intent, sequence=index) for index in range(80)]
+
+    assert all(action.mouse_dx == 0 for action in actions)
+    assert all(action.mouse_dy == 0 for action in actions)
+    assert all("space" not in action.keys_down for action in actions)
+
+
+def test_target_tracking_is_deadbanded_and_acceleration_limited() -> None:
+    policy = BootstrapMotorPolicy()
+    board = _board(_fact("target.visible", True), _fact("target.dx", 1.0))
+    intent = MotorIntent(skill_id="approach", mode="approach")
+
+    actions = [policy.act(board, intent, sequence=index) for index in range(8)]
+    deltas = [action.mouse_dx for action in actions]
+
+    assert deltas[0] <= policy.max_mouse_acceleration
+    assert all(
+        abs(current - previous) <= policy.max_mouse_acceleration
+        for previous, current in zip(deltas, deltas[1:], strict=False)
+    )
+    assert max(map(abs, deltas)) <= policy.max_mouse_step
+
+
+def test_explicit_unplayable_scene_releases_movement() -> None:
+    policy = BootstrapMotorPolicy()
+    intent = MotorIntent(skill_id="explore", mode="explore")
+    moving = policy.act(_board(), intent, sequence=0)
+    stopped = policy.act(
+        _board(_fact("scene.playable", False)),
+        intent,
+        sequence=1,
+    )
+
+    assert "w" in moving.keys_down
+    assert "w" in stopped.keys_up

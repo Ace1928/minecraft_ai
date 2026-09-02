@@ -32,11 +32,21 @@ class MotorPolicy(Protocol):
     def reset(self) -> MotorAction: ...
 
 
-def _number(blackboard: PerceptionBlackboard, key: str) -> float | None:
-    fact = blackboard.fact(key, min_confidence=0.35)
+def _number(
+    blackboard: PerceptionBlackboard,
+    key: str,
+    *,
+    min_confidence: float = 0.65,
+) -> float | None:
+    fact = blackboard.fact(key, min_confidence=min_confidence)
     if fact is None or not isinstance(fact.value, (int, float)):
         return None
     return float(fact.value)
+
+
+def _reliable_truth(blackboard: PerceptionBlackboard, key: str) -> bool:
+    fact = blackboard.fact(key, min_confidence=0.65)
+    return bool(fact is not None and not fact.source.startswith("bootstrap:") and bool(fact.value))
 
 
 @dataclass
@@ -47,16 +57,19 @@ class BootstrapMotorPolicy:
     never a learned behavior prior or a benchmark-backed preferred controller.
     """
 
-    policy_id: str = "bootstrap-motor-v1"
-    mouse_gain: float = 35.0
-    max_mouse_step: int = 120
-    sweep_amplitude: float = 24.0
-    jump_interval_ticks: int = 9
+    policy_id: str = "bootstrap-motor-v2-smooth"
+    mouse_gain: float = 20.0
+    mouse_deadzone: float = 0.08
+    mouse_smoothing: float = 0.35
+    max_mouse_step: int = 28
+    max_mouse_acceleration: int = 4
     _held_keys: set[str] = field(default_factory=set)
     _held_buttons: set[str] = field(default_factory=set)
     _last_sequence: int = -1
     _tick_count: int = 0
     _stuck_counter: int = 0
+    _last_mouse_dx: int = 0
+    _last_mouse_dy: int = 0
 
     def act(
         self,
@@ -75,56 +88,51 @@ class BootstrapMotorPolicy:
         mouse_dx = 0
         mouse_dy = 0
 
-        dx = _number(blackboard, "target.dx")
-        dy = _number(blackboard, "target.dy")
+        target_visible = _reliable_truth(blackboard, "target.visible")
+        dx = _number(blackboard, "target.dx") if target_visible else None
+        dy = _number(blackboard, "target.dy") if target_visible else None
         obstacle_ahead = blackboard.fact("obstacle.ahead")
         danger = blackboard.fact("danger.immediate")
         mode = intent.mode.lower()
 
-        pitch_up = blackboard.fact("pitch.looking_up")
-
-        # 1. Camera orientation and target tracking
+        # Camera motion is evidence-driven. Exploratory scanning must be an explicit
+        # skill/action, never periodic jitter hidden inside locomotion.
         if dx is not None:
-            mouse_dx = _bounded_round(dx * self.mouse_gain, self.max_mouse_step)
-        elif mode in {"explore", "reacquire", "navigate"}:
-            # Controlled 40-tick scan with five turning ticks in each direction.
-            cycle = self._tick_count % 40
-            if cycle < 5:
-                mouse_dx = 16
-            elif 20 <= cycle < 25:
-                mouse_dx = -16
+            mouse_dx = self._smooth_mouse(dx, self._last_mouse_dx)
 
         if dy is not None:
-            mouse_dy = _bounded_round(dy * self.mouse_gain, self.max_mouse_step)
-        elif pitch_up and bool(pitch_up.value):
-            # Pitch correction: if looking up at sky, pitch down toward horizon
-            mouse_dy = 35
+            mouse_dy = self._smooth_mouse(dy, self._last_mouse_dy)
 
-        underwater = blackboard.fact("environment.underwater")
+        self._last_mouse_dx = mouse_dx
+        self._last_mouse_dy = mouse_dy
+
+        underwater = _reliable_truth(blackboard, "environment.underwater")
+        scene_playable = blackboard.fact("scene.playable", min_confidence=0.65)
+        playable = not (scene_playable is not None and not bool(scene_playable.value))
 
         # 2. Movement, swimming & obstacle auto-climbing
-        if underwater and bool(underwater.value):
-            # Swim to surface: hold space and look upward
+        if not playable:
+            desired_keys.clear()
+        elif underwater:
             desired_keys.add("space")
             desired_keys.add("w")
-            mouse_dy = -25
         elif mode in {"approach", "navigate", "explore", "mine", "attack", "use"}:
             desired_keys.add("w")
-            obstacle_detected = bool(obstacle_ahead and obstacle_ahead.value)
-            periodic_jump = self._tick_count % self.jump_interval_ticks == 0
-            if obstacle_detected or periodic_jump:
+            obstacle_detected = bool(
+                obstacle_ahead
+                and obstacle_ahead.confidence >= 0.65
+                and not obstacle_ahead.source.startswith("bootstrap:")
+                and obstacle_ahead.value
+            )
+            if obstacle_detected:
                 desired_keys.add("space")
-                if obstacle_ahead and bool(obstacle_ahead.value) and (self._tick_count % 6 == 0):
-                    # Lateral strafe to navigate around tree trunks / rock pillars
-                    desired_keys.add("d" if self._tick_count % 12 < 6 else "a")
         elif mode in {"retreat", "backoff"}:
             desired_keys.add("s")
             if danger and bool(danger.value):
                 desired_keys.add("space")
 
         # 3. Sprinting & Sneaking parameters
-        exploring_on_land = mode == "explore" and not bool(underwater and underwater.value)
-        if bool(intent.parameters.get("sprint", False)) or exploring_on_land:
+        if bool(intent.parameters.get("sprint", False)):
             desired_keys.add("ctrl")
         if bool(intent.parameters.get("sneak", False)):
             desired_keys.add("shift")
@@ -132,9 +140,9 @@ class BootstrapMotorPolicy:
             desired_keys.add("space")
 
         # 4. Action button rhythms (mine, attack, place, use)
-        if mode == "mine":
+        if mode == "mine" and target_visible:
             desired_buttons.add("left")
-        elif mode == "attack":
+        elif mode == "attack" and target_visible:
             # Tactical hit rhythm on left click
             if self._tick_count % 3 != 0:
                 desired_buttons.add("left")
@@ -157,6 +165,19 @@ class BootstrapMotorPolicy:
         self._held_buttons = desired_buttons
         return action
 
+    def _smooth_mouse(self, error: float, previous: int) -> int:
+        target = (
+            0
+            if abs(error) <= self.mouse_deadzone
+            else _bounded_round(error * self.mouse_gain, self.max_mouse_step)
+        )
+        blended = int(round(previous + self.mouse_smoothing * (target - previous)))
+        delta = max(
+            -self.max_mouse_acceleration,
+            min(self.max_mouse_acceleration, blended - previous),
+        )
+        return _bounded_round(previous + delta, self.max_mouse_step)
+
     def reset(self) -> MotorAction:
         sequence = self._last_sequence + 1
         action = MotorAction(
@@ -166,6 +187,8 @@ class BootstrapMotorPolicy:
         )
         self._held_keys.clear()
         self._held_buttons.clear()
+        self._last_mouse_dx = 0
+        self._last_mouse_dy = 0
         self._last_sequence = sequence
         return action
 

@@ -137,8 +137,14 @@ class ActiveVLMWorker:
     def _inspect(self, job: SemanticJob) -> SemanticObservation:
         png = _bgra_to_png(job.frame)
         prompt = (
-            "Answer only JSON matching {facts:object, confidences:object, tracks:array, "
-            "chat:string[]}. Coordinates are normalized 0..1. Do not infer hidden state. "
+            "Inspect this Minecraft Bedrock screenshot. Answer only JSON matching "
+            "{facts:object, confidences:object, tracks:array, chat:string[]}. Always include "
+            "scene.mode as one of world, gui, loading, menu, death, unknown; scene.playable "
+            "as a boolean; and perception.uncertainty from 0 to 1. In world mode report only "
+            "visible HUD state, immediate hazards, terrain affordances, and task-relevant "
+            "targets. Only report target.visible=true with target.dx and target.dy in -1..1 "
+            "when a target is visibly localized. Never infer hidden inventory, coordinates, "
+            "seed, biome, identity, or time of day. Track coordinates are normalized 0..1. "
             f"Question: {job.query.question}"
         )
         response = self.model.inspect(prompt, image_bytes=png, mime_type="image/png")
@@ -194,7 +200,11 @@ class ActiveVLMWorker:
 
 @dataclass(frozen=True)
 class BootstrapFastPerception:
-    """Cheap RGB fallback for smoke tests, never a source of training labels."""
+    """Observable image statistics for smoke tests, never semantic ground truth.
+
+    Semantic RGB guesses were intentionally removed: color is not a reliable
+    block, target, obstacle, biome, scene, or time-of-day classifier.
+    """
 
     model_id: str = "bootstrap-rgb-v1"
     training_label_eligible: bool = False
@@ -203,101 +213,19 @@ class BootstrapFastPerception:
         if not frame.bgra or frame.width <= 0 or frame.height <= 0:
             return ()
         now = time.monotonic_ns()
-        width = frame.width
-        height = frame.height
-        center_x = width // 2
-        center_y = height // 2
-        row_bytes = width * 4
-
-        center_samples = 0
-        brown_count = 0
-        gray_count = 0
-        green_count = 0
-        for delta_y in range(-15, 15, 3):
-            sample_y = center_y + delta_y
-            if sample_y < 0 or sample_y >= height:
-                continue
-            row_offset = sample_y * row_bytes
-            for delta_x in range(-15, 15, 3):
-                sample_x = center_x + delta_x
-                if sample_x < 0 or sample_x >= width:
-                    continue
-                offset = row_offset + sample_x * 4
-                blue, green, red = frame.bgra[offset : offset + 3]
-                center_samples += 1
-                if red > 60 and green > 40 and red >= green and red > blue + 15:
-                    brown_count += 1
-                elif abs(red - green) < 20 and abs(green - blue) < 20 and 50 < red < 180:
-                    gray_count += 1
-                elif green > red + 15 and green > blue + 15:
-                    green_count += 1
-
-        sky_samples = 0
-        upper_sky = 0
-        lower_sky = 0
-        total_sky_brightness = 0.0
-        upper_color = (0, 0, 0)
-        lower_color = (0, 0, 0)
-        step = max(1, width // 10)
-        for sample_x in range(width // 4, max(width // 4 + 1, 3 * width // 4), step):
-            top_offset = min(height - 1, height // 8) * row_bytes + sample_x * 4
-            bottom_offset = min(height - 1, 7 * height // 8) * row_bytes + sample_x * 4
-            blue_top, green_top, red_top = frame.bgra[top_offset : top_offset + 3]
-            blue_bottom, green_bottom, red_bottom = frame.bgra[bottom_offset : bottom_offset + 3]
-            upper_color = (blue_top, green_top, red_top)
-            lower_color = (blue_bottom, green_bottom, red_bottom)
-            sky_samples += 1
-            total_sky_brightness += 0.299 * red_top + 0.587 * green_top + 0.114 * blue_top
-            if blue_top > 150 and green_top > 130 and red_top > 110:
-                upper_sky += 1
-            if blue_bottom > 150 and green_bottom > 130 and red_bottom > 110:
-                lower_sky += 1
-
-        looking_at_sky = bool(
-            sky_samples and upper_sky >= sky_samples * 0.7 and lower_sky >= sky_samples * 0.5
-        )
-        brightness = total_sky_brightness / max(1, sky_samples)
-        time_of_day = "day" if brightness > 135 else "dusk" if brightness > 75 else "night"
-        blue_top, green_top, red_top = upper_color
-        blue_bottom, _green_bottom, red_bottom = lower_color
-        is_underwater = bool(
-            blue_top > 120
-            and green_top > 100
-            and red_top < 40
-            and blue_bottom > 120
-            and red_bottom < 40
-        )
-
-        obstacle_samples = 0
-        solid_count = 0
-        for delta_y in range(20, 50, 5):
-            sample_y = center_y + delta_y
-            if sample_y >= height:
-                continue
-            row_offset = sample_y * row_bytes
-            for delta_x in range(-10, 10, 5):
-                sample_x = center_x + delta_x
-                if sample_x < 0 or sample_x >= width:
-                    continue
-                offset = row_offset + sample_x * 4
-                blue, green, red = frame.bgra[offset : offset + 3]
-                obstacle_samples += 1
-                if red + green + blue > 60:
-                    solid_count += 1
-
-        target_visible = bool(
-            center_samples and brown_count + gray_count + green_count > center_samples * 0.25
-        )
-        target_mineable = bool(center_samples and brown_count + gray_count > center_samples * 0.20)
-        obstacle_ahead = bool(obstacle_samples and solid_count >= obstacle_samples * 0.75)
+        pixel_count = frame.width * frame.height
+        sample_stride = max(4, pixel_count // 4096) * 4
+        luma_total = 0.0
+        samples = 0
+        for offset in range(0, len(frame.bgra) - 3, sample_stride):
+            blue, green, red = frame.bgra[offset : offset + 3]
+            luma_total += 0.299 * red + 0.587 * green + 0.114 * blue
+            samples += 1
+        mean_luma = luma_total / max(1, samples)
         source = f"bootstrap:{self.model_id}:not-training-label"
-        values: tuple[tuple[str, str | bool, float, int], ...] = (
-            ("target.visible", target_visible, 0.55, 300),
-            ("target.mineable", target_mineable, 0.50, 300),
-            ("pitch.looking_up", looking_at_sky, 0.50, 300),
-            ("environment.time_of_day", time_of_day, 0.45, 5000),
-            ("environment.underwater", is_underwater, 0.55, 500),
-            ("obstacle.ahead", obstacle_ahead, 0.50, 300),
+        values: tuple[tuple[str, float | bool, float, int], ...] = (
+            ("image.mean_luma", round(mean_luma / 255.0, 4), 1.0, 500),
+            ("perception.bootstrap_active", True, 1.0, 500),
         )
         return tuple(
             PerceptionFact(
