@@ -368,6 +368,22 @@ class HighLevelController:
         if danger is not None and bool(danger.value):
             return decision
         parameters = dict(decision.skill_parameters)
+        if decision.skill_id is not None and decision.skill_id in self.skills.specs:
+            selected_skill = self.skills.get(decision.skill_id)
+            if "target" in selected_skill.parameters:
+                latest = blackboard.latest()
+                operator_tracks = (
+                    ()
+                    if latest is None
+                    else tuple(
+                        track
+                        for track in latest.tracks
+                        if track.attributes.get("source") == "operator"
+                    )
+                )
+                if operator_tracks:
+                    target = max(operator_tracks, key=lambda track: track.last_seen_ns)
+                    parameters["target"] = target.label
         parameters.update(_explicit_action_constraints(active.text))
         return decision.model_copy(
             update={

@@ -6,7 +6,13 @@ import time
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.cognition import CognitionContext, CognitionDecision, HighLevelController
 from minecraft_ai.models import ModelMessage, ModelResponse
-from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
+from minecraft_ai.perception import (
+    FrameState,
+    PerceptionBlackboard,
+    PerceptionFact,
+    ScreenRegion,
+    Track,
+)
 from minecraft_ai.roles import get_role
 from minecraft_ai.social import OperatorMessage, OperatorMessageStatus
 from minecraft_ai.skills import SkillOutcome, SkillRun
@@ -100,6 +106,33 @@ class _IdleCapturingModel(_ShelterSelectingModel):
                     "say": None,
                     "request_replan": True,
                     "ask_perception": ["terrain.safe_direction"],
+                    "research_query": None,
+                }
+            ),
+            model=self.model_id,
+            latency_ms=1.0,
+        )
+
+
+class _TargetSelectingModel(_ShelterSelectingModel):
+    def complete_structured(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        del messages, name, schema
+        return ModelResponse(
+            text=json.dumps(
+                {
+                    "reasoning_summary": "Find the selected target",
+                    "chosen_goal_id": "old-goal",
+                    "skill_id": "reacquire_target",
+                    "skill_parameters": {"target": "selected terrain"},
+                    "say": None,
+                    "request_replan": False,
+                    "ask_perception": [],
                     "research_query": None,
                 }
             ),
@@ -337,6 +370,42 @@ def test_fresh_operator_directive_owns_idle_replan_decision() -> None:
     assert decision.skill_id is None
     assert decision.request_replan is True
     assert decision.skill_parameters["allow_attack"] is False
+
+
+def test_operator_grounded_skill_binds_exact_active_track_label() -> None:
+    message = OperatorMessage(
+        message_id="grounded-correction",
+        created_ns=2,
+        text="Use the selected region with ROCKET.",
+        status=OperatorMessageStatus.DELIVERED,
+    )
+    context = _context()
+    context.operator_messages = (message,)
+    board = _board()
+    latest = board.latest()
+    assert latest is not None
+    board.upsert_semantic_track(
+        instance_id=latest.instance_id,
+        track=Track(
+            track_id="operator:target",
+            label="open terrain gap",
+            confidence=1.0,
+            region=ScreenRegion(x=0.1, y=0.2, width=0.2, height=0.3),
+            first_seen_ns=1,
+            last_seen_ns=2,
+            attributes={"source": "operator"},
+        ),
+    )
+    controller = HighLevelController(
+        _TargetSelectingModel(),
+        build_bootstrap_skill_library(),
+    )
+
+    decision = controller.decide(board, context)
+
+    assert decision.chosen_goal_id == "operator:grounded-correction"
+    assert decision.skill_id == "reacquire_target"
+    assert decision.skill_parameters["target"] == "open terrain gap"
 
 
 def test_prior_agent_response_is_not_replayed_as_operator_instruction() -> None:

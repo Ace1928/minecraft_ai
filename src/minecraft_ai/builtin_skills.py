@@ -44,7 +44,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="reacquire_target",
-            version=4,
+            version=5,
             name="Reacquire target",
             description=(
                 "Look around deliberately to find the requested target again, stabilize it near "
@@ -55,7 +55,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             success_conditions=(SkillCondition(key="target.visible", operator="truthy"),),
             expected_effects=("target_visible",),
             max_duration_ms=8_000,
-            policy_ref="explore",
+            policy_ref="navigate",
             policy_instruction="find the target",
             action_permissions=SkillActionPermissions(
                 allow_attack=False,
