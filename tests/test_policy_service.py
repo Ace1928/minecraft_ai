@@ -264,6 +264,12 @@ def test_default_camera_adapter_matches_minecraft_half_sensitivity() -> None:
     assert config.camera_pitch_limit == 300
 
 
+def test_bedrock_camera_adapter_accepts_empirical_low_sensitivity_scale() -> None:
+    config = PolicyConfig(camera_scale=47.96)
+
+    assert config.camera_scale == pytest.approx(47.96)
+
+
 def test_camera_envelope_saturates_without_replacing_learned_task(
     tmp_path: Path,
 ) -> None:
