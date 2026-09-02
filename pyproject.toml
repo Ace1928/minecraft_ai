@@ -36,6 +36,10 @@ testpaths = ["tests"]
 target-version = "py311"
 line-length = 100
 
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["B008"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
