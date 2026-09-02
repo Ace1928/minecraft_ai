@@ -59,6 +59,10 @@ class PolicyConfig(BaseModel):
     # different sensitivity curve, so live deployments must replace this
     # default with an empirically measured counts-per-degree calibration.
     camera_scale: float = Field(default=20.0 / 3.0, ge=0.0, le=100.0)
+    # When Minecraft releases the pointer for a GUI, X11 relative motion is in
+    # screen pixels rather than world-camera degrees. Keep that independently
+    # calibrated so a correct GUI prediction cannot inherit world sensitivity.
+    gui_camera_scale: float = Field(default=1.0, ge=0.0, le=20.0)
     camera_max_step: int = Field(default=12, ge=0, le=100)
     camera_pitch_limit: int = Field(default=300, ge=0, le=2000)
     camera_recovery_release: int = Field(default=100, ge=0, le=2000)

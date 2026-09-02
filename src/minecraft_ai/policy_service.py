@@ -16,7 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from multiprocessing import resource_tracker, shared_memory
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -35,6 +35,7 @@ class LearnedPolicyOutput(BaseModel):
     buttons: tuple[str, ...] = ()
     mouse_dx: int = 0
     mouse_dy: int = 0
+    camera_semantics: Literal["world", "cursor"] = "world"
     inference_ns: int = Field(ge=0)
     model_version: str
     target_exists_probability: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -77,6 +78,10 @@ class TemporalPolicyClient:
     _estimated_pitch_units: int = field(default=0, init=False)
     _camera_recovery_active: bool = field(default=False, init=False)
     _pending_camera: tuple[int, int] = field(default=(0, 0), init=False)
+    _pending_camera_semantics: Literal["world", "cursor"] = field(
+        default="world",
+        init=False,
+    )
     _last_prediction: LearnedPolicyOutput | None = field(default=None, init=False)
     _last_emitted_camera: tuple[int, int] = field(default=(0, 0), init=False)
     _predicted_camera_total: tuple[int, int] = field(default=(0, 0), init=False)
@@ -171,6 +176,7 @@ class TemporalPolicyClient:
             "research_only": self.config.research_only,
             "condition_scale": self.config.condition_scale,
             "camera_scale": self.config.camera_scale,
+            "gui_camera_scale": self.config.gui_camera_scale,
             "camera_max_step": self.config.camera_max_step,
             "camera_pitch_limit": self.config.camera_pitch_limit,
             "action_hold_ms": self.config.action_hold_ms,
@@ -185,6 +191,7 @@ class TemporalPolicyClient:
                     "buttons": self._last_prediction.buttons,
                     "mouse_dx": self._last_prediction.mouse_dx,
                     "mouse_dy": self._last_prediction.mouse_dy,
+                    "camera_semantics": self._last_prediction.camera_semantics,
                     "target_exists_probability": (
                         self._last_prediction.target_exists_probability
                     ),
@@ -253,6 +260,7 @@ class TemporalPolicyClient:
         self._consumed_miss_recorded = False
         self._discard_pending_response = False
         self._pending_camera = (0, 0)
+        self._pending_camera_semantics = "world"
 
     def warmup(self) -> None:
         """Load and verify the configured checkpoint before its first live action."""
@@ -303,6 +311,8 @@ class TemporalPolicyClient:
             str(self.config.condition_scale),
             "--camera-scale",
             str(self.config.camera_scale),
+            "--gui-camera-scale",
+            str(self.config.gui_camera_scale),
         ]
         if self.config.stochastic:
             command.append("--stochastic")
@@ -394,10 +404,19 @@ class TemporalPolicyClient:
             self._predicted_camera_total[0] + output.mouse_dx,
             self._predicted_camera_total[1] + output.mouse_dy,
         )
+        if (
+            self._pending_camera != (0, 0)
+            and output.camera_semantics != self._pending_camera_semantics
+        ):
+            # World motion is measured in calibrated relative counts while GUI
+            # motion is measured in pointer pixels. Never add or replay one unit
+            # after the interaction mode has switched to the other.
+            self._pending_camera = (0, 0)
         self._pending_camera = (
             self._pending_camera[0] + output.mouse_dx,
             self._pending_camera[1] + output.mouse_dy,
         )
+        self._pending_camera_semantics = output.camera_semantics
         mouse_dx, mouse_dy = self._drain_camera()
         desired_keys = set(output.keys)
         desired_buttons = set(output.buttons)
@@ -486,7 +505,7 @@ class TemporalPolicyClient:
         remaining_dx = pending_dx - mouse_dx
         remaining_dy = pending_dy - mouse_dy
         pitch_limit = self.config.camera_pitch_limit
-        if pitch_limit > 0:
+        if pitch_limit > 0 and self._pending_camera_semantics == "world":
             proposed = self._estimated_pitch_units + mouse_dy
             bounded = max(-pitch_limit, min(pitch_limit, proposed))
             bounded_dy = bounded - self._estimated_pitch_units
@@ -504,6 +523,8 @@ class TemporalPolicyClient:
             # direction while all locomotion/interaction was suppressed.
             self._camera_recovery_active = False
         self._pending_camera = (remaining_dx, remaining_dy)
+        if remaining_dx == 0 and remaining_dy == 0:
+            self._pending_camera_semantics = "world"
         self._last_emitted_camera = (mouse_dx, mouse_dy)
         self._emitted_camera_total = (
             self._emitted_camera_total[0] + mouse_dx,
@@ -544,6 +565,7 @@ class TemporalPolicyClient:
         self._held_buttons.clear()
         self._held_until_ns = 0
         self._pending_camera = (0, 0)
+        self._pending_camera_semantics = "world"
         self._last_emitted_camera = (0, 0)
         return action
 
@@ -791,6 +813,7 @@ class _VPTBackend:
     threads: int
     stochastic: bool
     camera_scale: float
+    gui_camera_scale: float
     seed: int
     policy: Any = field(init=False)
     mapper: Any = field(init=False)
@@ -906,6 +929,7 @@ class _SteveOneBackend:
     deterministic_condition: bool
     condition_scale: float
     camera_scale: float
+    gui_camera_scale: float
     seed: int
     policy: Any = field(init=False)
     mapper: Any = field(init=False)
@@ -978,7 +1002,12 @@ class _SteveOneBackend:
             decoded,
             inference_ns=time.perf_counter_ns() - started,
             model_version=self.model_version,
-            camera_scale=self.camera_scale,
+            camera_scale=_intent_camera_scale(
+                intent,
+                world_scale=self.camera_scale,
+                gui_scale=self.gui_camera_scale,
+            ),
+            camera_semantics=_intent_camera_semantics(intent),
             suppressed_actions=suppressed,
         )
 
@@ -998,6 +1027,7 @@ class _RocketTwoBackend:
     stochastic: bool
     condition_scale: float
     camera_scale: float
+    gui_camera_scale: float
     seed: int
     policy: Any = field(init=False)
     mapper: Any = field(init=False)
@@ -1109,7 +1139,12 @@ class _RocketTwoBackend:
             decoded,
             inference_ns=time.perf_counter_ns() - started,
             model_version=self.model_version,
-            camera_scale=self.camera_scale,
+            camera_scale=_intent_camera_scale(
+                intent,
+                world_scale=self.camera_scale,
+                gui_scale=self.gui_camera_scale,
+            ),
+            camera_semantics=_intent_camera_semantics(intent),
             target_exists_probability=exists_probability,
             target_point_yx=point_yx,
             target_bbox_xyxy=bbox_xyxy,
@@ -1254,12 +1289,27 @@ def _intent_instruction(intent: dict[str, Any]) -> str:
     return skill_id.replace("_", " ")
 
 
+def _intent_camera_semantics(intent: dict[str, Any]) -> Literal["world", "cursor"]:
+    mode = str(intent.get("mode") or "").casefold()
+    return "cursor" if mode == "gui" or mode.startswith("craft") else "world"
+
+
+def _intent_camera_scale(
+    intent: dict[str, Any],
+    *,
+    world_scale: float,
+    gui_scale: float,
+) -> float:
+    return gui_scale if _intent_camera_semantics(intent) == "cursor" else world_scale
+
+
 def _decoded_policy_output(
     decoded: dict[str, Any],
     *,
     inference_ns: int,
     model_version: str,
     camera_scale: float = 1.0,
+    camera_semantics: Literal["world", "cursor"] = "world",
     target_exists_probability: float | None = None,
     target_point_yx: tuple[float, float] | None = None,
     target_bbox_xyxy: tuple[float, float, float, float] | None = None,
@@ -1294,6 +1344,7 @@ def _decoded_policy_output(
         buttons=tuple(sorted(buttons)),
         mouse_dx=int(round(float(yaw) * camera_scale)),
         mouse_dy=int(round(float(pitch) * camera_scale)),
+        camera_semantics=camera_semantics,
         inference_ns=inference_ns,
         model_version=model_version,
         target_exists_probability=target_exists_probability,
@@ -1378,6 +1429,7 @@ def _serve(args: argparse.Namespace) -> int:
             "threads": args.threads,
             "stochastic": args.stochastic,
             "camera_scale": args.camera_scale,
+            "gui_camera_scale": args.gui_camera_scale,
             "seed": args.seed,
         }
         if args.provider == "openai-vpt":
@@ -1472,6 +1524,7 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--deterministic-condition", action="store_true")
     serve.add_argument("--condition-scale", type=float, default=4.0)
     serve.add_argument("--camera-scale", type=float, default=1.0)
+    serve.add_argument("--gui-camera-scale", type=float, default=1.0)
     return parser
 
 

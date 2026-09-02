@@ -20,6 +20,8 @@ from minecraft_ai.policy_service import (
     TemporalPolicyClient,
     _apply_action_constraints,
     _decoded_policy_output,
+    _intent_camera_scale,
+    _intent_camera_semantics,
     _intent_instruction,
     _learned_scene_blocked,
     _rocket_action_contract,
@@ -313,6 +315,7 @@ def test_default_camera_adapter_matches_minecraft_half_sensitivity() -> None:
     config = PolicyConfig()
 
     assert config.camera_scale == pytest.approx(1.0 / 0.15)
+    assert config.gui_camera_scale == pytest.approx(1.0)
     assert config.camera_max_step == 12
     assert config.camera_pitch_limit == 300
 
@@ -321,6 +324,47 @@ def test_bedrock_camera_adapter_accepts_empirical_low_sensitivity_scale() -> Non
     config = PolicyConfig(camera_scale=47.96)
 
     assert config.camera_scale == pytest.approx(47.96)
+
+
+def test_gui_cursor_uses_pixel_scale_instead_of_world_camera_calibration() -> None:
+    gui = {"mode": "gui"}
+    craft = {"mode": "craft_inventory"}
+    world = {"mode": "explore"}
+
+    assert _intent_camera_semantics(gui) == "cursor"
+    assert _intent_camera_semantics(craft) == "cursor"
+    assert _intent_camera_semantics(world) == "world"
+    assert _intent_camera_scale(gui, world_scale=47.96, gui_scale=1.0) == 1.0
+    assert _intent_camera_scale(world, world_scale=47.96, gui_scale=1.0) == 47.96
+
+
+def test_cursor_motion_does_not_corrupt_world_pitch_estimate(tmp_path: Path) -> None:
+    config = _policy_config(tmp_path).model_copy(
+        update={
+            "camera_max_step": 3,
+            "camera_pitch_limit": 5,
+            "camera_recovery_release": 2,
+        }
+    )
+    client = TemporalPolicyClient(config=config, frame_provider=lambda: None)
+    world = LearnedPolicyOutput(
+        mouse_dy=9,
+        inference_ns=1,
+        model_version="official-v1",
+    )
+    cursor = world.model_copy(
+        update={"mouse_dx": 5, "mouse_dy": 5, "camera_semantics": "cursor"}
+    )
+
+    world_action = client._output_action(world, sequence=1)
+    cursor_action = client._output_action(cursor, sequence=2)
+    cursor_remainder = client._hold(sequence=3)
+
+    assert (world_action.mouse_dx, world_action.mouse_dy) == (0, 3)
+    assert (cursor_action.mouse_dx, cursor_action.mouse_dy) == (3, 3)
+    assert (cursor_remainder.mouse_dx, cursor_remainder.mouse_dy) == (2, 2)
+    assert client._estimated_pitch_units == 3
+    assert client._pending_camera_semantics == "world"
 
 
 def test_camera_envelope_saturates_without_replacing_learned_task(
@@ -543,6 +587,7 @@ def test_policy_status_exposes_predicted_and_emitted_camera(tmp_path: Path) -> N
         "buttons": ("left",),
         "mouse_dx": 9,
         "mouse_dy": -9,
+        "camera_semantics": "world",
         "target_exists_probability": None,
         "target_point_yx": None,
         "target_bbox_xyxy": None,
