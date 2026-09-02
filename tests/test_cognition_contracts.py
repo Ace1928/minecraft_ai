@@ -49,7 +49,7 @@ class _ShelterSelectingModel:
 
 class _CapturingModel(_ShelterSelectingModel):
     def __init__(self) -> None:
-        super().__init__(chosen_goal_id="operator:correction")
+        super().__init__(chosen_goal_id="role:generalist:0:survive")
         self.initial_messages: tuple[ModelMessage, ...] = ()
 
     def complete_structured(
@@ -61,7 +61,23 @@ class _CapturingModel(_ShelterSelectingModel):
     ) -> ModelResponse:
         if not self.initial_messages:
             self.initial_messages = messages
-        return super().complete_structured(messages, name=name, schema=schema)
+        del name, schema
+        return ModelResponse(
+            text=json.dumps(
+                {
+                    "reasoning_summary": "Traverse the hill for the operator",
+                    "chosen_goal_id": self.chosen_goal_id,
+                    "skill_id": "explore_forward",
+                    "skill_parameters": {},
+                    "say": "I am climbing the hill now.",
+                    "request_replan": False,
+                    "ask_perception": [],
+                    "research_query": None,
+                }
+            ),
+            model=self.model_id,
+            latency_ms=1.0,
+        )
 
 
 class _RepairingModel(_ShelterSelectingModel):
@@ -207,7 +223,7 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
     model = _CapturingModel()
     controller = HighLevelController(model, build_bootstrap_skill_library())
 
-    controller.decide(_board(), context)
+    decision = controller.decide(_board(), context)
 
     payload = json.loads(model.initial_messages[-1].content)
     assert payload["active_operator_message"]["message_id"] == "correction"
@@ -219,3 +235,5 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
         "address it before conflicting older directives"
         in model.initial_messages[0].content
     )
+    assert decision.chosen_goal_id == "operator:correction"
+    assert decision.say == "I am climbing the hill now."

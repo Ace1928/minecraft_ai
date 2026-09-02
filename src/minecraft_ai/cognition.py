@@ -14,7 +14,7 @@ from .perception import PerceptionBlackboard
 from .planning import Goal
 from .roles import RoleProfile
 from .skills import SkillLibrary
-from .social import OperatorMessage, Promise, PromiseStatus
+from .social import OperatorMessage, OperatorMessageStatus, Promise, PromiseStatus
 from .wiki import WikiEvidence
 
 
@@ -230,6 +230,7 @@ class HighLevelController:
                 ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
             )
             decision = self._complete(messages)
+            decision = self._scope_operator_decision(decision, blackboard, context)
             operator_goal_ids = {
                 f"operator:{message.message_id}" for message in context.operator_messages
             }
@@ -270,6 +271,40 @@ class HighLevelController:
                 ),
                 request_replan=True,
             )
+
+    def _scope_operator_decision(
+        self,
+        decision: CognitionDecision,
+        blackboard: PerceptionBlackboard,
+        context: CognitionContext,
+    ) -> CognitionDecision:
+        pending = next(
+            (
+                message
+                for message in context.operator_messages
+                if message.status
+                in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+            ),
+            None,
+        )
+        if pending is None:
+            return decision
+        danger = blackboard.fact("danger.immediate", min_confidence=0.7)
+        if danger is not None and bool(danger.value):
+            return decision
+        executable = (
+            decision.skill_id is not None
+            and decision.skill_id in self.skills.specs
+            and conditions_satisfied(
+                self.skills.get(decision.skill_id).preconditions,
+                blackboard,
+            )
+        )
+        if not executable and decision.say is None:
+            return decision
+        return decision.model_copy(
+            update={"chosen_goal_id": f"operator:{pending.message_id}"}
+        )
 
     def status(self) -> dict[str, object]:
         return {
