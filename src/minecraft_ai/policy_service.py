@@ -511,6 +511,7 @@ class TemporalPolicyClient:
             "jump": "space" in keys,
             "sprint_jump": {"ctrl", "space", "w"}.issubset(keys),
             "forward": "w" in keys,
+            "inventory": "e" in keys,
             "attack": "left" in buttons,
             "use": "right" in buttons,
         }
@@ -980,7 +981,7 @@ def _learned_scene_blocked(
     blackboard: PerceptionBlackboard,
     intent: MotorIntent | None = None,
 ) -> bool:
-    if intent is not None and intent.mode.casefold() == "gui":
+    if intent is not None and intent.mode.casefold() in {"gui", "close_inventory"}:
         return False
     playable = blackboard.fact("scene.playable", min_confidence=0.7)
     if playable is None or bool(playable.value):
@@ -1491,7 +1492,11 @@ def _intent_instruction(intent: dict[str, Any]) -> str:
 
 def _intent_camera_semantics(intent: dict[str, Any]) -> Literal["world", "cursor"]:
     mode = str(intent.get("mode") or "").casefold()
-    return "cursor" if mode == "gui" or mode.startswith("craft") else "world"
+    return (
+        "cursor"
+        if mode in {"gui", "close_inventory"} or mode.startswith("craft")
+        else "world"
+    )
 
 
 def _intent_camera_scale(

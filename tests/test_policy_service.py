@@ -450,12 +450,15 @@ def test_bedrock_camera_adapter_accepts_empirical_low_sensitivity_scale() -> Non
 def test_gui_cursor_uses_pixel_scale_instead_of_world_camera_calibration() -> None:
     gui = {"mode": "gui"}
     craft = {"mode": "craft_inventory"}
+    close_inventory = {"mode": "close_inventory"}
     world = {"mode": "explore"}
 
     assert _intent_camera_semantics(gui) == "cursor"
     assert _intent_camera_semantics(craft) == "cursor"
+    assert _intent_camera_semantics(close_inventory) == "cursor"
     assert _intent_camera_semantics(world) == "world"
     assert _intent_camera_scale(gui, world_scale=47.96, gui_scale=1.0) == 1.0
+    assert _intent_camera_scale(close_inventory, world_scale=47.96, gui_scale=1.0) == 1.0
     assert _intent_camera_scale(world, world_scale=47.96, gui_scale=1.0) == 47.96
 
 
@@ -746,6 +749,21 @@ def test_policy_status_counts_learned_jump_before_state_hold_actions(tmp_path: P
     }
 
 
+def test_policy_status_counts_learned_inventory_toggle(tmp_path: Path) -> None:
+    client = TemporalPolicyClient(config=_policy_config(tmp_path), frame_provider=lambda: None)
+
+    client._output_action(
+        LearnedPolicyOutput(
+            keys=("e",),
+            inference_ns=1,
+            model_version="official-v1",
+        ),
+        sequence=1,
+    )
+
+    assert client.status()["learned_action_counts"] == {"inventory": 1}
+
+
 def test_explicit_action_constraints_mask_only_prohibited_learned_bits() -> None:
     decoded = {
         "attack": numpy.asarray([1]),
@@ -817,6 +835,14 @@ def test_learned_static_gui_scene_blocks_world_policy_actions() -> None:
         board,
         MotorIntent(skill_id="activate", mode="gui", instruction="click button"),
     )
+    assert not _learned_scene_blocked(
+        board,
+        MotorIntent(
+            skill_id="close_open_inventory",
+            mode="close_inventory",
+            instruction="close inventory",
+        ),
+    )
 
 
 def test_rocket_interaction_taxonomy_matches_published_control_contract() -> None:
@@ -828,6 +854,7 @@ def test_rocket_interaction_taxonomy_matches_published_control_contract() -> Non
     assert _rocket_interaction_id("hotbar") == 5
     assert _rocket_interaction_id("approach") == 6
     assert _rocket_interaction_id("explore") == -1
+    assert _rocket_interaction_id("close_inventory") == -1
 
 
 def test_rocket_action_contract_masks_unsupported_drop_bit() -> None:

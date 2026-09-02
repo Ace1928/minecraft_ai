@@ -187,6 +187,24 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             policy_instruction="click button",
         ),
         SkillSpec(
+            skill_id="close_open_inventory",
+            version=1,
+            name="Close open inventory",
+            description=(
+                "Close the currently open Bedrock inventory through STEVE-1's learned inventory "
+                "action and verify that the playable world returns before resuming locomotion"
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            success_conditions=(SkillCondition(key="scene.playable", operator="truthy"),),
+            expected_effects=("inventory_closed", "playable_scene_restored"),
+            max_duration_ms=10_000,
+            # This mode deliberately has no ROCKET interaction ID. STEVE-1's
+            # VPT action space contains the learned inventory toggle; ROCKET-2
+            # is a grounded world-interaction controller and cannot emit it.
+            policy_ref="close_inventory",
+            policy_instruction="close inventory",
+        ),
+        SkillSpec(
             skill_id="place_block",
             version=3,
             name="Place block",
