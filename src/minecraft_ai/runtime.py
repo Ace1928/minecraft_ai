@@ -15,6 +15,7 @@ from .perception_service import RealtimePerceptionService
 from .planning import Goal
 from .roles import RoleProfile
 from .safety import MotorAction
+from .skill_editor import SkillEditor
 from .skills import SkillLibrary, SkillOutcome
 from .social import SocialState
 from .storage import StateDatabase
@@ -132,6 +133,7 @@ class AgentRuntime:
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
         if result.run.outcome != SkillOutcome.RUNNING:
             stats = self.skills.record(result.run)
+            editor = SkillEditor(self.skills)
             if self.state_db is not None:
                 self.state_db.save_skill_stats(
                     result.run.skill_id,
@@ -140,8 +142,22 @@ class AgentRuntime:
                 )
             if result.run.outcome == SkillOutcome.SUCCEEDED:
                 self.metrics.skill_successes += 1
+                promoted = editor.evaluate_and_promote(result.run.skill_id)
+                if promoted is not None and self.state_db is not None:
+                    self.state_db.save_skill(promoted)
             elif result.run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
                 self.metrics.skill_failures += 1
+                spec = self.skills.get(result.run.skill_id)
+                # Auto-synthesize adaptive recovery variant if persistent failure occurs
+                if stats.consecutive_failures >= 2:
+                    variant = editor.synthesize_recovery_variant(
+                        spec,
+                        reason="consecutive_runtime_failures",
+                        fallback_skills=result.recovery_skills,
+                    )
+                    if self.state_db is not None:
+                        self.state_db.save_skill(variant)
+
             for recovery_id in result.recovery_skills:
                 if recovery_id in self.skills.specs:
                     self.executor.start(

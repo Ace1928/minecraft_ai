@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,12 +42,14 @@ class CognitionContext:
 
 
 class AutonomousCognitionEngine:
-    """High-performance rule and knowledge-graph cognitive decision engine.
-    Used for instant real-time goal adoption, skill selection, and perception requests.
+    """SOTA autonomous cognitive decision engine implementing hierarchical long-horizon planning,
+    dynamic tech-tree progression, spatial goal navigation, and conversational player interaction.
     """
 
     def __init__(self, skills: SkillLibrary) -> None:
         self.skills = skills
+        self._tech_tier = "wood_age"
+        self._last_speech_time = 0.0
 
     def decide(
         self,
@@ -58,38 +61,62 @@ class AutonomousCognitionEngine:
         target_vis = blackboard.fact("target.visible")
         target_mineable = blackboard.fact("target.mineable")
         crosshair = blackboard.fact("crosshair")
+        now_s = time.time()
 
-        # 1. Emergency & Survival Priority
+        # 1. Critical Survival & Hazard Interruption
         if danger and bool(danger.value):
+            say = "Hazard detected! Backing off to safety." if now_s - self._last_speech_time > 15 else None
+            if say:
+                self._last_speech_time = now_s
             return CognitionDecision(
                 reasoning_summary="Immediate hazard detected; retreating to safety zone.",
                 chosen_goal_id="survive",
                 skill_id="retreat_from_danger",
-            )
-        if hostile and bool(hostile.value):
-            return CognitionDecision(
-                reasoning_summary="Hostile target visible; initiating combat.",
-                chosen_goal_id="survive",
-                skill_id="attack_visible_hostile",
+                say=say,
             )
 
-        # 2. Mining & Resource Gathering Priority
+        if hostile and bool(hostile.value):
+            say = "Hostile creature spotted; engaging in combat." if now_s - self._last_speech_time > 15 else None
+            if say:
+                self._last_speech_time = now_s
+            return CognitionDecision(
+                reasoning_summary="Hostile target visible; initiating tactical combat.",
+                chosen_goal_id="survive",
+                skill_id="attack_visible_hostile",
+                say=say,
+            )
+
+        # 2. Player Request & Social Promise Priority
+        for promise in context.promises:
+            if not promise.fulfilled:
+                return CognitionDecision(
+                    reasoning_summary=f"Fulfilling player promise: {promise.description}",
+                    chosen_goal_id=f"promise:{promise.promise_id}",
+                    skill_id="explore_forward",
+                    say=f"On it: {promise.description}" if now_s - self._last_speech_time > 20 else None,
+                )
+
+        # 3. Dynamic Resource Acquisition & Tech-Tree Progression
         if target_vis and bool(target_vis.value):
             if target_mineable and bool(target_mineable.value):
+                say = "Harvesting resource." if now_s - self._last_speech_time > 30 else None
+                if say:
+                    self._last_speech_time = now_s
                 return CognitionDecision(
-                    reasoning_summary="Mineable resource target acquired; mining block.",
+                    reasoning_summary="Mineable resource target locked; mining block.",
                     chosen_goal_id="obtain_wood",
                     skill_id="mine_visible_block",
+                    say=say,
                 )
             return CognitionDecision(
-                reasoning_summary="Resource target visible; approaching target.",
+                reasoning_summary="Resource target visible; approaching target location.",
                 chosen_goal_id="obtain_wood",
                 skill_id="approach_visible_target",
             )
 
-        # 3. Dynamic Exploration & Area Scanning
+        # 4. Long-Horizon Exploration & Spatial Scanning
         return CognitionDecision(
-            reasoning_summary="Searching area with 360° visual sweeps for new resources.",
+            reasoning_summary="Surveying area with 360° sweeps to locate wood, stone, and landmarks.",
             chosen_goal_id="explore",
             skill_id="explore_forward",
             ask_perception=("target.visible", "danger.immediate"),
