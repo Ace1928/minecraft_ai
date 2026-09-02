@@ -260,6 +260,12 @@ def test_grounded_router_merges_temporally_filtered_target_feedback() -> None:
     assert visible is not None and visible.value is True
     target_dx = board.fact("target.dx", now_ns=observed_ns)
     assert target_dx is not None and target_dx.value == pytest.approx(0.2)
+    target_near = board.fact("target.near", now_ns=observed_ns)
+    assert target_near is not None and target_near.value is True
+    target_fraction = board.fact("target.screen_fraction", now_ns=observed_ns)
+    assert target_fraction is not None and target_fraction.value == pytest.approx(0.18)
+    target_proximity = board.fact("target.proximity", now_ns=observed_ns)
+    assert target_proximity is not None and target_proximity.value == pytest.approx(1.0)
     updated = board.latest()
     assert updated is not None
     track = next(track for track in updated.tracks if track.track_id == "log-1")
@@ -291,6 +297,28 @@ def test_grounded_router_merges_temporally_filtered_target_feedback() -> None:
     assert router.merge_perception(board)
     after_two_misses = board.fact("target.visible", now_ns=observed_ns + 2)
     assert after_two_misses is not None and after_two_misses.value is False
+
+
+def test_grounded_router_keeps_small_learned_target_box_outside_near_range() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _TargetFeedbackPolicy("rocket", key="a")
+    router = GroundedPolicyRouter(primary, grounded)
+    board = _tracked_board()
+    router.act(board, MotorIntent(skill_id="approach", mode="approach"), sequence=1)
+    observed_ns = time.monotonic_ns()
+    grounded.observation = GroundedTargetObservation(
+        observed_ns=observed_ns,
+        probability=0.95,
+        point_yx=(0.5, 0.5),
+        bbox_xyxy=(0.45, 0.45, 0.55, 0.55),
+        model_version="rocket-test",
+    )
+
+    assert router.merge_perception(board)
+    target_near = board.fact("target.near", now_ns=observed_ns)
+    assert target_near is not None and target_near.value is False
+    target_proximity = board.fact("target.proximity", now_ns=observed_ns)
+    assert target_proximity is not None and target_proximity.value == pytest.approx(0.1)
 
 
 @pytest.mark.parametrize(

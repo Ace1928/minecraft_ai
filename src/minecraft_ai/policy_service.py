@@ -742,6 +742,8 @@ class GroundedPolicyRouter:
     min_track_confidence: float = 0.65
     max_track_age_ms: int = 15_000
     target_confidence_alpha: float = 0.2
+    target_near_min_screen_fraction: float = 0.10
+    target_near_max_center_error: float = 0.35
     policy_id: str = field(init=False)
     _active: MotorPolicy = field(init=False)
     _active_route: str = field(default="primary", init=False)
@@ -763,6 +765,10 @@ class GroundedPolicyRouter:
             raise ValueError("min_track_confidence must be in 0..1")
         if not 0.0 < self.target_confidence_alpha <= 1.0:
             raise ValueError("target_confidence_alpha must be in (0, 1]")
+        if not 0.0 < self.target_near_min_screen_fraction <= 1.0:
+            raise ValueError("target_near_min_screen_fraction must be in (0, 1]")
+        if not 0.0 <= self.target_near_max_center_error <= 2**0.5:
+            raise ValueError("target_near_max_center_error is outside the normalized frame")
         self._active = self.primary
         policy_ids = [self.primary.policy_id, self.grounded.policy_id]
         if self.gui is not None:
@@ -842,6 +848,8 @@ class GroundedPolicyRouter:
             "min_track_confidence": self.min_track_confidence,
             "max_track_age_ms": self.max_track_age_ms,
             "target_confidence_alpha": self.target_confidence_alpha,
+            "target_near_min_screen_fraction": self.target_near_min_screen_fraction,
+            "target_near_max_center_error": self.target_near_max_center_error,
             "world_camera": {
                 "estimated_pitch_units": self._world_camera_state.estimated_pitch_units,
             },
@@ -959,6 +967,25 @@ class GroundedPolicyRouter:
                 (
                     ("target.dx", max(-1.0, min(1.0, 2.0 * point_x - 1.0)), raw_confidence),
                     ("target.dy", max(-1.0, min(1.0, 2.0 * point_y - 1.0)), raw_confidence),
+                )
+            )
+        if bbox_xyxy is not None and raw_confidence >= self.min_track_confidence:
+            x0, y0, x1, y1 = bbox_xyxy
+            screen_fraction = max(0.0, (x1 - x0) * (y1 - y0))
+            center_x = (x0 + x1) / 2.0
+            center_y = (y0 + y1) / 2.0
+            center_error = ((center_x - 0.5) ** 2 + (center_y - 0.5) ** 2) ** 0.5
+            proximity = min(1.0, screen_fraction / self.target_near_min_screen_fraction)
+            near = (
+                screen_fraction >= self.target_near_min_screen_fraction
+                and center_error <= self.target_near_max_center_error
+            )
+            fact_values.extend(
+                (
+                    ("target.screen_fraction", screen_fraction, raw_confidence),
+                    ("target.center_error", center_error, raw_confidence),
+                    ("target.proximity", proximity, raw_confidence),
+                    ("target.near", near, raw_confidence),
                 )
             )
         facts = tuple(
