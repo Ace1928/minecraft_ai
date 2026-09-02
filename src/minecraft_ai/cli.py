@@ -15,6 +15,7 @@ from rich import print
 
 from .knowledge import Edition, GameVersion, KnowledgeGraph
 from .knowledge.importers import import_java_datapack
+from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
 from .supervisor import CONTROL_FILE, STATUS_FILE, ControlEndpoint, send_command, supervisor_alive
 
 app = typer.Typer(help="Minecraft AI lifecycle and tooling CLI.")
@@ -26,6 +27,7 @@ DATA_DIR = Path(user_data_dir(APP_NAME))
 RUNTIME_DIR = Path(user_runtime_dir(APP_NAME))
 LOG_FILE = DATA_DIR / "logs" / "supervisor.log"
 KNOWLEDGE_DIR = DATA_DIR / "knowledge"
+DEFAULT_EDITION = Edition.BEDROCK
 
 
 def _ensure_dirs() -> None:
@@ -66,11 +68,7 @@ def _load_graph(path: Path) -> KnowledgeGraph:
 
 @app.command()
 def install() -> None:
-    """Prepare local directories and report the platform profile.
-
-    Model/runtime downloads and Minecraft input bridge installation remain
-    gated until their license, compatibility and safety checks land.
-    """
+    """Prepare local directories and report the platform profile."""
     _ensure_dirs()
     print("[green]Minecraft AI bootstrap prepared.[/green]")
     doctor()
@@ -80,14 +78,25 @@ def install() -> None:
 def doctor() -> None:
     """Report platform capabilities without enabling live control."""
     _ensure_dirs()
+    bol = discover_bedrock_linux_install() if platform.system() == "Linux" else None
+    bedrock_instances = find_bedrock_linux_instances() if platform.system() == "Linux" else []
     profile = {
         "os": platform.system(),
         "release": platform.release(),
         "machine": platform.machine(),
         "python": platform.python_version(),
+        "default_edition": DEFAULT_EDITION.value,
+        "reference_runtime": "bedrock-on-linux/winegdk",
         "data_dir": str(DATA_DIR),
         "runtime_dir": str(RUNTIME_DIR),
         "supervisor": "running" if supervisor_alive() else "stopped",
+        "bedrock_on_linux": {
+            "detected": bol is not None,
+            "data_dir": str(bol.data_dir) if bol is not None else None,
+            "wine_prefix": str(bol.wine_prefix) if bol is not None else None,
+            "launcher": bol.launcher_command if bol is not None else None,
+            "running_instances": [instance.instance_id for instance in bedrock_instances],
+        },
         "scoped_input": "not-installed",
         "live_input": False,
     }
@@ -97,12 +106,14 @@ def doctor() -> None:
 @app.command()
 def run(
     role: str = typer.Option("generalist", help="Role/archetype profile."),
+    edition: Edition = typer.Option(DEFAULT_EDITION, "--edition"),
     live: bool = typer.Option(False, help="Request live input when a gated backend exists."),
 ) -> None:
     """Start the independent supervisor in SAFE_IDLE.
 
-    Phase 0 intentionally exposes only the fake motor backend. `--live` fails
-    closed until a scoped Minecraft backend has passed the safety gates.
+    Bedrock Edition is the default runtime. Phase 0 intentionally exposes only
+    the fake motor backend; `--live` fails closed until a scoped Bedrock backend
+    passes the safety gates.
     """
     _ensure_dirs()
     if live:
@@ -135,7 +146,10 @@ def run(
     while time.monotonic() < deadline:
         if supervisor_alive():
             current = send_command("status")
-            print(f"[green]Supervisor started[/green] role={role} state={current['state']}")
+            print(
+                f"[green]Supervisor started[/green] role={role} "
+                f"edition={edition.value} state={current['state']}"
+            )
             print("Live motor control remains disabled by design.")
             return
         time.sleep(0.05)
@@ -170,11 +184,7 @@ def resume() -> None:
 
 @app.command()
 def stop() -> None:
-    """Stop through the control socket, with a process-level fallback.
-
-    The fallback exists specifically so a broken cognition/control client cannot
-    make the operator dependent on that same client to stop the supervisor.
-    """
+    """Stop through the control socket, with a process-level fallback."""
     if not CONTROL_FILE.exists():
         print("[bold red]STOPPED[/bold red] — no supervisor endpoint exists.")
         return
@@ -227,7 +237,7 @@ def wiki(query: str) -> None:
 def knowledge_sync(
     version: str = typer.Option(..., "--version", help="Exact Minecraft version identifier."),
     data_root: Path = typer.Option(..., "--data-root", exists=True, file_okay=False),
-    edition: Edition = typer.Option(Edition.JAVA, "--edition"),
+    edition: Edition = typer.Option(DEFAULT_EDITION, "--edition"),
     output: Path | None = typer.Option(None, "--output"),
 ) -> None:
     """Compile exact-version machine-readable game data into a provenance graph."""
@@ -236,7 +246,10 @@ def knowledge_sync(
     if edition == Edition.JAVA:
         graph = import_java_datapack(data_root, game_version)
     else:
-        raise typer.BadParameter("Bedrock importer has not landed yet; no silent Java fallback")
+        raise typer.BadParameter(
+            "Bedrock is the default edition, but its exact-version importer has not landed yet. "
+            "No Java fallback will be used."
+        )
     errors = graph.validate()
     if errors:
         raise typer.BadParameter("compiled graph failed validation: " + "; ".join(errors[:10]))
