@@ -151,6 +151,10 @@ class TemporalPolicyClient:
         """Bind this controller to the physical camera shared with its peers."""
         self._world_camera_state = state
 
+    def restore_world_camera_state(self, *, estimated_pitch_units: int) -> None:
+        """Restore actuator pitch owned by the persistent supervisor."""
+        self._world_camera_state.estimated_pitch_units = estimated_pitch_units
+
     def target_observation(self) -> GroundedTargetObservation | None:
         return self._last_target_observation
 
@@ -571,6 +575,7 @@ class TemporalPolicyClient:
             self._pending_camera[1] + output.mouse_dy,
         )
         self._pending_camera_semantics = output.camera_semantics
+        camera_semantics = self._pending_camera_semantics
         mouse_dx, mouse_dy = self._drain_camera()
         desired_keys = set(output.keys)
         desired_buttons = set(output.buttons)
@@ -582,6 +587,7 @@ class TemporalPolicyClient:
             buttons_up=tuple(sorted(self._held_buttons - desired_buttons)),
             mouse_dx=mouse_dx,
             mouse_dy=mouse_dy,
+            camera_semantics=camera_semantics,
             duration_ms=50,
         )
         self._held_keys = desired_keys
@@ -702,12 +708,14 @@ class TemporalPolicyClient:
             keys_up = tuple(sorted(self._held_keys))
             self._held_keys.clear()
             self._held_until_ns = 0
+        camera_semantics = self._pending_camera_semantics
         mouse_dx, mouse_dy = self._drain_camera()
         return MotorAction(
             sequence=sequence,
             keys_up=keys_up,
             mouse_dx=mouse_dx,
             mouse_dy=mouse_dy,
+            camera_semantics=camera_semantics,
             duration_ms=50,
         )
 
@@ -859,6 +867,10 @@ class GroundedPolicyRouter:
         if self.gui is not None:
             status["gui"] = _policy_status(self.gui)
         return status
+
+    def restore_world_camera_state(self, *, estimated_pitch_units: int) -> None:
+        """Restore the one physical pitch accumulator shared by every route."""
+        self._world_camera_state.estimated_pitch_units = estimated_pitch_units
 
     def _policies(self) -> tuple[MotorPolicy, ...]:
         return (
@@ -1111,6 +1123,7 @@ def _merge_policy_release(action: MotorAction, release: MotorAction) -> MotorAct
         buttons_up=tuple(sorted(set(action.buttons_up) | set(release.buttons_up))),
         mouse_dx=action.mouse_dx,
         mouse_dy=action.mouse_dy,
+        camera_semantics=action.camera_semantics,
         duration_ms=action.duration_ms,
     )
 

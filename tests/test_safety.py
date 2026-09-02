@@ -118,3 +118,5 @@ def test_action_model_rejects_unbounded_mouse_and_duration() -> None:
         MotorAction(sequence=0, mouse_dx=5000)
     with pytest.raises(ValueError):
         MotorAction(sequence=0, duration_ms=1001)
+    with pytest.raises(ValueError):
+        MotorAction(sequence=0, camera_semantics="screen")

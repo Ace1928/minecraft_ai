@@ -239,6 +239,11 @@ def test_grounded_router_shares_one_physical_pitch_state(tmp_path: Path) -> None
     assert primary.status()["estimated_pitch_units"] == 100
     assert router.status()["world_camera"] == {"estimated_pitch_units": 100}
 
+    router.restore_world_camera_state(estimated_pitch_units=-37)
+
+    assert primary.status()["estimated_pitch_units"] == -37
+    assert grounded.status()["estimated_pitch_units"] == -37
+
 
 def test_grounded_router_merges_temporally_filtered_target_feedback() -> None:
     primary = _RoutingPolicy("steve", key="w")

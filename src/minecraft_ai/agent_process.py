@@ -21,6 +21,7 @@ from .policy_service import GroundedPolicyRouter, TemporalPolicyClient
 from .roles import get_role
 from .runtime import AgentRuntime
 from .storage import StateDatabase
+from .supervisor import send_command
 from .trajectory import TrajectoryRecorder, new_trajectory_id
 
 
@@ -121,6 +122,13 @@ def main(argv: list[str] | None = None) -> int:
                 policy = primary_policy
         else:
             policy = BootstrapMotorPolicy()
+        supervisor_status = send_command("status")
+        camera_status = supervisor_status.get("world_camera")
+        if isinstance(camera_status, dict):
+            estimated_pitch = camera_status.get("estimated_pitch_units")
+            restore_camera = getattr(policy, "restore_world_camera_state", None)
+            if isinstance(estimated_pitch, int) and callable(restore_camera):
+                restore_camera(estimated_pitch_units=estimated_pitch)
         executor = SkillExecutor(policy)
         trajectory: TrajectoryRecorder | None = None
         if config.trajectory.enabled:

@@ -69,6 +69,8 @@ class Supervisor:
         self.started_monotonic_ns = time.monotonic_ns()
         self.last_command_monotonic_ns = self.started_monotonic_ns
         self.last_fault: str | None = None
+        self.world_camera_pitch_units = 0
+        self.world_camera_updates = 0
         self._stop = threading.Event()
         self._lock = threading.RLock()
         self._server: socket.socket | None = None
@@ -129,6 +131,8 @@ class Supervisor:
                     close()
             self.backend = backend
             self.motor = MotorGate(backend)
+            self.world_camera_pitch_units = 0
+            self.world_camera_updates = 0
             self._persist_status()
 
     def attach_bedrock_x11(
@@ -185,6 +189,9 @@ class Supervisor:
             self._require_running_lease(lease_id)
             action = MotorAction.model_validate(raw_action)
             self.motor.apply(lease_id, action)
+            if action.camera_semantics == "world" and (action.mouse_dx or action.mouse_dy):
+                self.world_camera_pitch_units += action.mouse_dy
+                self.world_camera_updates += 1
             return {
                 "accepted_sequence": action.sequence,
                 # This is captured only after the scoped backend accepts the
@@ -316,6 +323,10 @@ class Supervisor:
                 "held_buttons": held_buttons,
                 "release_count": release_count,
                 "input_window_id": input_window_id,
+                "world_camera": {
+                    "estimated_pitch_units": self.world_camera_pitch_units,
+                    "accepted_updates": self.world_camera_updates,
+                },
                 "last_fault": self.last_fault,
                 "emergency_stop_latched": emergency_stop_latched(),
                 "uptime_s": round(

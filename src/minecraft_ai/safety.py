@@ -5,7 +5,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -85,6 +85,7 @@ class MotorAction(BaseModel):
     buttons_up: tuple[str, ...] = ()
     mouse_dx: int = Field(default=0, ge=-4096, le=4096)
     mouse_dy: int = Field(default=0, ge=-4096, le=4096)
+    camera_semantics: Literal["world", "cursor"] = "world"
     duration_ms: int = Field(default=0, ge=0, le=1000)
 
     @field_validator("keys_down", "keys_up", "buttons_down", "buttons_up")

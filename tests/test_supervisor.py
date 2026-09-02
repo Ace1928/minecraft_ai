@@ -66,6 +66,36 @@ def test_release_inputs_preserves_running_lease() -> None:
     assert not supervisor.backend.held_buttons
 
 
+def test_supervisor_tracks_only_accepted_world_camera_motion() -> None:
+    supervisor = Supervisor()
+    supervisor.start()
+    lease_info = supervisor.arm("fake-instance")
+    lease_id = str(lease_info["lease_id"])
+    supervisor.activate()
+
+    supervisor.apply_motor_action(
+        lease_id,
+        MotorAction(sequence=0, mouse_dy=-30).model_dump(mode="json"),
+    )
+    supervisor.apply_motor_action(
+        lease_id,
+        MotorAction(
+            sequence=1,
+            mouse_dy=20,
+            camera_semantics="cursor",
+        ).model_dump(mode="json"),
+    )
+    supervisor.apply_motor_action(
+        lease_id,
+        MotorAction(sequence=2, mouse_dy=7).model_dump(mode="json"),
+    )
+
+    assert supervisor.status()["world_camera"] == {
+        "estimated_pitch_units": -23,
+        "accepted_updates": 2,
+    }
+
+
 def test_stop_from_failsafe_reaches_stopped() -> None:
     supervisor = Supervisor()
     supervisor.start()
