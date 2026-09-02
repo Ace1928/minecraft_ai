@@ -39,6 +39,22 @@ def _semantic_deadline_ms(semantic_hz: float) -> int:
     return min(10_000, max(250, int(1000 / semantic_hz)))
 
 
+def _semantic_refresh_allowed(
+    *,
+    cognition_requested: bool,
+    cognition_pending: bool,
+    operator_message_pending: bool,
+    worker_available: bool,
+) -> bool:
+    """Keep optional semantic refreshes behind strategic and operator work."""
+    return not (
+        cognition_requested
+        or cognition_pending
+        or operator_message_pending
+        or not worker_available
+    )
+
+
 def _active_operator_messages(
     messages: tuple[OperatorMessage, ...],
 ) -> tuple[OperatorMessage, ...]:
@@ -243,12 +259,7 @@ class AgentRuntime:
         self.telemetry.publish(self._telemetry_payload(state="running"))
         self._consume_cognition()
         self._start_cognition_if_due()
-        # A queued/delivered operator message has priority over an optional VLM
-        # refresh on the shared local accelerator. This keeps corrections from
-        # waiting behind a long semantic request while normal unattended play
-        # continues to refresh semantics at its configured cadence.
-        if not self._pending_operator_message_ids:
-            self._request_semantics_if_due(frame.frame_id)
+        self._request_semantics_if_due(frame.frame_id)
 
         active = self.executor.run
         if active is None or active.outcome != SkillOutcome.RUNNING:
@@ -328,6 +339,13 @@ class AgentRuntime:
 
     def _request_semantics_if_due(self, frame_id: int) -> None:
         if self.perception.active_vlm is None:
+            return
+        if not _semantic_refresh_allowed(
+            cognition_requested=self._cognition_requested,
+            cognition_pending=self._pending_decision is not None,
+            operator_message_pending=bool(self._pending_operator_message_ids),
+            worker_available=self.perception.semantic_available(),
+        ):
             return
         now = time.monotonic_ns()
         interval = int(1e9 / self.semantic_hz)

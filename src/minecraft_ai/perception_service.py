@@ -127,6 +127,7 @@ class ActiveVLMMetrics:
     completed: int = 0
     failures: int = 0
     queue_replacements: int = 0
+    busy_rejections: int = 0
     stale_rejections: int = 0
     last_latency_ms: float = 0.0
     last_frame_age: int = 0
@@ -145,6 +146,7 @@ class ActiveVLMWorker:
     _jobs: queue.Queue[SemanticJob | None] = field(init=False)
     _thread: threading.Thread | None = field(default=None, init=False)
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
+    _busy: threading.Event = field(default_factory=threading.Event, init=False)
 
     def __post_init__(self) -> None:
         self._jobs = queue.Queue(maxsize=self.queue_size)
@@ -170,6 +172,15 @@ class ActiveVLMWorker:
         if self._stop.is_set():
             return False
         self.metrics.requests += 1
+        # There is no value in queueing a second periodic screenshot behind a
+        # slow one. More importantly, a queued VLM request can acquire the
+        # shared local-model slot before a newly due strategic decision and
+        # turn a 30 second cognition cadence into minutes. Active perception
+        # therefore admits at most one in-flight request; the realtime loop
+        # will ask again with a fresher frame after it completes.
+        if self._busy.is_set():
+            self.metrics.busy_rejections += 1
+            return False
         try:
             self._jobs.put_nowait(job)
             return True
@@ -193,6 +204,7 @@ class ActiveVLMWorker:
                 continue
             if job is None:
                 return
+            self._busy.set()
             try:
                 observation, latency_ms = self._inspect(job)
                 self.metrics.completed += 1
@@ -205,6 +217,12 @@ class ActiveVLMWorker:
                 self.metrics.failures += 1
                 self.metrics.last_error = f"{type(exc).__name__}: {exc}"
                 continue
+            finally:
+                self._busy.clear()
+
+    def available(self) -> bool:
+        """Return whether a fresh semantic job can start without queueing."""
+        return not self._stop.is_set() and not self._busy.is_set() and self._jobs.empty()
 
     def _inspect(self, job: SemanticJob) -> tuple[SemanticObservation, float]:
         png = _bgra_to_png(job.frame)
@@ -337,6 +355,9 @@ class ActiveVLMWorker:
             "completed": self.metrics.completed,
             "failures": self.metrics.failures,
             "queue_replacements": self.metrics.queue_replacements,
+            "busy_rejections": self.metrics.busy_rejections,
+            "busy": self._busy.is_set(),
+            "pending_requests": self._jobs.qsize(),
             "stale_rejections": self.metrics.stale_rejections,
             "last_latency_ms": round(self.metrics.last_latency_ms, 3),
             "last_frame_age": self.metrics.last_frame_age,
@@ -446,6 +467,10 @@ class RealtimePerceptionService:
                 ui_dhash=frame_region_dhash(selected, y_start=0.0, y_end=0.18),
             )
         )
+
+    def semantic_available(self) -> bool:
+        """Return whether active perception can accept a fresh frame now."""
+        return self.active_vlm is not None and self.active_vlm.available()
 
     def stale(self, now_ns: int | None = None) -> bool:
         latest = self.blackboard.raw_latest()

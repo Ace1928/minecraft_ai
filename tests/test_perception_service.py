@@ -139,6 +139,25 @@ def test_active_vlm_prefers_strict_structured_vision_contract() -> None:
     assert latency_ms == 12.0
 
 
+def test_active_vlm_reports_queued_work_as_unavailable() -> None:
+    worker = ActiveVLMWorker(
+        _UnusedVisionModel(),
+        PerceptionBlackboard(),
+        "bedrock:test",
+    )
+    frame = _frame(b"\0" * (9 * 8 * 4))
+
+    assert worker.available()
+    assert worker.submit(
+        SemanticJob(
+            query=ActivePerceptionQuery(query_id="q-pending", question="scene", frame_id=1),
+            frame=frame,
+            frame_dhash=frame_dhash(frame),
+        )
+    )
+    assert not worker.available()
+
+
 def test_slow_vlm_result_survives_frame_age_when_scene_is_visually_unchanged() -> None:
     board = PerceptionBlackboard()
     board.publish(

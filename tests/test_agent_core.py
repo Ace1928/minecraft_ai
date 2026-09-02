@@ -12,6 +12,7 @@ from minecraft_ai.runtime import (
     _active_operator_messages,
     _selected_operator_message_id,
     _semantic_deadline_ms,
+    _semantic_refresh_allowed,
 )
 from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
 from minecraft_ai.skills import SkillLibrary, SkillOutcome, SkillRun, SkillSpec, SkillStage
@@ -130,6 +131,29 @@ def test_empty_dependency_graph_is_valid() -> None:
 def test_semantic_request_deadline_is_bounded_below_query_cadence() -> None:
     assert _semantic_deadline_ms(2.0) == 500
     assert _semantic_deadline_ms(0.03) == 10_000
+
+
+def test_optional_semantics_yield_to_cognition_and_operator_work() -> None:
+    assert _semantic_refresh_allowed(
+        cognition_requested=False,
+        cognition_pending=False,
+        operator_message_pending=False,
+        worker_available=True,
+    )
+    for blocked in (
+        {"cognition_requested": True},
+        {"cognition_pending": True},
+        {"operator_message_pending": True},
+        {"worker_available": False},
+    ):
+        inputs = {
+            "cognition_requested": False,
+            "cognition_pending": False,
+            "operator_message_pending": False,
+            "worker_available": True,
+            **blocked,
+        }
+        assert not _semantic_refresh_allowed(**inputs)
 
 
 def test_acknowledged_operator_directive_remains_active_until_archived() -> None:
