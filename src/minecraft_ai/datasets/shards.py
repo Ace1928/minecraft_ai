@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .schema import TrajectoryManifest
+from .schema import TrajectoryManifest, TrajectoryShardManifest
 
 if TYPE_CHECKING:
     from ..trajectory import AcceptedTrajectorySample
@@ -89,6 +89,18 @@ class TrajectoryShardWriter:
                 "accepted_steps": accepted_steps,
                 "dropped_steps": dropped_steps,
                 "shard_ids": tuple(artifact.shard_id for artifact in self._artifacts),
+                "shards": tuple(
+                    TrajectoryShardManifest(
+                        shard_id=artifact.shard_id,
+                        filename=artifact.path.name,
+                        sha256=artifact.sha256,
+                        first_step_index=artifact.first_step_index,
+                        last_step_index=artifact.last_step_index,
+                        step_count=artifact.step_count,
+                        bytes=artifact.bytes,
+                    )
+                    for artifact in self._artifacts
+                ),
             }
         )
         self._write_manifest(completed)
@@ -148,6 +160,7 @@ class TrajectoryShardWriter:
                     trajectory_id=self.manifest.trajectory_id,
                     step_index=sample.step.step_index,
                     captured_ns=sample.step.captured_ns,
+                    accepted_ns=sample.step.accepted_ns,
                     shard_id=artifact.shard_id,
                     sample_key=f"{sample.step.step_index:012d}",
                     frame_hash=sample.step.frame_hash,

@@ -187,6 +187,10 @@ class Supervisor:
             self.motor.apply(lease_id, action)
             return {
                 "accepted_sequence": action.sequence,
+                # This is captured only after the scoped backend accepts the
+                # action, so trajectory latency and action labels refer to the
+                # physical supervisor boundary rather than policy intent.
+                "accepted_monotonic_ns": time.monotonic_ns(),
                 "lease_active": self.motor.lease is not None,
             }
 

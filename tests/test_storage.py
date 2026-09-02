@@ -138,3 +138,71 @@ def test_current_schema_open_does_not_reexecute_migration_ddl(
         pass
 
     assert calls == 0
+
+
+def test_v5_migration_adds_accept_time_and_benchmark_evidence(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO meta(key, value) VALUES('schema_version', '5');
+        CREATE TABLE trajectories (
+            trajectory_id TEXT PRIMARY KEY,
+            started_ns INTEGER NOT NULL,
+            ended_ns INTEGER,
+            source_type TEXT NOT NULL,
+            game_version TEXT NOT NULL,
+            payload TEXT NOT NULL
+        );
+        CREATE TABLE trajectory_shards (
+            shard_id TEXT PRIMARY KEY,
+            trajectory_id TEXT NOT NULL REFERENCES trajectories(trajectory_id),
+            path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            first_step_index INTEGER NOT NULL,
+            last_step_index INTEGER NOT NULL,
+            step_count INTEGER NOT NULL,
+            bytes INTEGER NOT NULL
+        );
+        CREATE TABLE trajectory_steps_index (
+            trajectory_id TEXT NOT NULL REFERENCES trajectories(trajectory_id),
+            step_index INTEGER NOT NULL,
+            captured_ns INTEGER NOT NULL,
+            shard_id TEXT NOT NULL REFERENCES trajectory_shards(shard_id),
+            sample_key TEXT NOT NULL,
+            frame_hash TEXT NOT NULL,
+            action_json TEXT NOT NULL,
+            action_level TEXT NOT NULL,
+            skill_run_id TEXT,
+            skill_id TEXT,
+            goal_id TEXT,
+            plan_node_id TEXT,
+            correction_of_step INTEGER,
+            PRIMARY KEY(trajectory_id, step_index)
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    with StateDatabase(path) as database:
+        columns = {
+            str(row[1])
+            for row in database.connection.execute(
+                "PRAGMA table_info(trajectory_steps_index)"
+            )
+        }
+        tables = {
+            str(row[0])
+            for row in database.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        version = database.connection.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()
+
+    assert "accepted_ns" in columns
+    assert {"benchmark_runs", "benchmark_task_results"} <= tables
+    assert version == ("6",)

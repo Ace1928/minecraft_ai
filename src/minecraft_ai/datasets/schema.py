@@ -35,6 +35,18 @@ class DatasetSource(BaseModel):
     checksum: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
 
 
+class TrajectoryShardManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    shard_id: str
+    filename: str
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    first_step_index: int = Field(ge=0)
+    last_step_index: int = Field(ge=0)
+    step_count: int = Field(ge=1)
+    bytes: int = Field(ge=1)
+
+
 class TrajectoryManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -55,3 +67,19 @@ class TrajectoryManifest(BaseModel):
     accepted_steps: int = Field(default=0, ge=0)
     dropped_steps: int = Field(default=0, ge=0)
     shard_ids: tuple[str, ...] = ()
+    shards: tuple[TrajectoryShardManifest, ...] = ()
+
+
+class DatasetValidationReport(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    trajectory_id: str
+    valid: bool
+    step_count: int = Field(ge=0)
+    shard_count: int = Field(ge=0)
+    first_captured_ns: int | None = None
+    last_captured_ns: int | None = None
+    frame_action_latency_ms_p50: float | None = None
+    frame_action_latency_ms_p95: float | None = None
+    errors: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()

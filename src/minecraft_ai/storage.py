@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .datasets.schema import TrajectoryManifest
 from .memory import MemoryKind, MemoryRecord, MemoryStore
@@ -18,8 +19,11 @@ from .social import (
 )
 from .spatial import PlaceRecord, SpatialPlaceMemory
 
+if TYPE_CHECKING:
+    from .eval.evaluator import BenchmarkReport
 
-SCHEMA_VERSION = 5
+
+SCHEMA_VERSION = 6
 
 
 class StateDatabase:
@@ -144,6 +148,7 @@ class StateDatabase:
                 trajectory_id TEXT NOT NULL REFERENCES trajectories(trajectory_id),
                 step_index INTEGER NOT NULL,
                 captured_ns INTEGER NOT NULL,
+                accepted_ns INTEGER,
                 shard_id TEXT NOT NULL REFERENCES trajectory_shards(shard_id),
                 sample_key TEXT NOT NULL,
                 frame_hash TEXT NOT NULL,
@@ -173,6 +178,23 @@ class StateDatabase:
                 kind TEXT NOT NULL,
                 payload TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS benchmark_runs (
+                benchmark_run_id TEXT PRIMARY KEY,
+                created_ns INTEGER NOT NULL,
+                suite_id TEXT NOT NULL,
+                git_commit TEXT,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS benchmark_task_results (
+                benchmark_run_id TEXT NOT NULL REFERENCES benchmark_runs(benchmark_run_id),
+                task_id TEXT NOT NULL,
+                repetition INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY(benchmark_run_id, task_id, repetition)
+            );
+            CREATE INDEX IF NOT EXISTS idx_benchmark_task_results_status
+                ON benchmark_task_results(benchmark_run_id, status);
             """
         )
         current = self.connection.execute(
@@ -201,6 +223,9 @@ class StateDatabase:
             if version == 4:
                 self._migrate_v4_to_v5()
                 version = 5
+            if version == 5:
+                self._migrate_v5_to_v6()
+                version = 6
             self.connection.execute(
                 "UPDATE meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
@@ -289,6 +314,37 @@ class StateDatabase:
             );
             CREATE INDEX IF NOT EXISTS idx_operator_targets_active_created
                 ON operator_targets(active, created_ns DESC);
+            """
+        )
+
+    def _migrate_v5_to_v6(self) -> None:
+        columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(trajectory_steps_index)")
+        }
+        if "accepted_ns" not in columns:
+            self.connection.execute(
+                "ALTER TABLE trajectory_steps_index ADD COLUMN accepted_ns INTEGER"
+            )
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS benchmark_runs (
+                benchmark_run_id TEXT PRIMARY KEY,
+                created_ns INTEGER NOT NULL,
+                suite_id TEXT NOT NULL,
+                git_commit TEXT,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS benchmark_task_results (
+                benchmark_run_id TEXT NOT NULL REFERENCES benchmark_runs(benchmark_run_id),
+                task_id TEXT NOT NULL,
+                repetition INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY(benchmark_run_id, task_id, repetition)
+            );
+            CREATE INDEX IF NOT EXISTS idx_benchmark_task_results_status
+                ON benchmark_task_results(benchmark_run_id, status);
             """
         )
 
@@ -649,6 +705,7 @@ class StateDatabase:
         trajectory_id: str,
         step_index: int,
         captured_ns: int,
+        accepted_ns: int | None,
         shard_id: str,
         sample_key: str,
         frame_hash: str,
@@ -663,12 +720,13 @@ class StateDatabase:
         self.connection.execute(
             """
             INSERT INTO trajectory_steps_index(
-                trajectory_id, step_index, captured_ns, shard_id, sample_key,
+                trajectory_id, step_index, captured_ns, accepted_ns, shard_id, sample_key,
                 frame_hash, action_json, action_level, skill_run_id, skill_id,
                 goal_id, plan_node_id, correction_of_step
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(trajectory_id, step_index) DO UPDATE SET
                 captured_ns=excluded.captured_ns,
+                accepted_ns=excluded.accepted_ns,
                 shard_id=excluded.shard_id,
                 sample_key=excluded.sample_key,
                 frame_hash=excluded.frame_hash,
@@ -684,6 +742,7 @@ class StateDatabase:
                 trajectory_id,
                 step_index,
                 captured_ns,
+                accepted_ns,
                 shard_id,
                 sample_key,
                 frame_hash,
@@ -697,6 +756,60 @@ class StateDatabase:
             ),
         )
         self.connection.commit()
+
+    def save_benchmark_report(self, report: BenchmarkReport) -> None:
+        """Persist an immutable benchmark report and its task-level evidence."""
+        payload = report.model_dump_json()
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO benchmark_runs(
+                    benchmark_run_id, created_ns, suite_id, git_commit, payload
+                ) VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(benchmark_run_id) DO UPDATE SET
+                    created_ns=excluded.created_ns,
+                    suite_id=excluded.suite_id,
+                    git_commit=excluded.git_commit,
+                    payload=excluded.payload
+                """,
+                (
+                    report.benchmark_run_id,
+                    report.created_ns,
+                    report.suite_id,
+                    report.git_commit,
+                    payload,
+                ),
+            )
+            for result in report.results:
+                self.connection.execute(
+                    """
+                    INSERT INTO benchmark_task_results(
+                        benchmark_run_id, task_id, repetition, status, payload
+                    ) VALUES(?, ?, ?, ?, ?)
+                    ON CONFLICT(benchmark_run_id, task_id, repetition) DO UPDATE SET
+                        status=excluded.status,
+                        payload=excluded.payload
+                    """,
+                    (
+                        report.benchmark_run_id,
+                        result.task_id,
+                        result.repetition,
+                        result.status.value,
+                        result.model_dump_json(),
+                    ),
+                )
+
+    def load_benchmark_report_payload(self, benchmark_run_id: str) -> dict[str, object]:
+        row = self.connection.execute(
+            "SELECT payload FROM benchmark_runs WHERE benchmark_run_id=?",
+            (benchmark_run_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(benchmark_run_id)
+        payload = json.loads(str(row[0]))
+        if not isinstance(payload, dict):
+            raise ValueError(f"invalid benchmark report payload: {benchmark_run_id}")
+        return payload
 
     def _save_json(
         self,

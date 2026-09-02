@@ -21,7 +21,7 @@ from .agent_lifecycle import (
     launch_agent_process,
     stop_agent_process,
 )
-from .config import ensure_default_config, load_config
+from .config import app_paths, ensure_default_config, load_config
 from .emergency import (
     clear_emergency_stop,
     emergency_reason,
@@ -31,6 +31,13 @@ from .emergency import (
 )
 from .knowledge import Edition, GameVersion, KnowledgeGraph
 from .knowledge.importers import import_java_datapack, import_minecraft_data
+from .eval import (
+    BenchmarkRunner,
+    TraceMetricAccumulator,
+    bedrock_baseline_suite,
+    compare_reports,
+    load_evidence,
+)
 from .operator_server import serve_operator_dashboard
 from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
 from .platforms.bedrock_session import (
@@ -42,7 +49,9 @@ from .platforms.bedrock_session import (
     wait_for_minecraft_window,
 )
 from .roles import BUILTIN_ROLES
+from .storage import StateDatabase
 from .supervisor import CONTROL_FILE, STATUS_FILE, send_command, supervisor_alive
+from .trajectory import TrajectoryReader
 from .wiki import WikiService
 
 app = typer.Typer(help="Minecraft AI lifecycle and tooling CLI.")
@@ -50,10 +59,16 @@ knowledge_app = typer.Typer(help="Versioned game knowledge commands.")
 bedrock_app = typer.Typer(help="BedrockOnLinux isolated-session commands.")
 roles_app = typer.Typer(help="Agent role/archetype commands.")
 config_app = typer.Typer(help="Local runtime/model configuration commands.")
+dataset_app = typer.Typer(help="Inspect and verify frame/action trajectory datasets.")
+eval_app = typer.Typer(help="Run and compare evidence-gated Bedrock evaluations.")
+benchmark_app = typer.Typer(help="Build frozen-suite benchmark reports.")
 app.add_typer(knowledge_app, name="knowledge")
 app.add_typer(bedrock_app, name="bedrock")
 app.add_typer(roles_app, name="roles")
 app.add_typer(config_app, name="config")
+app.add_typer(dataset_app, name="dataset")
+app.add_typer(eval_app, name="eval")
+app.add_typer(benchmark_app, name="benchmark")
 
 APP_NAME = "minecraft-ai"
 DATA_DIR = Path(user_data_dir(APP_NAME))
@@ -437,6 +452,166 @@ def dashboard(
     _ensure_dirs()
     print(f"[green]Operator dashboard[/green] http://{host}:{port}/")
     serve_operator_dashboard(host=host, port=port)
+
+
+@dataset_app.command("inspect")
+def dataset_inspect(
+    trajectory: Path = typer.Argument(..., exists=True),
+) -> None:
+    """Inspect one portable trajectory and summarize accepted motor behavior."""
+    reader = TrajectoryReader(trajectory)
+    accumulator = TraceMetricAccumulator()
+    validation = reader.validate(on_sample=accumulator.add)
+    metrics: dict[str, float | int | bool | str] = {}
+    if validation.valid:
+        metrics = accumulator.finish().values
+    payload = {
+        "manifest": reader.manifest.model_dump(mode="json"),
+        "validation": validation.model_dump(mode="json"),
+        "metrics": metrics,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@dataset_app.command("validate")
+def dataset_validate(
+    trajectory: Path = typer.Argument(..., exists=True),
+) -> None:
+    """Replay and integrity-check every sealed sample in one trajectory."""
+    report = TrajectoryReader(trajectory).validate()
+    print(json.dumps(report.model_dump(mode="json"), indent=2, sort_keys=True))
+    if not report.valid:
+        raise typer.Exit(code=1)
+
+
+@eval_app.command("tasks")
+def eval_tasks() -> None:
+    """List the immutable Bedrock M1 benchmark task contracts."""
+    suite = bedrock_baseline_suite()
+    print(json.dumps(suite.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@eval_app.command("run")
+def eval_run(
+    trajectory: Path = typer.Option(..., "--trajectory", exists=True),
+    task_ids: list[str] = typer.Option(..., "--task", help="Repeat for multiple tasks."),
+    evidence: Path | None = typer.Option(
+        None,
+        "--evidence",
+        exists=True,
+        dir_okay=False,
+        help="Controlled evaluator evidence JSON; never exposed to the agent.",
+    ),
+    output: Path | None = typer.Option(None, "--output"),
+) -> None:
+    """Evaluate accepted actions plus independently observed task outcomes."""
+    suite = bedrock_baseline_suite()
+    for task_id in task_ids:
+        try:
+            suite.task(task_id)
+        except KeyError as exc:
+            raise typer.BadParameter(f"unknown benchmark task: {task_id}") from exc
+    runner = BenchmarkRunner(suite)
+    report = runner.evaluate_trajectory(
+        trajectory,
+        task_ids=tuple(task_ids),
+        evidence=None if evidence is None else load_evidence(evidence),
+        git_commit=_git_commit(),
+    )
+    destination = output or _benchmark_output(report.benchmark_run_id)
+    report.write(destination)
+    with StateDatabase(app_paths().state_db) as database:
+        database.save_benchmark_report(report)
+    print(report.model_dump_json(indent=2))
+    print(f"[green]Benchmark report:[/green] {destination}")
+
+
+@eval_app.command("compare")
+def eval_compare(
+    baseline: Path = typer.Argument(..., exists=True, dir_okay=False),
+    candidate: Path = typer.Argument(..., exists=True, dir_okay=False),
+    output: Path | None = typer.Option(None, "--output"),
+) -> None:
+    """Compare two reports without treating small samples as promotion evidence."""
+    comparison = compare_reports(_load_json_object(baseline), _load_json_object(candidate))
+    if output is not None:
+        _write_json_atomic(output, comparison)
+    print(json.dumps(comparison, indent=2, sort_keys=True))
+
+
+@benchmark_app.command("report")
+def benchmark_report(
+    trajectory_root: Path | None = typer.Option(
+        None,
+        "--trajectory-root",
+        exists=True,
+        file_okay=False,
+        help="Root containing one directory per trajectory.",
+    ),
+    evidence_dir: Path | None = typer.Option(
+        None,
+        "--evidence-dir",
+        exists=True,
+        file_okay=False,
+        help="Optional evaluator evidence files named <trajectory-id>.json.",
+    ),
+    output: Path | None = typer.Option(None, "--output"),
+) -> None:
+    """Aggregate task-tagged trajectories into the frozen baseline report."""
+    root = trajectory_root or app_paths().data_dir / "trajectories"
+    if not root.is_dir():
+        raise typer.BadParameter(f"trajectory root does not exist: {root}")
+    trajectories = tuple(sorted(path.parent for path in root.glob("*/manifest.json")))
+    evidence_by_trajectory = {}
+    if evidence_dir is not None:
+        for evidence_path in sorted(evidence_dir.glob("*.json")):
+            evidence_by_trajectory[evidence_path.stem] = load_evidence(evidence_path)
+    runner = BenchmarkRunner(bedrock_baseline_suite())
+    report = runner.evaluate_many(
+        trajectories,
+        evidence_by_trajectory=evidence_by_trajectory,
+        git_commit=_git_commit(),
+    )
+    destination = output or _benchmark_output(report.benchmark_run_id)
+    report.write(destination)
+    with StateDatabase(app_paths().state_db) as database:
+        database.save_benchmark_report(report)
+    print(report.model_dump_json(indent=2))
+    print(f"[green]Benchmark report:[/green] {destination}")
+
+
+def _benchmark_output(benchmark_run_id: str) -> Path:
+    return app_paths().data_dir / "benchmarks" / f"{benchmark_run_id}.json"
+
+
+def _git_commit() -> str | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(__file__).resolve().parents[2],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    commit = result.stdout.strip()
+    return commit if result.returncode == 0 and commit else None
+
+
+def _load_json_object(path: Path) -> dict[str, object]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise typer.BadParameter(f"expected a JSON object: {path}")
+    return payload
+
+
+def _write_json_atomic(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staged = path.with_name(f".{path.name}.tmp")
+    staged.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    staged.replace(path)
 
 
 @config_app.command("show")
