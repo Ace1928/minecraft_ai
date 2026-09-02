@@ -37,7 +37,7 @@ class ControlEndpoint:
     session_id: str
 
     @classmethod
-    def load(cls, path: Path = CONTROL_FILE) -> "ControlEndpoint":
+    def load(cls, path: Path = CONTROL_FILE) -> ControlEndpoint:
         raw = json.loads(path.read_text(encoding="utf-8"))
         return cls(
             host=str(raw["host"]),
@@ -105,13 +105,16 @@ class Supervisor:
             self._persist_status()
 
     def arm(self, target_instance: str) -> dict[str, Any]:
-        """Create a fake motor lease for Phase-0 testing only."""
+        """Create a motor lease, then atomically expose the ARMED state."""
         with self._lock:
             if self.state != SupervisorState.SAFE_IDLE:
                 raise RuntimeError(f"cannot arm from {self.state}")
             validate_transition(self.state, SupervisorState.ARMED)
+            lease = self.motor.issue(
+                session_id=self.session_id,
+                target_instance=target_instance,
+            )
             self.state = SupervisorState.ARMED
-            lease = self.motor.issue(session_id=self.session_id, target_instance=target_instance)
             self._persist_status()
             return {
                 "lease_id": lease.lease_id,
@@ -120,10 +123,25 @@ class Supervisor:
                 "live_capable": self.backend.live_capable,
             }
 
+    def activate(self) -> None:
+        """Enter RUNNING only while a valid motor lease is already held."""
+        with self._lock:
+            if self.state != SupervisorState.ARMED:
+                raise RuntimeError(f"cannot activate from {self.state}")
+            lease = self.motor.lease
+            if lease is None or lease.expired():
+                self.motor.revoke("activate-without-live-lease")
+                self.fail("activate-without-live-lease")
+                return
+            validate_transition(self.state, SupervisorState.RUNNING)
+            self.state = SupervisorState.RUNNING
+            self._persist_status()
+
     def disarm(self, reason: str = "operator-disarm") -> None:
         with self._lock:
             self.motor.revoke(reason)
             if self.state in {SupervisorState.ARMED, SupervisorState.RUNNING}:
+                validate_transition(self.state, SupervisorState.PAUSED)
                 self.state = SupervisorState.PAUSED
             self._persist_status()
 
@@ -175,7 +193,10 @@ class Supervisor:
                 "held_buttons": sorted(self.backend.held_buttons),
                 "release_count": self.backend.release_count,
                 "last_fault": self.last_fault,
-                "uptime_s": round((time.monotonic_ns() - self.started_monotonic_ns) / 1e9, 3),
+                "uptime_s": round(
+                    (time.monotonic_ns() - self.started_monotonic_ns) / 1e9,
+                    3,
+                ),
             }
 
     def serve_forever(self) -> None:
@@ -242,6 +263,9 @@ class Supervisor:
             elif command == "arm-fake":
                 target_instance = str(payload.get("target_instance", "fake-instance"))
                 result = {"lease": self.arm(target_instance), "status": self.status()}
+            elif command == "activate-fake":
+                self.activate()
+                result = self.status()
             elif command == "disarm":
                 self.disarm()
                 result = self.status()
