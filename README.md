@@ -110,4 +110,4 @@ Third-party model/code integrations must be optional and must record their licen
 
 ## License
 
-MIT. Minecraft is a trademark and intellectual property of Microsoft/Mojang. This project is independent and is not affiliated with, endorsed by, or sponsored by Microsoft or Mojang.
+Apache License 2.0. Minecraft is a trademark and intellectual property of Microsoft/Mojang. This project is independent and is not affiliated with, endorsed by, or sponsored by Microsoft or Mojang.
