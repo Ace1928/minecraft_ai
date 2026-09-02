@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from ..safety import MotorAction
+from ..safety import MotorAction, MotorLease, MotorRejected
 
 
 class IsolationError(RuntimeError):
@@ -123,6 +123,7 @@ class IsolatedX11InputBackend:
             raise IsolationError(f"cannot open isolated X display {display_name}: {exc}") from exc
         self._held_keys: set[str] = set()
         self._held_buttons: set[str] = set()
+        self._lease: MotorLease | None = None
         self.release_count = 0
         self.live_capable = True
         if target_window_id is not None and not self.probe_target():
@@ -136,6 +137,25 @@ class IsolatedX11InputBackend:
     @property
     def held_buttons(self) -> frozenset[str]:
         return frozenset(self._held_buttons)
+
+    def bind_lease(self, lease: MotorLease) -> None:
+        if lease.backend_id != self.backend_id:
+            raise MotorRejected("motor lease backend identity mismatch")
+        self._lease = lease
+
+    def clear_lease(self) -> None:
+        self._lease = None
+
+    def _require_live_lease(self) -> MotorLease:
+        lease = self._lease
+        if lease is None:
+            self.release_all()
+            raise MotorRejected("Bedrock backend has no active motor lease")
+        if lease.expired():
+            self.release_all()
+            self._lease = None
+            raise MotorRejected("Bedrock backend motor lease expired")
+        return lease
 
     def _keycode(self, key: str) -> int:
         normalized = key.lower()
@@ -157,6 +177,7 @@ class IsolatedX11InputBackend:
         return True
 
     def apply(self, action: MotorAction) -> None:
+        self._require_live_lease()
         if not self.probe_target():
             self.release_all()
             raise IsolationError("Bedrock target window disappeared")
@@ -191,6 +212,7 @@ class IsolatedX11InputBackend:
 
     def type_chat(self, text: str) -> None:
         """Type one bounded ASCII chat message through the isolated input server."""
+        self._require_live_lease()
         if not self.probe_target():
             self.release_all()
             raise IsolationError("Bedrock target window disappeared")
@@ -264,6 +286,7 @@ class IsolatedX11InputBackend:
     def close(self) -> None:
         try:
             self.release_all()
+            self.clear_lease()
         finally:
             try:
                 self._display.close()
