@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "minecraft-ai-bridge",
+  "version": "${version}",
+  "name": "Minecraft AI Scoped Bridge",
+  "description": "Instance-scoped, fail-safe input bridge for the Minecraft AI project.",
+  "authors": ["Lloyd Handyside"],
+  "contact": {
+    "sources": "https://github.com/Ace1928/minecraft_ai"
+  },
+  "license": "Apache-2.0",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "io.github.ace1928.minecraftai.bridge.MinecraftAiBridgeClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~26.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}
