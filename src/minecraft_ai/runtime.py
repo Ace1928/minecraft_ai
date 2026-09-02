@@ -29,6 +29,11 @@ from .storage import StateDatabase
 from .supervisor import send_command
 
 
+def _semantic_deadline_ms(semantic_hz: float) -> int:
+    """Bound request lifetime independently from a slower query cadence."""
+    return min(10_000, max(250, int(1000 / semantic_hz)))
+
+
 @dataclass
 class RuntimeMetrics:
     frames: int = 0
@@ -238,7 +243,7 @@ class AgentRuntime:
             question=question,
             skill_id=skill_id,
             frame_id=frame_id,
-            deadline_ms=max(250, int(1000 / self.semantic_hz)),
+            deadline_ms=_semantic_deadline_ms(self.semantic_hz),
         )
         if self.perception.request_semantics(query):
             self.metrics.semantic_requests += 1

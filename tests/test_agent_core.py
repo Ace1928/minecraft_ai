@@ -7,6 +7,7 @@ from minecraft_ai.memory import MemoryKind, MemoryRecord, MemoryStore
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.planning import Goal, GoalScorer
 from minecraft_ai.roles import BUILTIN_ROLES, get_role
+from minecraft_ai.runtime import _semantic_deadline_ms
 from minecraft_ai.skills import SkillLibrary, SkillOutcome, SkillRun, SkillSpec, SkillStage
 
 
@@ -118,3 +119,8 @@ def test_memory_retrieval_prioritizes_relevant_location_and_goal() -> None:
 def test_empty_dependency_graph_is_valid() -> None:
     graph = KnowledgeGraph(GameVersion(edition=Edition.BEDROCK, version_id="1.0"))
     assert graph.validate() == []
+
+
+def test_semantic_request_deadline_is_bounded_below_query_cadence() -> None:
+    assert _semantic_deadline_ms(2.0) == 500
+    assert _semantic_deadline_ms(0.03) == 10_000
