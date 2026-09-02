@@ -50,9 +50,9 @@ class PolicyConfig(BaseModel):
     condition_scale: float = Field(default=4.0, ge=0.0, le=12.0)
     deterministic_condition: bool = True
     camera_scale: float = Field(default=1.0, ge=0.0, le=4.0)
-    camera_max_step: int = Field(default=3, ge=0, le=100)
-    camera_pitch_limit: int = Field(default=100, ge=0, le=2000)
-    camera_recovery_release: int = Field(default=40, ge=0, le=2000)
+    camera_max_step: int = Field(default=2, ge=0, le=100)
+    camera_pitch_limit: int = Field(default=40, ge=0, le=2000)
+    camera_recovery_release: int = Field(default=10, ge=0, le=2000)
     seed: int = 1928
 
 

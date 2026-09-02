@@ -230,6 +230,7 @@ font:inherit;font-weight:700;cursor:pointer}button.secondary{background:#17251f;
 button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{border-top:1px solid var(--line);padding:12px 0}
 .msg:first-child{border:0}.meta{display:flex;gap:8px;color:var(--muted);font-size:11px}.kind{color:var(--cyan)}.text{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere}
 .reason{font-size:16px;margin-top:9px}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:13px}
+.facts{margin:9px 0 0;max-height:220px;overflow:auto;white-space:pre-wrap;color:#b8d8ca;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}
 .metric{background:#09130f;border:1px solid #1d3028;border-radius:8px;padding:9px}.metric b{display:block;font-size:17px;margin-top:3px}
 .ok{color:var(--green)}.bad{color:var(--red)}.amber{color:var(--amber)}#notice{min-height:20px;margin-top:9px;color:var(--muted)}
 @media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}.wide{grid-column:span 2}}
@@ -242,7 +243,11 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 <div class="card"><div class="label">Agent</div><div class="value" id="agent">—</div></div>
 <div class="card"><div class="label">Active skill</div><div class="value" id="skill">—</div></div>
 <div class="card wide"><div class="label">Current goal</div><div class="value" id="goal">No active goal</div></div>
+<div class="card wide"><div class="label">Learned motor instruction</div><div class="reason" id="instruction">Waiting for an executable option.</div></div>
+<div class="card"><div class="label">Motor policy</div><div class="value" id="policy">—</div><div id="policyMetrics" class="label"></div></div>
+<div class="card"><div class="label">Camera state</div><div class="value" id="camera">—</div><div id="cameraMode" class="label"></div></div>
 <div class="card wide"><div class="label">Latest cognition</div><div class="reason" id="reason">Waiting for agent telemetry.</div></div></section>
+<section class="card"><h2>Fresh learned perception</h2><pre class="facts" id="facts">Waiting for perception facts.</pre></section>
 <section class="two"><div class="card"><h2>Talk to the high-level agent</h2><textarea id="text" maxlength="2000" placeholder="Give an instruction, ask a question, provide feedback, or correct its current approach…"></textarea>
 <div class="row"><select id="kind"><option value="instruction">Instruction</option><option value="question">Question</option><option value="feedback">Feedback</option><option value="correction">Correction</option></select>
 <select id="priority"><option value="0.8">High priority</option><option value="0.55">Normal priority</option><option value="1">Urgent</option></select><button id="send">Send to agent</button></div>
@@ -258,6 +263,9 @@ const bi=s.bedrock.instances.length>0; $('bedrock').textContent=bi?'RUNNING':'ST
 const sup=esc(s.supervisor.state);$('supervisor').textContent=sup;cls($('supervisor'),s.supervisor_reachable&&sup!=='FAILSAFE');
 const alive=s.agent.alive;$('agent').textContent=alive?'RUNNING':'DISARMED';cls($('agent'),alive);const t=s.telemetry||{};
 $('skill').textContent=esc(t.active_skill);$('goal').textContent=esc(t.chosen_goal_id||'No active goal');$('reason').textContent=esc(t.reasoning_summary||'Waiting for agent telemetry.');
+$('instruction').textContent=esc(t.active_instruction||'Waiting for an executable option.');const p=t.policy||{};$('policy').textContent=esc(p.model_version||p.policy_id);$('policyMetrics').textContent=(p.last_inference_ms??'—')+' ms · '+(p.goal_conditioned?'goal-conditioned':'unconditioned');
+$('camera').textContent=esc(p.estimated_pitch_units??'—')+' / '+esc(p.camera_pitch_limit??'—');$('cameraMode').textContent=p.camera_recovery_active?'learned horizon recovery':'normal learned control';$('camera').className='value '+(p.camera_recovery_active?'amber':'ok');
+const pf=((t.perception||{}).fresh_facts)||{};$('facts').textContent=Object.keys(pf).length?JSON.stringify(pf,null,2):'No fresh semantic facts yet.';
 $('frames').textContent=esc(t.frames||0);$('actions').textContent=esc(t.motor_actions||0);$('capture').textContent=t.last_capture_ms==null?'—':t.last_capture_ms+' ms';
 }catch(e){$('dot').style.background='var(--red)';$('connection').textContent='Disconnected'}}
 async function messages(){try{const d=await api('/api/messages');const feed=$('feed');feed.replaceChildren();if(!d.messages.length){const x=document.createElement('div');x.className='label';x.textContent='No messages yet';feed.append(x);return}

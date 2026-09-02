@@ -392,6 +392,19 @@ class AgentRuntime:
         }
         if self.perception.active_vlm is not None:
             perception_status["active_vlm"] = self.perception.active_vlm.status()
+        fresh_facts = self.blackboard.fresh_facts(min_confidence=0.35)
+        perception_status["fresh_facts"] = {
+            key: {
+                "value": fact.value,
+                "confidence": round(fact.confidence, 3),
+                "source": fact.source,
+            }
+            for key, fact in sorted(fresh_facts.items())
+        }
+        latest = self.blackboard.latest()
+        perception_status["tracks"] = [] if latest is None else [
+            track.model_dump(mode="json") for track in latest.tracks
+        ]
         return {
             "schema_version": 1,
             "state": state,
@@ -407,6 +420,7 @@ class AgentRuntime:
             "last_capture_ms": round(self.metrics.last_capture_ms, 3),
             "last_motor_ms": round(self.metrics.last_motor_ms, 3),
             "active_skill": None if running is None else running.skill_id,
+            "active_instruction": self.executor.instruction,
             "skill_outcome": None if running is None else running.outcome.value,
             "chosen_goal_id": None if decision is None else decision.chosen_goal_id,
             "reasoning_summary": None if decision is None else decision.reasoning_summary,

@@ -29,6 +29,12 @@ class SkillExecutor:
     def run(self) -> SkillRun | None:
         return self._run
 
+    @property
+    def instruction(self) -> str | None:
+        if self._spec is None or self._run is None:
+            return None
+        return _skill_instruction(self._spec, self._parameters)
+
     def close(self) -> None:
         close = getattr(self.policy, "close", None)
         if callable(close):

@@ -167,7 +167,16 @@ class HighLevelController:
                         "description": skill.description,
                         "stage": skill.stage.value,
                         "parameters": list(skill.parameters),
+                        "preconditions": [
+                            condition.model_dump(mode="json")
+                            for condition in skill.preconditions
+                        ],
+                        "success_conditions": [
+                            condition.model_dump(mode="json")
+                            for condition in skill.success_conditions
+                        ],
                         "expected_effects": list(skill.expected_effects),
+                        "measured_competence": self.skills.contextual_score(skill.skill_id),
                     }
                     for skill in self.skills.specs.values()
                 ],
@@ -185,7 +194,12 @@ class HighLevelController:
                         "ask_perception:string[], research_query:string|null. "
                         "Use only listed skill ids. Set say only when directly replying to a "
                         "fresh operator/player message or when urgent social communication is "
-                        "needed; ordinary private reasoning must not open in-game chat."
+                        "needed; ordinary private reasoning must not open in-game chat. Treat "
+                        "fresh_facts as the only authoritative observed game state. Prefer the "
+                        "most concrete feasible option that advances the chosen goal and has a "
+                        "verifiable success condition; do not select generic exploration when a "
+                        "visible resource or feasible progression option is available. Never "
+                        "claim an item, outcome, or completion that has not been observed."
                     ),
                 ),
                 ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),

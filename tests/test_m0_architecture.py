@@ -143,3 +143,14 @@ def test_supervisor_rejects_host_display_input_even_when_requested() -> None:
 
     with pytest.raises(RuntimeError, match="debug-only"):
         supervisor.attach_bedrock_x11(":0", 1, allow_host=True)
+
+
+def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> None:
+    skills = build_bootstrap_skill_library()
+    gather = skills.get("gather_nearby_wood")
+    crafting = skills.get("craft_crafting_table")
+
+    assert "visible trunk" in gather.description
+    assert gather.success_conditions[0].key == "inventory.logs"
+    assert "Bedrock crafting interface" in crafting.description
+    assert crafting.success_conditions[0].key == "inventory.crafting_table"
