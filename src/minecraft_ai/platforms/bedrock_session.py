@@ -39,6 +39,7 @@ class BedrockSession:
     created_ns: int
     launcher_command: tuple[str, ...]
     mode: str = "xephyr"
+    compositor_fullscreen: bool = False
     wayland_socket: str | None = None
     compositor_log: str | None = None
     launcher_log: str | None = None
@@ -61,6 +62,7 @@ class BedrockSession:
             created_ns=int(raw["created_ns"]),
             launcher_command=tuple(command),
             mode=str(raw.get("mode", "xephyr")),
+            compositor_fullscreen=bool(raw.get("compositor_fullscreen", False)),
             wayland_socket=None
             if raw.get("wayland_socket") is None
             else str(raw["wayland_socket"]),
@@ -234,6 +236,7 @@ def launch_weston_bedrock_session(
     *,
     width: int = DEFAULT_BEDROCK_WIDTH,
     height: int = DEFAULT_BEDROCK_HEIGHT,
+    fullscreen: bool = True,
     launcher_command: tuple[str, ...] | None = None,
 ) -> BedrockSession:
     """Launch Bedrock in a GPU-accelerated nested Weston/Xwayland compositor."""
@@ -263,18 +266,14 @@ def launch_weston_bedrock_session(
     compositor_log = RUNTIME_DIR / f"weston-{nonce}.log"
     launcher_log = RUNTIME_DIR / f"bedrock-launcher-{nonce}.log"
     compositor = subprocess.Popen(
-        [
-            weston,
-            "--backend=wayland",
-            f"--socket={wayland_socket}",
-            f"--width={width}",
-            f"--height={height}",
-            "--renderer=gl",
-            "--xwayland",
-            "--shell=kiosk",
-            "--no-config",
-            f"--log={compositor_log}",
-        ],
+        _weston_command(
+            weston=weston,
+            wayland_socket=wayland_socket,
+            width=width,
+            height=height,
+            fullscreen=fullscreen,
+            compositor_log=compositor_log,
+        ),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -308,6 +307,7 @@ def launch_weston_bedrock_session(
             created_ns=time.monotonic_ns(),
             launcher_command=launcher_command,
             mode="weston",
+            compositor_fullscreen=fullscreen,
             wayland_socket=wayland_socket,
             compositor_log=str(compositor_log),
             launcher_log=str(launcher_log),
@@ -317,6 +317,40 @@ def launch_weston_bedrock_session(
     except Exception:
         _terminate_process_group(compositor.pid)
         raise
+
+
+def _weston_command(
+    *,
+    weston: str,
+    wayland_socket: str,
+    width: int,
+    height: int,
+    fullscreen: bool,
+    compositor_log: Path,
+) -> list[str]:
+    """Build the nested compositor command without losing the host HUD surface.
+
+    A nominal 1920x1080 window is smaller than 1920x1080 after the host shell,
+    decorations, and dock reserve their space. Bedrock still allocates its
+    fullscreen backbuffer at the requested size, which clips the hotbar before
+    capture. Host-fullscreen Weston removes that mismatch while retaining the
+    isolated Wayland/Xwayland input namespace.
+    """
+    command = [
+        weston,
+        "--backend=wayland",
+        f"--socket={wayland_socket}",
+        f"--width={width}",
+        f"--height={height}",
+        "--renderer=gl",
+        "--xwayland",
+        "--shell=kiosk",
+        "--no-config",
+        f"--log={compositor_log}",
+    ]
+    if fullscreen:
+        command.append("--fullscreen")
+    return command
 
 
 def _wait_for_weston_xwayland(
@@ -346,6 +380,7 @@ def launch_isolated_bedrock_session(
     *,
     width: int = DEFAULT_BEDROCK_WIDTH,
     height: int = DEFAULT_BEDROCK_HEIGHT,
+    fullscreen: bool = True,
     launcher_command: tuple[str, ...] | None = None,
 ) -> BedrockSession:
     """Prefer the accelerated compositor, retaining Xephyr as a compatibility fallback."""
@@ -353,6 +388,7 @@ def launch_isolated_bedrock_session(
         return launch_weston_bedrock_session(
             width=width,
             height=height,
+            fullscreen=fullscreen,
             launcher_command=launcher_command,
         )
     return launch_xephyr_bedrock_session(

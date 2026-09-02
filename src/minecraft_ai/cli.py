@@ -141,6 +141,7 @@ def _session_payload(session: BedrockSession) -> dict[str, object]:
         "width": session.width,
         "height": session.height,
         "mode": session.mode,
+        "compositor_fullscreen": session.compositor_fullscreen,
         "wayland_socket": session.wayland_socket,
         "compositor_log": session.compositor_log,
         "launcher_log": session.launcher_log,
@@ -754,6 +755,11 @@ def bedrock_status() -> None:
 def bedrock_launch(
     width: int = typer.Option(DEFAULT_BEDROCK_WIDTH, min=320, max=7680),
     height: int = typer.Option(DEFAULT_BEDROCK_HEIGHT, min=240, max=4320),
+    fullscreen: bool = typer.Option(
+        True,
+        "--fullscreen/--windowed",
+        help="Present isolated Weston fullscreen so Bedrock's complete HUD remains visible.",
+    ),
     direct: bool = typer.Option(
         False,
         "--direct-debug",
@@ -761,11 +767,19 @@ def bedrock_launch(
     ),
 ) -> None:
     """Launch BedrockOnLinux in an accelerated isolated compositor."""
-    if bedrock_session_alive():
-        session = BedrockSession.load()
-        print("[yellow]Managed Bedrock session is already running.[/yellow]")
-        print(json.dumps(_session_payload(session), indent=2, sort_keys=True))
-        return
+    try:
+        existing_session = BedrockSession.load()
+    except (OSError, ValueError, TypeError, KeyError):
+        existing_session = None
+    if existing_session is not None:
+        if bedrock_session_alive(existing_session):
+            print("[yellow]Managed Bedrock session is already running.[/yellow]")
+            print(json.dumps(_session_payload(existing_session), indent=2, sort_keys=True))
+            return
+        # The launcher can exit while its nested compositor remains healthy.
+        # Reap that exact persisted session before replacing the descriptor so
+        # an orphaned fullscreen surface cannot occupy the Bedrock monitor.
+        stop_bedrock_session(existing_session)
     if direct:
         from .platforms.bedrock_session import launch_direct_bedrock_session
 
@@ -775,7 +789,11 @@ def bedrock_launch(
             "motor control cannot be armed.[/yellow]"
         )
     else:
-        session = launch_isolated_bedrock_session(width=width, height=height)
+        session = launch_isolated_bedrock_session(
+            width=width,
+            height=height,
+            fullscreen=fullscreen,
+        )
     print("[green]Bedrock session launched.[/green]")
     print(json.dumps(_session_payload(session), indent=2, sort_keys=True))
 
@@ -785,9 +803,14 @@ def bedrock_stop() -> None:
     """Stop realtime control then the managed Bedrock nested session."""
     stop_agent_process()
     if supervisor_alive():
-        current = send_command("status")
-        if bool(current.get("live_capable")):
-            send_command("pause")
+        try:
+            current = send_command("status")
+            if bool(current.get("live_capable")):
+                send_command("pause")
+        except Exception as exc:
+            # A compositor crash also closes the supervisor's X11 backend.
+            # Shutdown must still reap the launcher/compositor descriptor.
+            print(f"[yellow]Supervisor pause failed during cleanup: {exc}[/yellow]")
     stop_bedrock_session()
     print("[bold red]Managed Bedrock session stopped.[/bold red]")
 

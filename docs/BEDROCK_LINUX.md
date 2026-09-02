@@ -56,13 +56,19 @@ Launch Bedrock in an isolated namespace:
 minecraft-ai bedrock launch
 ```
 
-The default nested resolution is 1920x1080. This leaves enough drawable height
-for Wine's window chrome while preserving the complete Bedrock HUD on common
-scaled Wayland desktops. It can be changed explicitly:
+The default nested resolution is 1920x1080 and Weston is presented fullscreen
+on its host output. Fullscreen presentation is important: a nominal 1920x1080
+host window loses drawable pixels to shell chrome and Bedrock then clips the
+bottom of its 1920x1080 backbuffer, including part of the hotbar. It can be
+changed explicitly:
 
 ```bash
 minecraft-ai bedrock launch --width 1920 --height 1080
 ```
+
+Use `--windowed` only for manual debugging where a reduced and potentially
+clipped observation surface is acceptable. Autonomous play and trajectory
+recording should use the fullscreen default.
 
 Before arming live control, confirm that the dashboard frame includes all
 hearts, hunger icons, and all nine hotbar slots. A partially clipped HUD is not

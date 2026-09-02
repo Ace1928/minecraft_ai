@@ -11,6 +11,7 @@ from minecraft_ai.platforms.bedrock_session import (
     DEFAULT_BEDROCK_HEIGHT,
     DEFAULT_BEDROCK_WIDTH,
     BedrockSession,
+    _weston_command,
     bedrock_session_alive,
     launch_isolated_bedrock_session,
 )
@@ -55,6 +56,37 @@ def test_managed_session_defaults_preserve_full_hd_hud_surface() -> None:
     assert DEFAULT_BEDROCK_HEIGHT == 1080
     assert signature.parameters["width"].default == DEFAULT_BEDROCK_WIDTH
     assert signature.parameters["height"].default == DEFAULT_BEDROCK_HEIGHT
+    assert signature.parameters["fullscreen"].default is True
+
+
+def test_weston_defaults_to_host_fullscreen_for_complete_bedrock_hud(
+    tmp_path: Path,
+) -> None:
+    command = _weston_command(
+        weston="/usr/bin/weston",
+        wayland_socket="minecraft-ai-test",
+        width=1920,
+        height=1080,
+        fullscreen=True,
+        compositor_log=tmp_path / "weston.log",
+    )
+
+    assert "--fullscreen" in command
+    assert "--width=1920" in command
+    assert "--height=1080" in command
+
+
+def test_weston_windowed_escape_hatch_is_explicit(tmp_path: Path) -> None:
+    command = _weston_command(
+        weston="/usr/bin/weston",
+        wayland_socket="minecraft-ai-test",
+        width=1280,
+        height=720,
+        fullscreen=False,
+        compositor_log=tmp_path / "weston.log",
+    )
+
+    assert "--fullscreen" not in command
 
 
 def test_isolated_backend_refuses_host_x_server() -> None:
