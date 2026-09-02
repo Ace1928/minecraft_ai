@@ -41,6 +41,17 @@ _KEYSYM_NAMES: dict[str, str] = {
     "7": "7",
     "8": "8",
     "9": "9",
+    "`": "grave",
+    "-": "minus",
+    "=": "equal",
+    "[": "bracketleft",
+    "]": "bracketright",
+    "\\": "backslash",
+    ";": "semicolon",
+    "'": "apostrophe",
+    ",": "comma",
+    ".": "period",
+    "/": "slash",
 }
 _BUTTONS: dict[str, int] = {"left": 1, "middle": 2, "right": 3}
 _SHIFTED_ASCII = set('ABCDEFGHIJKLMNOPQRSTUVWXYZ~!@#$%^&*()_+{}|:"<>?')
@@ -74,6 +85,11 @@ def _display_identity(name: str) -> str:
     if not value:
         raise IsolationError("isolated X display is required")
     return value.split(".", 1)[0]
+
+
+def _x11_keysym_name(key: str) -> str:
+    normalized = key.lower()
+    return _KEYSYM_NAMES.get(normalized, normalized)
 
 
 def require_isolated_display(
@@ -164,8 +180,7 @@ class IsolatedX11InputBackend:
         return lease
 
     def _keycode(self, key: str) -> int:
-        normalized = key.lower()
-        keysym_name = _KEYSYM_NAMES.get(normalized, normalized)
+        keysym_name = _x11_keysym_name(key)
         keysym = int(self._xk.string_to_keysym(keysym_name))
         keycode = int(self._display.keysym_to_keycode(keysym))
         if keycode <= 0:
@@ -236,6 +251,13 @@ class IsolatedX11InputBackend:
             for char in text:
                 self._type_ascii(char)
             self._tap_key("enter")
+        except Exception:
+            # Never strand the player in a half-typed chat overlay.
+            try:
+                self._tap_key("escape")
+            except Exception:
+                pass
+            raise
         finally:
             for key in sorted(previous_keys):
                 self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))

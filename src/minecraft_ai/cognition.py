@@ -183,7 +183,9 @@ class HighLevelController:
                         "skill_id:string|null, "
                         "skill_parameters:object, say:string|null, request_replan:boolean, "
                         "ask_perception:string[], research_query:string|null. "
-                        "Use only listed skill ids."
+                        "Use only listed skill ids. Set say only when directly replying to a "
+                        "fresh operator/player message or when urgent social communication is "
+                        "needed; ordinary private reasoning must not open in-game chat."
                     ),
                 ),
                 ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),

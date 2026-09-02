@@ -197,7 +197,11 @@ class Supervisor:
             if not callable(actuator):
                 raise RuntimeError("active motor backend does not support scoped chat typing")
             try:
+                # Chat typing is synchronous and can outlive the normal heartbeat.
+                # Extend only this already-authenticated lease around the transaction.
+                self.motor.renew(lease_id, ttl_ms=5000)
                 actuator(text)
+                self.motor.renew(lease_id, ttl_ms=3000)
             except Exception as exc:
                 self.fail(f"chat-backend-fault:{type(exc).__name__}")
                 raise

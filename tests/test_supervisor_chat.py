@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from minecraft_ai.safety import MotorAction, MotorLease
+from minecraft_ai.platforms.bedrock_x11 import _x11_keysym_name
 from minecraft_ai.supervisor import Supervisor
 
 
@@ -84,3 +85,20 @@ def test_chat_rejects_control_characters_without_backend_call() -> None:
         supervisor.send_chat(lease_id, "bad\nmessage")
     assert backend.messages == []
     assert supervisor.status()["state"] == "RUNNING"
+
+
+def test_printable_chat_punctuation_maps_to_x11_keysyms() -> None:
+    expected = {
+        ".": "period",
+        ",": "comma",
+        "'": "apostrophe",
+        "-": "minus",
+        "=": "equal",
+        "[": "bracketleft",
+        "]": "bracketright",
+        "\\": "backslash",
+        ";": "semicolon",
+        "`": "grave",
+        "/": "slash",
+    }
+    assert {char: _x11_keysym_name(char) for char in expected} == expected
