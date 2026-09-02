@@ -1046,6 +1046,10 @@ def test_policy_status_counts_learned_inventory_toggle(tmp_path: Path) -> None:
 def test_explicit_action_constraints_mask_only_prohibited_learned_bits() -> None:
     decoded = {
         "attack": numpy.asarray([1]),
+        "drop": numpy.asarray([1]),
+        "hotbar.1": numpy.asarray([0]),
+        "hotbar.4": numpy.asarray([1]),
+        "inventory": numpy.asarray([1]),
         "use": numpy.asarray([1]),
         "jump": numpy.asarray([1]),
         "forward": numpy.asarray([1]),
@@ -1056,6 +1060,9 @@ def test_explicit_action_constraints_mask_only_prohibited_learned_bits() -> None
         {
             "parameters": {
                 "allow_attack": False,
+                "allow_drop": False,
+                "allow_hotbar": False,
+                "allow_inventory": False,
                 "allow_use": False,
                 "allow_jump": True,
             }
@@ -1063,11 +1070,15 @@ def test_explicit_action_constraints_mask_only_prohibited_learned_bits() -> None
     )
 
     assert int(constrained["attack"][0]) == 0
+    assert int(constrained["drop"][0]) == 0
+    assert int(constrained["hotbar.1"][0]) == 0
+    assert int(constrained["hotbar.4"][0]) == 0
+    assert int(constrained["inventory"][0]) == 0
     assert int(constrained["use"][0]) == 0
     assert int(constrained["jump"][0]) == 1
     assert int(constrained["forward"][0]) == 1
     assert int(decoded["attack"][0]) == 1
-    assert suppressed == ("attack", "use")
+    assert suppressed == ("attack", "use", "drop", "inventory", "hotbar")
 
 
 def test_close_inventory_learned_toggle_is_one_event_until_option_reset() -> None:

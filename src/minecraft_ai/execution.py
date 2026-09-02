@@ -198,7 +198,14 @@ def _policy_parameters(
 ) -> dict[str, str | int | float | bool]:
     """Intersect planner/operator bindings with an option's learned-action envelope."""
     merged = dict(parameters)
-    for name in ("allow_attack", "allow_use", "allow_jump"):
+    for name in (
+        "allow_attack",
+        "allow_use",
+        "allow_jump",
+        "allow_drop",
+        "allow_inventory",
+        "allow_hotbar",
+    ):
         skill_allows = bool(getattr(permissions, name))
         runtime_allows = parameters.get(name) is not False
         merged[name] = skill_allows and runtime_allows

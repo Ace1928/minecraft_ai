@@ -39,6 +39,9 @@ class SkillActionPermissions(BaseModel):
     allow_attack: bool = True
     allow_use: bool = True
     allow_jump: bool = True
+    allow_drop: bool = True
+    allow_inventory: bool = True
+    allow_hotbar: bool = True
 
 
 class SkillSpec(BaseModel):

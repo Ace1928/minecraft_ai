@@ -1882,25 +1882,34 @@ def _apply_action_constraints(
         return decoded, ()
     constrained = decoded
     suppressed: list[str] = []
-    for parameter, action in (
-        ("allow_attack", "attack"),
-        ("allow_use", "use"),
-        ("allow_jump", "jump"),
-    ):
-        if parameters.get(parameter) is not False or action not in decoded:
+    action_permissions: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("allow_attack", ("attack",)),
+        ("allow_use", ("use",)),
+        ("allow_jump", ("jump",)),
+        ("allow_drop", ("drop",)),
+        ("allow_inventory", ("inventory",)),
+        ("allow_hotbar", tuple(f"hotbar.{slot}" for slot in range(1, 10))),
+    )
+    for parameter, actions in action_permissions:
+        if parameters.get(parameter) is not False:
             continue
-        value = decoded[action]
-        try:
-            selected = bool(value[0])
-            safe_value = value.copy()
-            safe_value[...] = 0
-        except (IndexError, TypeError, AttributeError):
-            continue
-        if constrained is decoded:
-            constrained = dict(decoded)
-        constrained[action] = safe_value
-        if selected:
-            suppressed.append(action)
+        parameter_suppressed = False
+        for action in actions:
+            if action not in decoded:
+                continue
+            value = decoded[action]
+            try:
+                selected = bool(value[0])
+                safe_value = value.copy()
+                safe_value[...] = 0
+            except (IndexError, TypeError, AttributeError):
+                continue
+            if constrained is decoded:
+                constrained = dict(decoded)
+            constrained[action] = safe_value
+            parameter_suppressed = parameter_suppressed or selected
+        if parameter_suppressed:
+            suppressed.append(parameter.removeprefix("allow_"))
     return constrained, tuple(suppressed)
 
 

@@ -796,6 +796,8 @@ class AgentRuntime:
 
     def _telemetry_payload(self, *, state: str) -> dict[str, object]:
         running = self.executor.run
+        if running is not None and running.outcome != SkillOutcome.RUNNING:
+            running = None
         decision = self._last_decision
         policy_status: dict[str, object] = {"policy_id": self.executor.policy.policy_id}
         status = getattr(self.executor.policy, "status", None)

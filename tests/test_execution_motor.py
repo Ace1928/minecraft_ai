@@ -156,6 +156,9 @@ def test_skill_action_permissions_bound_learned_policy_without_replacing_it() ->
     assert policy.intent is not None
     assert policy.intent.parameters == {
         "allow_attack": False,
+        "allow_drop": True,
+        "allow_hotbar": True,
+        "allow_inventory": True,
         "allow_jump": False,
         "allow_use": False,
     }

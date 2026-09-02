@@ -20,7 +20,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
     specs = (
         SkillSpec(
             skill_id="approach_visible_target",
-            version=5,
+            version=6,
             name="Approach visible target",
             description=(
                 "Approach the visually localized target across safe terrain, keep it near the "
@@ -43,11 +43,17 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             max_duration_ms=15_000,
             policy_ref="approach",
             policy_instruction="approach the visible target",
-            action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
+            action_permissions=SkillActionPermissions(
+                allow_attack=False,
+                allow_use=False,
+                allow_drop=False,
+                allow_inventory=False,
+                allow_hotbar=False,
+            ),
         ),
         SkillSpec(
             skill_id="reacquire_target",
-            version=6,
+            version=7,
             name="Reacquire target",
             description=(
                 "Look around deliberately to find the requested target again, stabilize it near "
@@ -70,6 +76,9 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 allow_attack=False,
                 allow_use=False,
                 allow_jump=False,
+                allow_drop=False,
+                allow_inventory=False,
+                allow_hotbar=False,
             ),
         ),
         SkillSpec(
@@ -119,7 +128,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="retreat_from_danger",
-            version=4,
+            version=5,
             name="Retreat from danger",
             description=(
                 "Move away from the immediate hazard toward visible safe ground while keeping "
@@ -132,11 +141,17 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             max_duration_ms=10_000,
             policy_ref="retreat",
             policy_instruction="escape danger",
-            action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
+            action_permissions=SkillActionPermissions(
+                allow_attack=False,
+                allow_use=False,
+                allow_drop=False,
+                allow_inventory=False,
+                allow_hotbar=False,
+            ),
         ),
         SkillSpec(
             skill_id="escape_submersion",
-            version=2,
+            version=3,
             name="Escape submersion",
             description=(
                 "Swim to the visible surface, keep moving until the air HUD disappears, and "
@@ -153,11 +168,17 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             max_duration_ms=12_000,
             policy_ref="escape_submersion",
             policy_instruction="swim to the surface and leave the water",
-            action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
+            action_permissions=SkillActionPermissions(
+                allow_attack=False,
+                allow_use=False,
+                allow_drop=False,
+                allow_inventory=False,
+                allow_hotbar=False,
+            ),
         ),
         SkillSpec(
             skill_id="explore_forward",
-            version=7,
+            version=8,
             name="Explore forward",
             description=(
                 "Traverse visible open terrain to discover a genuinely new area, keep the view "
@@ -175,11 +196,17 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             # prompt ``go explore`` collapsed to forward-only motion on the same
             # Bedrock corner frame. The checkpoint still chooses every action.
             policy_instruction="Run around and explore the Minecraft world.",
-            action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
+            action_permissions=SkillActionPermissions(
+                allow_attack=False,
+                allow_use=False,
+                allow_drop=False,
+                allow_inventory=False,
+                allow_hotbar=False,
+            ),
         ),
         SkillSpec(
             skill_id="traverse_visible_obstacle",
-            version=1,
+            version=2,
             name="Traverse visible obstacle",
             description=(
                 "Use learned short-horizon movement and camera control to jump over or climb "
@@ -197,7 +224,13 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             # generic ``go explore`` latent. This remains a STEVE-1 option, not
             # an injected Space key or handcrafted obstacle reflex.
             policy_instruction="jump forward",
-            action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
+            action_permissions=SkillActionPermissions(
+                allow_attack=False,
+                allow_use=False,
+                allow_drop=False,
+                allow_inventory=False,
+                allow_hotbar=False,
+            ),
         ),
         SkillSpec(
             skill_id="use_target",
