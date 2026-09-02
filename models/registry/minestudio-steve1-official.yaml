@@ -1,0 +1,47 @@
+schema_version: 1
+model_version: minestudio-steve1-official
+provider: CraftJarvis MineStudio / STEVE-1
+architecture: MineCLIP-conditioned VPT 2x temporal policy
+purpose: short-horizon text-conditioned native-interface Minecraft control
+promotion_status: research-only-candidate-live-domain-transfer
+goal_conditioned: true
+temporal_memory: true
+research_only: true
+source:
+  integration_repository: https://github.com/CraftJarvis/MineStudio
+  integration_commit: 278aa8553668d591339dbf30d281594ed06ee882
+  integration_code_license: MIT
+  original_repository: https://github.com/Shalev-Lifshitz/STEVE-1
+  original_commit: 903b244796322f4d0073a8f62c05f51eac3aed52
+  original_repository_license: not-declared
+artifacts:
+  repository: https://huggingface.co/CraftJarvis/MineStudio_STEVE-1.official
+  repository_license: not-declared
+  config:
+    filename: config.json
+    sha256: a721384c345404e06b2f503705bd414cba94739c7825defc192726da5168dc52
+  weights:
+    filename: model.safetensors
+    sha256: 71cbfc167ac6d0da85797186f758fc0d3ef8d2a9419e7dfaf7be4f3e10920d18
+runtime:
+  parameters: 410450624
+  edition_trained: Java
+  target_edition: Bedrock
+  target_status: unadapted-domain-transfer
+  condition_scale: 4.0
+  deterministic_text_condition: true
+  measured_device: AMD Ryzen 5 5500 CPU, 4 inference threads
+  measured_steady_step_ms: 156-210
+  measured_service_step_ms: 204.07
+  measured_date: 2026-09-02
+  camera_scale: 0.5
+evidence:
+  - Prompt "mine a visible tree log" selected attack on a visible Bedrock tree.
+  - Prompt "open the inventory" selected the inventory action with classifier-free guidance.
+  - The isolated service preserved temporal state and returned a 204.07 ms steady prediction.
+limitations:
+  - The checkpoint artifact and original STEVE-1 repository do not declare a license.
+  - It is restricted to local research evaluation and is not redistributable or promotable.
+  - Java-to-Bedrock GUI, rendering and control domain adaptation is not yet trained.
+  - Text goals are short-horizon motor instructions, not substitutes for persistent planning.
+  - It is not eligible for preferred-policy claims until licensing is resolved and it beats the frozen Bedrock suite.

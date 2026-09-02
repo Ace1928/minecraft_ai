@@ -10,6 +10,8 @@ from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.policy_service import (
     LearnedPolicyOutput,
     TemporalPolicyClient,
+    _decoded_policy_output,
+    _intent_instruction,
     _learned_scene_blocked,
     _validate_policy_config,
 )
@@ -60,6 +62,53 @@ def test_policy_config_requires_hashes_provenance_and_paths(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="license"):
         _validate_policy_config(config.model_copy(update={"license": "unknown"}))
+
+    _validate_policy_config(
+        config.model_copy(update={"license": "unverified", "research_only": True})
+    )
+
+
+def test_goal_instruction_prefers_semantic_skill_contract() -> None:
+    assert (
+        _intent_instruction(
+            {
+                "skill_id": "mine_visible_log",
+                "instruction": "Approach and mine the visible oak log",
+            }
+        )
+        == "Approach and mine the visible oak log"
+    )
+    assert _intent_instruction({"skill_id": "mine_visible_log"}) == "mine visible log"
+
+
+def test_decoded_policy_camera_scale_is_bounded_adapter_calibration() -> None:
+    decoded = {
+        "camera": [[10.0, -10.0]],
+        "attack": [1],
+        "use": [0],
+        "forward": [1],
+        "back": [0],
+        "left": [0],
+        "right": [0],
+        "jump": [0],
+        "sneak": [0],
+        "sprint": [0],
+        "inventory": [0],
+        "drop": [0],
+        **{f"hotbar.{slot}": [0] for slot in range(1, 10)},
+    }
+
+    output = _decoded_policy_output(
+        decoded,
+        inference_ns=1,
+        model_version="goal-policy",
+        camera_scale=0.5,
+    )
+
+    assert output.keys == ("w",)
+    assert output.buttons == ("left",)
+    assert output.mouse_dx == -5
+    assert output.mouse_dy == 5
 
 
 def test_async_policy_does_not_double_count_an_already_recorded_deadline_miss(

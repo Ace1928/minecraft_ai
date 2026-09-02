@@ -32,7 +32,7 @@ class PolicyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = False
-    provider: str = "openai-vpt"
+    provider: str = Field(pattern="^(openai-vpt|minestudio-steve1)$", default="openai-vpt")
     python_path: str = ""
     source_path: str = ""
     model_path: str = ""
@@ -42,10 +42,14 @@ class PolicyConfig(BaseModel):
     model_version: str = ""
     source_commit: str = ""
     license: str = ""
+    research_only: bool = False
     device: str = "cpu"
     threads: int = Field(default=4, ge=1, le=64)
     deadline_ms: int = Field(default=48, ge=10, le=500)
     stochastic: bool = True
+    condition_scale: float = Field(default=4.0, ge=0.0, le=12.0)
+    deterministic_condition: bool = True
+    camera_scale: float = Field(default=1.0, ge=0.0, le=4.0)
     seed: int = 1928
 
 

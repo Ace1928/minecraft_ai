@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib
 import json
@@ -70,8 +71,6 @@ class TemporalPolicyClient:
     _discard_pending_response: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
-        if self.config.provider != "openai-vpt":
-            raise ValueError(f"unsupported learned policy provider: {self.config.provider}")
         _validate_policy_config(self.config)
         self.policy_id = f"learned:{self.config.provider}:{self.config.model_version}"
 
@@ -137,8 +136,11 @@ class TemporalPolicyClient:
             "model_version": self.config.model_version,
             "source_commit": self.config.source_commit,
             "license": self.config.license,
-            "goal_conditioned": False,
+            "goal_conditioned": self.config.provider == "minestudio-steve1",
             "temporal_memory": True,
+            "research_only": self.config.research_only,
+            "condition_scale": self.config.condition_scale,
+            "camera_scale": self.config.camera_scale,
             "process_alive": bool(process is not None and process.poll() is None),
             "requests": self.metrics.requests,
             "responses": self.metrics.responses,
@@ -197,6 +199,8 @@ class TemporalPolicyClient:
             "-m",
             "minecraft_ai.policy_service",
             "serve",
+            "--provider",
+            self.config.provider,
             "--shared-memory",
             self._memory.name,
             "--source-path",
@@ -217,9 +221,15 @@ class TemporalPolicyClient:
             str(self.config.threads),
             "--seed",
             str(self.config.seed),
+            "--condition-scale",
+            str(self.config.condition_scale),
+            "--camera-scale",
+            str(self.config.camera_scale),
         ]
         if self.config.stochastic:
             command.append("--stochastic")
+        if self.config.deterministic_condition:
+            command.append("--deterministic-condition")
         self._process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -345,7 +355,7 @@ def _validate_policy_config(config: PolicyConfig) -> None:
     for key in ("python_path", "source_path", "model_path", "weights_path"):
         if not Path(required[key]).exists():
             raise ValueError(f"learned policy {key} does not exist: {required[key]}")
-    if config.license.lower() != "mit":
+    if config.license.lower() != "mit" and not config.research_only:
         raise ValueError(f"unapproved learned policy license: {config.license}")
 
 
@@ -376,6 +386,7 @@ class _VPTBackend:
     device: str
     threads: int
     stochastic: bool
+    camera_scale: float
     seed: int
     policy: Any = field(init=False)
     mapper: Any = field(init=False)
@@ -454,37 +465,11 @@ class _VPTBackend:
         }
         factored = self.mapper.to_factored(raw)
         decoded = self.transformer.policy2env(factored)
-        keys: set[str] = set()
-        buttons: set[str] = set()
-        key_map = {
-            "forward": "w",
-            "back": "s",
-            "left": "a",
-            "right": "d",
-            "jump": "space",
-            "sneak": "shift",
-            "sprint": "ctrl",
-            "inventory": "e",
-            "drop": "q",
-        }
-        for source, target in key_map.items():
-            if bool(decoded[source][0]):
-                keys.add(target)
-        for slot in range(1, 10):
-            if bool(decoded[f"hotbar.{slot}"][0]):
-                keys.add(str(slot))
-        if bool(decoded["attack"][0]):
-            buttons.add("left")
-        if bool(decoded["use"][0]):
-            buttons.add("right")
-        pitch, yaw = decoded["camera"][0]
-        return LearnedPolicyOutput(
-            keys=tuple(sorted(keys)),
-            buttons=tuple(sorted(buttons)),
-            mouse_dx=int(round(float(yaw))),
-            mouse_dy=int(round(float(pitch))),
+        return _decoded_policy_output(
+            decoded,
             inference_ns=time.perf_counter_ns() - started,
             model_version=self.model_version,
+            camera_scale=self.camera_scale,
         )
 
     @staticmethod
@@ -499,6 +484,146 @@ class _VPTBackend:
             if name not in sys.modules:
                 sys.modules[name] = types.ModuleType(name)
         sys.modules["minerl.herobraine.hero.mc"].__dict__["MINERL_ITEM_MAP"] = {}
+
+
+@dataclass
+class _SteveOneBackend:
+    """MineStudio STEVE-1 goal-conditioned temporal policy backend."""
+
+    source_path: Path
+    model_path: Path
+    weights_path: Path
+    model_sha256: str
+    weights_sha256: str
+    model_version: str
+    device: str
+    threads: int
+    stochastic: bool
+    deterministic_condition: bool
+    condition_scale: float
+    camera_scale: float
+    seed: int
+    policy: Any = field(init=False)
+    mapper: Any = field(init=False)
+    transformer: Any = field(init=False)
+    torch: Any = field(init=False)
+    numpy: Any = field(init=False)
+    cv2: Any = field(init=False)
+    hidden_state: Any = field(init=False, default=None)
+    condition: Any = field(init=False, default=None)
+    instruction: str | None = field(init=False, default=None)
+
+    def __post_init__(self) -> None:
+        _verify_sha256(self.model_path, self.model_sha256)
+        _verify_sha256(self.weights_path, self.weights_sha256)
+        if self.model_path.parent != self.weights_path.parent:
+            raise ValueError("STEVE-1 config and weights must share a checkpoint directory")
+        sys.path.insert(0, str(self.source_path))
+        self.torch = importlib.import_module("torch")
+        self.numpy = importlib.import_module("numpy")
+        self.cv2 = importlib.import_module("cv2")
+        self.torch.set_num_threads(self.threads)
+        self.torch.set_num_interop_threads(1)
+        self.torch.manual_seed(self.seed)
+        body = importlib.import_module("minestudio.models.steve_one.body")
+        action_mapping = importlib.import_module("minestudio.utils.vpt_lib.action_mapping")
+        actions = importlib.import_module("minestudio.utils.vpt_lib.actions")
+        self.policy = body.SteveOnePolicy.from_pretrained(self.model_path.parent)
+        self.policy = self.policy.to(self.device).eval()
+        self.mapper = action_mapping.CameraHierarchicalMapping(n_camera_bins=11)
+        self.transformer = actions.ActionTransformer(
+            camera_binsize=2,
+            camera_maxval=10,
+            camera_mu=10,
+            camera_quantization_scheme="mu_law",
+        )
+        self.reset()
+
+    def reset(self) -> None:
+        self.hidden_state = None
+        self.condition = None
+        self.instruction = None
+
+    def infer(self, frame: Any, intent: dict[str, Any]) -> LearnedPolicyOutput:
+        started = time.perf_counter_ns()
+        instruction = _intent_instruction(intent)
+        if instruction != self.instruction or self.condition is None:
+            self.condition = self.policy.prepare_condition(
+                {"cond_scale": self.condition_scale, "text": instruction},
+                deterministic=self.deterministic_condition,
+            )
+            self.hidden_state = self.policy.initial_state(1, self.condition)
+            self.instruction = instruction
+        rgb = _center_crop_16_9(frame[:, :, [2, 1, 0]], self.numpy)
+        resized = self.cv2.resize(rgb, (128, 128), interpolation=self.cv2.INTER_LINEAR)
+        image = self.torch.from_numpy(resized[None, None].copy()).to(self.device)
+        with self.torch.inference_mode():
+            action, self.hidden_state = self.policy.get_action(
+                {"image": image, "condition": self.condition},
+                self.hidden_state,
+                input_shape="BT*",
+                deterministic=not self.stochastic,
+            )
+        raw = {
+            "buttons": action["buttons"].cpu().numpy().reshape(1, 1),
+            "camera": action["camera"].cpu().numpy().reshape(1, 1),
+        }
+        decoded = self.transformer.policy2env(self.mapper.to_factored(raw))
+        return _decoded_policy_output(
+            decoded,
+            inference_ns=time.perf_counter_ns() - started,
+            model_version=self.model_version,
+            camera_scale=self.camera_scale,
+        )
+
+
+def _intent_instruction(intent: dict[str, Any]) -> str:
+    instruction = intent.get("instruction")
+    if isinstance(instruction, str) and instruction.strip():
+        return instruction.strip()
+    skill_id = str(intent.get("skill_id") or "explore safely")
+    return skill_id.replace("_", " ")
+
+
+def _decoded_policy_output(
+    decoded: dict[str, Any],
+    *,
+    inference_ns: int,
+    model_version: str,
+    camera_scale: float = 1.0,
+) -> LearnedPolicyOutput:
+    keys: set[str] = set()
+    buttons: set[str] = set()
+    key_map = {
+        "forward": "w",
+        "back": "s",
+        "left": "a",
+        "right": "d",
+        "jump": "space",
+        "sneak": "shift",
+        "sprint": "ctrl",
+        "inventory": "e",
+        "drop": "q",
+    }
+    for source, target in key_map.items():
+        if bool(decoded[source][0]):
+            keys.add(target)
+    for slot in range(1, 10):
+        if bool(decoded[f"hotbar.{slot}"][0]):
+            keys.add(str(slot))
+    if bool(decoded["attack"][0]):
+        buttons.add("left")
+    if bool(decoded["use"][0]):
+        buttons.add("right")
+    pitch, yaw = decoded["camera"][0]
+    return LearnedPolicyOutput(
+        keys=tuple(sorted(keys)),
+        buttons=tuple(sorted(buttons)),
+        mouse_dx=int(round(float(yaw) * camera_scale)),
+        mouse_dy=int(round(float(pitch) * camera_scale)),
+        inference_ns=inference_ns,
+        model_version=model_version,
+    )
 
 
 def _center_crop_16_9(frame: Any, numpy_module: Any) -> Any:
@@ -534,18 +659,32 @@ def _serve(args: argparse.Namespace) -> int:
     # the attached child as a second owner and emits false leak warnings.
     resource_tracker.unregister(memory._name, "shared_memory")  # type: ignore[attr-defined]
     try:
-        backend = _VPTBackend(
-            source_path=Path(args.source_path),
-            model_path=Path(args.model_path),
-            weights_path=Path(args.weights_path),
-            model_sha256=args.model_sha256,
-            weights_sha256=args.weights_sha256,
-            model_version=args.model_version,
-            device=args.device,
-            threads=args.threads,
-            stochastic=args.stochastic,
-            seed=args.seed,
-        )
+        common = {
+            "source_path": Path(args.source_path),
+            "model_path": Path(args.model_path),
+            "weights_path": Path(args.weights_path),
+            "model_sha256": args.model_sha256,
+            "weights_sha256": args.weights_sha256,
+            "model_version": args.model_version,
+            "device": args.device,
+            "threads": args.threads,
+            "stochastic": args.stochastic,
+            "camera_scale": args.camera_scale,
+            "seed": args.seed,
+        }
+        if args.provider == "openai-vpt":
+            backend: _VPTBackend | _SteveOneBackend = _VPTBackend(**common)
+        elif args.provider == "minestudio-steve1":
+            # Third-party model loaders may print status text. Keep stdout a
+            # strict line-delimited JSON protocol for the realtime parent.
+            with contextlib.redirect_stdout(sys.stderr):
+                backend = _SteveOneBackend(
+                    **common,
+                    deterministic_condition=args.deterministic_condition,
+                    condition_scale=args.condition_scale,
+                )
+        else:
+            raise ValueError(f"unsupported learned policy provider: {args.provider}")
         _write_response({"type": "ready", "model_version": args.model_version})
         for line in sys.stdin:
             request: Any = {}
@@ -570,7 +709,10 @@ def _serve(args: argparse.Namespace) -> int:
                     dtype=backend.numpy.uint8,
                     buffer=memory.buf,
                 )
-                output = backend.infer(frame)
+                if isinstance(backend, _SteveOneBackend):
+                    output = backend.infer(frame, request["intent"])
+                else:
+                    output = backend.infer(frame)
                 _write_response(
                     {
                         "type": "prediction",
@@ -597,6 +739,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Minecraft AI learned policy service")
     subparsers = parser.add_subparsers(dest="command", required=True)
     serve = subparsers.add_parser("serve")
+    serve.add_argument(
+        "--provider",
+        choices=("openai-vpt", "minestudio-steve1"),
+        required=True,
+    )
     serve.add_argument("--shared-memory", required=True)
     serve.add_argument("--source-path", required=True)
     serve.add_argument("--model-path", required=True)
@@ -608,6 +755,9 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--threads", type=int, default=4)
     serve.add_argument("--seed", type=int, default=1928)
     serve.add_argument("--stochastic", action="store_true")
+    serve.add_argument("--deterministic-condition", action="store_true")
+    serve.add_argument("--condition-scale", type=float, default=4.0)
+    serve.add_argument("--camera-scale", type=float, default=1.0)
     return parser
 
 
