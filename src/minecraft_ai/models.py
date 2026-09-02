@@ -88,7 +88,13 @@ class OpenAICompatibleLocalModel:
             latency_ms=(time.perf_counter() - started) * 1000.0,
         )
 
-    def inspect(self, prompt: str, *, image_bytes: bytes, mime_type: str = "image/png") -> ModelResponse:
+    def inspect(
+        self,
+        prompt: str,
+        *,
+        image_bytes: bytes,
+        mime_type: str = "image/png",
+    ) -> ModelResponse:
         import time
 
         started = time.perf_counter()
