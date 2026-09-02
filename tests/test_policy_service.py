@@ -366,7 +366,7 @@ def test_slow_policy_uses_bounded_sample_and_hold_window(tmp_path: Path) -> None
     assert client._held_until_ns <= before + 260_000_000
 
 
-def test_async_policy_releases_expired_action_while_inference_is_pending(
+def test_async_policy_releases_expired_keys_but_holds_continuous_button(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -390,9 +390,61 @@ def test_async_policy_releases_expired_action_while_inference_is_pending(
     )
 
     assert action.keys_up == ("shift", "w")
-    assert action.buttons_up == ("left",)
+    assert action.buttons_up == ()
     assert not client._held_keys
+    assert client._held_buttons == {"left"}
+
+
+def test_async_policy_releases_continuous_button_at_request_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = CapturedFrame(frame_id=1, captured_ns=1, width=1, height=1, bgra=b"\0" * 4)
+    client = TemporalPolicyClient(
+        config=_policy_config(tmp_path, deadline_ms=150),
+        frame_provider=lambda: frame,
+    )
+    client._held_buttons = {"left"}
+    client._pending_request_id = "in-flight"
+    client._pending_deadline_ns = time.monotonic_ns() - 1
+    monkeypatch.setattr(client, "_ensure_started", lambda _size: None)
+    monkeypatch.setattr(client, "_consume_pending_response", lambda: None)
+
+    action = client.act(
+        PerceptionBlackboard(),
+        MotorIntent(skill_id="mine", mode="mine"),
+        sequence=1,
+    )
+
+    assert action.buttons_up == ("left",)
     assert not client._held_buttons
+    assert client.metrics.deadline_misses == 1
+
+
+def test_policy_status_exposes_predicted_and_emitted_camera(tmp_path: Path) -> None:
+    client = TemporalPolicyClient(config=_policy_config(tmp_path), frame_provider=lambda: None)
+    output = LearnedPolicyOutput(
+        keys=("w",),
+        buttons=("left",),
+        mouse_dx=9,
+        mouse_dy=-9,
+        inference_ns=1,
+        model_version="official-v1",
+    )
+
+    client._output_action(output, sequence=1)
+    status = client.status()
+
+    assert status["button_zero_order_hold"] is True
+    assert status["last_prediction"] == {
+        "keys": ("w",),
+        "buttons": ("left",),
+        "mouse_dx": 9,
+        "mouse_dy": -9,
+    }
+    assert status["last_emitted_camera"] == {"mouse_dx": 1, "mouse_dy": -1}
+    assert status["predicted_camera_total"] == {"mouse_dx": 9, "mouse_dy": -9}
+    assert status["emitted_camera_total"] == {"mouse_dx": 1, "mouse_dy": -1}
 
 
 def test_learned_static_gui_scene_blocks_world_policy_actions() -> None:

@@ -72,6 +72,10 @@ class TemporalPolicyClient:
     _discard_pending_response: bool = field(default=False, init=False)
     _estimated_pitch_units: int = field(default=0, init=False)
     _camera_recovery_active: bool = field(default=False, init=False)
+    _last_prediction: LearnedPolicyOutput | None = field(default=None, init=False)
+    _last_emitted_camera: tuple[int, int] = field(default=(0, 0), init=False)
+    _predicted_camera_total: tuple[int, int] = field(default=(0, 0), init=False)
+    _emitted_camera_total: tuple[int, int] = field(default=(0, 0), init=False)
 
     def __post_init__(self) -> None:
         _validate_policy_config(self.config)
@@ -165,6 +169,29 @@ class TemporalPolicyClient:
             "action_hold_ms": self.config.action_hold_ms,
             "estimated_pitch_units": self._estimated_pitch_units,
             "camera_recovery_active": self._camera_recovery_active,
+            "button_zero_order_hold": True,
+            "last_prediction": (
+                None
+                if self._last_prediction is None
+                else {
+                    "keys": self._last_prediction.keys,
+                    "buttons": self._last_prediction.buttons,
+                    "mouse_dx": self._last_prediction.mouse_dx,
+                    "mouse_dy": self._last_prediction.mouse_dy,
+                }
+            ),
+            "last_emitted_camera": {
+                "mouse_dx": self._last_emitted_camera[0],
+                "mouse_dy": self._last_emitted_camera[1],
+            },
+            "predicted_camera_total": {
+                "mouse_dx": self._predicted_camera_total[0],
+                "mouse_dy": self._predicted_camera_total[1],
+            },
+            "emitted_camera_total": {
+                "mouse_dx": self._emitted_camera_total[0],
+                "mouse_dy": self._emitted_camera_total[1],
+            },
             "process_alive": bool(process is not None and process.poll() is None),
             "requests": self.metrics.requests,
             "responses": self.metrics.responses,
@@ -342,6 +369,16 @@ class TemporalPolicyClient:
 
     def _output_action(self, output: LearnedPolicyOutput, sequence: int) -> MotorAction:
         mouse_dx, mouse_dy = self._filter_camera(output.mouse_dx, output.mouse_dy)
+        self._last_prediction = output
+        self._last_emitted_camera = (mouse_dx, mouse_dy)
+        self._predicted_camera_total = (
+            self._predicted_camera_total[0] + output.mouse_dx,
+            self._predicted_camera_total[1] + output.mouse_dy,
+        )
+        self._emitted_camera_total = (
+            self._emitted_camera_total[0] + mouse_dx,
+            self._emitted_camera_total[1] + mouse_dy,
+        )
         desired_keys = set(output.keys)
         desired_buttons = set(output.buttons)
         action = MotorAction(
@@ -400,10 +437,19 @@ class TemporalPolicyClient:
         return mouse_dx, mouse_dy
 
     def _hold(self, sequence: int) -> MotorAction:
-        """Respect the model's 50 ms action timing while inference is pending."""
-        if self._held_keys or self._held_buttons:
-            if time.monotonic_ns() >= self._held_until_ns:
-                return self._release(sequence)
+        """Bound locomotion while preserving continuous interaction semantics.
+
+        ROCKET and STEVE emit state, not clicks.  When inference is slower than
+        the 20 Hz training clock, releasing an attack button at the locomotion
+        hold boundary repeatedly cancels Minecraft's block-breaking progress.
+        Keep buttons latched until the next prediction (or the request deadline)
+        while releasing movement keys at the bounded sample-and-hold boundary.
+        """
+        if self._held_keys and time.monotonic_ns() >= self._held_until_ns:
+            keys_up = tuple(sorted(self._held_keys))
+            self._held_keys.clear()
+            self._held_until_ns = 0
+            return MotorAction(sequence=sequence, keys_up=keys_up)
         return MotorAction(sequence=sequence, duration_ms=50)
 
     def _release(self, sequence: int) -> MotorAction:
