@@ -310,14 +310,12 @@ def send_command(command: str, **payload: Any) -> dict[str, Any]:
 
 
 def supervisor_alive() -> bool:
-    try:
-        endpoint = ControlEndpoint.load()
-    except Exception:
-        return False
-    try:
-        os.kill(endpoint.pid, 0)
-    except (OSError, ProcessLookupError):
-        return False
+    """Use authenticated control-plane reachability as the liveness check.
+
+    Do not use `os.kill(pid, 0)`: that POSIX probe does not have portable
+    semantics on Windows. A stale endpoint simply fails the authenticated
+    status request and is treated as not alive.
+    """
     try:
         send_command("status")
     except Exception:
