@@ -309,8 +309,11 @@ def stop_bedrock_session(session: BedrockSession | None = None) -> None:
 def _terminate_process_group(pid: int) -> None:
     if pid <= 0:
         return
+    kill_group = getattr(os, "killpg", None)
+    if not callable(kill_group):
+        return
     try:
-        os.killpg(pid, signal.SIGTERM)
+        kill_group(pid, signal.SIGTERM)
     except (OSError, ProcessLookupError):
         return
     deadline = time.monotonic() + 2.0
@@ -319,6 +322,6 @@ def _terminate_process_group(pid: int) -> None:
             return
         time.sleep(0.05)
     try:
-        os.killpg(pid, signal.SIGKILL)
+        kill_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     except (OSError, ProcessLookupError):
         pass

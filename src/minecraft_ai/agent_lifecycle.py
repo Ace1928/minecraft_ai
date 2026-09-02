@@ -159,8 +159,11 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _terminate_group(pid: int, *, timeout_s: float) -> None:
+    kill_group = getattr(os, "killpg", None)
+    if not callable(kill_group):
+        return
     try:
-        os.killpg(pid, signal.SIGTERM)
+        kill_group(pid, signal.SIGTERM)
     except (OSError, ProcessLookupError):
         return
     deadline = time.monotonic() + timeout_s
@@ -169,6 +172,6 @@ def _terminate_group(pid: int, *, timeout_s: float) -> None:
             return
         time.sleep(0.05)
     try:
-        os.killpg(pid, signal.SIGKILL)
+        kill_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     except (OSError, ProcessLookupError):
         pass
