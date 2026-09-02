@@ -239,6 +239,10 @@ class HighLevelController:
                         "'acknowledged' means received, not completed or superseded. For a "
                         "current instruction or correction, set chosen_goal_id exactly to "
                         "'operator:' plus its message_id until a newer directive supersedes it. "
+                        "When that directive explicitly prohibits attack, use, or jump, encode "
+                        "the prohibition in skill_parameters as allow_attack:false, "
+                        "allow_use:false, or allow_jump:false so the policy contract can enforce "
+                        "it without replacing learned movement. "
                         "Never imply a message was handled while choosing a different goal."
                     ),
                 ),

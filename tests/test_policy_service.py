@@ -1,6 +1,7 @@
 from pathlib import Path
 import time
 
+import numpy
 import pytest
 
 from minecraft_ai.config import PolicyConfig
@@ -17,6 +18,7 @@ from minecraft_ai.policy_service import (
     LearnedPolicyOutput,
     GroundedPolicyRouter,
     TemporalPolicyClient,
+    _apply_action_constraints,
     _decoded_policy_output,
     _intent_instruction,
     _learned_scene_blocked,
@@ -544,6 +546,7 @@ def test_policy_status_exposes_predicted_and_emitted_camera(tmp_path: Path) -> N
         "target_exists_probability": None,
         "target_point_yx": None,
         "target_bbox_xyxy": None,
+        "suppressed_actions": (),
     }
     assert status["last_emitted_camera"] == {"mouse_dx": 1, "mouse_dy": -1}
     assert status["pending_camera"] == {"mouse_dx": 8, "mouse_dy": -8}
@@ -575,6 +578,33 @@ def test_policy_status_counts_learned_jump_before_state_hold_actions(tmp_path: P
         "jump": 2,
         "sprint_jump": 2,
     }
+
+
+def test_explicit_action_constraints_mask_only_prohibited_learned_bits() -> None:
+    decoded = {
+        "attack": numpy.asarray([1]),
+        "use": numpy.asarray([1]),
+        "jump": numpy.asarray([1]),
+        "forward": numpy.asarray([1]),
+    }
+
+    constrained, suppressed = _apply_action_constraints(
+        decoded,
+        {
+            "parameters": {
+                "allow_attack": False,
+                "allow_use": False,
+                "allow_jump": True,
+            }
+        },
+    )
+
+    assert int(constrained["attack"][0]) == 0
+    assert int(constrained["use"][0]) == 0
+    assert int(constrained["jump"][0]) == 1
+    assert int(constrained["forward"][0]) == 1
+    assert int(decoded["attack"][0]) == 1
+    assert suppressed == ("attack", "use")
 
 
 def test_learned_static_gui_scene_blocks_world_policy_actions() -> None:

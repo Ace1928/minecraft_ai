@@ -40,6 +40,7 @@ class LearnedPolicyOutput(BaseModel):
     target_exists_probability: float | None = Field(default=None, ge=0.0, le=1.0)
     target_point_yx: tuple[float, float] | None = None
     target_bbox_xyxy: tuple[float, float, float, float] | None = None
+    suppressed_actions: tuple[str, ...] = ()
 
 
 @dataclass
@@ -189,6 +190,7 @@ class TemporalPolicyClient:
                     ),
                     "target_point_yx": self._last_prediction.target_point_yx,
                     "target_bbox_xyxy": self._last_prediction.target_bbox_xyxy,
+                    "suppressed_actions": self._last_prediction.suppressed_actions,
                 }
             ),
             "last_emitted_camera": {
@@ -432,6 +434,12 @@ class TemporalPolicyClient:
             "attack": "left" in buttons,
             "use": "right" in buttons,
         }
+        labels.update(
+            {
+                f"constraint_suppressed.{action}": True
+                for action in output.suppressed_actions
+            }
+        )
         for label, selected in labels.items():
             if selected:
                 self._learned_action_counts[label] = (
@@ -965,11 +973,13 @@ class _SteveOneBackend:
             "camera": action["camera"].cpu().numpy().reshape(1, 1),
         }
         decoded = self.transformer.policy2env(self.mapper.to_factored(raw))
+        decoded, suppressed = _apply_action_constraints(decoded, intent)
         return _decoded_policy_output(
             decoded,
             inference_ns=time.perf_counter_ns() - started,
             model_version=self.model_version,
             camera_scale=self.camera_scale,
+            suppressed_actions=suppressed,
         )
 
 
@@ -1092,6 +1102,7 @@ class _RocketTwoBackend:
         }
         decoded = self.transformer.policy2env(self.mapper.to_factored(raw))
         decoded = _rocket_action_contract(decoded)
+        decoded, suppressed = _apply_action_constraints(decoded, intent)
         self.previous_action = self._decoded_previous_action(decoded)
         exists_probability, point_yx, bbox_xyxy = _rocket_target_estimate(self.policy)
         return _decoded_policy_output(
@@ -1102,6 +1113,7 @@ class _RocketTwoBackend:
             target_exists_probability=exists_probability,
             target_point_yx=point_yx,
             target_bbox_xyxy=bbox_xyxy,
+            suppressed_actions=suppressed,
         )
 
     def _empty_previous_action(self) -> dict[str, Any]:
@@ -1166,6 +1178,38 @@ def _rocket_action_contract(decoded: dict[str, Any]) -> dict[str, Any]:
     return {**decoded, "drop": safe_drop}
 
 
+def _apply_action_constraints(
+    decoded: dict[str, Any],
+    intent: dict[str, Any],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Mask explicit strategic prohibitions without replacing learned behavior."""
+    parameters = intent.get("parameters")
+    if not isinstance(parameters, dict):
+        return decoded, ()
+    constrained = decoded
+    suppressed: list[str] = []
+    for parameter, action in (
+        ("allow_attack", "attack"),
+        ("allow_use", "use"),
+        ("allow_jump", "jump"),
+    ):
+        if parameters.get(parameter) is not False or action not in decoded:
+            continue
+        value = decoded[action]
+        try:
+            selected = bool(value[0])
+            safe_value = value.copy()
+            safe_value[...] = 0
+        except (IndexError, TypeError, AttributeError):
+            continue
+        if constrained is decoded:
+            constrained = dict(decoded)
+        constrained[action] = safe_value
+        if selected:
+            suppressed.append(action)
+    return constrained, tuple(suppressed)
+
+
 def _rocket_interaction_id(mode: str) -> int:
     normalized = mode.casefold()
     if normalized in {"attack", "hunt", "combat"}:
@@ -1219,6 +1263,7 @@ def _decoded_policy_output(
     target_exists_probability: float | None = None,
     target_point_yx: tuple[float, float] | None = None,
     target_bbox_xyxy: tuple[float, float, float, float] | None = None,
+    suppressed_actions: tuple[str, ...] = (),
 ) -> LearnedPolicyOutput:
     keys: set[str] = set()
     buttons: set[str] = set()
@@ -1254,6 +1299,7 @@ def _decoded_policy_output(
         target_exists_probability=target_exists_probability,
         target_point_yx=target_point_yx,
         target_bbox_xyxy=target_bbox_xyxy,
+        suppressed_actions=suppressed_actions,
     )
 
 

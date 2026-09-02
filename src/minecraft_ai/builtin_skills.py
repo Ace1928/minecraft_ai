@@ -112,6 +112,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 "near the horizon, avoid drops and water, and stop when a useful resource appears"
             ),
             stage=SkillStage.EXPERIMENTAL,
+            parameters=("allow_attack", "allow_use", "allow_jump"),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("new_area_observed",),
             recovery_skills=("retreat_from_danger",),
