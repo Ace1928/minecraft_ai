@@ -67,7 +67,11 @@ class MemoryStore:
                 continue
             goal_overlap = len(set(record.goal_tags) & (goal_tags or set()))
             entity_overlap = len(set(record.entity_tags) & (entity_tags or set()))
-            location_bonus = 1.0 if location_key is not None and record.location_key == location_key else 0.0
+            location_bonus = (
+                1.0
+                if location_key is not None and record.location_key == location_key
+                else 0.0
+            )
             age_s = max(0.0, (now - record.updated_ns) / 1e9)
             recency = math.exp(-age_s / 86_400.0)
             score = (
