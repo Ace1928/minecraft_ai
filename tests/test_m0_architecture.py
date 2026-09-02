@@ -168,6 +168,12 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert close_inventory.policy_instruction == "close inventory"
     assert close_inventory.success_conditions[0].key == "scene.playable"
 
+    reacquire = skills.get("reacquire_target")
+    assert reacquire.policy_ref == "navigate"
+    assert reacquire.success_conditions[0].key == "target.tracking_confidence"
+    assert reacquire.success_conditions[0].operator == "gte"
+    assert reacquire.success_conditions[0].value == 0.65
+
     respawn = skills.get("respawn_after_death")
     assert respawn.preconditions[0].key == "scene.death"
     assert respawn.success_conditions[0].key == "scene.playable"
