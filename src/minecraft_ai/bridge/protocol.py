@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PROTOCOL_VERSION = 1
+_ALLOWED_ACTIONS = frozenset({"keyboard", "button", "mouse"})
 
 
 class BridgeCapability(StrEnum):
@@ -55,9 +56,16 @@ class LeaseBind(BaseModel):
     supervisor_session_id: str = Field(min_length=16, max_length=128)
     target_instance_id: str = Field(min_length=8, max_length=256)
     expires_monotonic_ns: int = Field(gt=0)
-    allowed_actions: frozenset[Literal["keyboard", "button", "mouse"]]
+    allowed_actions: frozenset[str]
     max_action_duration_ms: int = Field(ge=1, le=1000)
     first_sequence: int = Field(ge=0)
+
+    @field_validator("allowed_actions")
+    @classmethod
+    def _validate_allowed_actions(cls, value: frozenset[str]) -> frozenset[str]:
+        if not value.issubset(_ALLOWED_ACTIONS):
+            raise ValueError("unsupported action kind")
+        return value
 
     def expired(self, now_ns: int | None = None) -> bool:
         now = time.monotonic_ns() if now_ns is None else now_ns
