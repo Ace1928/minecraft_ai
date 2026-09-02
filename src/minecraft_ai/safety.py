@@ -52,11 +52,7 @@ class MotorRejected(RuntimeError):
 
 
 class MotorAction(BaseModel):
-    """Bounded human-style input semantics accepted by a motor backend.
-
-    The high-level planner never produces these directly. A fast motor policy or
-    deterministic safety routine does, and every action still passes MotorGate.
-    """
+    """Bounded human-style input semantics accepted by a motor backend."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -90,39 +86,6 @@ class MotorAction(BaseModel):
         return frozenset(kinds)
 
 
-class InputBackend(Protocol):
-    backend_id: str
-    live_capable: bool
-
-    def apply(self, action: MotorAction) -> None: ...
-
-    def release_all(self) -> None: ...
-
-
-@dataclass
-class FakeInputBackend:
-    """Deterministic non-live backend used to prove safety behavior first."""
-
-    backend_id: str = "fake"
-    live_capable: bool = False
-    held_keys: set[str] = field(default_factory=set)
-    held_buttons: set[str] = field(default_factory=set)
-    actions: list[MotorAction] = field(default_factory=list)
-    release_count: int = 0
-
-    def apply(self, action: MotorAction) -> None:
-        self.held_keys.update(action.keys_down)
-        self.held_keys.difference_update(action.keys_up)
-        self.held_buttons.update(action.buttons_down)
-        self.held_buttons.difference_update(action.buttons_up)
-        self.actions.append(action)
-
-    def release_all(self) -> None:
-        self.held_keys.clear()
-        self.held_buttons.clear()
-        self.release_count += 1
-
-
 @dataclass(frozen=True)
 class MotorLease:
     lease_id: str
@@ -139,12 +102,59 @@ class MotorLease:
         return now >= self.expires_monotonic_ns
 
 
+class InputBackend(Protocol):
+    backend_id: str
+    live_capable: bool
+
+    def bind_lease(self, lease: MotorLease) -> None: ...
+
+    def apply(self, action: MotorAction) -> None: ...
+
+    def release_all(self) -> None: ...
+
+    def clear_lease(self) -> None: ...
+
+
+@dataclass
+class FakeInputBackend:
+    """Deterministic non-live backend used to prove safety behavior first."""
+
+    backend_id: str = "fake"
+    live_capable: bool = False
+    held_keys: set[str] = field(default_factory=set)
+    held_buttons: set[str] = field(default_factory=set)
+    actions: list[MotorAction] = field(default_factory=list)
+    release_count: int = 0
+    lease_id: str | None = None
+
+    def bind_lease(self, lease: MotorLease) -> None:
+        self.lease_id = lease.lease_id
+
+    def apply(self, action: MotorAction) -> None:
+        if self.lease_id is None:
+            raise MotorRejected("backend has no active motor lease")
+        self.held_keys.update(action.keys_down)
+        self.held_keys.difference_update(action.keys_up)
+        self.held_buttons.update(action.buttons_down)
+        self.held_buttons.difference_update(action.buttons_up)
+        self.actions.append(action)
+
+    def release_all(self) -> None:
+        self.held_keys.clear()
+        self.held_buttons.clear()
+        self.release_count += 1
+
+    def clear_lease(self) -> None:
+        self.lease_id = None
+
+
 class MotorGate:
     """Capability gate between cognition/skills and any concrete input backend.
 
     A lease is deliberately short lived. Stale, replayed, oversized or disallowed
-    actions are rejected before they reach the backend. Every revocation releases
-    all input state unconditionally.
+    actions are rejected before they reach the backend. The same lease is bound
+    into the backend so a scoped remote bridge can independently enforce expiry
+    and sequence checks. Every revocation releases all input unconditionally.
     """
 
     def __init__(self, backend: InputBackend) -> None:
@@ -182,6 +192,7 @@ class MotorGate:
             raise MotorRejected("action duration outside safety bounds")
         with self._lock:
             self.backend.release_all()
+            self.backend.clear_lease()
             lease = MotorLease(
                 lease_id=uuid.uuid4().hex,
                 session_id=session_id,
@@ -192,6 +203,7 @@ class MotorGate:
                 max_action_duration_ms=max_action_duration_ms,
                 first_sequence=first_sequence,
             )
+            self.backend.bind_lease(lease)
             self._lease = lease
             self._last_sequence = first_sequence - 1
             self._revocation_reason = "active"
@@ -215,6 +227,7 @@ class MotorGate:
                 max_action_duration_ms=lease.max_action_duration_ms,
                 first_sequence=lease.first_sequence,
             )
+            self.backend.bind_lease(renewed)
             self._lease = renewed
             return renewed
 
@@ -252,6 +265,9 @@ class MotorGate:
     def _require_lease(self, lease_id: str) -> MotorLease:
         if self._lease is None or self._lease.lease_id != lease_id:
             self.backend.release_all()
+            self.backend.clear_lease()
+            self._lease = None
+            self._revocation_reason = "invalid-or-missing-lease"
             raise MotorRejected("invalid or missing motor lease")
         return self._lease
 
@@ -259,8 +275,13 @@ class MotorGate:
         self._lease = None
         self._revocation_reason = reason
         self.backend.release_all()
+        self.backend.clear_lease()
+
+
+def allowed_targets(current: SupervisorState) -> frozenset[SupervisorState]:
+    return _ALLOWED_TRANSITIONS[current]
 
 
 def validate_transition(current: SupervisorState, target: SupervisorState) -> None:
-    if target not in _ALLOWED_TRANSITIONS[current]:
+    if target not in allowed_targets(current):
         raise TransitionError(f"invalid supervisor transition: {current} -> {target}")
