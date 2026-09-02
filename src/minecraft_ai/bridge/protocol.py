@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import secrets
-import time
 from enum import StrEnum
 from typing import Literal
 
@@ -48,6 +47,8 @@ class Authenticate(BaseModel):
 
 
 class LeaseBind(BaseModel):
+    """Replicate a lease using a relative TTL, never a cross-runtime timestamp."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal["lease_bind"] = "lease_bind"
@@ -55,7 +56,7 @@ class LeaseBind(BaseModel):
     lease_id: str = Field(min_length=16, max_length=128)
     supervisor_session_id: str = Field(min_length=16, max_length=128)
     target_instance_id: str = Field(min_length=8, max_length=256)
-    expires_monotonic_ns: int = Field(gt=0)
+    ttl_ms: int = Field(ge=1, le=5000)
     allowed_actions: frozenset[str]
     max_action_duration_ms: int = Field(ge=1, le=1000)
     first_sequence: int = Field(ge=0)
@@ -66,10 +67,6 @@ class LeaseBind(BaseModel):
         if not value.issubset(_ALLOWED_ACTIONS):
             raise ValueError("unsupported action kind")
         return value
-
-    def expired(self, now_ns: int | None = None) -> bool:
-        now = time.monotonic_ns() if now_ns is None else now_ns
-        return now >= self.expires_monotonic_ns
 
 
 class LeaseClear(BaseModel):
@@ -82,11 +79,7 @@ class LeaseClear(BaseModel):
 
 
 class InputCommand(BaseModel):
-    """Bounded per-instance input semantics.
-
-    This intentionally contains no privileged game-state fields. The bridge is
-    a virtual keyboard/mouse attached to one client, not a world-state API.
-    """
+    """Bounded per-instance input semantics with a relative execution TTL."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -94,7 +87,7 @@ class InputCommand(BaseModel):
     protocol_version: int = PROTOCOL_VERSION
     lease_id: str = Field(min_length=16, max_length=128)
     sequence: int = Field(ge=0)
-    deadline_monotonic_ns: int = Field(gt=0)
+    ttl_ms: int = Field(ge=1, le=1000)
     keys_down: tuple[str, ...] = ()
     keys_up: tuple[str, ...] = ()
     buttons_down: tuple[str, ...] = ()
@@ -113,10 +106,6 @@ class InputCommand(BaseModel):
             raise ValueError("invalid input token")
         return normalized
 
-    def expired(self, now_ns: int | None = None) -> bool:
-        now = time.monotonic_ns() if now_ns is None else now_ns
-        return now >= self.deadline_monotonic_ns
-
 
 class ReleaseAll(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -132,7 +121,6 @@ class Heartbeat(BaseModel):
     kind: Literal["heartbeat"] = "heartbeat"
     protocol_version: int = PROTOCOL_VERSION
     sequence: int = Field(ge=0)
-    supervisor_monotonic_ns: int = Field(gt=0)
 
 
 class BridgeAck(BaseModel):
