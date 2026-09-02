@@ -107,7 +107,9 @@ def test_planner_preserves_and_or_recipe_structure() -> None:
     torch = options[0]
     assert len(torch.requirements) == 2
     stick_slot = next(
-        slot for slot in torch.requirements if any(plan.target == "item:minecraft:stick" for plan in slot)
+        slot
+        for slot in torch.requirements
+        if any(plan.target == "item:minecraft:stick" for plan in slot)
     )
     stick_plan = stick_slot[0]
     assert len(stick_plan.requirements) == 1
