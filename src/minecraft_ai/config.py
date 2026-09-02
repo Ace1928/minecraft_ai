@@ -69,8 +69,11 @@ class PolicyConfig(BaseModel):
     # MineRL/VPT camera actions are degrees. At Minecraft Java's default 0.5
     # mouse sensitivity one relative count is 0.15 degrees. Bedrock has a
     # different sensitivity curve, so live deployments must replace this
-    # default with an empirically measured counts-per-degree calibration.
+    # default with empirically measured per-axis counts-per-degree calibration.
+    # `camera_scale` remains the yaw/legacy scale so existing configs stay
+    # readable; pitch may differ under WineGDK and must be measured separately.
     camera_scale: float = Field(default=20.0 / 3.0, ge=0.0, le=100.0)
+    camera_pitch_scale: float | None = Field(default=None, gt=0.0, le=100.0)
     # When Minecraft releases the pointer for a GUI, X11 relative motion is in
     # screen pixels rather than world-camera degrees. Keep that independently
     # calibrated so a correct GUI prediction cannot inherit world sensitivity.
@@ -82,6 +85,10 @@ class PolicyConfig(BaseModel):
     camera_pitch_limit: int = Field(default=300, ge=0, le=5000)
     camera_recovery_release: int = Field(default=100, ge=0, le=5000)
     seed: int = 1928
+
+    @property
+    def effective_camera_pitch_scale(self) -> float:
+        return self.camera_scale if self.camera_pitch_scale is None else self.camera_pitch_scale
 
 
 class RuntimeConfig(BaseModel):

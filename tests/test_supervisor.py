@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from minecraft_ai.safety import MotorAction, MotorLease, SupervisorState
-from minecraft_ai.supervisor import Supervisor
+from minecraft_ai.supervisor import Supervisor, _bounded_camera_calibration_deltas
 
 
 class _PhysicalFakeBackend:
@@ -15,6 +15,7 @@ class _PhysicalFakeBackend:
         self.held_buttons: set[str] = set()
         self.release_count = 0
         self.lease_id: str | None = None
+        self.actions: list[MotorAction] = []
 
     def bind_lease(self, lease: MotorLease) -> None:
         self.lease_id = lease.lease_id
@@ -22,6 +23,7 @@ class _PhysicalFakeBackend:
     def apply(self, action: MotorAction) -> None:
         if self.lease_id is None:
             raise RuntimeError("backend has no lease")
+        self.actions.append(action)
 
     def release_all(self) -> None:
         self.held_keys.clear()
@@ -121,6 +123,9 @@ def test_supervisor_tracks_only_accepted_world_camera_motion() -> None:
     assert supervisor.status()["world_camera"] == {
         "estimated_pitch_units": -23,
         "accepted_updates": 2,
+        "origin_calibrated": False,
+        "pitch_counts_per_degree": None,
+        "calibration_id": None,
     }
 
 
@@ -131,6 +136,9 @@ def test_same_physical_backend_replacement_preserves_camera_state() -> None:
     supervisor.replace_backend(first)
     supervisor.world_camera_pitch_units = -317
     supervisor.world_camera_updates = 9
+    supervisor.world_camera_origin_calibrated = True
+    supervisor.world_camera_pitch_counts_per_degree = 47.96
+    supervisor.world_camera_calibration_id = "profile"
 
     supervisor.replace_backend(
         _PhysicalFakeBackend(":2", 42),
@@ -140,6 +148,9 @@ def test_same_physical_backend_replacement_preserves_camera_state() -> None:
     assert supervisor.status()["world_camera"] == {
         "estimated_pitch_units": -317,
         "accepted_updates": 9,
+        "origin_calibrated": True,
+        "pitch_counts_per_degree": 47.96,
+        "calibration_id": "profile",
     }
 
 
@@ -155,6 +166,41 @@ def test_new_physical_backend_replacement_resets_camera_state() -> None:
     assert supervisor.status()["world_camera"] == {
         "estimated_pitch_units": 0,
         "accepted_updates": 0,
+        "origin_calibrated": False,
+        "pitch_counts_per_degree": None,
+        "calibration_id": None,
+    }
+
+
+def test_camera_calibration_homes_then_establishes_measured_horizon(monkeypatch) -> None:
+    monkeypatch.setattr("minecraft_ai.supervisor.time.sleep", lambda _seconds: None)
+    deltas = _bounded_camera_calibration_deltas(47.9638888889)
+
+    assert all(0 < abs(delta) <= 96 for delta in deltas)
+    assert sum(delta for delta in deltas if delta < 0) == -9593
+    assert sum(delta for delta in deltas if delta > 0) == 4317
+    assert deltas[0] < 0
+    assert deltas[-1] > 0
+
+    supervisor = Supervisor()
+    supervisor.start()
+    backend = _PhysicalFakeBackend(":2", 42)
+    supervisor.replace_backend(backend)
+
+    status = supervisor.calibrate_world_camera(
+        pitch_counts_per_degree=47.9638888889,
+        calibration_id="calibration-sha256",
+    )
+
+    assert sum(action.mouse_dy for action in backend.actions) == -5276
+    assert status["state"] == "SAFE_IDLE"
+    assert status["motor_lease_active"] is False
+    assert status["world_camera"] == {
+        "estimated_pitch_units": 0,
+        "accepted_updates": 0,
+        "origin_calibrated": True,
+        "pitch_counts_per_degree": 47.9638888889,
+        "calibration_id": "calibration-sha256",
     }
 
 

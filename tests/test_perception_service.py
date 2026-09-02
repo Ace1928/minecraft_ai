@@ -18,6 +18,7 @@ from minecraft_ai.perception_service import (
     SemanticObservation,
     bedrock_air_bubbles,
     bedrock_death_screen_present,
+    bedrock_survival_hud_present,
     bedrock_ui_chrome_present,
     frame_dhash,
     perceptual_hash_distance,
@@ -121,6 +122,24 @@ def test_bedrock_ui_chrome_is_a_negative_only_motor_interlock() -> None:
     facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
     assert facts["scene.playable"].value is False
     assert facts["scene.playable"].source.startswith("bootstrap:")
+
+
+def test_complete_survival_hud_is_required_for_camera_calibration() -> None:
+    width, height = 640, 360
+    pixels = bytearray(bytes((20, 20, 20, 255)) * width * height)
+    for y in range(int(height * 0.82), int(height * 0.88)):
+        for x in range(int(width * 0.29), int(width * 0.49)):
+            offset = (y * width + x) * 4
+            pixels[offset : offset + 4] = bytes((25, 25, 230, 255))
+    for y in range(int(height * 0.92), height):
+        for x in range(int(width * 0.28), int(width * 0.72)):
+            offset = (y * width + x) * 4
+            pixels[offset : offset + 4] = bytes((140, 140, 140, 255))
+
+    assert bedrock_survival_hud_present(_frame(bytes(pixels), width=width, height=height))
+    assert not bedrock_survival_hud_present(
+        _frame(bytes((20, 20, 20, 255)) * width * height, width=width, height=height)
+    )
 
 
 def test_bedrock_air_hud_is_a_calibrated_safety_observation() -> None:

@@ -671,7 +671,7 @@ def test_option_condition_scale_overrides_policy_default() -> None:
     assert _intent_condition_scale({}, default=4.0) == 4.0
 
 
-def test_decoded_policy_camera_scale_is_bounded_adapter_calibration() -> None:
+def test_decoded_policy_camera_uses_independent_axis_calibration() -> None:
     decoded = {
         "camera": [[10.0, -10.0]],
         "attack": [1],
@@ -693,18 +693,20 @@ def test_decoded_policy_camera_scale_is_bounded_adapter_calibration() -> None:
         inference_ns=1,
         model_version="goal-policy",
         camera_scale=0.5,
+        camera_pitch_scale=0.3,
     )
 
     assert output.keys == ("w",)
     assert output.buttons == ("left",)
     assert output.mouse_dx == -5
-    assert output.mouse_dy == 5
+    assert output.mouse_dy == 3
 
 
 def test_default_camera_adapter_matches_minecraft_half_sensitivity() -> None:
     config = PolicyConfig()
 
     assert config.camera_scale == pytest.approx(1.0 / 0.15)
+    assert config.effective_camera_pitch_scale == pytest.approx(1.0 / 0.15)
     assert config.gui_camera_scale == pytest.approx(1.0)
     assert config.camera_max_step == 12
     assert config.camera_pitch_limit == 300
@@ -712,10 +714,11 @@ def test_default_camera_adapter_matches_minecraft_half_sensitivity() -> None:
     assert config.scene_min_confidence == pytest.approx(0.80)
 
 
-def test_bedrock_camera_adapter_accepts_empirical_low_sensitivity_scale() -> None:
-    config = PolicyConfig(camera_scale=47.96)
+def test_bedrock_camera_adapter_accepts_empirical_per_axis_scales() -> None:
+    config = PolicyConfig(camera_scale=47.96, camera_pitch_scale=66.0)
 
     assert config.camera_scale == pytest.approx(47.96)
+    assert config.effective_camera_pitch_scale == pytest.approx(66.0)
 
 
 def test_gui_cursor_uses_pixel_scale_instead_of_world_camera_calibration() -> None:

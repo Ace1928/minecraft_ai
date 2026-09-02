@@ -22,7 +22,7 @@ from .agent_lifecycle import AgentProcess, agent_alive, stop_agent_process
 from .config import app_paths
 from .emergency import emergency_reason, emergency_stop_latched
 from .perception import ScreenRegion, Track
-from .perception_service import frame_dhash
+from .perception_service import bedrock_survival_hud_present, frame_dhash
 from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
 from .platforms.bedrock_session import BedrockSession, bedrock_session_alive
 from .platforms.bedrock_x11 import CapturedFrame, IsolatedX11Capture
@@ -292,7 +292,14 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             HTTPStatus.OK,
             output.getvalue(),
             "image/jpeg",
-            extra_headers={"X-Minecraft-Frame-Token": frame_token},
+            extra_headers={
+                "X-Minecraft-Frame-Token": frame_token,
+                "X-Minecraft-Frame-Width": str(frame.width),
+                "X-Minecraft-Frame-Height": str(frame.height),
+                "X-Minecraft-HUD-Complete": (
+                    "true" if bedrock_survival_hud_present(frame) else "false"
+                ),
+            },
         )
 
     def _post_target(self, payload: dict[str, Any]) -> None:
@@ -464,7 +471,7 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 <div class="card"><div class="label">Motor policy</div><div class="value" id="policy">—</div><div id="policyMetrics" class="label"></div></div>
 <div class="card"><div class="label">Camera state</div><div class="value" id="camera">—</div><div id="cameraMode" class="label"></div></div>
 <div class="card wide"><div class="label">Latest cognition</div><div class="reason" id="reason">Waiting for agent telemetry.</div><div class="label" id="outcome"></div></div></section>
-<section class="card"><h2>Ground ROCKET-2 on the live Bedrock frame</h2><div class="viewer" id="viewer"><img id="worldFrame" alt="Live Bedrock frame" draggable="false"><div class="selection" id="selection"></div><div class="prediction" id="prediction" title="ROCKET-2 learned current-view prediction"></div></div>
+<section class="card"><h2>Ground ROCKET-2 on the live Bedrock frame</h2><div id="surface" class="label">Waiting for isolated capture geometry.</div><div class="viewer" id="viewer"><img id="worldFrame" alt="Live Bedrock frame" draggable="false"><div class="selection" id="selection"></div><div class="prediction" id="prediction" title="ROCKET-2 learned current-view prediction"></div></div>
 <div class="target-review" id="targetReview" hidden><canvas id="targetPreview" width="320" height="180"></canvas><div><b>Exact target pixels</b><span>This frame is frozen until you arm or clear the selection. Confirm the crop matches the label.</span></div></div>
 <div class="row"><input id="targetLabel" maxlength="80" value="log" aria-label="Target label"><button id="setTarget">Run ROCKET-2 on selection</button><button class="secondary" id="clearTarget">Clear target</button></div><div id="targetNotice" class="label">Drag a tight box around the object, then submit it as ROCKET-2's cross-view reference.</div></section>
 <section class="card"><h2>Fresh learned perception</h2><pre class="facts" id="facts">Waiting for perception facts.</pre></section>
@@ -489,14 +496,14 @@ viewer.onpointerdown=e=>{if(!displayedFrameToken||!worldFrame.complete||!worldFr
 viewer.onpointermove=e=>{if(!dragging)return;const p=point(e),x=Math.min(startX,p.x),y=Math.min(startY,p.y);targetBox={x:x/p.w,y:y/p.h,width:Math.max(1,Math.abs(p.x-startX))/p.w,height:Math.max(1,Math.abs(p.y-startY))/p.h};drawBox(targetBox)};
 viewer.onpointerup=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId);drawTargetPreview();$('targetNotice').textContent='Review the frozen crop, then arm it only if the pixels match the label.'};
 viewer.onpointercancel=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId);drawTargetPreview()};
-async function refreshFrame(){if(dragging||targetBox||frameLoading)return;frameLoading=true;try{const r=await fetch('/api/frame.png?t='+Date.now());if(!r.ok)throw Error('live frame unavailable');const token=r.headers.get('X-Minecraft-Frame-Token');if(!token)throw Error('live frame has no reference token');const blob=await r.blob(),url=URL.createObjectURL(blob),old=frameObjectUrl;displayedFrameToken=null;await new Promise((resolve,reject)=>{worldFrame.onload=resolve;worldFrame.onerror=reject;worldFrame.src=url});frameObjectUrl=url;displayedFrameToken=token;if(old)URL.revokeObjectURL(old)}catch(e){}finally{frameLoading=false}}
+async function refreshFrame(){if(dragging||targetBox||frameLoading)return;frameLoading=true;try{const r=await fetch('/api/frame.png?t='+Date.now());if(!r.ok)throw Error('live frame unavailable');const token=r.headers.get('X-Minecraft-Frame-Token');if(!token)throw Error('live frame has no reference token');const fw=r.headers.get('X-Minecraft-Frame-Width'),fh=r.headers.get('X-Minecraft-Frame-Height'),hud=r.headers.get('X-Minecraft-HUD-Complete')==='true';$('surface').textContent=(fw&&fh?fw+'×'+fh:'unknown geometry')+' · '+(hud?'FULL SURVIVAL HUD':'HUD INCOMPLETE / NOT IN WORLD');$('surface').className='label '+(hud?'ok':'bad');const blob=await r.blob(),url=URL.createObjectURL(blob),old=frameObjectUrl;displayedFrameToken=null;await new Promise((resolve,reject)=>{worldFrame.onload=resolve;worldFrame.onerror=reject;worldFrame.src=url});frameObjectUrl=url;displayedFrameToken=token;if(old)URL.revokeObjectURL(old)}catch(e){$('surface').textContent='Isolated capture unavailable';$('surface').className='label bad'}finally{frameLoading=false}}
 async function refresh(){try{const s=await api('/api/status');$('dot').style.background='var(--green)';$('connection').textContent='Live telemetry';
 const bi=s.bedrock.instances.length>0; $('bedrock').textContent=bi?'RUNNING':'STOPPED';cls($('bedrock'),bi);$('version').textContent=esc(s.bedrock.version);
 const sup=esc(s.supervisor.state);$('supervisor').textContent=sup;cls($('supervisor'),s.supervisor_reachable&&sup!=='FAILSAFE');
 const alive=s.agent.alive;$('agent').textContent=alive?'RUNNING':'DISARMED';cls($('agent'),alive);const t=s.telemetry||{};
 $('skill').textContent=esc(t.active_skill);$('goal').textContent=esc(t.chosen_goal_id||'No active goal');$('reason').textContent=esc(t.reasoning_summary||'Waiting for agent telemetry.');
 $('instruction').textContent=esc(t.active_instruction||'Waiting for an executable option.');const params=t.active_skill_parameters||{},paramText=Object.entries(params).map(([k,v])=>k+'='+v).join(' · ');$('constraints').textContent=paramText?'active contract · '+paramText:'no explicit action constraints';const recent=(t.recent_skill_runs||[])[0];$('outcome').textContent=recent?'last option · '+recent.skill_id+' · '+recent.outcome+(recent.failure_reason?' · '+recent.failure_reason:''):'no terminal option evidence yet';const p=t.policy||{},active=p.active_route==='grounded'?(p.grounded||p):(p.primary||p),pred=active.last_prediction||{},counts=active.learned_action_counts||{},suppressed=(counts['constraint_suppressed.attack']||0)+(counts['constraint_suppressed.use']||0)+(counts['constraint_suppressed.jump']||0);$('policy').textContent=esc(active.model_version||p.policy_id);$('policyMetrics').textContent=(active.last_inference_ms??'—')+' ms · '+esc(p.active_route||active.grounding_mode)+' · '+esc(active.accepted_predictions||0)+' learned · '+esc(counts.jump||0)+' jumps · '+esc(counts.camera||0)+' camera · '+suppressed+' constrained · target '+(pred.target_exists_probability==null?'—':Math.round(pred.target_exists_probability*100)+'%');
-$('camera').textContent=esc(active.estimated_pitch_units??'—')+' / '+esc(active.camera_pitch_limit??'—');$('cameraMode').textContent=active.camera_envelope_saturated?'calibrated envelope saturated':'normal learned control';$('camera').className='value '+(active.camera_envelope_saturated?'amber':'ok');drawPrediction(pred.target_bbox_xyxy,pred.target_exists_probability);
+const wc=s.supervisor.world_camera||{};$('camera').textContent=esc(active.estimated_pitch_units??wc.estimated_pitch_units??'—')+' / '+esc(active.camera_pitch_limit??'—');$('cameraMode').textContent=(wc.origin_calibrated?'physical horizon calibrated':'physical horizon uncalibrated')+' · '+(active.camera_envelope_saturated?'envelope saturated':'normal learned control');$('camera').className='value '+(!wc.origin_calibrated?'bad':active.camera_envelope_saturated?'amber':'ok');drawPrediction(pred.target_bbox_xyxy,pred.target_exists_probability);
 const pf=((t.perception||{}).fresh_facts)||{};$('facts').textContent=Object.keys(pf).length?JSON.stringify(pf,null,2):'No fresh semantic facts yet.';
 $('frames').textContent=esc(t.frames||0);$('actions').textContent=esc(t.motor_actions||0);$('capture').textContent=t.last_capture_ms==null?'—':t.last_capture_ms+' ms';
 }catch(e){$('dot').style.background='var(--red)';$('connection').textContent='Disconnected'}}

@@ -273,6 +273,7 @@ class TemporalPolicyClient:
             "scene_model_version": self.config.scene_model_version or None,
             "scene_min_confidence": self.config.scene_min_confidence,
             "camera_scale": self.config.camera_scale,
+            "camera_pitch_scale": self.config.effective_camera_pitch_scale,
             "gui_camera_scale": self.config.gui_camera_scale,
             "camera_max_step": self.config.camera_max_step,
             "camera_pitch_limit": self.config.camera_pitch_limit,
@@ -452,6 +453,8 @@ class TemporalPolicyClient:
             str(self.config.scene_min_confidence),
             "--camera-scale",
             str(self.config.camera_scale),
+            "--camera-pitch-scale",
+            str(self.config.effective_camera_pitch_scale),
             "--gui-camera-scale",
             str(self.config.gui_camera_scale),
         ]
@@ -1359,6 +1362,7 @@ class _VPTBackend:
     threads: int
     stochastic: bool
     camera_scale: float
+    camera_pitch_scale: float
     gui_camera_scale: float
     seed: int
     policy: Any = field(init=False)
@@ -1451,6 +1455,11 @@ class _VPTBackend:
                 world_scale=self.camera_scale,
                 gui_scale=self.gui_camera_scale,
             ),
+            camera_pitch_scale=_intent_camera_scale(
+                intent or {},
+                world_scale=self.camera_pitch_scale,
+                gui_scale=self.gui_camera_scale,
+            ),
             camera_semantics=_intent_camera_semantics(intent or {}),
         )
 
@@ -1489,6 +1498,7 @@ class _SteveOneBackend:
     scene_model_version: str
     scene_min_confidence: float
     camera_scale: float
+    camera_pitch_scale: float
     gui_camera_scale: float
     seed: int
     policy: Any = field(init=False)
@@ -1613,6 +1623,11 @@ class _SteveOneBackend:
                 world_scale=self.camera_scale,
                 gui_scale=self.gui_camera_scale,
             ),
+            camera_pitch_scale=_intent_camera_scale(
+                intent,
+                world_scale=self.camera_pitch_scale,
+                gui_scale=self.gui_camera_scale,
+            ),
             camera_semantics=_intent_camera_semantics(intent),
             scene_mode=scene_mode,
             scene_playable=scene_playable,
@@ -1699,6 +1714,7 @@ class _RocketTwoBackend:
     stochastic: bool
     condition_scale: float
     camera_scale: float
+    camera_pitch_scale: float
     gui_camera_scale: float
     seed: int
     policy: Any = field(init=False)
@@ -1826,6 +1842,11 @@ class _RocketTwoBackend:
             camera_scale=_intent_camera_scale(
                 intent,
                 world_scale=self.camera_scale,
+                gui_scale=self.gui_camera_scale,
+            ),
+            camera_pitch_scale=_intent_camera_scale(
+                intent,
+                world_scale=self.camera_pitch_scale,
                 gui_scale=self.gui_camera_scale,
             ),
             camera_semantics=_intent_camera_semantics(intent),
@@ -2111,6 +2132,7 @@ def _decoded_policy_output(
     inference_ns: int,
     model_version: str,
     camera_scale: float = 1.0,
+    camera_pitch_scale: float | None = None,
     camera_semantics: Literal["world", "cursor"] = "world",
     target_exists_probability: float | None = None,
     target_point_yx: tuple[float, float] | None = None,
@@ -2146,11 +2168,14 @@ def _decoded_policy_output(
     if bool(decoded["use"][0]):
         buttons.add("right")
     pitch, yaw = decoded["camera"][0]
+    effective_pitch_scale = (
+        camera_scale if camera_pitch_scale is None else camera_pitch_scale
+    )
     return LearnedPolicyOutput(
         keys=tuple(sorted(keys)),
         buttons=tuple(sorted(buttons)),
         mouse_dx=int(round(float(yaw) * camera_scale)),
-        mouse_dy=int(round(float(pitch) * camera_scale)),
+        mouse_dy=int(round(float(pitch) * effective_pitch_scale)),
         camera_semantics=camera_semantics,
         inference_ns=inference_ns,
         model_version=model_version,
@@ -2288,6 +2313,7 @@ def _serve(args: argparse.Namespace) -> int:
             "threads": args.threads,
             "stochastic": args.stochastic,
             "camera_scale": args.camera_scale,
+            "camera_pitch_scale": args.camera_pitch_scale,
             "gui_camera_scale": args.gui_camera_scale,
             "seed": args.seed,
         }
@@ -2392,6 +2418,7 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument("--scene-model-version", default="")
     serve.add_argument("--scene-min-confidence", type=float, default=0.80)
     serve.add_argument("--camera-scale", type=float, default=1.0)
+    serve.add_argument("--camera-pitch-scale", type=float, default=1.0)
     serve.add_argument("--gui-camera-scale", type=float, default=1.0)
     return parser
 

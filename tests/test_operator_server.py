@@ -59,6 +59,9 @@ def test_operator_http_message_roundtrip(tmp_path: Path, monkeypatch) -> None:
             assert response.status == 200
             assert response.headers["Content-Type"] == "image/jpeg"
             frame_token = response.headers["X-Minecraft-Frame-Token"]
+            assert response.headers["X-Minecraft-Frame-Width"] == "4"
+            assert response.headers["X-Minecraft-Frame-Height"] == "4"
+            assert response.headers["X-Minecraft-HUD-Complete"] == "false"
             assert len(response.read()) > 0
 
         target_request = urllib.request.Request(

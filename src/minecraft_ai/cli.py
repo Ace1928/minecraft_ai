@@ -21,6 +21,10 @@ from .agent_lifecycle import (
     launch_agent_process,
     stop_agent_process,
 )
+from .camera_calibration import (
+    load_camera_calibration,
+    read_bedrock_mouse_sensitivity,
+)
 from .config import app_paths, ensure_default_config, load_config
 from .emergency import (
     clear_emergency_stop,
@@ -40,7 +44,12 @@ from .eval import (
     load_evidence,
 )
 from .operator_server import serve_operator_dashboard
-from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
+from .perception_service import bedrock_survival_hud_present
+from .platforms import (
+    IsolatedX11Capture,
+    discover_bedrock_linux_install,
+    find_bedrock_linux_instances,
+)
 from .platforms.bedrock_session import (
     BEDROCK_SESSION_FILE,
     DEFAULT_BEDROCK_HEIGHT,
@@ -100,9 +109,14 @@ def _read_status_file() -> dict[str, object]:
         return {"state": "UNKNOWN", "live_capable": False}
 
 
-def _command(command: str, **payload: object) -> dict[str, object]:
+def _command(
+    command: str,
+    *,
+    timeout_s: float = 1.5,
+    **payload: object,
+) -> dict[str, object]:
     try:
-        return send_command(command, **payload)
+        return send_command(command, timeout_s=timeout_s, **payload)
     except Exception as exc:
         raise typer.BadParameter(f"supervisor unavailable: {exc}") from exc
 
@@ -306,15 +320,91 @@ def run(
             "Stop it and launch the default isolated session first."
         )
     window_id = wait_for_minecraft_window(session, timeout_s=30.0)
-    _command(
+    install = discover_bedrock_linux_install()
+    build = install.selected_build if install is not None else None
+    if install is None or build is None:
+        raise typer.BadParameter(
+            "The exact active BedrockOnLinux build and Wine prefix are required "
+            "before live camera control can be calibrated."
+        )
+    version = build.version
+
+    capture = IsolatedX11Capture(session.display, window_id, allow_host=False)
+    try:
+        launch_frame = capture.capture()
+    finally:
+        capture.close()
+    if not bedrock_survival_hud_present(launch_frame):
+        raise typer.BadParameter(
+            "Live control requires a complete in-world survival HUD before arming. "
+            f"The captured {launch_frame.width}x{launch_frame.height} frame did not "
+            "contain both the heart bank and hotbar; open the world or relaunch "
+            "Bedrock with the default fullscreen 1920x1080 Weston session."
+        )
+    print(
+        "[green]Complete survival HUD verified[/green] "
+        f"capture={launch_frame.width}x{launch_frame.height}"
+    )
+
+    attached = _command(
         "attach-bedrock-x11",
         display=session.display,
         window_id=window_id,
         allow_host=False,
     )
-    install = discover_bedrock_linux_install()
-    build = install.selected_build if install is not None else None
-    version = build.version if build is not None else "unknown"
+    config = load_config()
+    try:
+        profile = load_camera_calibration(
+            app_paths().data_dir,
+            game_version=version,
+        )
+        sensitivity = read_bedrock_mouse_sensitivity(install.wine_prefix)
+        profile.require_compatible(
+            game_version=version,
+            mouse_sensitivity=sensitivity,
+            configured_yaw_counts_per_degree=(
+                config.policy.camera_scale if config.policy.enabled else None
+            ),
+            configured_pitch_counts_per_degree=(
+                config.policy.effective_camera_pitch_scale
+                if config.policy.enabled
+                else None
+            ),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise typer.BadParameter(
+            "Live camera origin cannot be established from a compatible measured "
+            f"Bedrock profile: {exc}"
+        ) from exc
+    camera_state = attached.get("world_camera")
+    reported_pitch_scale = (
+        camera_state.get("pitch_counts_per_degree")
+        if isinstance(camera_state, dict)
+        else None
+    )
+    camera_calibrated = (
+        isinstance(camera_state, dict)
+        and bool(camera_state.get("origin_calibrated"))
+        and camera_state.get("calibration_id") == profile.profile_id
+        and isinstance(reported_pitch_scale, (int, float))
+        and not isinstance(reported_pitch_scale, bool)
+        and abs(float(reported_pitch_scale) - profile.pitch_counts_per_degree) <= 1e-6
+    )
+    if not camera_calibrated:
+        _command(
+            "calibrate-world-camera",
+            timeout_s=10.0,
+            pitch_counts_per_degree=profile.pitch_counts_per_degree,
+            calibration_id=profile.profile_id,
+        )
+        print(
+            "[green]Physical camera horizon calibrated[/green] "
+            f"Bedrock={version} pitch_counts_per_degree="
+            f"{profile.pitch_counts_per_degree:.6f}"
+        )
+    else:
+        print("[green]Physical camera horizon calibration preserved[/green]")
+
     target = f"bedrock:{version}:x11:{window_id}"
     armed = _command("arm", target_instance=target)
     lease = armed.get("lease")

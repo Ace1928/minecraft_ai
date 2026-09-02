@@ -72,7 +72,28 @@ recording should use the fullscreen default.
 
 Before arming live control, confirm that the dashboard frame includes all
 hearts, hunger icons, and all nine hotbar slots. A partially clipped HUD is not
-a valid perception or trajectory-recording surface.
+a valid perception or trajectory-recording surface. `run --live` enforces this
+as a fail-closed actuator interlock: it will not attach or issue a gameplay
+lease until an isolated capture contains both the survival heart bank and the
+hotbar. This detector is only a launch-safety interlock; it is explicitly not a
+semantic perception source or training label.
+
+Live camera control also requires an exact-version, machine-local measured
+profile at:
+
+```text
+~/.local/share/minecraft-ai/calibrations/bedrock-camera-<version>.json
+```
+
+The profile is accepted only when the active Bedrock version, in-game mouse
+sensitivity, and configured per-axis policy scales match. Yaw and pitch are
+measured independently: WineGDK/Bedrock must not be assumed to map both axes
+through one scalar. On the first attachment to a physical game window, the
+supervisor uses a one-use mouse-only lease to home the pitch axis and establish
+a measured horizon. Calibration motion is paced across Bedrock input frames so
+Xwayland cannot collapse the pole and return phases into one net delta.
+Reattaching to that same physical target preserves the origin; changing targets
+invalidates it.
 
 Sign in/select a world through the nested Bedrock window normally. Then start the agent:
 
@@ -86,12 +107,14 @@ minecraft-ai run --live --role generalist
 2. start/reuse the independent supervisor;
 3. verify the managed nested Bedrock session;
 4. find the Minecraft window only on that nested display;
-5. attach the isolated XTEST backend to that window;
-6. issue a short-lived motor capability lease;
-7. enter supervisor `RUNNING` state;
-8. spawn the independent realtime agent process;
-9. capture the Bedrock window and begin the 20 Hz player loop;
-10. renew the motor lease only while the runtime remains healthy.
+5. verify a complete survival HUD from the isolated capture;
+6. attach the isolated XTEST backend to that window;
+7. validate the exact-version mouse calibration and establish physical horizon;
+8. issue a short-lived motor capability lease;
+9. enter supervisor `RUNNING` state;
+10. spawn the independent realtime agent process;
+11. capture the Bedrock window and begin the 20 Hz player loop;
+12. renew the motor lease only while the runtime remains healthy.
 
 ## Stopping
 

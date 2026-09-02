@@ -35,6 +35,35 @@ STATUS_FILE = RUNTIME_DIR / "supervisor-state.json"
 LOCK_FILE = RUNTIME_DIR / "supervisor.lock"
 
 
+def _bounded_camera_calibration_deltas(
+    pitch_counts_per_degree: float,
+    *,
+    max_step: int = 96,
+) -> tuple[int, ...]:
+    """Home at the upper pitch pole, then return exactly 90 degrees to horizon."""
+    if not 0.0 < pitch_counts_per_degree <= 100.0:
+        raise ValueError("camera pitch_counts_per_degree must be in (0, 100]")
+    if max_step < 1 or max_step > 4096:
+        raise ValueError("camera calibration max_step must be in [1, 4096]")
+
+    def split(total: int) -> list[int]:
+        sign = 1 if total >= 0 else -1
+        remaining = abs(total)
+        parts: list[int] = []
+        while remaining:
+            step = min(max_step, remaining)
+            parts.append(sign * step)
+            remaining -= step
+        return parts
+
+    # From any legal pitch, 200 degrees upward is guaranteed to hit the -90
+    # pole. Moving 90 measured degrees down from that pole establishes a
+    # reproducible physical horizon independently of prior supervisor state.
+    home = -round(pitch_counts_per_degree * 200.0)
+    horizon = round(pitch_counts_per_degree * 90.0)
+    return tuple((*split(home), *split(horizon)))
+
+
 @dataclass(frozen=True)
 class ControlEndpoint:
     host: str
@@ -71,6 +100,9 @@ class Supervisor:
         self.last_fault: str | None = None
         self.world_camera_pitch_units = 0
         self.world_camera_updates = 0
+        self.world_camera_origin_calibrated = False
+        self.world_camera_pitch_counts_per_degree: float | None = None
+        self.world_camera_calibration_id: str | None = None
         self._stop = threading.Event()
         self._lock = threading.RLock()
         self._server: socket.socket | None = None
@@ -139,6 +171,9 @@ class Supervisor:
             if not preserve_world_camera:
                 self.world_camera_pitch_units = 0
                 self.world_camera_updates = 0
+                self.world_camera_origin_calibrated = False
+                self.world_camera_pitch_counts_per_degree = None
+                self.world_camera_calibration_id = None
             self._persist_status()
 
     def attach_bedrock_x11(
@@ -164,6 +199,71 @@ class Supervisor:
             backend.close()
             raise
         return self.status()
+
+    def calibrate_world_camera(
+        self,
+        *,
+        pitch_counts_per_degree: float,
+        calibration_id: str,
+    ) -> dict[str, Any]:
+        """Establish a physical pitch origin under a one-use mouse-only lease."""
+        with self._lock:
+            if self.state != SupervisorState.SAFE_IDLE:
+                raise RuntimeError(f"cannot calibrate camera from {self.state}")
+            if not self.backend.live_capable:
+                raise RuntimeError("camera calibration requires a live isolated backend")
+            target_window_id = getattr(self.backend, "target_window_id", None)
+            display_name = getattr(self.backend, "display_name", None)
+            if target_window_id is None or not display_name:
+                raise RuntimeError("camera calibration requires a bound Bedrock target")
+            if not calibration_id or len(calibration_id) > 128:
+                raise ValueError("camera calibration identity is required")
+            deltas = _bounded_camera_calibration_deltas(pitch_counts_per_degree)
+            lease = self.motor.issue(
+                session_id=self.session_id,
+                target_instance=f"camera-calibration:{display_name}:{target_window_id}",
+                ttl_ms=5000,
+                allowed_actions=frozenset({"mouse"}),
+                max_action_duration_ms=50,
+            )
+            try:
+                return_phase = False
+                for sequence, mouse_dy in enumerate(deltas):
+                    if mouse_dy > 0 and not return_phase:
+                        # X11 and a grabbed Bedrock pointer may coalesce a burst
+                        # of relative events. Let the game consume the complete
+                        # home phase at its pitch pole before issuing the
+                        # measured 90-degree return; otherwise only the net
+                        # delta is observed and no physical origin is created.
+                        time.sleep(0.1)
+                        return_phase = True
+                    self.motor.apply(
+                        lease.lease_id,
+                        MotorAction(sequence=sequence, mouse_dy=mouse_dy),
+                    )
+                    # Relative events sent in one CPU burst are not a measured
+                    # actuator trajectory: Xwayland/Wine/Bedrock can collapse
+                    # or sample that queue at render cadence. Pace every chunk
+                    # across input frames and renew the private lease during a
+                    # long machine calibration.
+                    if sequence % 25 == 24:
+                        self.motor.renew(lease.lease_id, ttl_ms=5000)
+                    time.sleep(0.02)
+                # Do not hand the lease to a policy before the return phase has
+                # crossed at least one Bedrock render/input boundary.
+                time.sleep(0.1)
+            except Exception as exc:
+                self.fail(f"camera-calibration:{type(exc).__name__}")
+                raise
+            finally:
+                self.motor.revoke("camera-calibration-complete")
+            self.world_camera_pitch_units = 0
+            self.world_camera_updates = 0
+            self.world_camera_origin_calibrated = True
+            self.world_camera_pitch_counts_per_degree = pitch_counts_per_degree
+            self.world_camera_calibration_id = calibration_id
+            self._persist_status()
+            return self.status()
 
     def arm(self, target_instance: str) -> dict[str, Any]:
         with self._lock:
@@ -339,6 +439,11 @@ class Supervisor:
                 "world_camera": {
                     "estimated_pitch_units": self.world_camera_pitch_units,
                     "accepted_updates": self.world_camera_updates,
+                    "origin_calibrated": self.world_camera_origin_calibrated,
+                    "pitch_counts_per_degree": (
+                        self.world_camera_pitch_counts_per_degree
+                    ),
+                    "calibration_id": self.world_camera_calibration_id,
                 },
                 "last_fault": self.last_fault,
                 "emergency_stop_latched": emergency_stop_latched(),
@@ -425,6 +530,15 @@ class Supervisor:
                 window_id = int(payload.get("window_id", 0))
                 allow_host = bool(payload.get("allow_host", False))
                 result = self.attach_bedrock_x11(display, window_id, allow_host=allow_host)
+            elif command == "calibrate-world-camera":
+                pitch_counts_per_degree = float(
+                    payload.get("pitch_counts_per_degree", 0.0)
+                )
+                calibration_id = str(payload.get("calibration_id", ""))
+                result = self.calibrate_world_camera(
+                    pitch_counts_per_degree=pitch_counts_per_degree,
+                    calibration_id=calibration_id,
+                )
             elif command in {"arm-fake", "arm"}:
                 target_instance = str(payload.get("target_instance", "fake-instance"))
                 result = {"lease": self.arm(target_instance), "status": self.status()}
@@ -504,10 +618,17 @@ def _exclusive_runtime_lock() -> Iterator[None]:
             handle.close()
 
 
-def send_command(command: str, **payload: Any) -> dict[str, Any]:
+def send_command(
+    command: str,
+    *,
+    timeout_s: float = 1.5,
+    **payload: Any,
+) -> dict[str, Any]:
+    if not 0.05 <= timeout_s <= 30.0:
+        raise ValueError("supervisor command timeout must be in [0.05, 30] seconds")
     endpoint = ControlEndpoint.load()
     request = {"token": endpoint.token, "command": command, **payload}
-    with socket.create_connection((endpoint.host, endpoint.port), timeout=1.5) as sock:
+    with socket.create_connection((endpoint.host, endpoint.port), timeout=timeout_s) as sock:
         _send_json_line(sock, request)
         response = _recv_json_line(sock)
     if not bool(response.get("ok")):

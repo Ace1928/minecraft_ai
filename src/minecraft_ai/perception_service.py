@@ -616,6 +616,77 @@ def bedrock_ui_chrome_present(frame: CapturedFrame) -> bool:
     return sampled > 0 and bright / sampled >= 0.90
 
 
+def bedrock_survival_hud_present(frame: CapturedFrame) -> bool:
+    """Verify an in-world survival HUD before supervisory camera calibration.
+
+    This is a conservative actuator interlock, not semantic perception or a
+    training label. Requiring both the red heart bank and neutral hotbar frame
+    prevents calibration motion from being emitted over menus or loading UI.
+    """
+    if not frame.bgra or frame.width < 320 or frame.height < 180:
+        return False
+    pixels = _numpy_bgra(frame)
+    heart_ratio = _hud_palette_ratio(
+        frame,
+        x_start=0.29,
+        x_end=0.49,
+        y_start=0.82,
+        y_end=0.91,
+        palette="heart",
+        pixels=pixels,
+    )
+    hotbar_ratio = _hud_palette_ratio(
+        frame,
+        x_start=0.28,
+        x_end=0.72,
+        y_start=0.89,
+        y_end=1.0,
+        palette="hotbar",
+        pixels=pixels,
+    )
+    return heart_ratio >= 0.02 and hotbar_ratio >= 0.03
+
+
+def _hud_palette_ratio(
+    frame: CapturedFrame,
+    *,
+    x_start: float,
+    x_end: float,
+    y_start: float,
+    y_end: float,
+    palette: Literal["heart", "hotbar"],
+    pixels: Any | None,
+) -> float:
+    x0, x1 = int(frame.width * x_start), int(frame.width * x_end)
+    y0, y1 = int(frame.height * y_start), int(frame.height * y_end)
+    if pixels is not None:
+        roi = pixels[y0:y1, x0:x1, :3]
+        blue, green, red = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
+        if palette == "heart":
+            selected = (red >= 175) & (red >= green * 1.35) & (red >= blue * 1.25)
+        else:
+            high = roi.max(axis=2).astype("int16")
+            low = roi.min(axis=2).astype("int16")
+            selected = (high - low <= 18) & (red >= 85) & (red <= 235)
+        return float(selected.mean()) if selected.size else 0.0
+    source = memoryview(frame.bgra)
+    matched = 0
+    sampled = 0
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            offset = (y * frame.width + x) * 4
+            blue, green, red = (int(value) for value in source[offset : offset + 3])
+            if palette == "heart":
+                selected = red >= 175 and red >= green * 1.35 and red >= blue * 1.25
+            else:
+                selected = max(blue, green, red) - min(blue, green, red) <= 18 and (
+                    85 <= red <= 235
+                )
+            matched += int(selected)
+            sampled += 1
+    return matched / sampled if sampled else 0.0
+
+
 def bedrock_air_bubbles(frame: CapturedFrame) -> int | None:
     """Read Bedrock's rendered air HUD without inferring world semantics.
 
