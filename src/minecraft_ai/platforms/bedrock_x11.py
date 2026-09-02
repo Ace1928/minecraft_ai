@@ -367,6 +367,37 @@ class IsolatedX11Capture:
             "height": height,
         }
 
+    def _content_rect(self, width: int, height: int) -> tuple[int, int, int, int] | None:
+        """Resolve Wine's real Minecraft client drawable inside its desktop window."""
+        try:
+            target = self._display.create_resource_object("window", self.target_window_id)
+            minecraft_window: Any | None = None
+            for child in target.query_tree().children:
+                name = str(child.get_wm_name() or "").lower()
+                if "minecraft" in name:
+                    minecraft_window = child
+                    break
+            if minecraft_window is None:
+                return None
+            candidates = list(minecraft_window.query_tree().children)
+            if not candidates:
+                return None
+            client = max(
+                candidates,
+                key=lambda item: int(item.get_geometry().width) * int(item.get_geometry().height),
+            )
+            geometry = client.get_geometry()
+            translated = target.translate_coords(client, 0, 0)
+            x = max(0, int(translated.x))
+            y = max(0, int(translated.y))
+            client_width = min(int(geometry.width), width - x)
+            client_height = min(int(geometry.height), height - y)
+            if client_width <= 0 or client_height <= 0:
+                return None
+            return x, y, client_width, client_height
+        except Exception:
+            return None
+
     def capture(self) -> CapturedFrame:
         bounds = self._bounds()
         bgra_bytes: bytes = b""
@@ -407,12 +438,22 @@ class IsolatedX11Capture:
                 bgra_bytes = raw.data
             except Exception as exc:
                 raise IsolationError(f"isolated X11 capture failed: {exc}") from exc
+        content_rect = self._content_rect(bounds["width"], bounds["height"])
+        frame_width = bounds["width"]
+        frame_height = bounds["height"]
+        if content_rect is not None:
+            bgra_bytes = _crop_bgra(
+                bgra_bytes,
+                source_width=bounds["width"],
+                rect=content_rect,
+            )
+            _, _, frame_width, frame_height = content_rect
         self._frame_id += 1
         return CapturedFrame(
             frame_id=self._frame_id,
             captured_ns=time.monotonic_ns(),
-            width=bounds["width"],
-            height=bounds["height"],
+            width=frame_width,
+            height=frame_height,
             bgra=bgra_bytes,
         )
 
@@ -421,6 +462,27 @@ class IsolatedX11Capture:
             self._display.close()
         except Exception:
             pass
+
+
+def _crop_bgra(
+    source: bytes,
+    *,
+    source_width: int,
+    rect: tuple[int, int, int, int],
+) -> bytes:
+    x, y, width, height = rect
+    source_stride = source_width * 4
+    row_bytes = width * 4
+    output = bytearray(row_bytes * height)
+    source_view = memoryview(source)
+    output_view = memoryview(output)
+    for row in range(height):
+        source_start = (y + row) * source_stride + x * 4
+        output_start = row * row_bytes
+        output_view[output_start : output_start + row_bytes] = source_view[
+            source_start : source_start + row_bytes
+        ]
+    return bytes(output)
 
 
 def find_minecraft_window(

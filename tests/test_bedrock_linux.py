@@ -7,7 +7,11 @@ import pytest
 
 from minecraft_ai.platforms.bedrock_linux import _read_install_record
 from minecraft_ai.platforms.bedrock_session import BedrockSession, bedrock_session_alive
-from minecraft_ai.platforms.bedrock_x11 import IsolationError, require_isolated_display
+from minecraft_ai.platforms.bedrock_x11 import (
+    IsolationError,
+    _crop_bgra,
+    require_isolated_display,
+)
 
 
 def test_install_record_provides_exact_bedrock_build(tmp_path: Path) -> None:
@@ -42,6 +46,12 @@ def test_isolated_backend_refuses_host_x_server() -> None:
 
 def test_different_x_server_is_accepted() -> None:
     require_isolated_display(":71", host_display=":0")
+
+
+def test_wine_client_crop_removes_window_decoration_without_reordering_pixels() -> None:
+    pixels = bytes(range(4 * 4 * 3))
+    cropped = _crop_bgra(pixels, source_width=4, rect=(1, 1, 2, 2))
+    assert cropped == pixels[20:28] + pixels[36:44]
 
 
 def test_nested_session_is_not_alive_when_launcher_exited(tmp_path: Path, monkeypatch) -> None:

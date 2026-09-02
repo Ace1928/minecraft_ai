@@ -62,6 +62,9 @@ class TemporalPolicyClient:
     _held_buttons: set[str] = field(default_factory=set, init=False)
     _last_sequence: int = field(default=-1, init=False)
     _pending_request_id: str | None = field(default=None, init=False)
+    _pending_miss_recorded: bool = field(default=False, init=False)
+    _consumed_miss_recorded: bool = field(default=False, init=False)
+    _discard_pending_response: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if self.config.provider != "openai-vpt":
@@ -85,37 +88,24 @@ class TemporalPolicyClient:
             return self._release(sequence)
         try:
             self._ensure_started(len(frame.bgra))
-            if not self._drain_pending_response():
-                self.metrics.deadline_misses += 1
+            response = self._consume_pending_response()
+            if self._pending_request_id is not None:
+                if not self._pending_miss_recorded:
+                    self.metrics.deadline_misses += 1
+                    self._pending_miss_recorded = True
                 return self._release(sequence)
-            assert self._memory is not None
-            assert self._process is not None
-            assert self._process.stdin is not None
-            memory = self._memory
-            memory.buf[: len(frame.bgra)] = frame.bgra  # type: ignore[index]
-            request_id = uuid.uuid4().hex
-            request = {
-                "type": "infer",
-                "request_id": request_id,
-                "frame": {
-                    "width": frame.width,
-                    "height": frame.height,
-                    "length": len(frame.bgra),
-                    "captured_ns": frame.captured_ns,
-                },
-                "intent": intent.model_dump(mode="json"),
-                "deadline_ns": time.monotonic_ns() + self.config.deadline_ms * 1_000_000,
-            }
-            self._process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
-            self._process.stdin.flush()
-            self.metrics.requests += 1
-            self._pending_request_id = request_id
-            response = self._read_response(self.config.deadline_ms / 1000.0)
+            if self._discard_pending_response:
+                response = None
+                self._discard_pending_response = False
+            self._submit(frame, intent)
             if response is None:
-                self.metrics.deadline_misses += 1
                 return self._release(sequence)
-            self._pending_request_id = None
-            return self._response_action(response, sequence)
+            output = LearnedPolicyOutput.model_validate(response["output"])
+            if output.inference_ns > self.config.deadline_ms * 1_000_000:
+                if not self._consumed_miss_recorded:
+                    self.metrics.deadline_misses += 1
+                return self._release(sequence)
+            return self._output_action(output, sequence)
         except Exception as exc:
             self.metrics.failures += 1
             self.metrics.last_error = f"{type(exc).__name__}: {exc}"
@@ -124,14 +114,8 @@ class TemporalPolicyClient:
 
     def reset(self) -> MotorAction:
         sequence = self._last_sequence + 1
-        process = self._process
-        if process is not None and process.poll() is None and process.stdin is not None:
-            try:
-                process.stdin.write('{"type":"reset"}\n')
-                process.stdin.flush()
-            except OSError:
-                pass
-        self._pending_request_id = None
+        if self._pending_request_id is not None:
+            self._discard_pending_response = True
         self._last_sequence = sequence
         return self._release(sequence)
 
@@ -181,6 +165,9 @@ class TemporalPolicyClient:
             self._memory = None
         self._memory_size = 0
         self._pending_request_id = None
+        self._pending_miss_recorded = False
+        self._consumed_miss_recorded = False
+        self._discard_pending_response = False
 
     def _ensure_started(self, required_size: int) -> None:
         if (
@@ -232,17 +219,48 @@ class TemporalPolicyClient:
         if ready is None or ready.get("type") != "ready":
             raise RuntimeError(f"learned policy did not become ready: {ready}")
 
-    def _drain_pending_response(self) -> bool:
+    def _consume_pending_response(self) -> dict[str, Any] | None:
+        self._consumed_miss_recorded = False
         if self._pending_request_id is None:
-            return True
+            return None
         response = self._read_response(0.0)
         if response is None:
-            return False
+            return None
+        request_id = self._pending_request_id
         self._pending_request_id = None
+        self._consumed_miss_recorded = self._pending_miss_recorded
+        self._pending_miss_recorded = False
+        if response.get("request_id") != request_id:
+            raise RuntimeError("learned policy response/request identity mismatch")
         if response.get("type") == "error":
-            self.metrics.failures += 1
-            self.metrics.last_error = str(response.get("error", "policy inference failed"))
-        return True
+            raise RuntimeError(str(response.get("error", "policy inference failed")))
+        if response.get("type") != "prediction":
+            raise RuntimeError(f"unexpected policy response: {response.get('type')}")
+        return response
+
+    def _submit(self, frame: CapturedFrame, intent: MotorIntent) -> None:
+        assert self._memory is not None
+        assert self._process is not None
+        assert self._process.stdin is not None
+        self._memory.buf[: len(frame.bgra)] = frame.bgra  # type: ignore[index]
+        request_id = uuid.uuid4().hex
+        request = {
+            "type": "infer",
+            "request_id": request_id,
+            "frame": {
+                "width": frame.width,
+                "height": frame.height,
+                "length": len(frame.bgra),
+                "captured_ns": frame.captured_ns,
+            },
+            "intent": intent.model_dump(mode="json"),
+            "deadline_ns": time.monotonic_ns() + self.config.deadline_ms * 1_000_000,
+        }
+        self._process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+        self._process.stdin.flush()
+        self.metrics.requests += 1
+        self._pending_request_id = request_id
+        self._pending_miss_recorded = False
 
     def _read_response(self, timeout_s: float) -> dict[str, Any] | None:
         process = self._process
@@ -261,12 +279,7 @@ class TemporalPolicyClient:
             raise RuntimeError("learned policy returned a non-object response")
         return payload
 
-    def _response_action(self, response: dict[str, Any], sequence: int) -> MotorAction:
-        if response.get("type") == "error":
-            raise RuntimeError(str(response.get("error", "policy inference failed")))
-        if response.get("type") != "prediction":
-            raise RuntimeError(f"unexpected policy response: {response.get('type')}")
-        output = LearnedPolicyOutput.model_validate(response["output"])
+    def _output_action(self, output: LearnedPolicyOutput, sequence: int) -> MotorAction:
         self.metrics.responses += 1
         self.metrics.last_inference_ms = output.inference_ns / 1_000_000.0
         self.metrics.last_error = None
