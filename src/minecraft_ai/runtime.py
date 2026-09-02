@@ -381,6 +381,17 @@ class AgentRuntime:
             reported = status()
             if isinstance(reported, dict):
                 policy_status = reported
+        perception_status: dict[str, object] = {
+            "fast_model_id": None
+            if self.perception.fast_perception is None
+            else self.perception.fast_perception.model_id,
+            "fast_training_label_eligible": False
+            if self.perception.fast_perception is None
+            else self.perception.fast_perception.training_label_eligible,
+            "active_vlm": None,
+        }
+        if self.perception.active_vlm is not None:
+            perception_status["active_vlm"] = self.perception.active_vlm.status()
         return {
             "schema_version": 1,
             "state": state,
@@ -400,6 +411,7 @@ class AgentRuntime:
             "chosen_goal_id": None if decision is None else decision.chosen_goal_id,
             "reasoning_summary": None if decision is None else decision.reasoning_summary,
             "policy": policy_status,
+            "perception": perception_status,
             "lease_heartbeat_error": self._lease_fault,
             "updated_monotonic_ns": time.monotonic_ns(),
         }

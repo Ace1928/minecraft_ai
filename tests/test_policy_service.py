@@ -5,11 +5,12 @@ import pytest
 
 from minecraft_ai.config import PolicyConfig
 from minecraft_ai.motor import MotorIntent
-from minecraft_ai.perception import PerceptionBlackboard
+from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.policy_service import (
     LearnedPolicyOutput,
     TemporalPolicyClient,
+    _learned_scene_blocked,
     _validate_policy_config,
 )
 
@@ -117,3 +118,45 @@ def test_async_policy_preserves_held_state_inside_inference_deadline(
     assert action.keys_up == ()
     assert client._held_keys == {"w"}
     assert client.metrics.deadline_misses == 0
+
+
+def test_learned_static_gui_scene_blocks_world_policy_actions() -> None:
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:test",
+            width=1280,
+            height=635,
+            facts=(
+                PerceptionFact(
+                    key="scene.playable",
+                    value=False,
+                    confidence=0.99,
+                    observed_ns=now,
+                    source="vlm:qwen3-vl:test",
+                    expires_after_ms=10_000,
+                ),
+                PerceptionFact(
+                    key="scene.observation_dhash",
+                    value="0123456789abcdef",
+                    confidence=1.0,
+                    observed_ns=now,
+                    source="vlm:qwen3-vl:test",
+                    expires_after_ms=10_000,
+                ),
+                PerceptionFact(
+                    key="frame.dhash",
+                    value="0123456789abcdef",
+                    confidence=1.0,
+                    observed_ns=now,
+                    source="bootstrap:image-signal:not-training-label",
+                    expires_after_ms=10_000,
+                ),
+            ),
+        )
+    )
+
+    assert _learned_scene_blocked(board)

@@ -140,6 +140,7 @@ class OpenAICompatibleLocalModel:
                 }
             ],
             "temperature": 0.1,
+            "max_tokens": 256,
         }
         with self._client() as client:
             response = client.post(

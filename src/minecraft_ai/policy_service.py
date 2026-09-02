@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .config import PolicyConfig
 from .motor import MotorIntent
 from .perception import PerceptionBlackboard
+from .perception_service import perceptual_hash_distance
 from .platforms.bedrock_x11 import CapturedFrame
 from .safety import MotorAction
 
@@ -43,6 +44,7 @@ class PolicyServiceMetrics:
     responses: int = 0
     deadline_misses: int = 0
     failures: int = 0
+    scene_blocks: int = 0
     last_inference_ms: float = 0.0
     last_error: str | None = None
 
@@ -80,10 +82,12 @@ class TemporalPolicyClient:
         *,
         sequence: int,
     ) -> MotorAction:
-        del blackboard
         if sequence <= self._last_sequence:
             raise ValueError("motor policy sequence must increase monotonically")
         self._last_sequence = sequence
+        if _learned_scene_blocked(blackboard):
+            self.metrics.scene_blocks += 1
+            return self._release(sequence)
         frame = self.frame_provider()
         if frame is None:
             return self._release(sequence)
@@ -140,6 +144,7 @@ class TemporalPolicyClient:
             "responses": self.metrics.responses,
             "deadline_misses": self.metrics.deadline_misses,
             "failures": self.metrics.failures,
+            "scene_blocks": self.metrics.scene_blocks,
             "last_inference_ms": round(self.metrics.last_inference_ms, 3),
             "last_error": self.metrics.last_error,
         }
@@ -342,6 +347,22 @@ def _validate_policy_config(config: PolicyConfig) -> None:
             raise ValueError(f"learned policy {key} does not exist: {required[key]}")
     if config.license.lower() != "mit":
         raise ValueError(f"unapproved learned policy license: {config.license}")
+
+
+def _learned_scene_blocked(blackboard: PerceptionBlackboard) -> bool:
+    playable = blackboard.fact("scene.playable", min_confidence=0.7)
+    if playable is None or bool(playable.value) or not playable.source.startswith("vlm:"):
+        return False
+    observed = blackboard.fact("scene.observation_dhash", min_confidence=1.0)
+    current = blackboard.fact("frame.dhash", min_confidence=1.0)
+    if observed is None or current is None:
+        return False
+    if not isinstance(observed.value, str) or not isinstance(current.value, str):
+        return False
+    try:
+        return perceptual_hash_distance(observed.value, current.value) <= 6
+    except ValueError:
+        return False
 
 
 @dataclass

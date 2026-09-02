@@ -70,6 +70,20 @@ class SemanticObservation(BaseModel):
 class SemanticJob:
     query: ActivePerceptionQuery
     frame: CapturedFrame
+    frame_dhash: str
+
+
+@dataclass
+class ActiveVLMMetrics:
+    requests: int = 0
+    completed: int = 0
+    failures: int = 0
+    queue_replacements: int = 0
+    stale_rejections: int = 0
+    last_latency_ms: float = 0.0
+    last_frame_age: int = 0
+    last_hash_distance: int | None = None
+    last_error: str | None = None
 
 
 @dataclass
@@ -77,7 +91,8 @@ class ActiveVLMWorker:
     model: VisionLanguageModel
     blackboard: PerceptionBlackboard
     instance_id: str
-    queue_size: int = 4
+    queue_size: int = 1
+    metrics: ActiveVLMMetrics = field(default_factory=ActiveVLMMetrics, init=False)
     _jobs: queue.Queue[SemanticJob | None] = field(init=False)
     _thread: threading.Thread | None = field(default=None, init=False)
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
@@ -105,12 +120,14 @@ class ActiveVLMWorker:
         """Drop stale semantic work instead of blocking realtime capture."""
         if self._stop.is_set():
             return False
+        self.metrics.requests += 1
         try:
             self._jobs.put_nowait(job)
             return True
         except queue.Full:
             try:
                 self._jobs.get_nowait()
+                self.metrics.queue_replacements += 1
             except queue.Empty:
                 return False
             try:
@@ -128,13 +145,18 @@ class ActiveVLMWorker:
             if job is None:
                 return
             try:
-                observation = self._inspect(job)
+                observation, latency_ms = self._inspect(job)
+                self.metrics.completed += 1
+                self.metrics.last_latency_ms = latency_ms
+                self.metrics.last_error = None
                 self._publish(job, observation)
-            except Exception:
+            except Exception as exc:
                 # Semantic VLM failure must never terminate capture or motor control.
+                self.metrics.failures += 1
+                self.metrics.last_error = f"{type(exc).__name__}: {exc}"
                 continue
 
-    def _inspect(self, job: SemanticJob) -> SemanticObservation:
+    def _inspect(self, job: SemanticJob) -> tuple[SemanticObservation, float]:
         png = _bgra_to_png(job.frame)
         prompt = (
             "Inspect this Minecraft Bedrock screenshot. Answer only JSON matching "
@@ -153,15 +175,30 @@ class ActiveVLMWorker:
         )
         response = self.model.inspect(prompt, image_bytes=png, mime_type="image/png")
         raw_text = _strip_code_fence(response.text)
-        return SemanticObservation.model_validate(json.loads(raw_text))
+        return SemanticObservation.model_validate(json.loads(raw_text)), response.latency_ms
 
     def _publish(self, job: SemanticJob, observation: SemanticObservation) -> None:
         latest = self.blackboard.raw_latest()
         if latest is None or latest.instance_id != self.instance_id:
             return
-        # If a very old semantic job survived long enough to be irrelevant,
-        # discard it instead of contaminating the current tactical state.
-        if latest.frame_id - job.query.frame_id > 120:
+        frame_age = latest.frame_id - job.query.frame_id
+        current_hash_fact = self.blackboard.fact("frame.dhash", min_confidence=1.0)
+        current_hash = (
+            current_hash_fact.value
+            if current_hash_fact is not None and isinstance(current_hash_fact.value, str)
+            else None
+        )
+        hash_distance = (
+            perceptual_hash_distance(job.frame_dhash, current_hash)
+            if current_hash is not None
+            else None
+        )
+        self.metrics.last_frame_age = frame_age
+        self.metrics.last_hash_distance = hash_distance
+        # Slow semantics remain valid for an unchanged static GUI or view. A
+        # numerically old result from a changed scene must not control tactics.
+        if frame_age > 120 and (hash_distance is None or hash_distance > 6):
+            self.metrics.stale_rejections += 1
             return
         now = time.monotonic_ns()
         facts = tuple(
@@ -174,6 +211,15 @@ class ActiveVLMWorker:
                 expires_after_ms=max(15_000, job.query.deadline_ms * 3),
             )
             for key, value in observation.facts.items()
+        ) + (
+            PerceptionFact(
+                key="scene.observation_dhash",
+                value=job.frame_dhash,
+                confidence=1.0,
+                observed_ns=now,
+                source=f"vlm:{self.model.model_id}:{job.query.query_id}",
+                expires_after_ms=120_000,
+            ),
         )
         tracks = tuple(
             Track(
@@ -201,6 +247,22 @@ class ActiveVLMWorker:
             chat=chat,
         )
 
+    def status(self) -> dict[str, object]:
+        thread = self._thread
+        return {
+            "model_id": self.model.model_id,
+            "thread_alive": bool(thread is not None and thread.is_alive()),
+            "requests": self.metrics.requests,
+            "completed": self.metrics.completed,
+            "failures": self.metrics.failures,
+            "queue_replacements": self.metrics.queue_replacements,
+            "stale_rejections": self.metrics.stale_rejections,
+            "last_latency_ms": round(self.metrics.last_latency_ms, 3),
+            "last_frame_age": self.metrics.last_frame_age,
+            "last_hash_distance": self.metrics.last_hash_distance,
+            "last_error": self.metrics.last_error,
+        }
+
 
 @dataclass(frozen=True)
 class BootstrapFastPerception:
@@ -218,8 +280,9 @@ class BootstrapFastPerception:
             return ()
         now = time.monotonic_ns()
         source = f"bootstrap:{self.model_id}:not-training-label"
-        values: tuple[tuple[str, bool, float, int], ...] = (
+        values: tuple[tuple[str, str | bool, float, int], ...] = (
             ("perception.bootstrap_active", True, 1.0, 500),
+            ("frame.dhash", frame_dhash(frame), 1.0, 500),
         )
         return tuple(
             PerceptionFact(
@@ -283,7 +346,13 @@ class RealtimePerceptionService:
         selected = self._last_capture if frame is None else frame
         if selected is None:
             return False
-        return self.active_vlm.submit(SemanticJob(query=query, frame=selected))
+        return self.active_vlm.submit(
+            SemanticJob(
+                query=query,
+                frame=selected,
+                frame_dhash=frame_dhash(selected),
+            )
+        )
 
     def stale(self, now_ns: int | None = None) -> bool:
         latest = self.blackboard.raw_latest()
@@ -325,3 +394,35 @@ def _strip_code_fence(text: str) -> str:
     if lines and lines[-1].strip() == "```":
         lines = lines[:-1]
     return "\n".join(lines).strip()
+
+
+def frame_dhash(frame: CapturedFrame) -> str:
+    """Return a compact image-similarity signal without assigning semantics."""
+    if not frame.bgra or frame.width < 2 or frame.height < 1:
+        return "0" * 16
+    source = memoryview(frame.bgra)
+    comparisons = 0
+    bit = 1
+    for row in range(8):
+        y = min(frame.height - 1, int((row + 0.5) * frame.height / 8))
+        previous: int | None = None
+        for column in range(9):
+            x = min(frame.width - 1, int((column + 0.5) * frame.width / 9))
+            offset = (y * frame.width + x) * 4
+            blue, green, red = source[offset : offset + 3]
+            luma = 29 * int(blue) + 150 * int(green) + 77 * int(red)
+            if previous is not None:
+                if previous > luma:
+                    comparisons |= bit
+                bit <<= 1
+            previous = luma
+    return f"{comparisons:016x}"
+
+
+def perceptual_hash_distance(first: str, second: str) -> int:
+    if len(first) != 16 or len(second) != 16:
+        raise ValueError("frame dHash values must contain exactly 16 hexadecimal characters")
+    try:
+        return (int(first, 16) ^ int(second, 16)).bit_count()
+    except ValueError as exc:
+        raise ValueError("frame dHash values must be hexadecimal") from exc
