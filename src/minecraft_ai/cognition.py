@@ -13,7 +13,7 @@ from .perception import PerceptionBlackboard
 from .planning import Goal
 from .roles import RoleProfile
 from .skills import SkillLibrary
-from .social import Promise, PromiseStatus
+from .social import OperatorMessage, Promise, PromiseStatus
 from .wiki import WikiEvidence
 
 
@@ -39,6 +39,7 @@ class CognitionContext:
     memories: tuple[MemoryRecord, ...]
     promises: tuple[Promise, ...]
     wiki: tuple[WikiEvidence, ...]
+    operator_messages: tuple[OperatorMessage, ...] = ()
 
 
 class BootstrapCognitionPolicy:
@@ -88,6 +89,17 @@ class BootstrapCognitionPolicy:
                     skill_id="explore_forward",
                     say=self._speech(now_s, f"Continuing: {promise.summary}", interval_s=20.0),
                 )
+
+        if context.operator_messages:
+            message = context.operator_messages[0]
+            return CognitionDecision(
+                reasoning_summary=(
+                    f"Bootstrap fallback retained operator {message.kind.value}: {message.text}"
+                ),
+                chosen_goal_id=f"operator:{message.message_id}",
+                skill_id="explore_forward",
+                say=self._speech(now_s, f"Received: {message.text[:160]}", interval_s=10.0),
+            )
 
         goal_id = context.goals[0].goal_id if context.goals else "explore"
         if target_vis and bool(target_vis.value):
@@ -142,6 +154,9 @@ class HighLevelController:
                 "goals": [goal.model_dump(mode="json") for goal in context.goals],
                 "memories": [memory.model_dump(mode="json") for memory in context.memories],
                 "promises": [promise.model_dump(mode="json") for promise in context.promises],
+                "operator_messages": [
+                    message.model_dump(mode="json") for message in context.operator_messages
+                ],
                 "wiki_evidence": [item.model_dump(mode="json") for item in context.wiki],
                 "frame": None if latest is None else latest.model_dump(mode="json"),
                 "fresh_facts": facts,
@@ -173,7 +188,15 @@ class HighLevelController:
                 ),
                 ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
             )
-            response = self.model.complete(messages)
+            structured = getattr(self.model, "complete_structured", None)
+            if callable(structured):
+                response = structured(
+                    messages,
+                    name="cognition_decision",
+                    schema=CognitionDecision.model_json_schema(),
+                )
+            else:
+                response = self.model.complete(messages)
             decision = _parse_decision(response.text)
             if decision.skill_id is not None and decision.skill_id not in self.skills.specs:
                 return self._bootstrap.decide(blackboard, context)

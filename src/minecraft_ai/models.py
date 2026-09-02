@@ -65,6 +65,29 @@ class OpenAICompatibleLocalModel:
         return httpx.Client(timeout=self.timeout_s)
 
     def complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse:
+        return self._complete(messages)
+
+    def complete_structured(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        return self._complete(
+            messages,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": name, "strict": True, "schema": schema},
+            },
+        )
+
+    def _complete(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        response_format: dict[str, object] | None = None,
+    ) -> ModelResponse:
         import time
 
         started = time.perf_counter()
@@ -72,7 +95,10 @@ class OpenAICompatibleLocalModel:
             "model": self.model_id,
             "messages": [message.model_dump(mode="json") for message in messages],
             "temperature": 0.2,
+            "max_tokens": 512,
         }
+        if response_format is not None:
+            payload["response_format"] = response_format
         with self._client() as client:
             response = client.post(
                 self.base_url.rstrip("/") + "/chat/completions",

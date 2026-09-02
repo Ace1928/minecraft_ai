@@ -38,6 +38,41 @@ class PlayerRequest(BaseModel):
     metadata: dict[str, str | int | float | bool] = Field(default_factory=dict)
 
 
+class OperatorMessageKind(StrEnum):
+    INSTRUCTION = "instruction"
+    QUESTION = "question"
+    FEEDBACK = "feedback"
+    CORRECTION = "correction"
+
+
+class OperatorMessageStatus(StrEnum):
+    QUEUED = "queued"
+    DELIVERED = "delivered"
+    ACKNOWLEDGED = "acknowledged"
+    ARCHIVED = "archived"
+
+
+class OperatorMessage(BaseModel):
+    """Durable high-level input from the local operator surface.
+
+    These messages enter cognition as social/task context. They never bypass the
+    supervisor or translate directly into keyboard/mouse events.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    message_id: str
+    created_ns: int
+    author: str = "operator"
+    text: str = Field(min_length=1, max_length=2000)
+    kind: OperatorMessageKind = OperatorMessageKind.INSTRUCTION
+    priority: float = Field(default=0.8, ge=0.0, le=1.0)
+    status: OperatorMessageStatus = OperatorMessageStatus.QUEUED
+    delivered_ns: int | None = None
+    acknowledged_ns: int | None = None
+    response_text: str | None = Field(default=None, max_length=2000)
+
+
 class Promise(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

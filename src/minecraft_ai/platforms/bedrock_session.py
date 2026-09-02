@@ -91,7 +91,11 @@ def bedrock_session_alive(session: BedrockSession | None = None) -> bool:
             return False
     if current.mode == "direct":
         return _pid_alive(current.launcher_pid)
-    return _pid_alive(current.xserver_pid) and _x_socket(current.display).exists()
+    return (
+        _pid_alive(current.xserver_pid)
+        and _pid_alive(current.launcher_pid)
+        and _x_socket(current.display).exists()
+    )
 
 
 def _display_number(display: str) -> int:

@@ -21,7 +21,8 @@ from .planning import Goal
 from .roles import RoleProfile
 from .safety import MotorAction
 from .skills import SkillLibrary, SkillOutcome
-from .social import SocialState
+from .social import OperatorMessage, OperatorMessageStatus, SocialState
+from .telemetry import TelemetryPublisher
 from .storage import StateDatabase
 from .supervisor import send_command
 
@@ -58,6 +59,7 @@ class AgentRuntime:
     semantic_hz: float = 2.0
     lease_renew_ms: int = 500
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics)
+    telemetry: TelemetryPublisher = field(default_factory=TelemetryPublisher)
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
     _sequence: int = field(default=0, init=False)
     _last_renew_ns: int = field(default=0, init=False)
@@ -68,6 +70,8 @@ class AgentRuntime:
         init=False,
     )
     _pool: concurrent.futures.ThreadPoolExecutor = field(init=False)
+    _last_decision: CognitionDecision | None = field(default=None, init=False)
+    _pending_operator_message_ids: tuple[str, ...] = field(default=(), init=False)
 
     def __post_init__(self) -> None:
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz <= 0:
@@ -109,6 +113,7 @@ class AgentRuntime:
             except Exception:
                 pass
             self.perception.close()
+            self.telemetry.publish(self._telemetry_payload(state="stopped"), force=True)
             self._pool.shutdown(wait=False, cancel_futures=True)
 
     def tick(self) -> None:
@@ -116,6 +121,7 @@ class AgentRuntime:
         frame = self.perception.capture_once()
         self.metrics.frames += 1
         self.metrics.last_capture_ms = (time.perf_counter() - capture_started) * 1000.0
+        self.telemetry.publish(self._telemetry_payload(state="running"))
         if self.perception.stale():
             raise RuntimeError("capture stream is stale")
         self._renew_lease_if_due()
@@ -220,6 +226,17 @@ class AgentRuntime:
         if now - self._last_cognition_ns < interval:
             return
         context = self._cognition_context()
+        self._pending_operator_message_ids = tuple(
+            message.message_id for message in context.operator_messages
+        )
+        if self.state_db is not None:
+            for message in context.operator_messages:
+                if message.status == OperatorMessageStatus.QUEUED:
+                    self.state_db.update_operator_message_status(
+                        message.message_id,
+                        OperatorMessageStatus.DELIVERED,
+                        timestamp_ns=time.time_ns(),
+                    )
         if self.high_level is None:
             engine = BootstrapCognitionPolicy(self.skills)
             self._pending_decision = self._pool.submit(
@@ -245,6 +262,20 @@ class AgentRuntime:
             decision = future.result()
         except Exception:
             return
+        self._last_decision = decision
+        if self.state_db is not None and self._pending_operator_message_ids:
+            response = decision.say or decision.reasoning_summary
+            for message_id in self._pending_operator_message_ids:
+                try:
+                    self.state_db.update_operator_message_status(
+                        message_id,
+                        OperatorMessageStatus.ACKNOWLEDGED,
+                        timestamp_ns=time.time_ns(),
+                        response_text=response,
+                    )
+                except KeyError:
+                    continue
+            self._pending_operator_message_ids = ()
         for question in decision.ask_perception:
             latest = self.blackboard.raw_latest()
             if latest is None:
@@ -284,13 +315,44 @@ class AgentRuntime:
     def _cognition_context(self) -> CognitionContext:
         goals = tuple((*role_standing_goals(self.role), *self.custom_goals))
         memories = tuple(self.memories.retrieve(limit=20))
+        operator_messages: tuple[OperatorMessage, ...] = ()
+        if self.state_db is not None:
+            operator_messages = self.state_db.load_operator_messages(
+                statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED},
+                limit=20,
+            )
         return CognitionContext(
             role=self.role,
             goals=goals,
             memories=memories,
             promises=self.social.active_promises(),
             wiki=(),
+            operator_messages=operator_messages,
         )
+
+    def _telemetry_payload(self, *, state: str) -> dict[str, object]:
+        running = self.executor.run
+        decision = self._last_decision
+        return {
+            "schema_version": 1,
+            "state": state,
+            "role": self.role.role_id,
+            "lease_id": self.lease_id,
+            "frames": self.metrics.frames,
+            "motor_actions": self.metrics.motor_actions,
+            "cognition_calls": self.metrics.cognition_calls,
+            "semantic_requests": self.metrics.semantic_requests,
+            "chat_messages": self.metrics.chat_messages,
+            "skill_successes": self.metrics.skill_successes,
+            "skill_failures": self.metrics.skill_failures,
+            "last_capture_ms": round(self.metrics.last_capture_ms, 3),
+            "last_motor_ms": round(self.metrics.last_motor_ms, 3),
+            "active_skill": None if running is None else running.skill_id,
+            "skill_outcome": None if running is None else running.outcome.value,
+            "chosen_goal_id": None if decision is None else decision.chosen_goal_id,
+            "reasoning_summary": None if decision is None else decision.reasoning_summary,
+            "updated_monotonic_ns": time.monotonic_ns(),
+        }
 
     def _bootstrap_if_idle(self) -> None:
         running = self.executor.run

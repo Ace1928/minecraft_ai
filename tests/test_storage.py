@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from minecraft_ai.memory import MemoryKind, MemoryRecord
 from minecraft_ai.planning import Goal
 from minecraft_ai.skills import SkillSpec, SkillStats
-from minecraft_ai.social import Promise, SharedProject
+from minecraft_ai.social import (
+    OperatorMessage,
+    OperatorMessageKind,
+    OperatorMessageStatus,
+    Promise,
+    SharedProject,
+)
 from minecraft_ai.storage import StateDatabase
 
 
@@ -33,6 +40,14 @@ def test_state_database_roundtrip(tmp_path: Path) -> None:
             Promise(promise_id="p1", player="Alex", summary="Finish roof", created_ns=3)
         )
         db.save_project(SharedProject(project_id="build", name="House", created_ns=4, owner="Alex"))
+        db.save_operator_message(
+            OperatorMessage(
+                message_id="op1",
+                created_ns=time.time_ns(),
+                kind=OperatorMessageKind.CORRECTION,
+                text="Return to the workshop and finish the west wall.",
+            )
+        )
 
     with StateDatabase(path) as db:
         memories = db.load_memories()
@@ -45,6 +60,16 @@ def test_state_database_roundtrip(tmp_path: Path) -> None:
         social = db.load_social()
         assert social.promises["p1"].player == "Alex"
         assert social.projects["build"].owner == "Alex"
+        messages = db.load_operator_messages(limit=10)
+        assert messages[0].message_id == "op1"
+        assert messages[0].kind == OperatorMessageKind.CORRECTION
+        updated = db.update_operator_message_status(
+            "op1",
+            OperatorMessageStatus.ACKNOWLEDGED,
+            timestamp_ns=time.time_ns(),
+            response_text="I will finish the west wall.",
+        )
+        assert updated.response_text == "I will finish the west wall."
 
 
 def test_memory_kind_filter(tmp_path: Path) -> None:

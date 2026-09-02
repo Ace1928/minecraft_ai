@@ -7,11 +7,17 @@ from pathlib import Path
 from .memory import MemoryKind, MemoryRecord, MemoryStore
 from .planning import Goal
 from .skills import SkillLibrary, SkillSpec, SkillStats
-from .social import Promise, SharedProject, SocialState
+from .social import (
+    OperatorMessage,
+    OperatorMessageStatus,
+    Promise,
+    SharedProject,
+    SocialState,
+)
 from .spatial import PlaceRecord, SpatialPlaceMemory
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class StateDatabase:
@@ -87,6 +93,14 @@ class StateDatabase:
             );
             CREATE INDEX IF NOT EXISTS idx_spatial_places_kind_dim
                 ON spatial_places(kind, dimension);
+            CREATE TABLE IF NOT EXISTS operator_messages (
+                message_id TEXT PRIMARY KEY,
+                created_ns INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_operator_messages_status_created
+                ON operator_messages(status, created_ns DESC);
             """
         )
         current = self.connection.execute(
@@ -97,8 +111,10 @@ class StateDatabase:
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
-        elif int(current[0]) == 1:
-            self._migrate_v1_to_v2()
+        elif int(current[0]) in {1, 2}:
+            if int(current[0]) == 1:
+                self._migrate_v1_to_v2()
+            self._migrate_v2_to_v3()
             self.connection.execute(
                 "UPDATE meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
@@ -108,6 +124,20 @@ class StateDatabase:
                 f"unsupported state database schema {current[0]}; expected {SCHEMA_VERSION}"
             )
         self.connection.commit()
+
+    def _migrate_v2_to_v3(self) -> None:
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS operator_messages (
+                message_id TEXT PRIMARY KEY,
+                created_ns INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_operator_messages_status_created
+                ON operator_messages(status, created_ns DESC);
+            """
+        )
 
     def _migrate_v1_to_v2(self) -> None:
         stats_columns = {
@@ -304,6 +334,70 @@ class StateDatabase:
             project = SharedProject.model_validate(json.loads(payload))
             state.projects[project.project_id] = project
         return state
+
+    def save_operator_message(self, message: OperatorMessage) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO operator_messages(message_id, created_ns, status, payload)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(message_id) DO UPDATE SET
+                status=excluded.status,
+                payload=excluded.payload
+            """,
+            (
+                message.message_id,
+                message.created_ns,
+                message.status.value,
+                message.model_dump_json(),
+            ),
+        )
+        self.connection.commit()
+
+    def load_operator_messages(
+        self,
+        *,
+        statuses: set[OperatorMessageStatus] | None = None,
+        limit: int = 100,
+    ) -> tuple[OperatorMessage, ...]:
+        if limit < 1 or limit > 1000:
+            raise ValueError("operator message limit must be between 1 and 1000")
+        parameters: list[object] = []
+        where = ""
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            where = f" WHERE status IN ({placeholders})"
+            parameters.extend(status.value for status in statuses)
+        parameters.append(limit)
+        rows = self.connection.execute(
+            "SELECT payload FROM operator_messages" + where + " ORDER BY created_ns DESC LIMIT ?",
+            tuple(parameters),
+        ).fetchall()
+        return tuple(OperatorMessage.model_validate_json(payload) for (payload,) in rows)
+
+    def update_operator_message_status(
+        self,
+        message_id: str,
+        status: OperatorMessageStatus,
+        *,
+        timestamp_ns: int,
+        response_text: str | None = None,
+    ) -> OperatorMessage:
+        row = self.connection.execute(
+            "SELECT payload FROM operator_messages WHERE message_id=?",
+            (message_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(message_id)
+        current = OperatorMessage.model_validate_json(row[0])
+        changes: dict[str, object] = {"status": status}
+        if status == OperatorMessageStatus.DELIVERED:
+            changes["delivered_ns"] = timestamp_ns
+        elif status == OperatorMessageStatus.ACKNOWLEDGED:
+            changes["acknowledged_ns"] = timestamp_ns
+            changes["response_text"] = response_text
+        updated = current.model_copy(update=changes)
+        self.save_operator_message(updated)
+        return updated
 
     def _save_json(
         self,

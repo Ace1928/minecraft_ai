@@ -31,6 +31,7 @@ from .emergency import (
 )
 from .knowledge import Edition, GameVersion, KnowledgeGraph
 from .knowledge.importers import import_java_datapack, import_minecraft_data
+from .operator_server import serve_operator_dashboard
 from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
 from .platforms.bedrock_session import (
     BEDROCK_SESSION_FILE,
@@ -420,6 +421,17 @@ def logs(lines: int = typer.Option(80, min=1, max=2000)) -> None:
             continue
         content = path.read_text(encoding="utf-8", errors="replace").splitlines()
         print("\n".join(content[-lines:]))
+
+
+@app.command()
+def dashboard(
+    host: str = typer.Option("127.0.0.1", help="Numeric loopback address."),
+    port: int = typer.Option(8765, min=1, max=65535),
+) -> None:
+    """Serve the local telemetry and high-level agent interaction surface."""
+    _ensure_dirs()
+    print(f"[green]Operator dashboard[/green] http://{host}:{port}/")
+    serve_operator_dashboard(host=host, port=port)
 
 
 @config_app.command("show")
