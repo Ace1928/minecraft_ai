@@ -69,6 +69,7 @@ class RuntimeConfig(BaseModel):
     cognition_hz: float = Field(default=0.5, gt=0.0, le=10.0)
     semantic_hz: float = Field(default=2.0, gt=0.0, le=20.0)
     stale_frame_ms: int = Field(default=500, ge=100, le=5000)
+    stale_frame_consecutive_limit: int = Field(default=3, ge=1, le=20)
     lease_renew_ms: int = Field(default=500, ge=100, le=2000)
     high_level: ModelConfig = Field(default_factory=ModelConfig)
     vision_language: ModelConfig = Field(default_factory=ModelConfig)

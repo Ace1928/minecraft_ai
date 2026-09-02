@@ -70,6 +70,8 @@ class RuntimeMetrics:
     started_ns: int = field(default_factory=time.monotonic_ns)
     last_capture_ms: float = 0.0
     last_motor_ms: float = 0.0
+    stale_frame_skips: int = 0
+    consecutive_stale_frames: int = 0
 
 
 @dataclass
@@ -89,6 +91,7 @@ class AgentRuntime:
     cognition_hz: float = 0.5
     semantic_hz: float = 2.0
     lease_renew_ms: int = 500
+    stale_frame_consecutive_limit: int = 3
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics)
     telemetry: TelemetryPublisher = field(default_factory=TelemetryPublisher)
     trajectory: TrajectoryRecorder | None = None
@@ -112,6 +115,8 @@ class AgentRuntime:
     def __post_init__(self) -> None:
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz <= 0:
             raise ValueError("runtime frequencies must be positive")
+        if self.stale_frame_consecutive_limit < 1:
+            raise ValueError("stale_frame_consecutive_limit must be positive")
         self._pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="minecraft-ai-cognition",
@@ -189,9 +194,25 @@ class AgentRuntime:
         self.metrics.frames += 1
         self.metrics.last_capture_ms = (time.perf_counter() - capture_started) * 1000.0
         self._merge_operator_target()
-        self.telemetry.publish(self._telemetry_payload(state="running"))
         if self.perception.stale():
-            raise RuntimeError("capture stream is stale")
+            self.metrics.stale_frame_skips += 1
+            self.metrics.consecutive_stale_frames += 1
+            # A late frame must never extend a previously accepted key/button
+            # state. Preserve the authenticated lease so a transient CPU stall
+            # can recover on the next fresh capture.
+            send_command("release-inputs", lease_id=self.lease_id)
+            self.telemetry.publish(self._telemetry_payload(state="capture-stalled"))
+            if (
+                self.metrics.consecutive_stale_frames
+                >= self.stale_frame_consecutive_limit
+            ):
+                raise RuntimeError(
+                    "capture stream is stale for "
+                    f"{self.metrics.consecutive_stale_frames} consecutive frames"
+                )
+            return
+        self.metrics.consecutive_stale_frames = 0
+        self.telemetry.publish(self._telemetry_payload(state="running"))
         self._consume_cognition()
         self._request_semantics_if_due(frame.frame_id)
         self._start_cognition_if_due()
@@ -502,6 +523,8 @@ class AgentRuntime:
             "skill_failures": self.metrics.skill_failures,
             "last_capture_ms": round(self.metrics.last_capture_ms, 3),
             "last_motor_ms": round(self.metrics.last_motor_ms, 3),
+            "stale_frame_skips": self.metrics.stale_frame_skips,
+            "consecutive_stale_frames": self.metrics.consecutive_stale_frames,
             "active_skill": None if running is None else running.skill_id,
             "active_instruction": self.executor.instruction,
             "skill_outcome": None if running is None else running.outcome.value,

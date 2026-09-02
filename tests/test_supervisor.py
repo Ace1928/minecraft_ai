@@ -46,6 +46,26 @@ def test_fault_enters_failsafe_and_releases_input() -> None:
     assert supervisor.motor.lease is None
 
 
+def test_release_inputs_preserves_running_lease() -> None:
+    supervisor = Supervisor()
+    supervisor.start()
+    lease_info = supervisor.arm("fake-instance")
+    lease_id = str(lease_info["lease_id"])
+    supervisor.activate()
+    supervisor.motor.apply(
+        lease_id,
+        MotorAction(sequence=0, keys_down=("w",), buttons_down=("left",)),
+    )
+
+    result = supervisor.release_inputs(lease_id)
+
+    assert result == {"released": True, "lease_active": True}
+    assert supervisor.state == SupervisorState.RUNNING
+    assert supervisor.motor.lease is not None
+    assert not supervisor.backend.held_keys
+    assert not supervisor.backend.held_buttons
+
+
 def test_stop_from_failsafe_reaches_stopped() -> None:
     supervisor = Supervisor()
     supervisor.start()

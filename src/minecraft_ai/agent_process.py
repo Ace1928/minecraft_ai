@@ -154,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             cognition_hz=config.cognition_hz,
             semantic_hz=config.semantic_hz,
             lease_renew_ms=config.lease_renew_ms,
+            stale_frame_consecutive_limit=config.stale_frame_consecutive_limit,
             trajectory=trajectory,
         )
 

@@ -271,6 +271,15 @@ class MotorGate:
             self.backend.apply(action)
             self._last_sequence = action.sequence
 
+    def release_inputs(self, lease_id: str) -> None:
+        """Release held input without revoking an otherwise healthy lease."""
+        with self._lock:
+            lease = self._require_lease(lease_id)
+            if lease.expired():
+                self._revoke_locked("lease-expired")
+                raise MotorRejected("motor lease expired")
+            self.backend.release_all()
+
     def check_expiry(self, now_ns: int | None = None) -> bool:
         with self._lock:
             if self._lease is None:

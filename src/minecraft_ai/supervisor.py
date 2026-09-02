@@ -190,6 +190,17 @@ class Supervisor:
                 "lease_active": self.motor.lease is not None,
             }
 
+    def release_inputs(self, lease_id: str) -> dict[str, Any]:
+        """Neutralize current input while preserving the scoped runtime lease."""
+        with self._lock:
+            self._require_running_lease(lease_id)
+            self.motor.release_inputs(lease_id)
+            self._persist_status()
+            return {
+                "released": True,
+                "lease_active": self.motor.lease is not None,
+            }
+
     def send_chat(self, lease_id: str, text: str) -> dict[str, Any]:
         """Send player chat through the already scoped Minecraft input backend."""
         with self._lock:
@@ -397,6 +408,9 @@ class Supervisor:
             elif command == "motor-action":
                 lease_id = str(payload.get("lease_id", ""))
                 result = self.apply_motor_action(lease_id, payload.get("action"))
+            elif command == "release-inputs":
+                lease_id = str(payload.get("lease_id", ""))
+                result = self.release_inputs(lease_id)
             elif command == "chat":
                 lease_id = str(payload.get("lease_id", ""))
                 text = str(payload.get("text", ""))
