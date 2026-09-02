@@ -510,6 +510,22 @@ def _wine_content_rect(
         )
         geometry = client.get_geometry()
         translated = target.translate_coords(client, 0, 0)
+        available_width, available_height = _client_fit_dimensions(
+            parent_width=width,
+            parent_height=height,
+            x=int(translated.x),
+            y=int(translated.y),
+        )
+        if int(geometry.width) != available_width or int(geometry.height) != available_height:
+            # A nested Weston surface can be resized by the host while Wine's
+            # client drawable retains its previous dimensions. Resize only the
+            # isolated Minecraft drawable to the exact visible client area;
+            # this sends the normal X ConfigureNotify path and makes Bedrock
+            # redraw its complete HUD without synthesizing game input.
+            client.configure(width=available_width, height=available_height)
+            display.sync()
+            geometry = client.get_geometry()
+            translated = target.translate_coords(client, 0, 0)
     except Exception:
         return None
     return _contained_content_rect(
@@ -520,6 +536,21 @@ def _wine_content_rect(
         content_width=int(geometry.width),
         content_height=int(geometry.height),
     )
+
+
+def _client_fit_dimensions(
+    *,
+    parent_width: int,
+    parent_height: int,
+    x: int,
+    y: int,
+) -> tuple[int, int]:
+    """Return the drawable size that fills, but never exceeds, its parent."""
+    if parent_width <= 0 or parent_height <= 0:
+        raise IsolationError("Minecraft parent window has invalid geometry")
+    if x < 0 or y < 0 or x >= parent_width or y >= parent_height:
+        raise IsolationError("Minecraft client origin is outside the isolated compositor")
+    return parent_width - x, parent_height - y
 
 
 def _contained_content_rect(
@@ -534,12 +565,7 @@ def _contained_content_rect(
     """Require the complete game drawable before admitting a capture stream."""
     if content_width <= 0 or content_height <= 0:
         raise IsolationError("Minecraft client drawable has invalid geometry")
-    if (
-        x < 0
-        or y < 0
-        or x + content_width > parent_width
-        or y + content_height > parent_height
-    ):
+    if x < 0 or y < 0 or x + content_width > parent_width or y + content_height > parent_height:
         raise IsolationError(
             "Minecraft client drawable is clipped by the isolated compositor "
             f"({content_width}x{content_height}+{x}+{y} inside "

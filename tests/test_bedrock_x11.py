@@ -6,6 +6,7 @@ import pytest
 
 from minecraft_ai.platforms.bedrock_x11 import (
     IsolationError,
+    _client_fit_dimensions,
     _contained_content_rect,
     _resolve_minecraft_input_window,
     _window_is_descendant_or_same,
@@ -67,9 +68,7 @@ def _wine_tree() -> tuple[_Display, _Window, _Window, _Window]:
     ime.tree = _Tree(parent=desktop)
     minecraft.tree = _Tree(parent=desktop, children=[drawable])
     drawable.tree = _Tree(parent=minecraft)
-    display = _Display(
-        {item.id: item for item in (root, desktop, ime, minecraft, drawable)}
-    )
+    display = _Display({item.id: item for item in (root, desktop, ime, minecraft, drawable)})
     return display, desktop, minecraft, drawable
 
 
@@ -100,6 +99,25 @@ def test_complete_wine_drawable_is_accepted_for_capture() -> None:
     )
 
     assert rect == (0, 26, 1908, 1021)
+
+
+def test_wine_drawable_fit_preserves_the_complete_hud_area() -> None:
+    assert _client_fit_dimensions(
+        parent_width=1842,
+        parent_height=1018,
+        x=0,
+        y=26,
+    ) == (1842, 992)
+
+
+def test_wine_drawable_fit_rejects_an_origin_outside_the_parent() -> None:
+    with pytest.raises(IsolationError, match="origin is outside"):
+        _client_fit_dimensions(
+            parent_width=1842,
+            parent_height=1018,
+            x=1842,
+            y=26,
+        )
 
 
 def test_clipped_wine_drawable_is_rejected_before_capture() -> None:
