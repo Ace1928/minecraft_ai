@@ -18,6 +18,14 @@ class ModelConfig(BaseModel):
     timeout_s: float = Field(default=60.0, gt=0.0, le=600.0)
 
 
+class TrajectoryConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = True
+    shard_steps: int = Field(default=256, ge=16, le=4096)
+    queue_size: int = Field(default=512, ge=32, le=8192)
+
+
 class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -29,6 +37,7 @@ class RuntimeConfig(BaseModel):
     lease_renew_ms: int = Field(default=500, ge=100, le=2000)
     high_level: ModelConfig = Field(default_factory=ModelConfig)
     vision_language: ModelConfig = Field(default_factory=ModelConfig)
+    trajectory: TrajectoryConfig = Field(default_factory=TrajectoryConfig)
     online_wiki: bool = True
 
 

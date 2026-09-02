@@ -12,6 +12,7 @@ from .cognition import (
     CognitionDecision,
     HighLevelController,
 )
+from .datasets import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
 from .execution import SkillExecutor
 from .memory import MemoryStore
@@ -23,6 +24,7 @@ from .safety import MotorAction
 from .skills import SkillLibrary, SkillOutcome
 from .social import OperatorMessage, OperatorMessageStatus, SocialState
 from .telemetry import TelemetryPublisher
+from .trajectory import TrajectoryRecorder
 from .storage import StateDatabase
 from .supervisor import send_command
 
@@ -60,6 +62,7 @@ class AgentRuntime:
     lease_renew_ms: int = 500
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics)
     telemetry: TelemetryPublisher = field(default_factory=TelemetryPublisher)
+    trajectory: TrajectoryRecorder | None = None
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
     _sequence: int = field(default=0, init=False)
     _last_renew_ns: int = field(default=0, init=False)
@@ -113,6 +116,11 @@ class AgentRuntime:
             except Exception:
                 pass
             self.perception.close()
+            if self.trajectory is not None:
+                try:
+                    self.trajectory.close()
+                except Exception as exc:
+                    self._failsafe(f"trajectory-flush:{type(exc).__name__}:{exc}")
             self.telemetry.publish(self._telemetry_payload(state="stopped"), force=True)
             self._pool.shutdown(wait=False, cancel_futures=True)
 
@@ -175,11 +183,28 @@ class AgentRuntime:
         self._last_renew_ns = now
 
     def _send_motor(self, action: MotorAction) -> None:
-        send_command(
+        accepted = send_command(
             "motor-action",
             lease_id=self.lease_id,
             action=action.model_dump(mode="json"),
         )
+        if self.trajectory is not None:
+            frame = self.perception.last_capture
+            blackboard = self.blackboard.latest()
+            if frame is not None and blackboard is not None:
+                running = self.executor.run
+                self.trajectory.record_accepted(
+                    action=action,
+                    supervisor_response=accepted,
+                    frame=frame,
+                    blackboard=blackboard,
+                    action_level=ActionLevel.RAW,
+                    skill_run_id=None if running is None else running.run_id,
+                    skill_id=None if running is None else running.skill_id,
+                    goal_id=None
+                    if self._last_decision is None
+                    else self._last_decision.chosen_goal_id,
+                )
         self._sequence = action.sequence + 1
         self.metrics.motor_actions += 1
 

@@ -4,6 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from .datasets.schema import TrajectoryManifest
 from .memory import MemoryKind, MemoryRecord, MemoryStore
 from .planning import Goal
 from .skills import SkillLibrary, SkillSpec, SkillStats
@@ -17,7 +18,7 @@ from .social import (
 from .spatial import PlaceRecord, SpatialPlaceMemory
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class StateDatabase:
@@ -101,6 +102,57 @@ class StateDatabase:
             );
             CREATE INDEX IF NOT EXISTS idx_operator_messages_status_created
                 ON operator_messages(status, created_ns DESC);
+            CREATE TABLE IF NOT EXISTS trajectories (
+                trajectory_id TEXT PRIMARY KEY,
+                started_ns INTEGER NOT NULL,
+                ended_ns INTEGER,
+                source_type TEXT NOT NULL,
+                game_version TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS trajectory_shards (
+                shard_id TEXT PRIMARY KEY,
+                trajectory_id TEXT NOT NULL REFERENCES trajectories(trajectory_id),
+                path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                first_step_index INTEGER NOT NULL,
+                last_step_index INTEGER NOT NULL,
+                step_count INTEGER NOT NULL,
+                bytes INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS trajectory_steps_index (
+                trajectory_id TEXT NOT NULL REFERENCES trajectories(trajectory_id),
+                step_index INTEGER NOT NULL,
+                captured_ns INTEGER NOT NULL,
+                shard_id TEXT NOT NULL REFERENCES trajectory_shards(shard_id),
+                sample_key TEXT NOT NULL,
+                frame_hash TEXT NOT NULL,
+                action_json TEXT NOT NULL,
+                action_level TEXT NOT NULL,
+                skill_run_id TEXT,
+                skill_id TEXT,
+                goal_id TEXT,
+                plan_node_id TEXT,
+                correction_of_step INTEGER,
+                PRIMARY KEY(trajectory_id, step_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_trajectory_steps_capture
+                ON trajectory_steps_index(trajectory_id, captured_ns);
+            CREATE TABLE IF NOT EXISTS episodes (
+                episode_id TEXT PRIMARY KEY,
+                trajectory_id TEXT NOT NULL REFERENCES trajectories(trajectory_id),
+                started_ns INTEGER NOT NULL,
+                ended_ns INTEGER,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS events (
+                event_id TEXT PRIMARY KEY,
+                trajectory_id TEXT REFERENCES trajectories(trajectory_id),
+                step_index INTEGER,
+                observed_ns INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
             """
         )
         current = self.connection.execute(
@@ -111,17 +163,24 @@ class StateDatabase:
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
-        elif int(current[0]) in {1, 2}:
-            if int(current[0]) == 1:
+        else:
+            version = int(current[0])
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"unsupported state database schema {version}; expected <= {SCHEMA_VERSION}"
+                )
+            if version == 1:
                 self._migrate_v1_to_v2()
-            self._migrate_v2_to_v3()
+                version = 2
+            if version == 2:
+                self._migrate_v2_to_v3()
+                version = 3
+            if version == 3:
+                self._migrate_v3_to_v4()
+                version = 4
             self.connection.execute(
                 "UPDATE meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
-            )
-        elif int(current[0]) != SCHEMA_VERSION:
-            raise RuntimeError(
-                f"unsupported state database schema {current[0]}; expected {SCHEMA_VERSION}"
             )
         self.connection.commit()
 
@@ -136,6 +195,63 @@ class StateDatabase:
             );
             CREATE INDEX IF NOT EXISTS idx_operator_messages_status_created
                 ON operator_messages(status, created_ns DESC);
+            """
+        )
+
+    def _migrate_v3_to_v4(self) -> None:
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS trajectories (
+                trajectory_id TEXT PRIMARY KEY,
+                started_ns INTEGER NOT NULL,
+                ended_ns INTEGER,
+                source_type TEXT NOT NULL,
+                game_version TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS trajectory_shards (
+                shard_id TEXT PRIMARY KEY,
+                trajectory_id TEXT NOT NULL REFERENCES trajectories(trajectory_id),
+                path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                first_step_index INTEGER NOT NULL,
+                last_step_index INTEGER NOT NULL,
+                step_count INTEGER NOT NULL,
+                bytes INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS trajectory_steps_index (
+                trajectory_id TEXT NOT NULL REFERENCES trajectories(trajectory_id),
+                step_index INTEGER NOT NULL,
+                captured_ns INTEGER NOT NULL,
+                shard_id TEXT NOT NULL REFERENCES trajectory_shards(shard_id),
+                sample_key TEXT NOT NULL,
+                frame_hash TEXT NOT NULL,
+                action_json TEXT NOT NULL,
+                action_level TEXT NOT NULL,
+                skill_run_id TEXT,
+                skill_id TEXT,
+                goal_id TEXT,
+                plan_node_id TEXT,
+                correction_of_step INTEGER,
+                PRIMARY KEY(trajectory_id, step_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_trajectory_steps_capture
+                ON trajectory_steps_index(trajectory_id, captured_ns);
+            CREATE TABLE IF NOT EXISTS episodes (
+                episode_id TEXT PRIMARY KEY,
+                trajectory_id TEXT NOT NULL REFERENCES trajectories(trajectory_id),
+                started_ns INTEGER NOT NULL,
+                ended_ns INTEGER,
+                payload TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS events (
+                event_id TEXT PRIMARY KEY,
+                trajectory_id TEXT REFERENCES trajectories(trajectory_id),
+                step_index INTEGER,
+                observed_ns INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                payload TEXT NOT NULL
+            );
             """
         )
 
@@ -398,6 +514,121 @@ class StateDatabase:
         updated = current.model_copy(update=changes)
         self.save_operator_message(updated)
         return updated
+
+    def save_trajectory_manifest(self, manifest: TrajectoryManifest) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO trajectories(
+                trajectory_id, started_ns, ended_ns, source_type, game_version, payload
+            ) VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(trajectory_id) DO UPDATE SET
+                ended_ns=excluded.ended_ns,
+                payload=excluded.payload
+            """,
+            (
+                manifest.trajectory_id,
+                manifest.started_ns,
+                manifest.ended_ns,
+                manifest.source.source_type.value,
+                manifest.game_version,
+                manifest.model_dump_json(),
+            ),
+        )
+        self.connection.commit()
+
+    def save_trajectory_shard(
+        self,
+        *,
+        shard_id: str,
+        trajectory_id: str,
+        path: str,
+        sha256: str,
+        first_step_index: int,
+        last_step_index: int,
+        step_count: int,
+        bytes_count: int,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO trajectory_shards(
+                shard_id, trajectory_id, path, sha256, first_step_index,
+                last_step_index, step_count, bytes
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(shard_id) DO UPDATE SET
+                path=excluded.path,
+                sha256=excluded.sha256,
+                first_step_index=excluded.first_step_index,
+                last_step_index=excluded.last_step_index,
+                step_count=excluded.step_count,
+                bytes=excluded.bytes
+            """,
+            (
+                shard_id,
+                trajectory_id,
+                path,
+                sha256,
+                first_step_index,
+                last_step_index,
+                step_count,
+                bytes_count,
+            ),
+        )
+        self.connection.commit()
+
+    def save_trajectory_step_index(
+        self,
+        *,
+        trajectory_id: str,
+        step_index: int,
+        captured_ns: int,
+        shard_id: str,
+        sample_key: str,
+        frame_hash: str,
+        action_json: str,
+        action_level: str,
+        skill_run_id: str | None,
+        skill_id: str | None,
+        goal_id: str | None,
+        plan_node_id: str | None,
+        correction_of_step: int | None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO trajectory_steps_index(
+                trajectory_id, step_index, captured_ns, shard_id, sample_key,
+                frame_hash, action_json, action_level, skill_run_id, skill_id,
+                goal_id, plan_node_id, correction_of_step
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(trajectory_id, step_index) DO UPDATE SET
+                captured_ns=excluded.captured_ns,
+                shard_id=excluded.shard_id,
+                sample_key=excluded.sample_key,
+                frame_hash=excluded.frame_hash,
+                action_json=excluded.action_json,
+                action_level=excluded.action_level,
+                skill_run_id=excluded.skill_run_id,
+                skill_id=excluded.skill_id,
+                goal_id=excluded.goal_id,
+                plan_node_id=excluded.plan_node_id,
+                correction_of_step=excluded.correction_of_step
+            """,
+            (
+                trajectory_id,
+                step_index,
+                captured_ns,
+                shard_id,
+                sample_key,
+                frame_hash,
+                action_json,
+                action_level,
+                skill_run_id,
+                skill_id,
+                goal_id,
+                plan_node_id,
+                correction_of_step,
+            ),
+        )
+        self.connection.commit()
 
     def _save_json(
         self,

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import platform
 import signal
 import sys
+import time
 from pathlib import Path
 
 from .builtin_skills import build_bootstrap_skill_library
 from .cognition import HighLevelController
 from .config import app_paths, load_config
+from .datasets import DatasetSource, DatasetSourceType, TrajectoryManifest
 from .execution import SkillExecutor
 from .models import OpenAICompatibleLocalModel
 from .motor import BootstrapMotorPolicy
@@ -17,6 +20,7 @@ from .platforms.bedrock_x11 import IsolatedX11Capture
 from .roles import get_role
 from .runtime import AgentRuntime
 from .storage import StateDatabase
+from .trajectory import TrajectoryRecorder, new_trajectory_id
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
 
         blackboard = PerceptionBlackboard()
         capture = IsolatedX11Capture(args.display, args.window_id, allow_host=False)
+        capture_probe = capture.capture()
 
         high_level: HighLevelController | None = None
         if config.high_level.enabled:
@@ -88,6 +93,35 @@ def main(argv: list[str] | None = None) -> int:
             active_vlm=active_vlm,
         )
         executor = SkillExecutor(BootstrapMotorPolicy())
+        trajectory: TrajectoryRecorder | None = None
+        if config.trajectory.enabled:
+            trajectory_id = new_trajectory_id("bedrock-agent")
+            manifest = TrajectoryManifest(
+                trajectory_id=trajectory_id,
+                source=DatasetSource(
+                    source_id=f"minecraft-ai:{trajectory_id}",
+                    source_type=DatasetSourceType.BEDROCK_AGENT,
+                    license="operator-owned-gameplay",
+                    redistribution_allowed=False,
+                    training_allowed=True,
+                    edition="bedrock",
+                    game_versions=(args.instance_id.split(":", 2)[1],),
+                ),
+                role=role.role_id,
+                label="autonomous-play",
+                game_version=args.instance_id.split(":", 2)[1],
+                platform=platform.platform(),
+                launcher_profile="bedrock-on-linux/winegdk",
+                resolution=(capture_probe.width, capture_probe.height),
+                started_ns=time.time_ns(),
+            )
+            trajectory = TrajectoryRecorder(
+                manifest=manifest,
+                artifact_root=paths.data_dir / "trajectories",
+                state_db_path=paths.state_db,
+                shard_steps=config.trajectory.shard_steps,
+                queue_size=config.trajectory.queue_size,
+            )
         runtime = AgentRuntime(
             perception=perception,
             blackboard=blackboard,
@@ -103,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
             cognition_hz=config.cognition_hz,
             semantic_hz=config.semantic_hz,
             lease_renew_ms=config.lease_renew_ms,
+            trajectory=trajectory,
         )
 
         def _stop(_signum: int, _frame: object) -> None:

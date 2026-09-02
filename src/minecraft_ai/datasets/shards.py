@@ -1,0 +1,185 @@
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import os
+import tarfile
+import time
+import zlib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from .schema import TrajectoryManifest
+
+if TYPE_CHECKING:
+    from ..trajectory import AcceptedTrajectorySample
+
+
+@dataclass(frozen=True)
+class ShardArtifact:
+    shard_id: str
+    trajectory_id: str
+    path: Path
+    sha256: str
+    first_step_index: int
+    last_step_index: int
+    step_count: int
+    bytes: int
+
+
+@dataclass
+class TrajectoryShardWriter:
+    manifest: TrajectoryManifest
+    artifact_root: Path
+    state_db_path: Path
+    max_steps: int = 256
+    compression_level: int = 1
+    _directory: Path = field(init=False)
+    _tar: tarfile.TarFile | None = field(default=None, init=False)
+    _staged_path: Path | None = field(default=None, init=False)
+    _final_path: Path | None = field(default=None, init=False)
+    _shard_id: str | None = field(default=None, init=False)
+    _shard_index: int = field(default=0, init=False)
+    _samples: list[AcceptedTrajectorySample] = field(default_factory=list, init=False)
+    _artifacts: list[ShardArtifact] = field(default_factory=list, init=False)
+
+    def __post_init__(self) -> None:
+        if self.max_steps < 1:
+            raise ValueError("max_steps must be positive")
+        self._directory = self.artifact_root / self.manifest.trajectory_id
+        self._directory.mkdir(parents=True, exist_ok=True)
+        self._write_manifest(self.manifest)
+        from ..storage import StateDatabase
+
+        with StateDatabase(self.state_db_path) as database:
+            database.save_trajectory_manifest(self.manifest)
+
+    def append(self, sample: AcceptedTrajectorySample) -> None:
+        if sample.step.trajectory_id != self.manifest.trajectory_id:
+            raise ValueError("sample trajectory identity does not match writer")
+        if self._tar is None:
+            self._open_shard()
+        if len(self._samples) >= self.max_steps:
+            self._seal_shard()
+            self._open_shard()
+        assert self._tar is not None
+        key = f"{sample.step.step_index:012d}"
+        frame_payload = zlib.compress(sample.frame.bgra, level=self.compression_level)
+        frame_header = {
+            "codec": "zlib",
+            "pixel_format": "BGRA",
+            "width": sample.frame.width,
+            "height": sample.frame.height,
+            "raw_bytes": len(sample.frame.bgra),
+        }
+        self._add_bytes(f"{key}.step.json", sample.step.model_dump_json().encode())
+        self._add_bytes(f"{key}.frame.json", json.dumps(frame_header).encode())
+        self._add_bytes(f"{key}.frame.bgra.zlib", frame_payload)
+        self._add_bytes(f"{key}.blackboard.json", sample.blackboard_json)
+        self._samples.append(sample)
+
+    def close(self, *, accepted_steps: int, dropped_steps: int) -> None:
+        if self._tar is not None:
+            self._seal_shard()
+        completed = self.manifest.model_copy(
+            update={
+                "ended_ns": time.time_ns(),
+                "accepted_steps": accepted_steps,
+                "dropped_steps": dropped_steps,
+                "shard_ids": tuple(artifact.shard_id for artifact in self._artifacts),
+            }
+        )
+        self._write_manifest(completed)
+        from ..storage import StateDatabase
+
+        with StateDatabase(self.state_db_path) as database:
+            database.save_trajectory_manifest(completed)
+
+    def _open_shard(self) -> None:
+        shard_id = f"{self.manifest.trajectory_id}-shard-{self._shard_index:06d}"
+        final_path = self._directory / f"{shard_id}.tar"
+        staged_path = final_path.with_name(f".{final_path.name}.{os.getpid()}.tmp")
+        self._tar = tarfile.open(staged_path, mode="w")
+        self._staged_path = staged_path
+        self._final_path = final_path
+        self._shard_id = shard_id
+        self._samples = []
+
+    def _seal_shard(self) -> None:
+        assert self._tar is not None
+        assert self._staged_path is not None
+        assert self._final_path is not None
+        assert self._shard_id is not None
+        if not self._samples:
+            self._tar.close()
+            self._staged_path.unlink(missing_ok=True)
+            self._reset_open_shard()
+            return
+        self._tar.close()
+        self._staged_path.replace(self._final_path)
+        digest = hashlib.sha256(self._final_path.read_bytes()).hexdigest()
+        artifact = ShardArtifact(
+            shard_id=self._shard_id,
+            trajectory_id=self.manifest.trajectory_id,
+            path=self._final_path,
+            sha256=digest,
+            first_step_index=self._samples[0].step.step_index,
+            last_step_index=self._samples[-1].step.step_index,
+            step_count=len(self._samples),
+            bytes=self._final_path.stat().st_size,
+        )
+        from ..storage import StateDatabase
+
+        with StateDatabase(self.state_db_path) as database:
+            database.save_trajectory_shard(
+                shard_id=artifact.shard_id,
+                trajectory_id=artifact.trajectory_id,
+                path=str(artifact.path),
+                sha256=artifact.sha256,
+                first_step_index=artifact.first_step_index,
+                last_step_index=artifact.last_step_index,
+                step_count=artifact.step_count,
+                bytes_count=artifact.bytes,
+            )
+            for sample in self._samples:
+                database.save_trajectory_step_index(
+                    trajectory_id=self.manifest.trajectory_id,
+                    step_index=sample.step.step_index,
+                    captured_ns=sample.step.captured_ns,
+                    shard_id=artifact.shard_id,
+                    sample_key=f"{sample.step.step_index:012d}",
+                    frame_hash=sample.step.frame_hash,
+                    action_json=sample.step.action.model_dump_json(),
+                    action_level=sample.step.action_level.value,
+                    skill_run_id=sample.step.skill_run_id,
+                    skill_id=sample.step.skill_id,
+                    goal_id=sample.step.goal_id,
+                    plan_node_id=sample.step.plan_node_id,
+                    correction_of_step=sample.step.correction_of_step,
+                )
+        self._artifacts.append(artifact)
+        self._shard_index += 1
+        self._reset_open_shard()
+
+    def _reset_open_shard(self) -> None:
+        self._tar = None
+        self._staged_path = None
+        self._final_path = None
+        self._shard_id = None
+        self._samples = []
+
+    def _add_bytes(self, name: str, payload: bytes) -> None:
+        assert self._tar is not None
+        info = tarfile.TarInfo(name=name)
+        info.size = len(payload)
+        info.mtime = int(time.time())
+        info.mode = 0o600
+        self._tar.addfile(info, io.BytesIO(payload))
+
+    def _write_manifest(self, manifest: TrajectoryManifest) -> None:
+        path = self._directory / "manifest.json"
+        staged = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        staged.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+        staged.replace(path)
