@@ -26,7 +26,12 @@ from .wiki import WikiEvidence
 
 
 class CognitionDecision(BaseModel):
-    """High-level output. It deliberately contains no key/mouse commands."""
+    """High-level output with explicit, non-interchangeable communication channels.
+
+    ``say`` is rendered in the operator console. ``game_chat`` is a request for
+    the runtime to type into Bedrock and therefore remains subject to a separate
+    observed-message/authority gate. Neither field is private reasoning.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -35,6 +40,7 @@ class CognitionDecision(BaseModel):
     skill_id: str | None = None
     skill_parameters: dict[str, str | int | float | bool] = Field(default_factory=dict)
     say: str | None = None
+    game_chat: str | None = None
     request_replan: bool = False
     ask_perception: tuple[str, ...] = ()
     research_query: str | None = None
@@ -234,13 +240,17 @@ class HighLevelController:
                         "closed-loop skill to execute. Return one JSON object matching: "
                         "reasoning_summary:string, chosen_goal_id:string|null, "
                         "skill_id:string|null, "
-                        "skill_parameters:object, say:string|null, request_replan:boolean, "
-                        "ask_perception:string[], research_query:string|null. "
+                        "skill_parameters:object, say:string|null, game_chat:string|null, "
+                        "request_replan:boolean, ask_perception:string[], "
+                        "research_query:string|null. "
                         "The skills list contains only options executable from current fresh "
-                        "observations. Use only listed skill ids. Set say only when directly "
-                        "replying to a "
-                        "fresh operator/player message or when urgent social communication is "
-                        "needed; ordinary private reasoning must not open in-game chat. Treat "
+                        "observations. Use only listed skill ids. The say field is an operator-"
+                        "console response: set it only when directly replying to a fresh "
+                        "operator message. It never types into Bedrock. Set game_chat only when "
+                        "fresh_facts contains an authoritative fresh player-message or explicit "
+                        "game-chat authorization fact; otherwise it must be null. Ordinary "
+                        "private reasoning belongs only in reasoning_summary and must never "
+                        "appear in either communication channel. Treat "
                         "fresh_facts as the only authoritative observed game state. Prefer the "
                         "most concrete feasible option that advances the chosen goal and has a "
                         "verifiable success condition; do not select generic exploration when a "

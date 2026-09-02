@@ -179,13 +179,33 @@ def _selected_operator_message_id(
     return selected if selected in pending_message_ids else None
 
 
+def _authorized_game_chat(
+    decision: CognitionDecision,
+    blackboard: PerceptionBlackboard,
+) -> str | None:
+    """Return game chat only when perception carries explicit channel authority.
+
+    Typing chat changes Bedrock focus and can interrupt/drown the embodied agent,
+    so an LLM field alone is intentionally insufficient authority. Future player
+    chat OCR and the operator UI can publish either exact fact after verification.
+    """
+    if decision.game_chat is None:
+        return None
+    for key in ("social.player_message", "operator.game_chat_authorized"):
+        fact = blackboard.fact(key, min_confidence=0.7)
+        if fact is not None and bool(fact.value):
+            return decision.game_chat
+    return None
+
+
 @dataclass
 class RuntimeMetrics:
     frames: int = 0
     motor_actions: int = 0
     cognition_calls: int = 0
     semantic_requests: int = 0
-    chat_messages: int = 0
+    operator_responses: int = 0
+    game_chat_messages: int = 0
     skill_successes: int = 0
     skill_failures: int = 0
     started_ns: int = field(default_factory=time.monotonic_ns)
@@ -591,6 +611,7 @@ class AgentRuntime:
                         timestamp_ns=time.time_ns(),
                         response_text=response,
                     )
+                    self.metrics.operator_responses += 1
                 except KeyError:
                     pass
             self._pending_operator_message_ids = ()
@@ -605,10 +626,11 @@ class AgentRuntime:
                 frame_id=latest.frame_id,
             )
             self.perception.request_semantics(query)
-        if decision.say:
+        game_chat = _authorized_game_chat(decision, self.blackboard)
+        if game_chat:
             try:
-                send_command("chat", lease_id=self.lease_id, text=decision.say)
-                self.metrics.chat_messages += 1
+                send_command("chat", lease_id=self.lease_id, text=game_chat)
+                self.metrics.game_chat_messages += 1
             except Exception:
                 pass
         if decision.skill_id is not None:
@@ -717,7 +739,11 @@ class AgentRuntime:
             "motor_actions": self.metrics.motor_actions,
             "cognition_calls": self.metrics.cognition_calls,
             "semantic_requests": self.metrics.semantic_requests,
-            "chat_messages": self.metrics.chat_messages,
+            "operator_responses": self.metrics.operator_responses,
+            "game_chat_messages": self.metrics.game_chat_messages,
+            # Compatibility alias for existing telemetry consumers. This now
+            # means actual Bedrock chat transmissions, never console replies.
+            "chat_messages": self.metrics.game_chat_messages,
             "skill_successes": self.metrics.skill_successes,
             "skill_failures": self.metrics.skill_failures,
             "last_capture_ms": round(self.metrics.last_capture_ms, 3),
@@ -733,6 +759,8 @@ class AgentRuntime:
             ],
             "chosen_goal_id": None if decision is None else decision.chosen_goal_id,
             "reasoning_summary": None if decision is None else decision.reasoning_summary,
+            "operator_response": None if decision is None else decision.say,
+            "pending_game_chat": None if decision is None else decision.game_chat,
             "cognition": cognition_status,
             "policy": policy_status,
             "policy_warmup_error": self._policy_warmup_error,

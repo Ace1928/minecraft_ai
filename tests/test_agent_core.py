@@ -18,6 +18,7 @@ from minecraft_ai.planning import Goal, GoalScorer
 from minecraft_ai.roles import BUILTIN_ROLES, get_role
 from minecraft_ai.cognition import CognitionDecision
 from minecraft_ai.runtime import (
+    _authorized_game_chat,
     _active_operator_messages,
     _first_feasible_recovery,
     _operator_target_facts,
@@ -67,6 +68,43 @@ def test_blackboard_rejects_instance_switch_and_stale_fact() -> None:
         pass
     else:
         raise AssertionError("instance identity changes must be rejected")
+
+
+def test_game_chat_requires_explicit_perception_authority() -> None:
+    decision = CognitionDecision(game_chat="I found the base.")
+    board = PerceptionBlackboard()
+
+    assert _authorized_game_chat(decision, board) is None
+
+    now = time.monotonic_ns()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:chat",
+            width=1280,
+            height=720,
+            facts=(
+                PerceptionFact(
+                    key="social.player_message",
+                    value=True,
+                    confidence=0.9,
+                    observed_ns=now,
+                    source="verified-chat-perception",
+                    expires_after_ms=1000,
+                ),
+            ),
+        )
+    )
+
+    assert _authorized_game_chat(decision, board) == "I found the base."
+
+
+def test_operator_console_response_never_authorizes_game_chat() -> None:
+    board = PerceptionBlackboard()
+    decision = CognitionDecision(say="Working on it.")
+
+    assert _authorized_game_chat(decision, board) is None
 
 
 def test_skill_library_uses_smoothed_context_score_and_lifecycle() -> None:

@@ -4,7 +4,7 @@ import json
 import time
 
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
-from minecraft_ai.cognition import CognitionContext, HighLevelController
+from minecraft_ai.cognition import CognitionContext, CognitionDecision, HighLevelController
 from minecraft_ai.models import ModelMessage, ModelResponse
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.roles import get_role
@@ -239,6 +239,18 @@ def test_explicit_operator_reply_remains_available_as_social_output() -> None:
     decision = controller.decide(_board(), context)
 
     assert decision.say == "Gathering wood."
+    assert decision.game_chat is None
+
+
+def test_operator_response_and_game_chat_are_distinct_schema_channels() -> None:
+    decision = CognitionDecision(
+        reasoning_summary="Private execution summary.",
+        say="Visible only in the operator console.",
+        game_chat="Visible to players inside Bedrock.",
+    )
+
+    assert decision.say == "Visible only in the operator console."
+    assert decision.game_chat == "Visible to players inside Bedrock."
 
 
 def test_high_level_receives_explicit_active_operator_correction() -> None:
