@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -379,7 +379,7 @@ class BootstrapFastPerception:
         if not frame.bgra or frame.width <= 0 or frame.height <= 0:
             return ()
         now = time.monotonic_ns()
-        source = f"bootstrap:{self.model_id}:not-training-label"
+        bootstrap_source = f"bootstrap:{self.model_id}:not-training-label"
         values: tuple[tuple[str, str | bool, float, int], ...] = (
             ("perception.bootstrap_active", True, 1.0, 500),
             ("frame.dhash", frame_dhash(frame), 1.0, 500),
@@ -394,17 +394,50 @@ class BootstrapFastPerception:
                 ("scene.playable", False, 0.99, 250),
                 ("scene.ui_overlay", True, 0.99, 250),
             )
-        return tuple(
+        facts = [
             PerceptionFact(
                 key=key,
                 value=value,
                 confidence=confidence,
                 observed_ns=now,
-                source=source,
+                source=bootstrap_source,
                 expires_after_ms=expires_after_ms,
             )
             for key, value, confidence, expires_after_ms in values
+        ]
+        safety_source = "safety:bedrock-hud-v1:not-training-label"
+        safety_values: tuple[tuple[str, str | int | float | bool], ...] = ()
+        if bedrock_death_screen_present(frame):
+            safety_values = (
+                ("scene.playable", False),
+                ("scene.ui_overlay", True),
+                ("scene.mode", "death"),
+                ("scene.death", True),
+            )
+        else:
+            air_bubbles = bedrock_air_bubbles(frame)
+            if air_bubbles is not None:
+                safety_values = (
+                    ("player.air_visible", True),
+                    ("player.air_bubbles", air_bubbles),
+                    ("player.air_fraction", air_bubbles / 10.0),
+                    ("player.submerged", True),
+                    ("environment.underwater", True),
+                    ("danger.immediate", True),
+                    ("danger.drowning", True),
+                )
+        facts.extend(
+            PerceptionFact(
+                key=key,
+                value=value,
+                confidence=0.995,
+                observed_ns=now,
+                source=safety_source,
+                expires_after_ms=250,
+            )
+            for key, value in safety_values
         )
+        return tuple(facts)
 
 
 @dataclass
@@ -568,6 +601,130 @@ def bedrock_ui_chrome_present(frame: CapturedFrame) -> bool:
             bright += int(luma > 180 * 256)
             sampled += 1
     return sampled > 0 and bright / sampled >= 0.90
+
+
+def bedrock_air_bubbles(frame: CapturedFrame) -> int | None:
+    """Read Bedrock's rendered air HUD without inferring world semantics.
+
+    The palette and normalized HUD band were calibrated against raw 1279x635
+    trajectory frames. Filled bubbles contribute 64 matching pixels at that
+    resolution; scaling the area keeps the count stable at other resolutions.
+    This is a safety observation and is never eligible as a training label.
+    """
+    if not frame.bgra or frame.width < 64 or frame.height < 64:
+        return None
+    x_start = int(frame.width * 0.50)
+    x_end = int(frame.width * 0.66)
+    y_start = int(frame.height * 0.90)
+    y_end = int(frame.height * 0.97)
+    pixels = _numpy_bgra(frame)
+    if pixels is not None:
+        roi = pixels[y_start:y_end, x_start:x_end, :3]
+        blue, green, red = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
+        matched = int(
+            ((blue >= 230) & (green >= 110) & (green <= 210) & (red <= 100)).sum()
+        )
+    else:
+        source = memoryview(frame.bgra)
+        matched = 0
+        for y in range(y_start, y_end):
+            for x in range(x_start, x_end):
+                offset = (y * frame.width + x) * 4
+                blue, green, red = source[offset : offset + 3]
+                matched += int(
+                    int(blue) >= 230
+                    and 110 <= int(green) <= 210
+                    and int(red) <= 100
+                )
+    area_scale = (frame.width / 1279.0) * (frame.height / 635.0)
+    if matched < max(8, round(32 * area_scale)):
+        return None
+    pixels_per_bubble = max(1.0, 64.0 * area_scale)
+    return max(1, min(10, round(matched / pixels_per_bubble)))
+
+
+def bedrock_death_screen_present(frame: CapturedFrame) -> bool:
+    """Detect the paired primary/secondary controls on Bedrock's death screen.
+
+    Requiring both the green primary control and gray secondary control makes
+    this a conservative negative-only scene interlock. It does not identify a
+    clickable point or emit an action, and it is not a training label.
+    """
+    if not frame.bgra or frame.width < 64 or frame.height < 64:
+        return False
+    pixels = _numpy_bgra(frame)
+    primary_ratio = _region_palette_ratio(
+        frame,
+        x_start=0.39,
+        x_end=0.61,
+        y_start=0.77,
+        y_end=0.81,
+        palette="primary",
+        pixels=pixels,
+    )
+    secondary_ratio = _region_palette_ratio(
+        frame,
+        x_start=0.39,
+        x_end=0.61,
+        y_start=0.85,
+        y_end=0.89,
+        palette="secondary",
+        pixels=pixels,
+    )
+    return primary_ratio >= 0.70 and secondary_ratio >= 0.75
+
+
+def _region_palette_ratio(
+    frame: CapturedFrame,
+    *,
+    x_start: float,
+    x_end: float,
+    y_start: float,
+    y_end: float,
+    palette: Literal["primary", "secondary"],
+    pixels: Any | None = None,
+) -> float:
+    x0, x1 = int(frame.width * x_start), int(frame.width * x_end)
+    y0, y1 = int(frame.height * y_start), int(frame.height * y_end)
+    if pixels is not None:
+        roi = pixels[y0:y1, x0:x1, :3]
+        blue, green, red = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
+        if palette == "primary":
+            selected = (green >= 90) & (green >= red * 1.18) & (green >= blue * 1.05)
+        else:
+            high = roi.max(axis=2).astype("int16")
+            low = roi.min(axis=2).astype("int16")
+            selected = (high - low <= 18) & (red >= 100) & (red <= 230)
+        return float(selected.mean()) if selected.size else 0.0
+    source = memoryview(frame.bgra)
+    matched = 0
+    sampled = 0
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            offset = (y * frame.width + x) * 4
+            blue, green, red = (int(value) for value in source[offset : offset + 3])
+            if palette == "primary":
+                selected = green >= 90 and green >= red * 1.18 and green >= blue * 1.05
+            else:
+                selected = (
+                    max(red, green, blue) - min(red, green, blue) <= 18
+                    and 100 <= red <= 230
+                )
+            matched += int(selected)
+            sampled += 1
+    return matched / sampled if sampled else 0.0
+
+
+def _numpy_bgra(frame: CapturedFrame) -> Any | None:
+    try:
+        numpy = importlib.import_module("numpy")
+    except ImportError:
+        return None
+    return numpy.frombuffer(frame.bgra, dtype=numpy.uint8).reshape(
+        frame.height,
+        frame.width,
+        4,
+    )
 
 
 def perceptual_hash_distance(first: str, second: str) -> int:

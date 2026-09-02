@@ -16,6 +16,8 @@ from minecraft_ai.perception_service import (
     BootstrapFastPerception,
     SemanticJob,
     SemanticObservation,
+    bedrock_air_bubbles,
+    bedrock_death_screen_present,
     bedrock_ui_chrome_present,
     frame_dhash,
     perceptual_hash_distance,
@@ -119,6 +121,57 @@ def test_bedrock_ui_chrome_is_a_negative_only_motor_interlock() -> None:
     facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
     assert facts["scene.playable"].value is False
     assert facts["scene.playable"].source.startswith("bootstrap:")
+
+
+def test_bedrock_air_hud_is_a_calibrated_safety_observation() -> None:
+    width, height = 1279, 635
+    pixels = bytearray(bytes((20, 20, 20, 255)) * width * height)
+    x0, y0 = int(width * 0.52), int(height * 0.935)
+    for index in range(8 * 64):
+        x = x0 + index % 128
+        y = y0 + index // 128
+        offset = (y * width + x) * 4
+        pixels[offset : offset + 4] = bytes((250, 150, 40, 255))
+    frame = _frame(bytes(pixels), width=width, height=height)
+
+    assert bedrock_air_bubbles(frame) == 8
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["player.air_bubbles"].value == 8
+    assert facts["player.air_fraction"].value == 0.8
+    assert facts["player.submerged"].value is True
+    assert facts["environment.underwater"].value is True
+    assert facts["danger.drowning"].value is True
+    assert facts["danger.immediate"].source.startswith("safety:")
+
+
+def test_bedrock_air_hud_rejects_nonmatching_world_pixels() -> None:
+    width, height = 320, 180
+    frame = _frame(bytes((200, 180, 120, 255)) * width * height, width=width, height=height)
+
+    assert bedrock_air_bubbles(frame) is None
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert "player.submerged" not in facts
+
+
+def test_bedrock_death_screen_blocks_world_control_without_emitting_action() -> None:
+    width, height = 1279, 635
+    pixels = bytearray(bytes((20, 20, 20, 255)) * width * height)
+    for x_start, x_end, y_start, y_end, color in (
+        (0.39, 0.61, 0.77, 0.81, bytes((60, 150, 70, 255))),
+        (0.39, 0.61, 0.85, 0.89, bytes((205, 202, 201, 255))),
+    ):
+        for y in range(int(height * y_start), int(height * y_end)):
+            for x in range(int(width * x_start), int(width * x_end)):
+                offset = (y * width + x) * 4
+                pixels[offset : offset + 4] = color
+    frame = _frame(bytes(pixels), width=width, height=height)
+
+    assert bedrock_death_screen_present(frame)
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["scene.playable"].value is False
+    assert facts["scene.mode"].value == "death"
+    assert facts["scene.death"].value is True
+    assert facts["scene.death"].source.startswith("safety:")
 
 
 def test_active_vlm_prefers_strict_structured_vision_contract() -> None:
