@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import sqlite3
 import threading
 import time
 import uuid
@@ -22,7 +23,7 @@ from .perception_service import RealtimePerceptionService, perceptual_hash_dista
 from .planning import Goal
 from .roles import RoleProfile
 from .safety import MotorAction
-from .skills import SkillLibrary, SkillOutcome, SkillRun, SkillSpec
+from .skills import SkillLibrary, SkillOutcome, SkillRun, SkillSpec, SkillStats
 from .social import (
     OperatorMessage,
     OperatorMessageKind,
@@ -237,6 +238,8 @@ class RuntimeMetrics:
     last_motor_ms: float = 0.0
     stale_frame_skips: int = 0
     consecutive_stale_frames: int = 0
+    storage_contentions: int = 0
+    last_storage_error: str | None = None
 
 
 @dataclass
@@ -283,6 +286,11 @@ class AgentRuntime:
     _last_operator_target_id: str | None = field(default=None, init=False)
     _policy_warmup_error: str | None = field(default=None, init=False)
     _cognition_requested: bool = field(default=True, init=False)
+    _pending_skill_stats: dict[tuple[str, str], SkillStats] = field(
+        default_factory=dict,
+        init=False,
+    )
+    _last_storage_retry_ns: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz <= 0:
@@ -393,6 +401,7 @@ class AgentRuntime:
 
         active = self.executor.run
         if active is None or active.outcome != SkillOutcome.RUNNING:
+            self._flush_pending_skill_stats()
             return
         motor_started = time.perf_counter()
         result = self.executor.tick(
@@ -410,11 +419,8 @@ class AgentRuntime:
             self._cognition_requested = True
             stats = self.skills.record(result.run)
             if self.state_db is not None:
-                self.state_db.save_skill_stats(
-                    result.run.skill_id,
-                    result.run.context_key,
-                    stats,
-                )
+                self._pending_skill_stats[(result.run.skill_id, result.run.context_key)] = stats
+                self._flush_pending_skill_stats(force=True)
             if result.run.outcome == SkillOutcome.SUCCEEDED:
                 self.metrics.skill_successes += 1
             elif result.run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
@@ -711,6 +717,26 @@ class AgentRuntime:
                     parameters=decision.skill_parameters,
                 )
 
+    def _flush_pending_skill_stats(self, *, force: bool = False) -> None:
+        if self.state_db is None or not self._pending_skill_stats:
+            return
+        now = time.monotonic_ns()
+        if not force and now - self._last_storage_retry_ns < 1_000_000_000:
+            return
+        self._last_storage_retry_ns = now
+        for key, stats in tuple(self._pending_skill_stats.items()):
+            try:
+                self.state_db.save_skill_stats(key[0], key[1], stats)
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).casefold() and "busy" not in str(exc).casefold():
+                    raise
+                self.metrics.storage_contentions += 1
+                self.metrics.last_storage_error = f"{type(exc).__name__}: {exc}"
+                return
+            else:
+                self._pending_skill_stats.pop(key, None)
+                self.metrics.last_storage_error = None
+
     def _queued_operator_message_waiting(self) -> bool:
         if self.state_db is None:
             return False
@@ -802,6 +828,9 @@ class AgentRuntime:
             "last_motor_ms": round(self.metrics.last_motor_ms, 3),
             "stale_frame_skips": self.metrics.stale_frame_skips,
             "consecutive_stale_frames": self.metrics.consecutive_stale_frames,
+            "storage_contentions": self.metrics.storage_contentions,
+            "storage_backlog": len(self._pending_skill_stats),
+            "last_storage_error": self.metrics.last_storage_error,
             "active_skill": None if running is None else running.skill_id,
             "active_skill_parameters": self.executor.parameters,
             "active_instruction": self.executor.instruction,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 
 import pytest
@@ -18,6 +19,8 @@ from minecraft_ai.planning import Goal, GoalScorer
 from minecraft_ai.roles import BUILTIN_ROLES, get_role
 from minecraft_ai.cognition import CognitionDecision
 from minecraft_ai.runtime import (
+    AgentRuntime,
+    RuntimeMetrics,
     _authorized_game_chat,
     _active_operator_messages,
     _first_feasible_recovery,
@@ -28,7 +31,14 @@ from minecraft_ai.runtime import (
     _semantic_refresh_allowed,
 )
 from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
-from minecraft_ai.skills import SkillLibrary, SkillOutcome, SkillRun, SkillSpec, SkillStage
+from minecraft_ai.skills import (
+    SkillLibrary,
+    SkillOutcome,
+    SkillRun,
+    SkillSpec,
+    SkillStage,
+    SkillStats,
+)
 
 
 def test_blackboard_rejects_instance_switch_and_stale_fact() -> None:
@@ -263,6 +273,41 @@ def test_optional_semantics_yield_to_cognition_and_operator_work() -> None:
             **blocked,
         }
         assert not _semantic_refresh_allowed(**inputs)
+
+
+def test_realtime_skill_stats_survive_transient_database_contention() -> None:
+    class _FlakyDatabase:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def save_skill_stats(
+            self,
+            skill_id: str,
+            context_key: str,
+            stats: SkillStats,
+        ) -> None:
+            del skill_id, context_key, stats
+            self.calls += 1
+            if self.calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+
+    database = _FlakyDatabase()
+    runtime = object.__new__(AgentRuntime)
+    runtime.state_db = database
+    runtime.metrics = RuntimeMetrics()
+    runtime._pending_skill_stats = {("navigate", "default"): SkillStats(successes=1)}
+    runtime._last_storage_retry_ns = 0
+
+    runtime._flush_pending_skill_stats(force=True)
+
+    assert runtime.metrics.storage_contentions == 1
+    assert runtime.metrics.last_storage_error == "OperationalError: database is locked"
+    assert runtime._pending_skill_stats
+
+    runtime._flush_pending_skill_stats(force=True)
+
+    assert not runtime._pending_skill_stats
+    assert runtime.metrics.last_storage_error is None
 
 
 def test_matching_operator_region_publishes_geometry_without_guessing_semantics() -> None:

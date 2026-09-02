@@ -41,6 +41,12 @@ class StateDatabase:
     def close(self) -> None:
         self.connection.close()
 
+    def set_busy_timeout_ms(self, milliseconds: int) -> None:
+        """Bound how long this connection may block its caller on writer contention."""
+        if milliseconds < 0 or milliseconds > 60_000:
+            raise ValueError("busy timeout must be between 0 and 60000 milliseconds")
+        self.connection.execute(f"PRAGMA busy_timeout={milliseconds}")
+
     def __enter__(self) -> StateDatabase:
         return self
 

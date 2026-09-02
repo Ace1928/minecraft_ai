@@ -140,6 +140,14 @@ def test_current_schema_open_does_not_reexecute_migration_ddl(
     assert calls == 0
 
 
+def test_busy_timeout_can_be_bounded_for_realtime_callers(tmp_path: Path) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        database.set_busy_timeout_ms(100)
+        timeout = database.connection.execute("PRAGMA busy_timeout").fetchone()
+
+    assert timeout == (100,)
+
+
 def test_v5_migration_adds_accept_time_and_benchmark_evidence(tmp_path: Path) -> None:
     path = tmp_path / "state.sqlite3"
     connection = sqlite3.connect(path)

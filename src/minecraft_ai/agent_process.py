@@ -151,6 +151,9 @@ def main(argv: list[str] | None = None) -> int:
                 shard_steps=config.trajectory.shard_steps,
                 queue_size=config.trajectory.queue_size,
             )
+        # Startup and migrations may wait for the operator console, but the
+        # realtime loop must never spend seconds blocked behind a UI write.
+        database.set_busy_timeout_ms(100)
         runtime = AgentRuntime(
             perception=perception,
             blackboard=blackboard,
