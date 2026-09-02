@@ -127,7 +127,6 @@ class Supervisor:
             self._persist_status()
 
     def attach_bedrock_x11(self, display: str, window_id: int) -> dict[str, Any]:
-        """Attach the live backend to one isolated Bedrock X window."""
         if emergency_stop_latched():
             raise RuntimeError("emergency stop is latched")
         from .platforms.bedrock_x11 import IsolatedX11InputBackend
@@ -141,7 +140,6 @@ class Supervisor:
         return self.status()
 
     def arm(self, target_instance: str) -> dict[str, Any]:
-        """Create a motor lease, then atomically expose the ARMED state."""
         with self._lock:
             if emergency_stop_latched():
                 raise RuntimeError("emergency stop is latched")
@@ -174,11 +172,7 @@ class Supervisor:
 
     def apply_motor_action(self, lease_id: str, raw_action: object) -> dict[str, Any]:
         with self._lock:
-            if emergency_stop_latched():
-                self.fail("emergency-stop-latched")
-                raise RuntimeError("emergency stop is latched")
-            if self.state != SupervisorState.RUNNING:
-                raise RuntimeError(f"motor actions require RUNNING, got {self.state}")
+            self._require_running_lease(lease_id)
             action = MotorAction.model_validate(raw_action)
             self.motor.apply(lease_id, action)
             return {
@@ -186,8 +180,37 @@ class Supervisor:
                 "lease_active": self.motor.lease is not None,
             }
 
+    def send_chat(self, lease_id: str, text: str) -> dict[str, Any]:
+        """Send player chat through the already scoped Minecraft input backend."""
+        with self._lock:
+            self._require_running_lease(lease_id)
+            if not text or len(text) > 256:
+                raise ValueError("chat text must contain 1..256 characters")
+            if any(ord(char) < 32 or ord(char) > 126 for char in text):
+                raise ValueError("chat currently supports printable ASCII only")
+            actuator = getattr(self.backend, "type_chat", None)
+            if not callable(actuator):
+                raise RuntimeError("active motor backend does not support scoped chat typing")
+            try:
+                actuator(text)
+            except Exception as exc:
+                self.fail(f"chat-backend-fault:{type(exc).__name__}")
+                raise
+            return {"sent": True, "characters": len(text)}
+
+    def _require_running_lease(self, lease_id: str) -> None:
+        if emergency_stop_latched():
+            self.fail("emergency-stop-latched")
+            raise RuntimeError("emergency stop is latched")
+        if self.state != SupervisorState.RUNNING:
+            raise RuntimeError(f"motor interaction requires RUNNING, got {self.state}")
+        lease = self.motor.lease
+        if lease is None or lease.lease_id != lease_id or lease.expired():
+            self.motor.revoke("invalid-runtime-lease")
+            self.fail("invalid-runtime-lease")
+            raise RuntimeError("invalid or expired runtime motor lease")
+
     def activate(self) -> None:
-        """Enter RUNNING only while a valid motor lease is already held."""
         with self._lock:
             if emergency_stop_latched():
                 self.fail("emergency-stop-latched")
@@ -355,6 +378,10 @@ class Supervisor:
             elif command == "motor-action":
                 lease_id = str(payload.get("lease_id", ""))
                 result = self.apply_motor_action(lease_id, payload.get("action"))
+            elif command == "chat":
+                lease_id = str(payload.get("lease_id", ""))
+                text = str(payload.get("text", ""))
+                result = self.send_chat(lease_id, text)
             elif command == "disarm":
                 self.disarm()
                 result = self.status()
@@ -399,7 +426,6 @@ def send_command(command: str, **payload: Any) -> dict[str, Any]:
 
 
 def supervisor_alive() -> bool:
-    """Use authenticated control-plane reachability as the liveness check."""
     try:
         send_command("status")
     except Exception:
