@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from collections.abc import Iterable
 from enum import StrEnum
-from typing import Iterable, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -135,7 +136,9 @@ class KnowledgeGraph:
         self._out[edge.source].append(edge.edge_id)
         self._in[edge.target].append(edge.edge_id)
 
-    def outgoing(self, node_id: str, kinds: Iterable[EdgeKind] | None = None) -> list[KnowledgeEdge]:
+    def outgoing(
+        self, node_id: str, kinds: Iterable[EdgeKind] | None = None
+    ) -> list[KnowledgeEdge]:
         allowed = None if kinds is None else frozenset(kinds)
         return [
             self.edges[edge_id]
@@ -143,7 +146,9 @@ class KnowledgeGraph:
             if allowed is None or self.edges[edge_id].kind in allowed
         ]
 
-    def incoming(self, node_id: str, kinds: Iterable[EdgeKind] | None = None) -> list[KnowledgeEdge]:
+    def incoming(
+        self, node_id: str, kinds: Iterable[EdgeKind] | None = None
+    ) -> list[KnowledgeEdge]:
         allowed = None if kinds is None else frozenset(kinds)
         return [
             self.edges[edge_id]
@@ -217,12 +222,12 @@ class KnowledgeGraph:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, object]) -> "KnowledgeGraph":
+    def from_dict(cls, payload: dict[str, object]) -> KnowledgeGraph:
         version_raw = payload.get("version")
         nodes_raw = payload.get("nodes")
         edges_raw = payload.get("edges")
         if not isinstance(version_raw, dict) or not isinstance(nodes_raw, list) or not isinstance(edges_raw, list):
-            raise ValueError("invalid graph payload")
+            raise TypeError("invalid graph payload")
         graph = cls(GameVersion.model_validate(version_raw))
         for raw in nodes_raw:
             graph.add_node(KnowledgeNode.model_validate(raw))
