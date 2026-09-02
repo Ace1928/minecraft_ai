@@ -103,11 +103,12 @@ class ScopedBridgeBackend:
             if lease.target_instance != identity.instance_id:
                 self._fail_closed("lease-target-mismatch")
                 raise MotorRejected("motor lease targets another Minecraft instance")
+            remaining_ms = _remaining_lease_ms(lease)
             message = LeaseBind(
                 lease_id=lease.lease_id,
                 supervisor_session_id=lease.session_id,
                 target_instance_id=lease.target_instance,
-                expires_monotonic_ns=lease.expires_monotonic_ns,
+                ttl_ms=remaining_ms,
                 allowed_actions=frozenset(lease.allowed_actions),
                 max_action_duration_ms=lease.max_action_duration_ms,
                 first_sequence=lease.first_sequence,
@@ -127,17 +128,12 @@ class ScopedBridgeBackend:
             if lease is None:
                 self._fail_closed("missing-lease")
                 raise MotorRejected("scoped bridge has no bound lease")
-            if lease.expired():
-                self._fail_closed("expired-lease")
-                raise MotorRejected("scoped bridge lease expired")
-            deadline = min(
-                lease.expires_monotonic_ns,
-                time.monotonic_ns() + max(action.duration_ms, 1) * 1_000_000,
-            )
+            remaining_ms = _remaining_lease_ms(lease)
+            action_ttl_ms = max(1, min(remaining_ms, max(action.duration_ms, 1)))
             command = InputCommand(
                 lease_id=lease.lease_id,
                 sequence=action.sequence,
-                deadline_monotonic_ns=deadline,
+                ttl_ms=action_ttl_ms,
                 keys_down=action.keys_down,
                 keys_up=action.keys_up,
                 buttons_down=action.buttons_down,
@@ -229,6 +225,13 @@ class ScopedBridgeBackend:
             except OSError:
                 pass
         self.close()
+
+
+def _remaining_lease_ms(lease: MotorLease) -> int:
+    remaining_ns = lease.expires_monotonic_ns - time.monotonic_ns()
+    if remaining_ns <= 0:
+        raise MotorRejected("scoped bridge lease expired")
+    return max(1, min(5000, remaining_ns // 1_000_000))
 
 
 def _send_model(sock: socket.socket, message: BaseModel) -> None:
