@@ -156,6 +156,15 @@ def test_active_vlm_reports_queued_work_as_unavailable() -> None:
         )
     )
     assert not worker.available()
+    assert not worker.submit(
+        SemanticJob(
+            query=ActivePerceptionQuery(query_id="q-rejected", question="scene", frame_id=2),
+            frame=frame,
+            frame_dhash=frame_dhash(frame),
+        )
+    )
+    assert worker.metrics.busy_rejections == 1
+    assert worker.metrics.queue_replacements == 0
 
 
 def test_slow_vlm_result_survives_frame_age_when_scene_is_visually_unchanged() -> None:

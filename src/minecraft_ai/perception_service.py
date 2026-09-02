@@ -147,6 +147,8 @@ class ActiveVLMWorker:
     _thread: threading.Thread | None = field(default=None, init=False)
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
     _busy: threading.Event = field(default_factory=threading.Event, init=False)
+    _admission_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    _work_admitted: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         self._jobs = queue.Queue(maxsize=self.queue_size)
@@ -169,31 +171,23 @@ class ActiveVLMWorker:
 
     def submit(self, job: SemanticJob) -> bool:
         """Drop stale semantic work instead of blocking realtime capture."""
-        if self._stop.is_set():
-            return False
-        self.metrics.requests += 1
-        # There is no value in queueing a second periodic screenshot behind a
-        # slow one. More importantly, a queued VLM request can acquire the
-        # shared local-model slot before a newly due strategic decision and
-        # turn a 30 second cognition cadence into minutes. Active perception
-        # therefore admits at most one in-flight request; the realtime loop
-        # will ask again with a fresher frame after it completes.
-        if self._busy.is_set():
-            self.metrics.busy_rejections += 1
-            return False
-        try:
-            self._jobs.put_nowait(job)
-            return True
-        except queue.Full:
-            try:
-                self._jobs.get_nowait()
-                self.metrics.queue_replacements += 1
-            except queue.Empty:
+        with self._admission_lock:
+            if self._stop.is_set():
                 return False
+            self.metrics.requests += 1
+            # Admission covers both the queued and executing states. Without
+            # this atomic flag, the worker can dequeue a job just before it
+            # marks itself busy and a second caller can fill the queue in that
+            # narrow window, reproducing the cognition-starvation bug.
+            if self._work_admitted:
+                self.metrics.busy_rejections += 1
+                return False
+            self._work_admitted = True
             try:
                 self._jobs.put_nowait(job)
                 return True
             except queue.Full:
+                self._work_admitted = False
                 return False
 
     def _run(self) -> None:
@@ -219,10 +213,13 @@ class ActiveVLMWorker:
                 continue
             finally:
                 self._busy.clear()
+                with self._admission_lock:
+                    self._work_admitted = False
 
     def available(self) -> bool:
         """Return whether a fresh semantic job can start without queueing."""
-        return not self._stop.is_set() and not self._busy.is_set() and self._jobs.empty()
+        with self._admission_lock:
+            return not self._stop.is_set() and not self._work_admitted
 
     def _inspect(self, job: SemanticJob) -> tuple[SemanticObservation, float]:
         png = _bgra_to_png(job.frame)
