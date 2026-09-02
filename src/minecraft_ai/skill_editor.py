@@ -149,21 +149,33 @@ class SkillEditor:
 
         return None
 
-    def synthesize_recovery_variant(self, skill_id: str, failure_reason: str) -> SkillSpec:
+    def evaluate_and_promote(self, skill_id: str) -> SkillSpec | None:
+        """Public endpoint to evaluate stats and auto-promote skill stage."""
+        return self._try_auto_promote(skill_id)
+
+    def synthesize_recovery_variant(
+        self,
+        skill_id: str | SkillSpec,
+        failure_reason: str = "consecutive_runtime_failures",
+        reason: str | None = None,
+        fallback_skills: tuple[str, ...] = (),
+    ) -> SkillSpec:
         """Create a self-healed, adapted skill variant with additional failure recovery logic."""
-        parent = self.library.get(skill_id)
-        new_id = f"{skill_id}_adapted"
+        target_id = skill_id.skill_id if isinstance(skill_id, SkillSpec) else skill_id
+        effective_reason = reason or failure_reason
+        parent = self.library.get(target_id)
+        new_id = f"{target_id}_adapted"
         new_name = f"{parent.name} (Adapted)"
 
         # Append extra failure condition based on reason
-        extra_condition = SkillCondition(key=failure_reason.split(":")[-1], operator="truthy")
+        extra_condition = SkillCondition(key=effective_reason.split(":")[-1], operator="truthy")
         new_failures = parent.failure_conditions + (extra_condition,)
 
-        recovery = parent.recovery_skills or ("retreat",)
+        recovery = tuple(fallback_skills) if fallback_skills else (parent.recovery_skills or ("retreat",))
         return self.create_skill(
             skill_id=new_id,
             name=new_name,
-            description=f"Self-healed variant of {skill_id} adapted for {failure_reason}",
+            description=f"Self-healed variant of {target_id} adapted for {effective_reason}",
             policy_ref=parent.policy_ref,
             parameters=parent.parameters,
             preconditions=parent.preconditions,
