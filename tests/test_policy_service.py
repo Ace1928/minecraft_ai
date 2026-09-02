@@ -790,6 +790,49 @@ def test_camera_accumulator_preserves_motion_across_motor_ticks(tmp_path: Path) 
     assert status["emitted_camera_total"] == {"mouse_dx": 9, "mouse_dy": -8}
 
 
+def test_next_recurrent_observation_waits_for_complete_camera_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = CapturedFrame(frame_id=1, captured_ns=1, width=1, height=1, bgra=b"\0" * 4)
+    config = _policy_config(tmp_path).model_copy(
+        update={
+            "camera_max_step": 3,
+            "camera_pitch_limit": 100,
+            "camera_recovery_release": 50,
+        }
+    )
+    client = TemporalPolicyClient(config=config, frame_provider=lambda: frame)
+    responses: list[dict[str, object] | None] = [
+        {
+            "output": {
+                "mouse_dx": 9,
+                "inference_ns": 1,
+                "model_version": "official-v1",
+            }
+        },
+        None,
+        None,
+        None,
+    ]
+    submissions: list[int] = []
+    monkeypatch.setattr(client, "_ensure_started", lambda _size: None)
+    monkeypatch.setattr(client, "_consume_pending_response", lambda: responses.pop(0))
+    monkeypatch.setattr(
+        client,
+        "_submit",
+        lambda submitted, _intent, _board: submissions.append(submitted.frame_id),
+    )
+    intent = MotorIntent(skill_id="traverse", mode="traverse")
+    board = PerceptionBlackboard()
+
+    actions = [client.act(board, intent, sequence=sequence) for sequence in range(1, 5)]
+
+    assert [action.mouse_dx for action in actions] == [3, 3, 3, 0]
+    assert submissions == [1]
+    assert client.metrics.camera_feedback_waits == 2
+
+
 def test_async_policy_does_not_double_count_an_already_recorded_deadline_miss(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

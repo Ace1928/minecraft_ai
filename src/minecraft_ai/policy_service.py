@@ -56,6 +56,7 @@ class PolicyServiceMetrics:
     deadline_misses: int = 0
     failures: int = 0
     scene_blocks: int = 0
+    camera_feedback_waits: int = 0
     last_inference_ms: float = 0.0
     last_error: str | None = None
 
@@ -207,6 +208,13 @@ class TemporalPolicyClient:
                 response = None
                 self._discard_pending_response = False
             if response is None:
+                if self._pending_camera != (0, 0):
+                    # Do not ask the recurrent controller to react to a frame
+                    # captured before its complete previous camera action.
+                    # Drain the learned delta through the bounded actuator,
+                    # then submit the first post-action frame on a later tick.
+                    self.metrics.camera_feedback_waits += 1
+                    return self._hold(sequence)
                 self._submit(frame, intent, blackboard)
                 return self._hold(sequence)
             output = LearnedPolicyOutput.model_validate(response["output"])
@@ -216,10 +224,8 @@ class TemporalPolicyClient:
             if output.inference_ns > self.config.deadline_ms * 1_000_000:
                 if not self._consumed_miss_recorded:
                     self.metrics.deadline_misses += 1
-                self._submit(frame, intent, blackboard)
                 return self._release(sequence)
             action = self._output_action(output, sequence)
-            self._submit(frame, intent, blackboard)
             return action
         except Exception as exc:
             self.metrics.failures += 1
@@ -339,6 +345,7 @@ class TemporalPolicyClient:
             "deadline_misses": self.metrics.deadline_misses,
             "failures": self.metrics.failures,
             "scene_blocks": self.metrics.scene_blocks,
+            "camera_feedback_waits": self.metrics.camera_feedback_waits,
             "last_inference_ms": round(self.metrics.last_inference_ms, 3),
             "last_error": self.metrics.last_error,
         }
