@@ -165,9 +165,20 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.CREATED, message.model_dump(mode="json"))
 
     def _get_frame(self) -> None:
-        process = AgentProcess.load()
+        try:
+            process = AgentProcess.load()
+        except (OSError, ValueError, TypeError, KeyError):
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": "agent capture process is not running"},
+            )
+            return
         if not agent_alive(process):
-            raise ValueError("agent capture process is not running")
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": "agent capture process is not running"},
+            )
+            return
         capture = IsolatedX11Capture(
             process.display,
             process.window_id,
@@ -308,6 +319,7 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 .metric{background:#09130f;border:1px solid #1d3028;border-radius:8px;padding:9px}.metric b{display:block;font-size:17px;margin-top:3px}
 .viewer{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:#030705;line-height:0;user-select:none;touch-action:none}
 .viewer img{display:block;width:100%;height:auto;min-height:220px;object-fit:contain}.selection{position:absolute;border:2px solid var(--cyan);background:#70d7e829;box-shadow:0 0 0 1px #001a;display:none;pointer-events:none}
+.prediction{position:absolute;border:2px dashed var(--amber);background:#ffc76618;box-shadow:0 0 12px #ffc76688;display:none;pointer-events:none}
 .ok{color:var(--green)}.bad{color:var(--red)}.amber{color:var(--amber)}#notice{min-height:20px;margin-top:9px;color:var(--muted)}
 @media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}.wide{grid-column:span 2}}
 @media(max-width:540px){main{padding:16px}.grid{grid-template-columns:1fr}.wide,.full{grid-column:1}.row{flex-direction:column}.live{display:none}}
@@ -323,7 +335,7 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 <div class="card"><div class="label">Motor policy</div><div class="value" id="policy">—</div><div id="policyMetrics" class="label"></div></div>
 <div class="card"><div class="label">Camera state</div><div class="value" id="camera">—</div><div id="cameraMode" class="label"></div></div>
 <div class="card wide"><div class="label">Latest cognition</div><div class="reason" id="reason">Waiting for agent telemetry.</div></div></section>
-<section class="card"><h2>Ground ROCKET-2 on the live Bedrock frame</h2><div class="viewer" id="viewer"><img id="worldFrame" alt="Live Bedrock frame" draggable="false"><div class="selection" id="selection"></div></div>
+<section class="card"><h2>Ground ROCKET-2 on the live Bedrock frame</h2><div class="viewer" id="viewer"><img id="worldFrame" alt="Live Bedrock frame" draggable="false"><div class="selection" id="selection"></div><div class="prediction" id="prediction" title="ROCKET-2 learned current-view prediction"></div></div>
 <div class="row"><input id="targetLabel" maxlength="80" value="log" aria-label="Target label"><button id="setTarget">Run ROCKET-2 on selection</button><button class="secondary" id="clearTarget">Clear target</button></div><div id="targetNotice" class="label">Drag a tight box around the object, then submit it as ROCKET-2's cross-view reference.</div></section>
 <section class="card"><h2>Fresh learned perception</h2><pre class="facts" id="facts">Waiting for perception facts.</pre></section>
 <section class="two"><div class="card"><h2>Talk to the high-level agent</h2><textarea id="text" maxlength="2000" placeholder="Give an instruction, ask a question, provide feedback, or correct its current approach…"></textarea>
@@ -336,9 +348,10 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 const $=id=>document.getElementById(id);const esc=v=>v??'—';
 async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);return d}
 function cls(el,good){el.className='value '+(good?'ok':'bad')}
-let dragging=false,startX=0,startY=0,targetBox=null;const viewer=$('viewer'),selection=$('selection'),worldFrame=$('worldFrame');
+let dragging=false,startX=0,startY=0,targetBox=null;const viewer=$('viewer'),selection=$('selection'),prediction=$('prediction'),worldFrame=$('worldFrame');
 function point(e){const r=worldFrame.getBoundingClientRect();return{x:Math.max(0,Math.min(r.width,e.clientX-r.left)),y:Math.max(0,Math.min(r.height,e.clientY-r.top)),w:r.width,h:r.height}}
 function drawBox(box){selection.style.display='block';selection.style.left=(box.x*100)+'%';selection.style.top=(box.y*100)+'%';selection.style.width=(box.width*100)+'%';selection.style.height=(box.height*100)+'%'}
+function drawPrediction(raw,confidence){if(!raw||raw.length!==4||!worldFrame.naturalWidth){prediction.style.display='none';return}const w=worldFrame.naturalWidth,h=worldFrame.naturalHeight,r=16/9;let ox=0,oy=0,cw=w,ch=h;if(w/h>r){cw=h*r;ox=(w-cw)/2}else{ch=w/r;oy=(h-ch)/2}const x=(ox+raw[0]*cw)/w,y=(oy+raw[1]*ch)/h,x1=(ox+raw[2]*cw)/w,y1=(oy+raw[3]*ch)/h;prediction.style.display='block';prediction.style.left=(x*100)+'%';prediction.style.top=(y*100)+'%';prediction.style.width=(Math.max(0,x1-x)*100)+'%';prediction.style.height=(Math.max(0,y1-y)*100)+'%';prediction.title='ROCKET-2 learned target · '+Math.round((confidence||0)*100)+'%'}
 viewer.onpointerdown=e=>{if(!worldFrame.complete)return;const p=point(e);dragging=true;startX=p.x;startY=p.y;viewer.setPointerCapture(e.pointerId);targetBox={x:p.x/p.w,y:p.y/p.h,width:.001,height:.001};drawBox(targetBox)};
 viewer.onpointermove=e=>{if(!dragging)return;const p=point(e),x=Math.min(startX,p.x),y=Math.min(startY,p.y);targetBox={x:x/p.w,y:y/p.h,width:Math.max(1,Math.abs(p.x-startX))/p.w,height:Math.max(1,Math.abs(p.y-startY))/p.h};drawBox(targetBox)};
 viewer.onpointerup=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId)};
@@ -348,8 +361,8 @@ const bi=s.bedrock.instances.length>0; $('bedrock').textContent=bi?'RUNNING':'ST
 const sup=esc(s.supervisor.state);$('supervisor').textContent=sup;cls($('supervisor'),s.supervisor_reachable&&sup!=='FAILSAFE');
 const alive=s.agent.alive;$('agent').textContent=alive?'RUNNING':'DISARMED';cls($('agent'),alive);const t=s.telemetry||{};
 $('skill').textContent=esc(t.active_skill);$('goal').textContent=esc(t.chosen_goal_id||'No active goal');$('reason').textContent=esc(t.reasoning_summary||'Waiting for agent telemetry.');
-$('instruction').textContent=esc(t.active_instruction||'Waiting for an executable option.');const p=t.policy||{};$('policy').textContent=esc(p.model_version||p.policy_id);$('policyMetrics').textContent=(p.last_inference_ms??'—')+' ms · '+(p.goal_conditioned?'goal-conditioned':'unconditioned');
-$('camera').textContent=esc(p.estimated_pitch_units??'—')+' / '+esc(p.camera_pitch_limit??'—');$('cameraMode').textContent=p.camera_recovery_active?'learned horizon recovery':'normal learned control';$('camera').className='value '+(p.camera_recovery_active?'amber':'ok');
+$('instruction').textContent=esc(t.active_instruction||'Waiting for an executable option.');const p=t.policy||{},active=p.active_route==='grounded'?(p.grounded||p):(p.primary||p),pred=active.last_prediction||{};$('policy').textContent=esc(active.model_version||p.policy_id);$('policyMetrics').textContent=(active.last_inference_ms??'—')+' ms · '+esc(p.active_route||active.grounding_mode)+' · target '+(pred.target_exists_probability==null?'—':Math.round(pred.target_exists_probability*100)+'%');
+$('camera').textContent=esc(active.estimated_pitch_units??'—')+' / '+esc(active.camera_pitch_limit??'—');$('cameraMode').textContent=active.camera_recovery_active?'learned horizon recovery':'normal learned control';$('camera').className='value '+(active.camera_recovery_active?'amber':'ok');drawPrediction(pred.target_bbox_xyxy,pred.target_exists_probability);
 const pf=((t.perception||{}).fresh_facts)||{};$('facts').textContent=Object.keys(pf).length?JSON.stringify(pf,null,2):'No fresh semantic facts yet.';
 $('frames').textContent=esc(t.frames||0);$('actions').textContent=esc(t.motor_actions||0);$('capture').textContent=t.last_capture_ms==null?'—':t.last_capture_ms+' ms';
 }catch(e){$('dot').style.background='var(--red)';$('connection').textContent='Disconnected'}}
