@@ -96,6 +96,7 @@ class SkillExecutor:
         intent = MotorIntent(
             skill_id=self._spec.skill_id,
             mode=self._spec.policy_ref or self._spec.skill_id,
+            instruction=_skill_instruction(self._spec, self._parameters),
             parameters=self._parameters,
         )
         action = self.policy.act(blackboard, intent, sequence=sequence)
@@ -128,6 +129,18 @@ class SkillExecutor:
         release = self.policy.reset()
         recovery = self._spec.recovery_skills if recover else ()
         return ExecutionTick(run=self._run, action=release, recovery_skills=recovery)
+
+
+def _skill_instruction(
+    spec: SkillSpec,
+    parameters: dict[str, str | int | float | bool],
+) -> str:
+    """Render the semantic option contract for a goal-conditioned motor policy."""
+    instruction = spec.description.strip() or spec.name.strip()
+    if not parameters:
+        return instruction
+    rendered = ", ".join(f"{key}={parameters[key]}" for key in sorted(parameters))
+    return f"{instruction}. Parameters: {rendered}"
 
 
 def _all_matching(

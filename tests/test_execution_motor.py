@@ -5,7 +5,28 @@ import time
 from minecraft_ai.execution import SkillExecutor
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
+from minecraft_ai.safety import MotorAction
 from minecraft_ai.skills import SkillCondition, SkillOutcome, SkillSpec
+
+
+class _IntentCapturePolicy:
+    policy_id = "capture"
+
+    def __init__(self) -> None:
+        self.intent: MotorIntent | None = None
+
+    def act(
+        self,
+        blackboard: PerceptionBlackboard,
+        intent: MotorIntent,
+        *,
+        sequence: int,
+    ) -> MotorAction:
+        self.intent = intent
+        return MotorAction(sequence=sequence)
+
+    def reset(self) -> MotorAction:
+        return MotorAction(sequence=1)
 
 
 def _board(*facts: PerceptionFact) -> PerceptionBlackboard:
@@ -57,6 +78,25 @@ def test_running_skill_emits_bounded_motor_action() -> None:
     assert tick.action.keys_down == ("w",)
     assert abs(tick.action.mouse_dx) <= policy.max_mouse_step
     assert abs(tick.action.mouse_dy) <= policy.max_mouse_step
+
+
+def test_skill_contract_becomes_learned_policy_instruction() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = SkillSpec(
+        skill_id="mine_log",
+        name="Mine log",
+        description="Approach and mine a visible tree log",
+        policy_ref="mine",
+    )
+    executor.start(spec, run_id="r1", parameters={"wood": "oak"}, now_ns=100)
+
+    executor.tick(_board(), sequence=1, now_ns=200)
+
+    assert policy.intent is not None
+    assert policy.intent.instruction == (
+        "Approach and mine a visible tree log. Parameters: wood=oak"
+    )
 
 
 def test_skill_success_releases_held_input() -> None:
