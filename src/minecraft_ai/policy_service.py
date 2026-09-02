@@ -155,6 +155,10 @@ class TemporalPolicyClient:
     def restore_world_camera_state(self, *, estimated_pitch_units: int) -> None:
         """Restore actuator pitch owned by the persistent supervisor."""
         self._world_camera_state.estimated_pitch_units = estimated_pitch_units
+        limit = self.config.camera_pitch_limit
+        self._camera_recovery_active = bool(
+            limit > 0 and abs(estimated_pitch_units) >= limit
+        )
 
     def target_observation(self) -> GroundedTargetObservation | None:
         return self._last_target_observation
@@ -660,7 +664,11 @@ class TemporalPolicyClient:
         Policy camera outputs represent an angular delta for one source step.
         CPU inference is slower than the 20 Hz actuator, so clipping that delta
         once permanently loses part of the learned action. Queue the converted
-        relative motion and drain it over live motor ticks instead.
+        relative motion and drain it over live motor ticks instead. If repeated
+        learned motion reaches a calibrated pitch pole, a bounded actuator
+        servo returns inside the release envelope while leaving locomotion and
+        interaction outputs intact. This is an actuator invariant, not a
+        replacement navigation policy or synthetic camera training target.
         """
 
         pending_dx, pending_dy = self._pending_camera
@@ -675,22 +683,29 @@ class TemporalPolicyClient:
         pitch_limit = self.config.camera_pitch_limit
         if pitch_limit > 0 and self._pending_camera_semantics == "world":
             current_pitch = self._world_camera_state.estimated_pitch_units
-            proposed = current_pitch + mouse_dy
-            bounded = max(-pitch_limit, min(pitch_limit, proposed))
-            bounded_dy = bounded - current_pitch
-            if bounded_dy != mouse_dy:
-                # The envelope rejected motion farther toward a pitch pole.
-                # Discard queued motion in that same direction so it cannot
-                # reappear after a later, valid correction moves away.
+            release = self.config.camera_recovery_release
+            if self._camera_recovery_active and abs(current_pitch) > release:
+                # Never replay the rejected vertical queue after recovery.
                 remaining_dy = 0
-            mouse_dy = bounded_dy
-            self._world_camera_state.estimated_pitch_units = bounded
-            # Saturation is sufficient: it preserves the learned controller's
-            # task conditioning while preventing cumulative pitch runaway.
-            # Replacing the task with a horizon-recovery prompt caused a live
-            # deadlock because the policy could keep choosing the saturated
-            # direction while all locomotion/interaction was suppressed.
-            self._camera_recovery_active = False
+                distance = abs(current_pitch) - release
+                recovery_step = distance if max_step <= 0 else min(max_step, distance)
+                mouse_dy = -recovery_step if current_pitch > 0 else recovery_step
+                current_pitch += mouse_dy
+                self._world_camera_state.estimated_pitch_units = current_pitch
+                self._camera_recovery_active = abs(current_pitch) > release
+            else:
+                self._camera_recovery_active = False
+                proposed = current_pitch + mouse_dy
+                bounded = max(-pitch_limit, min(pitch_limit, proposed))
+                bounded_dy = bounded - current_pitch
+                if bounded_dy != mouse_dy:
+                    # The envelope rejected motion farther toward a pitch pole.
+                    # Discard it so it cannot reappear after the servo moves
+                    # back toward the useful central viewing envelope.
+                    remaining_dy = 0
+                    self._camera_recovery_active = True
+                mouse_dy = bounded_dy
+                self._world_camera_state.estimated_pitch_units = bounded
         self._pending_camera = (remaining_dx, remaining_dy)
         if remaining_dx == 0 and remaining_dy == 0:
             self._pending_camera_semantics = "world"
@@ -878,6 +893,10 @@ class GroundedPolicyRouter:
     def restore_world_camera_state(self, *, estimated_pitch_units: int) -> None:
         """Restore the one physical pitch accumulator shared by every route."""
         self._world_camera_state.estimated_pitch_units = estimated_pitch_units
+        for policy in self._policies():
+            restore = getattr(policy, "restore_world_camera_state", None)
+            if callable(restore):
+                restore(estimated_pitch_units=estimated_pitch_units)
 
     def _policies(self) -> tuple[MotorPolicy, ...]:
         return (

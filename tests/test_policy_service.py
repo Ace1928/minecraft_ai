@@ -244,6 +244,7 @@ def test_grounded_router_shares_one_physical_pitch_state(tmp_path: Path) -> None
 
     assert primary.status()["estimated_pitch_units"] == -37
     assert grounded.status()["estimated_pitch_units"] == -37
+    assert grounded.status()["camera_recovery_active"] is False
 
 
 def test_grounded_router_merges_temporally_filtered_target_feedback() -> None:
@@ -722,7 +723,7 @@ def test_cursor_motion_does_not_corrupt_world_pitch_estimate(tmp_path: Path) -> 
     assert client._pending_camera_semantics == "world"
 
 
-def test_camera_envelope_saturates_without_replacing_learned_task(
+def test_camera_envelope_recovers_without_replacing_learned_task(
     tmp_path: Path,
 ) -> None:
     config = _policy_config(tmp_path).model_copy(
@@ -745,15 +746,22 @@ def test_camera_envelope_saturates_without_replacing_learned_task(
     assert (second.mouse_dx, second.mouse_dy) == (3, 2)
     assert second.keys_up == ()
     assert second.buttons_up == ()
-    assert client._camera_recovery_active is False
+    assert client._camera_recovery_active is True
     recovery = client._conditioned_intent(MotorIntent(skill_id="explore", mode="explore"))
     assert recovery["skill_id"] == "explore"
     assert recovery["interaction_id"] == -1
 
+    recovered = client._output_action(output, sequence=3)
+    assert (recovered.mouse_dx, recovered.mouse_dy) == (3, -3)
+    assert recovered.keys_up == ()
+    assert recovered.buttons_up == ()
+    assert client._world_camera_state.estimated_pitch_units == 2
+    assert client._camera_recovery_active is False
+
     upward = output.model_copy(update={"keys": (), "buttons": (), "mouse_dy": -9})
-    client._output_action(upward, sequence=3)
     client._output_action(upward, sequence=4)
-    assert client._world_camera_state.estimated_pitch_units == -1
+    client._output_action(upward, sequence=5)
+    assert client._world_camera_state.estimated_pitch_units == -4
     assert client._camera_recovery_active is False
 
 
