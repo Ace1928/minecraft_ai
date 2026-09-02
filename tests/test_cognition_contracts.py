@@ -9,6 +9,7 @@ from minecraft_ai.models import ModelMessage, ModelResponse
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.roles import get_role
 from minecraft_ai.social import OperatorMessage, OperatorMessageStatus
+from minecraft_ai.skills import SkillOutcome, SkillRun
 
 
 class _ShelterSelectingModel:
@@ -101,6 +102,39 @@ class _RepairingModel(_ShelterSelectingModel):
                     "reasoning_summary": "Use the feasible learned exploration option",
                     "chosen_goal_id": "survive",
                     "skill_id": "explore_forward",
+                    "skill_parameters": {},
+                    "say": None,
+                    "request_replan": False,
+                    "ask_perception": [],
+                    "research_query": None,
+                }
+            ),
+            model=self.model_id,
+            latency_ms=1.0,
+        )
+
+
+class _RetryRepairingModel(_ShelterSelectingModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def complete_structured(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        del messages, name, schema
+        self.calls += 1
+        skill_id = "explore_forward" if self.calls == 1 else "reacquire_target"
+        return ModelResponse(
+            text=json.dumps(
+                {
+                    "reasoning_summary": "Use a different learned option after timeout",
+                    "chosen_goal_id": "survive",
+                    "skill_id": skill_id,
                     "skill_parameters": {},
                     "say": None,
                     "request_replan": False,
@@ -263,3 +297,48 @@ def test_prior_agent_response_is_not_replayed_as_operator_instruction() -> None:
     assert payload["active_operator_message"]["text"] == message.text
     assert "response_text" not in payload["active_operator_message"]
     assert "Restart the old" not in model.initial_messages[-1].content
+
+
+def test_literal_operator_action_prohibitions_are_enforced_on_model_output() -> None:
+    message = OperatorMessage(
+        message_id="constraints",
+        created_ns=2,
+        text=(
+            "Continue exploring. Do not attack and do not use or interact. "
+            "Jump over one-block rises."
+        ),
+        status=OperatorMessageStatus.ACKNOWLEDGED,
+    )
+    context = _context()
+    context.operator_messages = (message,)
+    controller = HighLevelController(_CapturingModel(), build_bootstrap_skill_library())
+
+    decision = controller.decide(_board(), context)
+
+    assert decision.skill_parameters["allow_attack"] is False
+    assert decision.skill_parameters["allow_use"] is False
+    assert "allow_jump" not in decision.skill_parameters
+
+
+def test_repeated_timed_out_option_is_repaired_to_different_learned_option() -> None:
+    library = build_bootstrap_skill_library()
+    recent = SkillRun(
+        run_id="timeout-2",
+        skill_id="explore_forward",
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.TIMED_OUT,
+        failure_reason="skill-timeout",
+    )
+    library.record(recent.model_copy(update={"run_id": "timeout-1"}))
+    library.record(recent)
+    context = _context()
+    context.recent_skill_runs = (recent,)
+    model = _RetryRepairingModel()
+    controller = HighLevelController(model, library)
+
+    decision = controller.decide(_board(), context)
+
+    assert decision.skill_id == "reacquire_target"
+    assert model.calls == 2
+    assert controller.metrics.retry_repairs == 1

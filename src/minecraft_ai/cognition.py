@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,8 +14,14 @@ from .models import LanguageModel, ModelMessage
 from .perception import PerceptionBlackboard
 from .planning import Goal
 from .roles import RoleProfile
-from .skills import SkillLibrary
-from .social import OperatorMessage, OperatorMessageKind, Promise, PromiseStatus
+from .skills import SkillLibrary, SkillOutcome, SkillRun
+from .social import (
+    OperatorMessage,
+    OperatorMessageKind,
+    OperatorMessageStatus,
+    Promise,
+    PromiseStatus,
+)
 from .wiki import WikiEvidence
 
 
@@ -41,6 +48,7 @@ class CognitionContext:
     promises: tuple[Promise, ...]
     wiki: tuple[WikiEvidence, ...]
     operator_messages: tuple[OperatorMessage, ...] = ()
+    recent_skill_runs: tuple[SkillRun, ...] = ()
 
 
 @dataclass
@@ -48,6 +56,7 @@ class HighLevelMetrics:
     calls: int = 0
     repairs: int = 0
     failures: int = 0
+    retry_repairs: int = 0
     last_latency_ms: float = 0.0
     last_error: str | None = None
     last_model: str | None = None
@@ -64,6 +73,29 @@ def _operator_prompt_payload(message: OperatorMessage) -> dict[str, object]:
         "priority": message.priority,
         "status": message.status.value,
     }
+
+
+def _explicit_action_constraints(text: str) -> dict[str, bool]:
+    """Translate literal operator prohibitions into the motor option contract.
+
+    This is authority enforcement, not a gameplay policy: it never selects an
+    action and only masks an actuator the operator explicitly prohibited. The
+    strategic model still chooses the skill and every remaining learned action.
+    """
+    constraints: dict[str, bool] = {}
+    normalized = text.casefold()
+    for match in re.finditer(
+        r"\b(?:do\s+not|don't|never|without)\b(?P<scope>[^.!?;]{0,160})",
+        normalized,
+    ):
+        scope = match.group("scope")
+        if re.search(r"\b(?:attack|attacking|hit|hitting|fight|fighting)\b", scope):
+            constraints["allow_attack"] = False
+        if re.search(r"\b(?:use|using|interact|interacting)\b", scope):
+            constraints["allow_use"] = False
+        if re.search(r"\b(?:jump|jumping)\b", scope):
+            constraints["allow_jump"] = False
+    return constraints
 
 
 class BootstrapCognitionPolicy:
@@ -186,30 +218,12 @@ class HighLevelController:
                 if not context.operator_messages
                 else _operator_prompt_payload(context.operator_messages[0]),
                 "wiki_evidence": [item.model_dump(mode="json") for item in context.wiki],
+                "recent_skill_runs": [
+                    run.model_dump(mode="json") for run in context.recent_skill_runs
+                ],
                 "frame": None if latest is None else latest.model_dump(mode="json"),
                 "fresh_facts": facts,
-                "skills": [
-                    {
-                        "skill_id": skill.skill_id,
-                        "name": skill.name,
-                        "description": skill.description,
-                        "stage": skill.stage.value,
-                        "parameters": list(skill.parameters),
-                        "preconditions": [
-                            condition.model_dump(mode="json")
-                            for condition in skill.preconditions
-                        ],
-                        "success_conditions": [
-                            condition.model_dump(mode="json")
-                            for condition in skill.success_conditions
-                        ],
-                        "expected_effects": list(skill.expected_effects),
-                        "currently_feasible": True,
-                        "measured_competence": self.skills.contextual_score(skill.skill_id),
-                    }
-                    for skill in self.skills.specs.values()
-                    if conditions_satisfied(skill.preconditions, blackboard)
-                ],
+                "skills": self._feasible_skill_payloads(blackboard),
             }
             messages = (
                 ModelMessage(
@@ -243,6 +257,11 @@ class HighLevelController:
                         "the prohibition in skill_parameters as allow_attack:false, "
                         "allow_use:false, or allow_jump:false so the policy contract can enforce "
                         "it without replacing learned movement. "
+                        "recent_skill_runs and each skill's evaluation counters are empirical "
+                        "execution evidence. Never repeat the same failed or timed-out option "
+                        "unchanged when its consecutive failures are at least two; select a "
+                        "different feasible learned option, request missing perception, or "
+                        "return no skill with request_replan true. "
                         "Never imply a message was handled while choosing a different goal."
                     ),
                 ),
@@ -295,6 +314,13 @@ class HighLevelController:
                         ),
                         missing=missing,
                     )
+                if self._repeated_failed_option(decision, context):
+                    return self._repair_repeated_failure(
+                        messages,
+                        decision,
+                        blackboard,
+                        context,
+                    )
             self.metrics.last_error = None
             return decision
         except Exception as exc:
@@ -338,8 +364,13 @@ class HighLevelController:
         )
         if not executable and decision.say is None:
             return decision
+        parameters = dict(decision.skill_parameters)
+        parameters.update(_explicit_action_constraints(active.text))
         return decision.model_copy(
-            update={"chosen_goal_id": f"operator:{active.message_id}"}
+            update={
+                "chosen_goal_id": f"operator:{active.message_id}",
+                "skill_parameters": parameters,
+            }
         )
 
     def status(self) -> dict[str, object]:
@@ -348,10 +379,132 @@ class HighLevelController:
             "calls": self.metrics.calls,
             "repairs": self.metrics.repairs,
             "failures": self.metrics.failures,
+            "retry_repairs": self.metrics.retry_repairs,
             "last_latency_ms": round(self.metrics.last_latency_ms, 3),
             "last_error": self.metrics.last_error,
             "last_model": self.metrics.last_model,
         }
+
+    def _feasible_skill_payloads(
+        self,
+        blackboard: PerceptionBlackboard,
+    ) -> list[dict[str, object]]:
+        payloads: list[dict[str, object]] = []
+        for skill in self.skills.specs.values():
+            if not conditions_satisfied(skill.preconditions, blackboard):
+                continue
+            stats = self.skills.stats.get((skill.skill_id, "default"))
+            payloads.append(
+                {
+                    "skill_id": skill.skill_id,
+                    "name": skill.name,
+                    "description": skill.description,
+                    "stage": skill.stage.value,
+                    "parameters": list(skill.parameters),
+                    "preconditions": [
+                        condition.model_dump(mode="json")
+                        for condition in skill.preconditions
+                    ],
+                    "success_conditions": [
+                        condition.model_dump(mode="json")
+                        for condition in skill.success_conditions
+                    ],
+                    "expected_effects": list(skill.expected_effects),
+                    "currently_feasible": True,
+                    "measured_competence": self.skills.contextual_score(skill.skill_id),
+                    "evaluation": {
+                        "attempts": 0 if stats is None else stats.attempts,
+                        "successes": 0 if stats is None else stats.successes,
+                        "failures": 0 if stats is None else stats.failures,
+                        "timeouts": 0 if stats is None else stats.timeouts,
+                        "consecutive_failures": (
+                            0 if stats is None else stats.consecutive_failures
+                        ),
+                    },
+                }
+            )
+        return payloads
+
+    def _repeated_failed_option(
+        self,
+        decision: CognitionDecision,
+        context: CognitionContext,
+    ) -> bool:
+        if decision.skill_id is None or not context.recent_skill_runs:
+            return False
+        if context.operator_messages and context.operator_messages[0].status in {
+            OperatorMessageStatus.QUEUED,
+            OperatorMessageStatus.DELIVERED,
+        }:
+            # A fresh, explicit operator retry gets one evidence-producing attempt.
+            return False
+        recent = context.recent_skill_runs[0]
+        if recent.skill_id != decision.skill_id or recent.outcome not in {
+            SkillOutcome.FAILED,
+            SkillOutcome.TIMED_OUT,
+        }:
+            return False
+        stats = self.skills.stats.get((decision.skill_id, recent.context_key))
+        return stats is not None and stats.consecutive_failures >= 2
+
+    def _repair_repeated_failure(
+        self,
+        messages: tuple[ModelMessage, ...],
+        decision: CognitionDecision,
+        blackboard: PerceptionBlackboard,
+        context: CognitionContext,
+    ) -> CognitionDecision:
+        failed_skill = decision.skill_id
+        assert failed_skill is not None
+        feasible = sorted(
+            skill.skill_id
+            for skill in self.skills.specs.values()
+            if skill.skill_id != failed_skill
+            and conditions_satisfied(skill.preconditions, blackboard)
+        )
+        recent = context.recent_skill_runs[0]
+        self.metrics.repairs += 1
+        self.metrics.retry_repairs += 1
+        repair_messages = (
+            *messages,
+            ModelMessage(role="assistant", content=decision.model_dump_json()),
+            ModelMessage(
+                role="user",
+                content=(
+                    f"That decision is rejected by empirical execution evidence: option "
+                    f"{failed_skill!r} just ended as {recent.outcome.value!r} with reason "
+                    f"{recent.failure_reason!r} and has repeated consecutive failures. Do not "
+                    "restart it unchanged. Select a different feasible learned option from "
+                    f"{json.dumps(feasible)}, or return skill_id null, request_replan true, "
+                    "and request the perception needed to choose safely. Preserve the current "
+                    "goal and explicit operator action constraints."
+                ),
+            ),
+        )
+        repaired = self._complete(repair_messages)
+        repaired = self._scope_operator_decision(repaired, blackboard, context)
+        if repaired.skill_id is None and repaired.request_replan:
+            self.metrics.last_error = None
+            return repaired
+        if repaired.skill_id in feasible:
+            self.metrics.last_error = None
+            return repaired
+        self.metrics.last_error = f"repeated-option-blocked:{failed_skill}"
+        return decision.model_copy(
+            update={
+                "reasoning_summary": (
+                    f"Blocked repeated {failed_skill} after empirical timeout/failure evidence."
+                ),
+                "skill_id": None,
+                "skill_parameters": {},
+                "request_replan": True,
+                "ask_perception": tuple(
+                    dict.fromkeys(
+                        (*decision.ask_perception, "walkable route around the obstacle")
+                    )
+                ),
+            }
+        )
 
     def _complete(self, messages: tuple[ModelMessage, ...]) -> CognitionDecision:
         structured = getattr(self.model, "complete_structured", None)

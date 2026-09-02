@@ -96,6 +96,9 @@ def test_skill_contract_becomes_learned_policy_instruction() -> None:
 
     assert policy.intent is not None
     assert policy.intent.instruction == "mine log"
+    assert executor.parameters == {"wood": "oak"}
+    assert executor.run is not None
+    assert executor.run.parameters == {"wood": "oak"}
     assert executor.instruction == "Approach and mine a visible tree log. Parameters: wood=oak"
 
 

@@ -35,6 +35,11 @@ class SkillExecutor:
             return None
         return _skill_instruction(self._spec, self._parameters)
 
+    @property
+    def parameters(self) -> dict[str, str | int | float | bool]:
+        """Return the active option bindings without exposing mutable executor state."""
+        return dict(self._parameters)
+
     def close(self) -> None:
         close = getattr(self.policy, "close", None)
         if callable(close):
@@ -59,6 +64,7 @@ class SkillExecutor:
             skill_id=spec.skill_id,
             started_ns=started,
             context_key=context_key,
+            parameters=self._parameters,
         )
         return self._run
 

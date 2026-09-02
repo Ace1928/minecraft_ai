@@ -62,6 +62,7 @@ class SkillRun(BaseModel):
     ended_ns: int | None = None
     outcome: SkillOutcome = SkillOutcome.RUNNING
     context_key: str = "default"
+    parameters: dict[str, str | int | float | bool] = Field(default_factory=dict)
     failure_reason: str | None = None
 
 

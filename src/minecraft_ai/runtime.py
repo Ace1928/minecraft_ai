@@ -4,6 +4,7 @@ import concurrent.futures
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 
 from .cognition import (
@@ -21,7 +22,7 @@ from .perception_service import RealtimePerceptionService
 from .planning import Goal
 from .roles import RoleProfile
 from .safety import MotorAction
-from .skills import SkillLibrary, SkillOutcome
+from .skills import SkillLibrary, SkillOutcome, SkillRun
 from .social import (
     OperatorMessage,
     OperatorMessageKind,
@@ -166,6 +167,12 @@ class AgentRuntime:
     _pool: concurrent.futures.ThreadPoolExecutor = field(init=False)
     _last_decision: CognitionDecision | None = field(default=None, init=False)
     _pending_operator_message_ids: tuple[str, ...] = field(default=(), init=False)
+    _recent_skill_runs: deque[SkillRun] = field(
+        default_factory=lambda: deque(maxlen=8),
+        init=False,
+    )
+    _execution_revision: int = field(default=0, init=False)
+    _pending_execution_revision: int = field(default=0, init=False)
     _last_operator_target_id: str | None = field(default=None, init=False)
     _policy_warmup_error: str | None = field(default=None, init=False)
     _cognition_requested: bool = field(default=True, init=False)
@@ -288,6 +295,8 @@ class AgentRuntime:
             self._send_motor(result.action)
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
         if result.run.outcome != SkillOutcome.RUNNING:
+            self._recent_skill_runs.appendleft(result.run)
+            self._execution_revision += 1
             self._cognition_requested = True
             stats = self.skills.record(result.run)
             if self.state_db is not None:
@@ -458,6 +467,7 @@ class AgentRuntime:
             )
         self._last_cognition_ns = now
         self._cognition_requested = False
+        self._pending_execution_revision = self._execution_revision
         self.metrics.cognition_calls += 1
 
     def _consume_cognition(self) -> None:
@@ -471,6 +481,13 @@ class AgentRuntime:
             self._last_cognition_ns = time.monotonic_ns()
             return
         self._last_cognition_ns = time.monotonic_ns()
+        if self._pending_execution_revision != self._execution_revision:
+            # The decision was sampled before the option produced terminal
+            # evidence. Re-evaluate with that failure/success in context rather
+            # than immediately replaying the stale option choice.
+            self._pending_operator_message_ids = ()
+            self._cognition_requested = True
+            return
         if self._queued_operator_message_waiting():
             # This decision was produced from an older context snapshot. A
             # fresh operator message has higher authority and must be included
@@ -516,10 +533,15 @@ class AgentRuntime:
         if decision.skill_id is not None:
             running = self.executor.run
             if running is not None and running.outcome == SkillOutcome.RUNNING:
-                if running.skill_id != decision.skill_id:
+                if (
+                    running.skill_id != decision.skill_id
+                    or self.executor.parameters != decision.skill_parameters
+                ):
                     cancelled = self.executor.cancel()
                     if cancelled.action is not None:
                         self._send_motor(cancelled.action)
+                    self._recent_skill_runs.appendleft(cancelled.run)
+                    self._execution_revision += 1
                     spec = self.skills.get(decision.skill_id)
                     self.executor.start(
                         spec,
@@ -566,6 +588,7 @@ class AgentRuntime:
             promises=self.social.active_promises(),
             wiki=(),
             operator_messages=operator_messages,
+            recent_skill_runs=tuple(self._recent_skill_runs),
         )
 
     def _telemetry_payload(self, *, state: str) -> dict[str, object]:
@@ -621,8 +644,12 @@ class AgentRuntime:
             "stale_frame_skips": self.metrics.stale_frame_skips,
             "consecutive_stale_frames": self.metrics.consecutive_stale_frames,
             "active_skill": None if running is None else running.skill_id,
+            "active_skill_parameters": self.executor.parameters,
             "active_instruction": self.executor.instruction,
             "skill_outcome": None if running is None else running.outcome.value,
+            "recent_skill_runs": [
+                run.model_dump(mode="json") for run in self._recent_skill_runs
+            ],
             "chosen_goal_id": None if decision is None else decision.chosen_goal_id,
             "reasoning_summary": None if decision is None else decision.reasoning_summary,
             "cognition": cognition_status,
