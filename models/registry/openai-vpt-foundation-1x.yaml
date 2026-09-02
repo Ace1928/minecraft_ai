@@ -1,0 +1,30 @@
+schema_version: 1
+model_version: openai-vpt-foundation-1x
+provider: openai
+architecture: VPT 1x MinecraftPolicy
+purpose: human-interface temporal behavior prior
+promotion_status: candidate-live-foundation
+goal_conditioned: false
+temporal_memory: true
+source:
+  repository: https://github.com/openai/Video-Pre-Training
+  commit: 095519fbd4ee0e9281d19f19601e45629de9ac3f
+  license: MIT
+artifacts:
+  model:
+    url: https://openaipublic.blob.core.windows.net/minecraft-rl/models/foundation-model-1x.model
+    sha256: d3cf019ef5452bd5a6cc0bddcedfdf66b90f682d23db00fcb364389ab1dde294
+  weights:
+    url: https://openaipublic.blob.core.windows.net/minecraft-rl/models/foundation-model-1x.weights
+    sha256: 016a7f435aed16e03d33d9ea086baec68f9d64ce391057304273fde78975d1ee
+runtime:
+  edition_trained: Java
+  target_edition: Bedrock
+  target_status: unadapted-domain-transfer
+  measured_device: AMD Ryzen 5 5500 CPU, 4 inference threads
+  measured_step_ms: 35-48
+  measured_date: 2026-09-02
+limitations:
+  - This foundation checkpoint is not goal conditioned.
+  - Java-to-Bedrock input and visual domain adaptation is not yet trained.
+  - It is not eligible for preferred-policy claims until it beats the frozen Bedrock baseline.

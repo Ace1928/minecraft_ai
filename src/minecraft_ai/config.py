@@ -26,6 +26,29 @@ class TrajectoryConfig(BaseModel):
     queue_size: int = Field(default=512, ge=32, le=8192)
 
 
+class PolicyConfig(BaseModel):
+    """Configuration for the isolated learned visuomotor policy process."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    provider: str = "openai-vpt"
+    python_path: str = ""
+    source_path: str = ""
+    model_path: str = ""
+    weights_path: str = ""
+    model_sha256: str = ""
+    weights_sha256: str = ""
+    model_version: str = ""
+    source_commit: str = ""
+    license: str = ""
+    device: str = "cpu"
+    threads: int = Field(default=4, ge=1, le=64)
+    deadline_ms: int = Field(default=48, ge=10, le=500)
+    stochastic: bool = True
+    seed: int = 1928
+
+
 class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -37,6 +60,7 @@ class RuntimeConfig(BaseModel):
     lease_renew_ms: int = Field(default=500, ge=100, le=2000)
     high_level: ModelConfig = Field(default_factory=ModelConfig)
     vision_language: ModelConfig = Field(default_factory=ModelConfig)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
     trajectory: TrajectoryConfig = Field(default_factory=TrajectoryConfig)
     online_wiki: bool = True
 

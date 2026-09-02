@@ -1,4 +1,5 @@
 .venv/
+/.venv-policy/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -17,4 +18,3 @@ build/
 *.sqlite3-wal
 *.log
 .env
-

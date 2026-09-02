@@ -116,6 +116,7 @@ class AgentRuntime:
             except Exception:
                 pass
             self.perception.close()
+            self.executor.close()
             if self.trajectory is not None:
                 try:
                     self.trajectory.close()
@@ -360,6 +361,12 @@ class AgentRuntime:
     def _telemetry_payload(self, *, state: str) -> dict[str, object]:
         running = self.executor.run
         decision = self._last_decision
+        policy_status: dict[str, object] = {"policy_id": self.executor.policy.policy_id}
+        status = getattr(self.executor.policy, "status", None)
+        if callable(status):
+            reported = status()
+            if isinstance(reported, dict):
+                policy_status = reported
         return {
             "schema_version": 1,
             "state": state,
@@ -378,6 +385,7 @@ class AgentRuntime:
             "skill_outcome": None if running is None else running.outcome.value,
             "chosen_goal_id": None if decision is None else decision.chosen_goal_id,
             "reasoning_summary": None if decision is None else decision.reasoning_summary,
+            "policy": policy_status,
             "updated_monotonic_ns": time.monotonic_ns(),
         }
 

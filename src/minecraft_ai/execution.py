@@ -29,6 +29,11 @@ class SkillExecutor:
     def run(self) -> SkillRun | None:
         return self._run
 
+    def close(self) -> None:
+        close = getattr(self.policy, "close", None)
+        if callable(close):
+            close()
+
     def start(
         self,
         spec: SkillSpec,

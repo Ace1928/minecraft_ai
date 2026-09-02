@@ -13,10 +13,11 @@ from .config import app_paths, load_config
 from .datasets import DatasetSource, DatasetSourceType, TrajectoryManifest
 from .execution import SkillExecutor
 from .models import OpenAICompatibleLocalModel
-from .motor import BootstrapMotorPolicy
+from .motor import BootstrapMotorPolicy, MotorPolicy
 from .perception import PerceptionBlackboard
 from .perception_service import ActiveVLMWorker, RealtimePerceptionService
 from .platforms.bedrock_x11 import IsolatedX11Capture
+from .policy_service import TemporalPolicyClient
 from .roles import get_role
 from .runtime import AgentRuntime
 from .storage import StateDatabase
@@ -92,7 +93,15 @@ def main(argv: list[str] | None = None) -> int:
             stale_frame_ms=config.stale_frame_ms,
             active_vlm=active_vlm,
         )
-        executor = SkillExecutor(BootstrapMotorPolicy())
+        policy: MotorPolicy
+        if config.policy.enabled:
+            policy = TemporalPolicyClient(
+                config.policy,
+                frame_provider=lambda: perception.last_capture,
+            )
+        else:
+            policy = BootstrapMotorPolicy()
+        executor = SkillExecutor(policy)
         trajectory: TrajectoryRecorder | None = None
         if config.trajectory.enabled:
             trajectory_id = new_trajectory_id("bedrock-agent")
