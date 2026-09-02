@@ -39,6 +39,8 @@ from .supervisor import send_command
 
 def _semantic_deadline_ms(semantic_hz: float) -> int:
     """Bound request lifetime independently from a slower query cadence."""
+    if semantic_hz <= 0:
+        raise ValueError("periodic semantic frequency must be positive")
     return min(10_000, max(250, int(1000 / semantic_hz)))
 
 
@@ -325,8 +327,10 @@ class AgentRuntime:
     _last_operator_storage_retry_ns: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
-        if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz <= 0:
-            raise ValueError("runtime frequencies must be positive")
+        if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz < 0:
+            raise ValueError(
+                "motor/cognition frequencies must be positive and semantic nonnegative"
+            )
         if self.stale_frame_consecutive_limit < 1:
             raise ValueError("stale_frame_consecutive_limit must be positive")
         self._pool = concurrent.futures.ThreadPoolExecutor(
@@ -540,7 +544,9 @@ class AgentRuntime:
         self.metrics.motor_actions += 1
 
     def _request_semantics_if_due(self, frame_id: int) -> None:
-        if self.perception.active_vlm is None:
+        # semantic_hz=0 is event-only active perception. Explicit questions from
+        # cognition still flow through _consume_cognition below.
+        if self.semantic_hz <= 0 or self.perception.active_vlm is None:
             return
         if not _semantic_refresh_allowed(
             cognition_requested=self._cognition_requested,

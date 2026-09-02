@@ -250,6 +250,23 @@ def test_empty_dependency_graph_is_valid() -> None:
 def test_semantic_request_deadline_is_bounded_below_query_cadence() -> None:
     assert _semantic_deadline_ms(2.0) == 500
     assert _semantic_deadline_ms(0.03) == 10_000
+    with pytest.raises(ValueError, match="must be positive"):
+        _semantic_deadline_ms(0.0)
+
+
+def test_zero_semantic_frequency_disables_only_periodic_refresh() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.semantic_hz = 0.0
+
+    class _Perception:
+        active_vlm = object()
+
+        def semantic_available(self) -> bool:
+            raise AssertionError("event-only mode must not schedule periodic semantics")
+
+    runtime.perception = _Perception()  # type: ignore[assignment]
+
+    runtime._request_semantics_if_due(frame_id=1)
 
 
 def test_optional_semantics_yield_to_cognition_and_operator_work() -> None:

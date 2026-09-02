@@ -97,7 +97,10 @@ class RuntimeConfig(BaseModel):
     role: str = "generalist"
     motor_hz: float = Field(default=20.0, ge=5.0, le=60.0)
     cognition_hz: float = Field(default=0.5, gt=0.0, le=10.0)
-    semantic_hz: float = Field(default=2.0, gt=0.0, le=20.0)
+    # Zero is an intentional event-only mode: cognition and tactical events may
+    # still submit active-perception questions, but no periodic VLM narration is
+    # generated. This is the appropriate mode for a capable, slower local VLM.
+    semantic_hz: float = Field(default=2.0, ge=0.0, le=20.0)
     stale_frame_ms: int = Field(default=500, ge=100, le=5000)
     stale_frame_consecutive_limit: int = Field(default=3, ge=1, le=20)
     lease_renew_ms: int = Field(default=500, ge=100, le=2000)
