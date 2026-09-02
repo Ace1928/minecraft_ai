@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from .skills import SkillCondition, SkillLibrary, SkillSpec, SkillStage
+from .skills import (
+    SkillActionPermissions,
+    SkillCondition,
+    SkillLibrary,
+    SkillSpec,
+    SkillStage,
+)
 
 
 def build_bootstrap_skill_library() -> SkillLibrary:
@@ -14,7 +20,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
     specs = (
         SkillSpec(
             skill_id="approach_visible_target",
-            version=3,
+            version=4,
             name="Approach visible target",
             description=(
                 "Approach the visually localized target across safe terrain, keep it near the "
@@ -34,10 +40,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             max_duration_ms=15_000,
             policy_ref="approach",
             policy_instruction="approach the visible target",
+            action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
         ),
         SkillSpec(
             skill_id="reacquire_target",
-            version=3,
+            version=4,
             name="Reacquire target",
             description=(
                 "Look around deliberately to find the requested target again, stabilize it near "
@@ -50,6 +57,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             max_duration_ms=8_000,
             policy_ref="explore",
             policy_instruction="find the target",
+            action_permissions=SkillActionPermissions(
+                allow_attack=False,
+                allow_use=False,
+                allow_jump=False,
+            ),
         ),
         SkillSpec(
             skill_id="mine_visible_block",
@@ -98,7 +110,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="retreat_from_danger",
-            version=3,
+            version=4,
             name="Retreat from danger",
             description=(
                 "Move away from the immediate hazard toward visible safe ground while keeping "
@@ -111,10 +123,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             max_duration_ms=10_000,
             policy_ref="retreat",
             policy_instruction="escape danger",
+            action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
         ),
         SkillSpec(
             skill_id="escape_submersion",
-            version=1,
+            version=2,
             name="Escape submersion",
             description=(
                 "Swim to the visible surface, keep moving until the air HUD disappears, and "
@@ -131,10 +144,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             max_duration_ms=12_000,
             policy_ref="escape_submersion",
             policy_instruction="swim to the surface and leave the water",
+            action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
         ),
         SkillSpec(
             skill_id="explore_forward",
-            version=4,
+            version=5,
             name="Explore forward",
             description=(
                 "Traverse visible open terrain to discover a genuinely new area, keep the view "
@@ -152,6 +166,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             # benchmark wording. The checkpoint still chooses every key,
             # camera delta, and jump; this is goal conditioning, not a macro.
             policy_instruction="Run around and explore the Minecraft world.",
+            action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
         ),
         SkillSpec(
             skill_id="use_target",
@@ -206,7 +221,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="close_open_inventory",
-            version=1,
+            version=2,
             name="Close open inventory",
             description=(
                 "Close the currently open Bedrock inventory through STEVE-1's learned inventory "
@@ -221,10 +236,15 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             # is a grounded world-interaction controller and cannot emit it.
             policy_ref="close_inventory",
             policy_instruction="close inventory",
+            action_permissions=SkillActionPermissions(
+                allow_attack=False,
+                allow_use=False,
+                allow_jump=False,
+            ),
         ),
         SkillSpec(
             skill_id="place_block",
-            version=3,
+            version=4,
             name="Place block",
             description=(
                 "Select the requested block, aim at a stable adjacent face, place it once, and "
@@ -237,10 +257,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             max_duration_ms=5_000,
             policy_ref="place",
             policy_instruction="place a block",
+            action_permissions=SkillActionPermissions(allow_attack=False, allow_jump=False),
         ),
         SkillSpec(
             skill_id="gather_nearby_wood",
-            version=2,
+            version=3,
             name="Gather nearby wood",
             description=(
                 "Find a nearby tree, approach a visible trunk rather than leaves, mine connected "
@@ -260,6 +281,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             max_duration_ms=90_000,
             policy_ref="gather_wood",
             policy_instruction="mine log",
+            action_permissions=SkillActionPermissions(allow_use=False),
         ),
         SkillSpec(
             skill_id="craft_wood_planks",

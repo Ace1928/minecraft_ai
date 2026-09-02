@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from .motor import MotorIntent, MotorPolicy
 from .perception import PerceptionBlackboard
 from .safety import MotorAction
-from .skills import SkillCondition, SkillOutcome, SkillRun, SkillSpec
+from .skills import SkillActionPermissions, SkillCondition, SkillOutcome, SkillRun, SkillSpec
 
 
 @dataclass(frozen=True)
@@ -40,6 +40,13 @@ class SkillExecutor:
     def parameters(self) -> dict[str, str | int | float | bool]:
         """Return the active option bindings without exposing mutable executor state."""
         return dict(self._parameters)
+
+    @property
+    def policy_parameters(self) -> dict[str, str | int | float | bool]:
+        """Return option bindings intersected with the skill's action contract."""
+        if self._spec is None or self._run is None:
+            return {}
+        return _policy_parameters(self._spec.action_permissions, self._parameters)
 
     def close(self) -> None:
         close = getattr(self.policy, "close", None)
@@ -123,7 +130,7 @@ class SkillExecutor:
             mode=self._spec.policy_ref or self._spec.skill_id,
             instruction=_policy_instruction(self._spec),
             target_label=_target_label(self._parameters),
-            parameters=self._parameters,
+            parameters=self.policy_parameters,
         )
         action = self.policy.act(blackboard, intent, sequence=sequence)
         return ExecutionTick(run=self._run, action=action)
@@ -185,6 +192,19 @@ def _target_label(parameters: dict[str, str | int | float | bool]) -> str | None
     if not isinstance(target, str) or not target.strip():
         return None
     return target.strip()
+
+
+def _policy_parameters(
+    permissions: SkillActionPermissions,
+    parameters: dict[str, str | int | float | bool],
+) -> dict[str, str | int | float | bool]:
+    """Intersect planner/operator bindings with an option's learned-action envelope."""
+    merged = dict(parameters)
+    for name in ("allow_attack", "allow_use", "allow_jump"):
+        skill_allows = bool(getattr(permissions, name))
+        runtime_allows = parameters.get(name) is not False
+        merged[name] = skill_allows and runtime_allows
+    return merged
 
 
 def conditions_satisfied(

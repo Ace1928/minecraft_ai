@@ -24,6 +24,23 @@ class SkillCondition(BaseModel):
     min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
+class SkillActionPermissions(BaseModel):
+    """Actions a learned option may emit while satisfying a skill contract.
+
+    These permissions do not choose movement or synthesize a macro. They form a
+    fail-closed boundary around the learned controller so, for example, a
+    retreat option cannot turn an ambiguous visual observation into mining.
+    Runtime/operator constraints may further remove permissions, but can never
+    grant an action forbidden by the skill contract.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allow_attack: bool = True
+    allow_use: bool = True
+    allow_jump: bool = True
+
+
 class SkillSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -42,6 +59,7 @@ class SkillSpec(BaseModel):
     max_duration_ms: int = Field(default=30_000, ge=50, le=3_600_000)
     policy_ref: str | None = None
     policy_instruction: str | None = Field(default=None, min_length=1, max_length=256)
+    action_permissions: SkillActionPermissions = Field(default_factory=SkillActionPermissions)
     compatible_editions: tuple[str, ...] = ("bedrock", "java")
     compatible_versions: tuple[str, ...] = ()
 

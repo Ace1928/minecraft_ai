@@ -159,6 +159,11 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert "Bedrock crafting interface" in crafting.description
     assert crafting.success_conditions[0].key == "inventory.crafting_table"
     assert retreat.preconditions[0].key == "danger.immediate"
+    assert retreat.action_permissions.allow_attack is False
+    assert retreat.action_permissions.allow_use is False
+    assert retreat.action_permissions.allow_jump is True
+    assert skills.get("explore_forward").action_permissions.allow_attack is False
+    assert skills.get("explore_forward").action_permissions.allow_jump is True
     assert close_inventory.policy_ref == "close_inventory"
     assert close_inventory.policy_instruction == "close inventory"
     assert close_inventory.success_conditions[0].key == "scene.playable"

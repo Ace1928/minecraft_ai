@@ -6,7 +6,7 @@ from minecraft_ai.execution import SkillExecutor
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.safety import MotorAction
-from minecraft_ai.skills import SkillCondition, SkillOutcome, SkillSpec
+from minecraft_ai.skills import SkillActionPermissions, SkillCondition, SkillOutcome, SkillSpec
 
 
 class _IntentCapturePolicy:
@@ -108,6 +108,36 @@ def test_skill_contract_becomes_learned_policy_instruction() -> None:
     assert executor.instruction == (
         "Approach and mine a visible tree log. Parameters: target=oak_log, wood=oak"
     )
+
+
+def test_skill_action_permissions_bound_learned_policy_without_replacing_it() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = SkillSpec(
+        skill_id="retreat",
+        name="Retreat",
+        policy_ref="retreat",
+        action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
+    )
+    executor.start(
+        spec,
+        run_id="r1",
+        parameters={"allow_attack": True, "allow_jump": False},
+        now_ns=100,
+    )
+
+    executor.tick(_board(), sequence=1, now_ns=200)
+
+    assert policy.intent is not None
+    assert policy.intent.parameters == {
+        "allow_attack": False,
+        "allow_jump": False,
+        "allow_use": False,
+    }
+    # Planner bindings remain stable, so policy constraints cannot cause the
+    # runtime to cancel/restart an otherwise identical option every tick.
+    assert executor.parameters == {"allow_attack": True, "allow_jump": False}
+    assert executor.policy_parameters == policy.intent.parameters
 
 
 def test_skill_success_releases_held_input() -> None:
