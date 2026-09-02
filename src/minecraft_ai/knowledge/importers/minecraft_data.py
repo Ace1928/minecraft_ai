@@ -42,7 +42,8 @@ def import_minecraft_data(root: str | Path, version: GameVersion) -> KnowledgeGr
     mapping = edition_paths.get(version.version_id)
     if not isinstance(mapping, dict):
         raise MinecraftDataError(
-            f"minecraft-data does not map exact {version.edition.value} version {version.version_id}"
+            "minecraft-data does not map exact "
+            f"{version.edition.value} version {version.version_id}"
         )
 
     graph = KnowledgeGraph(version)
@@ -157,12 +158,10 @@ def _import_recipes(
         ingredients = recipe.get("ingredients")
         if isinstance(ingredients, list):
             for index, ingredient in enumerate(ingredients):
-                for alternative_index, (name, quantity) in enumerate(
-                    _ingredient_alternatives(ingredient)
-                ):
+                alternatives = _ingredient_alternatives(ingredient)
+                for alternative_index, (name, quantity) in enumerate(alternatives):
                     item_id = _ensure_item(graph, name)
                     group = f"{process_id}:ingredient:{index}"
-                    alternatives = _ingredient_alternatives(ingredient)
                     graph.add_edge(
                         KnowledgeEdge(
                             edge_id=(
