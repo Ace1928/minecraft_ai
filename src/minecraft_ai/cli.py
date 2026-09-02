@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import platform
@@ -13,6 +14,14 @@ import typer
 from platformdirs import user_data_dir, user_runtime_dir
 from rich import print
 
+from .agent_lifecycle import (
+    AGENT_LOG,
+    AgentProcess,
+    agent_alive,
+    launch_agent_process,
+    stop_agent_process,
+)
+from .config import ensure_default_config, load_config
 from .emergency import (
     clear_emergency_stop,
     emergency_reason,
@@ -33,20 +42,24 @@ from .platforms.bedrock_session import (
 )
 from .roles import BUILTIN_ROLES
 from .supervisor import CONTROL_FILE, STATUS_FILE, send_command, supervisor_alive
+from .wiki import WikiService
 
 app = typer.Typer(help="Minecraft AI lifecycle and tooling CLI.")
 knowledge_app = typer.Typer(help="Versioned game knowledge commands.")
 bedrock_app = typer.Typer(help="BedrockOnLinux isolated-session commands.")
 roles_app = typer.Typer(help="Agent role/archetype commands.")
+config_app = typer.Typer(help="Local runtime/model configuration commands.")
 app.add_typer(knowledge_app, name="knowledge")
 app.add_typer(bedrock_app, name="bedrock")
 app.add_typer(roles_app, name="roles")
+app.add_typer(config_app, name="config")
 
 APP_NAME = "minecraft-ai"
 DATA_DIR = Path(user_data_dir(APP_NAME))
 RUNTIME_DIR = Path(user_runtime_dir(APP_NAME))
 LOG_FILE = DATA_DIR / "logs" / "supervisor.log"
 KNOWLEDGE_DIR = DATA_DIR / "knowledge"
+WIKI_CACHE = DATA_DIR / "wiki-cache"
 DEFAULT_EDITION = Edition.BEDROCK
 
 
@@ -55,6 +68,7 @@ def _ensure_dirs() -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+    WIKI_CACHE.mkdir(parents=True, exist_ok=True)
 
 
 def _read_status_file() -> dict[str, object]:
@@ -75,7 +89,9 @@ def _command(command: str, **payload: object) -> dict[str, object]:
 
 
 def _graph_path(version: GameVersion) -> Path:
-    safe_version = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in version.version_id)
+    safe_version = "".join(
+        ch if ch.isalnum() or ch in ".-_" else "_" for ch in version.version_id
+    )
     return KNOWLEDGE_DIR / f"{version.edition.value}-{safe_version}.json"
 
 
@@ -99,6 +115,7 @@ def _bedrock_version_or_error(explicit: str | None) -> str:
 
 
 def _session_payload(session: BedrockSession) -> dict[str, object]:
+    alive = bedrock_session_alive(session)
     return {
         "display": session.display,
         "host_display": session.host_display,
@@ -107,16 +124,32 @@ def _session_payload(session: BedrockSession) -> dict[str, object]:
         "width": session.width,
         "height": session.height,
         "mode": session.mode,
-        "alive": bedrock_session_alive(session),
-        "minecraft_window": session.find_window() if bedrock_session_alive(session) else None,
+        "alive": alive,
+        "minecraft_window": session.find_window() if alive else None,
+    }
+
+
+def _agent_payload() -> dict[str, object] | None:
+    try:
+        process = AgentProcess.load()
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    return {
+        "pid": process.pid,
+        "alive": agent_alive(process),
+        "role": process.role,
+        "display": process.display,
+        "window_id": process.window_id,
+        "instance_id": process.instance_id,
     }
 
 
 @app.command()
 def install() -> None:
-    """Prepare local state and report all runtime dependencies/capabilities."""
+    """Prepare local state/config and report runtime dependencies/capabilities."""
     _ensure_dirs()
-    print("[green]Minecraft AI bootstrap prepared.[/green]")
+    config_path = ensure_default_config()
+    print(f"[green]Minecraft AI bootstrap prepared.[/green] config={config_path}")
     doctor()
 
 
@@ -128,7 +161,6 @@ def doctor() -> None:
     bol = discover_bedrock_linux_install() if linux else None
     bedrock_instances = find_bedrock_linux_instances() if linux else []
     selected_build = bol.selected_build if bol is not None else None
-    session: BedrockSession | None
     try:
         session = BedrockSession.load() if BEDROCK_SESSION_FILE.exists() else None
     except (OSError, ValueError, TypeError, KeyError):
@@ -143,6 +175,7 @@ def doctor() -> None:
         "data_dir": str(DATA_DIR),
         "runtime_dir": str(RUNTIME_DIR),
         "supervisor": "running" if supervisor_alive() else "stopped",
+        "agent": _agent_payload(),
         "emergency_stop": {
             "latched": emergency_stop_latched(),
             "reason": emergency_reason(),
@@ -173,8 +206,6 @@ def doctor() -> None:
 
 
 def _module_available(name: str) -> bool:
-    import importlib.util
-
     return importlib.util.find_spec(name) is not None
 
 
@@ -182,10 +213,11 @@ def _module_available(name: str) -> bool:
 def run(
     role: str = typer.Option("generalist", help="Role/archetype profile."),
     edition: Edition = typer.Option(DEFAULT_EDITION, "--edition"),
-    live: bool = typer.Option(False, help="Attach the isolated Bedrock motor backend."),
+    live: bool = typer.Option(False, help="Run the realtime isolated Bedrock agent."),
 ) -> None:
-    """Start the independent supervisor; optionally attach isolated Bedrock input."""
+    """Start supervisor; with --live attach Bedrock and start the player loop."""
     _ensure_dirs()
+    ensure_default_config()
     if role not in BUILTIN_ROLES:
         raise typer.BadParameter(f"unknown role {role!r}; see `minecraft-ai roles list`")
     if emergency_stop_latched():
@@ -205,6 +237,9 @@ def run(
     if not live:
         print("Motor control remains SAFE_IDLE/unarmed.")
         return
+    if agent_alive():
+        print("[yellow]Realtime agent process is already running.[/yellow]")
+        return
 
     try:
         session = BedrockSession.load()
@@ -218,17 +253,30 @@ def run(
     _command("attach-bedrock-x11", display=session.display, window_id=window_id)
     install = discover_bedrock_linux_install()
     build = install.selected_build if install is not None else None
-    target = f"bedrock:{build.version if build is not None else 'unknown'}:x11:{window_id}"
+    version = build.version if build is not None else "unknown"
+    target = f"bedrock:{version}:x11:{window_id}"
     armed = _command("arm", target_instance=target)
     lease = armed.get("lease")
     if not isinstance(lease, dict) or not isinstance(lease.get("lease_id"), str):
         raise typer.BadParameter("supervisor did not return a valid motor lease")
+    lease_id = str(lease["lease_id"])
     _command("activate")
+    try:
+        process = launch_agent_process(
+            lease_id=lease_id,
+            display=session.display,
+            window_id=window_id,
+            instance_id=target,
+            role=role,
+        )
+    except Exception as exc:
+        _command("disarm")
+        raise typer.BadParameter(f"realtime agent failed to start: {exc}") from exc
     print(
-        "[bold green]LIVE BEDROCK BACKEND ARMED[/bold green] "
-        f"display={session.display} window={window_id}"
+        "[bold green]LIVE BEDROCK AGENT STARTED[/bold green] "
+        f"pid={process.pid} display={session.display} window={window_id}"
     )
-    print("No host-global input backend is enabled. Emergency stop remains independently latched.")
+    print("Host-global input is not enabled; emergency stop remains independent.")
 
 
 def _start_supervisor(role: str) -> None:
@@ -255,7 +303,7 @@ def _start_supervisor(role: str) -> None:
 
 @app.command()
 def status() -> None:
-    """Show live supervisor state, or the last persisted safe state."""
+    """Show supervisor, realtime agent and emergency-stop status."""
     if supervisor_alive():
         payload = send_command("status")
     else:
@@ -263,28 +311,31 @@ def status() -> None:
         payload["supervisor_reachable"] = False
         payload["emergency_stop_latched"] = emergency_stop_latched()
         payload["emergency_stop_reason"] = emergency_reason()
+    payload["agent"] = _agent_payload()
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @app.command()
 def pause() -> None:
     """Pause the agent and revoke motor capability immediately."""
+    stop_agent_process()
     payload = _command("pause")
     print(f"[yellow]{payload['state']}[/yellow] — motor capability revoked.")
 
 
 @app.command()
 def resume() -> None:
-    """Return a paused supervisor to SAFE_IDLE; this never arms live input."""
+    """Return a paused supervisor to SAFE_IDLE; run --live to re-arm gameplay."""
     if emergency_stop_latched():
         raise typer.BadParameter("Emergency stop is latched; reset it explicitly first.")
     payload = _command("resume")
-    print(f"[green]{payload['state']}[/green] — live input remains unarmed.")
+    print(f"[green]{payload['state']}[/green] — run --live to attach gameplay again.")
 
 
 @app.command()
 def stop() -> None:
-    """Normal stop: control socket first, OS-level PID termination as fallback."""
+    """Stop realtime agent first, then stop the independent supervisor."""
+    stop_agent_process()
     if not CONTROL_FILE.exists():
         print("[bold red]STOPPED[/bold red] — no supervisor endpoint exists.")
         return
@@ -296,7 +347,7 @@ def stop() -> None:
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         if not supervisor_alive():
-            print("[bold red]STOPPED[/bold red] — supervisor is no longer reachable.")
+            print("[bold red]STOPPED[/bold red] — agent and supervisor are no longer reachable.")
             return
         time.sleep(0.05)
     raise typer.BadParameter("supervisor did not stop; use `minecraft-ai emergency-stop`")
@@ -304,31 +355,47 @@ def stop() -> None:
 
 @app.command("emergency-stop")
 def emergency_stop(reason: str = typer.Option("operator-emergency-stop", "--reason")) -> None:
-    """Latch a stop and terminate the registered supervisor without using IPC."""
+    """Latch stop and terminate agent/supervisor without depending on normal IPC."""
     engage_emergency_stop(reason)
-    terminated = terminate_registered_supervisor()
+    agent_terminated = stop_agent_process(timeout_s=1.0)
+    supervisor_terminated = terminate_registered_supervisor()
     print("[bold red]EMERGENCY STOP LATCHED[/bold red]")
-    print(f"OS-level supervisor termination attempted: {terminated}")
-    print("The agent cannot be restarted until `minecraft-ai reset-emergency-stop` is run.")
+    print(f"Agent termination attempted: {agent_terminated}")
+    print(f"Supervisor termination attempted: {supervisor_terminated}")
+    print("The agent cannot restart until `minecraft-ai reset-emergency-stop` is run.")
 
 
 @app.command("reset-emergency-stop")
 def reset_emergency_stop() -> None:
-    """Clear the persistent stop latch. This does not start or arm the agent."""
-    if supervisor_alive():
-        raise typer.BadParameter("Stop the supervisor before resetting the emergency latch.")
+    """Clear persistent stop latch. This does not start or arm the agent."""
+    if supervisor_alive() or agent_alive():
+        raise typer.BadParameter("Stop the agent and supervisor before resetting the latch.")
     clear_emergency_stop()
     print("[green]Emergency stop latch cleared.[/green] Agent remains stopped.")
 
 
 @app.command()
 def logs(lines: int = typer.Option(80, min=1, max=2000)) -> None:
-    """Show the tail of the supervisor log."""
-    if not LOG_FILE.exists():
-        print("No supervisor log yet.")
-        return
-    content = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
-    print("\n".join(content[-lines:]))
+    """Show the tail of supervisor and realtime-agent logs."""
+    for label, path in (("supervisor", LOG_FILE), ("agent", AGENT_LOG)):
+        print(f"[bold]{label}[/bold] {path}")
+        if not path.exists():
+            print("No log yet.")
+            continue
+        content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        print("\n".join(content[-lines:]))
+
+
+@config_app.command("show")
+def config_show() -> None:
+    config = load_config()
+    print(json.dumps(config.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@config_app.command("init")
+def config_init() -> None:
+    path = ensure_default_config()
+    print(f"[green]Configuration ready:[/green] {path}")
 
 
 @bedrock_app.command("status")
@@ -379,7 +446,8 @@ def bedrock_launch(
 
 @bedrock_app.command("stop")
 def bedrock_stop() -> None:
-    """Stop the managed Bedrock nested session and its launcher process group."""
+    """Stop realtime control then the managed Bedrock nested session."""
+    stop_agent_process()
     if supervisor_alive():
         current = send_command("status")
         if bool(current.get("live_capable")):
@@ -403,9 +471,19 @@ def roles_list() -> None:
 
 
 @app.command()
-def wiki(query: str) -> None:
-    """Placeholder for exact-version sourced game Q&A."""
-    print(f"Wiki service not implemented yet. Query preserved: {query!r}")
+def wiki(
+    query: str,
+    version: str | None = typer.Option(None, "--version"),
+    edition: Edition = typer.Option(DEFAULT_EDITION, "--edition"),
+) -> None:
+    """Search version-locked Minecraft Wiki evidence for player/game questions."""
+    resolved = _bedrock_version_or_error(version) if edition == Edition.BEDROCK else version
+    if not resolved:
+        raise typer.BadParameter("--version is required for Java wiki lookup")
+    service = WikiService(WIKI_CACHE)
+    evidence = service.search(query, GameVersion(edition=edition, version_id=resolved))
+    payload = [item.model_dump(mode="json") for item in evidence]
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @knowledge_app.command("sync")
