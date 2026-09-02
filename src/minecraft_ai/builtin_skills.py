@@ -157,7 +157,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="explore_forward",
-            version=5,
+            version=6,
             name="Explore forward",
             description=(
                 "Traverse visible open terrain to discover a genuinely new area, keep the view "
@@ -170,11 +170,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=("escape_submersion", "retreat_from_danger"),
             max_duration_ms=12_000,
             policy_ref="explore",
-            # Keep the motor command within STEVE-1's short-horizon text
-            # distribution while matching MineStudio's published exploration
-            # benchmark wording. The checkpoint still chooses every key,
-            # camera delta, and jump; this is goal conditioning, not a macro.
-            policy_instruction="Run around and explore the Minecraft world.",
+            # Use the exact public STEVE-1 evaluation prompt. Its text prior is
+            # not an instruction-following LLM: paraphrases can map to materially
+            # different behavior latents. The checkpoint still chooses every
+            # key, camera delta, and jump; this is learned goal conditioning.
+            policy_instruction="go explore",
             action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
         ),
         SkillSpec(
