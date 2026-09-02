@@ -66,7 +66,7 @@ class SkillExecutor:
 
         if now - self._run.started_ns > self._spec.max_duration_ms * 1_000_000:
             return self._finish(SkillOutcome.TIMED_OUT, now, "skill-timeout")
-        failed = _first_matching(self._spec.failure_conditions, blackboard)
+        failed = _first_matching(self._spec.failure_conditions, blackboard, now_ns=now)
         if failed is not None:
             return self._finish(
                 SkillOutcome.FAILED,
@@ -75,10 +75,12 @@ class SkillExecutor:
                 recover=True,
             )
         if self._spec.success_conditions and _all_matching(
-            self._spec.success_conditions, blackboard
+            self._spec.success_conditions, blackboard, now_ns=now
         ):
             return self._finish(SkillOutcome.SUCCEEDED, now, None)
-        if self._spec.preconditions and not _all_matching(self._spec.preconditions, blackboard):
+        if self._spec.preconditions and not _all_matching(
+            self._spec.preconditions, blackboard, now_ns=now
+        ):
             return self._finish(
                 SkillOutcome.FAILED,
                 now,
@@ -126,22 +128,31 @@ class SkillExecutor:
 def _all_matching(
     conditions: tuple[SkillCondition, ...],
     blackboard: PerceptionBlackboard,
+    now_ns: int | None = None,
 ) -> bool:
-    return all(_matches(condition, blackboard) for condition in conditions)
+    return all(_matches(condition, blackboard, now_ns=now_ns) for condition in conditions)
 
 
 def _first_matching(
     conditions: tuple[SkillCondition, ...],
     blackboard: PerceptionBlackboard,
+    now_ns: int | None = None,
 ) -> SkillCondition | None:
     for condition in conditions:
-        if _matches(condition, blackboard):
+        if _matches(condition, blackboard, now_ns=now_ns):
             return condition
     return None
 
 
-def _matches(condition: SkillCondition, blackboard: PerceptionBlackboard) -> bool:
-    fact = blackboard.fact(condition.key, min_confidence=condition.min_confidence)
+def _matches(
+    condition: SkillCondition,
+    blackboard: PerceptionBlackboard,
+    now_ns: int | None = None,
+) -> bool:
+    try:
+        fact = blackboard.fact(condition.key, min_confidence=condition.min_confidence, now_ns=now_ns)
+    except TypeError:
+        fact = blackboard.fact(condition.key, min_confidence=condition.min_confidence)
     if condition.operator == "exists":
         return fact is not None
     if fact is None:

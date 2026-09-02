@@ -108,7 +108,7 @@ class DependencyPlanner:
     """Deterministic dependency expander used below generative cognition."""
 
     graph: KnowledgeGraph
-    skills: SkillLibrary
+    skills: SkillLibrary = field(default_factory=SkillLibrary)
 
     def dependency_nodes(self, target_node: str) -> set[str]:
         if target_node not in self.graph.nodes:

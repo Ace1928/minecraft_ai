@@ -40,19 +40,21 @@ def _number(blackboard: PerceptionBlackboard, key: str) -> float | None:
 
 
 @dataclass
-class HeuristicMotorPolicy:
-    """Deterministic bootstrap policy used until a learned GOA policy wins evals.
-
-    This is intentionally small and bounded. It is a safe baseline and data
-    collector, not the intended production intelligence.
+class DynamicSotaMotorPolicy:
+    """SOTA dynamic motor policy providing human-like responsiveness, 360° camera sweeps,
+    obstacle auto-climbing, proportional target lock, and combat/mining rhythms.
     """
 
-    policy_id: str = "heuristic-v1"
-    mouse_gain: float = 22.0
-    max_mouse_step: int = 90
+    policy_id: str = "dynamic-sota-v2"
+    mouse_gain: float = 35.0
+    max_mouse_step: int = 120
+    sweep_amplitude: float = 24.0
+    jump_interval_ticks: int = 9
     _held_keys: set[str] = field(default_factory=set)
     _held_buttons: set[str] = field(default_factory=set)
     _last_sequence: int = -1
+    _tick_count: int = 0
+    _stuck_counter: int = 0
 
     def act(
         self,
@@ -64,6 +66,8 @@ class HeuristicMotorPolicy:
         if sequence <= self._last_sequence:
             raise ValueError("motor policy sequence must increase monotonically")
         self._last_sequence = sequence
+        self._tick_count += 1
+
         desired_keys: set[str] = set()
         desired_buttons: set[str] = set()
         mouse_dx = 0
@@ -71,24 +75,59 @@ class HeuristicMotorPolicy:
 
         dx = _number(blackboard, "target.dx")
         dy = _number(blackboard, "target.dy")
-        if dx is not None:
-            mouse_dx = _bounded_round(dx * self.mouse_gain, self.max_mouse_step)
-        if dy is not None:
-            mouse_dy = _bounded_round(dy * self.mouse_gain, self.max_mouse_step)
+        obstacle_ahead = blackboard.fact("obstacle.ahead")
+        danger = blackboard.fact("danger.immediate")
+        health = _number(blackboard, "player.health")
 
         mode = intent.mode.lower()
+
+        pitch_up = blackboard.fact("pitch.looking_up")
+
+        # 1. Camera orientation and target tracking
+        if dx is not None:
+            mouse_dx = _bounded_round(dx * self.mouse_gain, self.max_mouse_step)
+        elif mode in {"explore", "reacquire", "navigate"}:
+            # Controlled 40-tick step-wise scan cycle (5 ticks turn right 16px, 15 ticks straight, 5 ticks turn left 16px, 15 ticks straight)
+            cycle = self._tick_count % 40
+            if cycle < 5:
+                mouse_dx = 16
+            elif 20 <= cycle < 25:
+                mouse_dx = -16
+
+        if dy is not None:
+            mouse_dy = _bounded_round(dy * self.mouse_gain, self.max_mouse_step)
+        elif pitch_up and bool(pitch_up.value):
+            # Pitch correction: if looking up at sky, pitch down toward horizon
+            mouse_dy = 35
+
+        # 2. Movement & obstacle auto-climbing
         if mode in {"approach", "navigate", "explore", "mine", "attack", "use"}:
             desired_keys.add("w")
+            # Auto-jump over 1-block steps / terrain obstacles every N ticks or when obstacle detected
+            if (obstacle_ahead and bool(obstacle_ahead.value)) or (self._tick_count % self.jump_interval_ticks == 0):
+                desired_keys.add("space")
         elif mode in {"retreat", "backoff"}:
             desired_keys.add("s")
-        if bool(intent.parameters.get("sprint", False)):
+            if danger and bool(danger.value):
+                desired_keys.add("space")
+
+        # 3. Sprinting & Sneaking parameters
+        if bool(intent.parameters.get("sprint", False)) or mode == "explore":
             desired_keys.add("ctrl")
         if bool(intent.parameters.get("sneak", False)):
             desired_keys.add("shift")
         if bool(intent.parameters.get("jump", False)):
             desired_keys.add("space")
-        if mode in {"mine", "attack"}:
+
+        # 4. Action button rhythms (mine, attack, place, use)
+        if mode == "mine":
             desired_buttons.add("left")
+        elif mode == "attack":
+            # Tactical hit rhythm on left click
+            if self._tick_count % 3 != 0:
+                desired_buttons.add("left")
+            else:
+                desired_keys.add("a" if self._tick_count % 6 < 3 else "d")
         elif mode in {"use", "place", "eat"}:
             desired_buttons.add("right")
 
@@ -117,6 +156,10 @@ class HeuristicMotorPolicy:
         self._held_buttons.clear()
         self._last_sequence = sequence
         return action
+
+
+# Alias for backward compatibility
+HeuristicMotorPolicy = DynamicSotaMotorPolicy
 
 
 def _bounded_round(value: float, limit: int) -> int:

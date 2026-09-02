@@ -8,6 +8,7 @@ from .memory import MemoryKind, MemoryRecord, MemoryStore
 from .planning import Goal
 from .skills import SkillLibrary, SkillSpec, SkillStats
 from .social import Promise, SharedProject, SocialState
+from .spatial import PlaceRecord, SpatialPlaceMemory
 
 
 SCHEMA_VERSION = 1
@@ -74,6 +75,17 @@ class StateDatabase:
                 project_id TEXT PRIMARY KEY,
                 payload TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS spatial_places (
+                place_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                dimension TEXT NOT NULL,
+                x REAL NOT NULL,
+                y REAL NOT NULL,
+                z REAL NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_spatial_places_kind_dim
+                ON spatial_places(kind, dimension);
             """
         )
         current = self.connection.execute(
@@ -122,6 +134,38 @@ class StateDatabase:
         for (payload,) in rows:
             store.upsert(MemoryRecord.model_validate_json(payload))
         return store
+
+    def save_place(self, record: PlaceRecord) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO spatial_places(place_id, kind, dimension, x, y, z, payload)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(place_id) DO UPDATE SET
+                kind=excluded.kind,
+                dimension=excluded.dimension,
+                x=excluded.x,
+                y=excluded.y,
+                z=excluded.z,
+                payload=excluded.payload
+            """,
+            (
+                record.place_id,
+                record.kind.value,
+                record.dimension,
+                record.x,
+                record.y,
+                record.z,
+                record.model_dump_json(),
+            ),
+        )
+        self.connection.commit()
+
+    def load_places(self) -> SpatialPlaceMemory:
+        rows = self.connection.execute("SELECT payload FROM spatial_places").fetchall()
+        memory = SpatialPlaceMemory()
+        for (payload,) in rows:
+            memory.upsert(PlaceRecord.model_validate_json(payload))
+        return memory
 
     def save_skill(self, spec: SkillSpec) -> None:
         self.connection.execute(

@@ -126,12 +126,16 @@ class Supervisor:
             self.motor = MotorGate(backend)
             self._persist_status()
 
-    def attach_bedrock_x11(self, display: str, window_id: int) -> dict[str, Any]:
+    def attach_bedrock_x11(
+        self, display: str, window_id: int, *, allow_host: bool = False
+    ) -> dict[str, Any]:
         if emergency_stop_latched():
             raise RuntimeError("emergency stop is latched")
         from .platforms.bedrock_x11 import IsolatedX11InputBackend
 
-        backend = IsolatedX11InputBackend(display, target_window_id=window_id)
+        backend = IsolatedX11InputBackend(
+            display, target_window_id=window_id, allow_host=allow_host
+        )
         try:
             self.replace_backend(backend)
         except Exception:
@@ -149,6 +153,7 @@ class Supervisor:
             lease = self.motor.issue(
                 session_id=self.session_id,
                 target_instance=target_instance,
+                ttl_ms=3000,
             )
             self.state = SupervisorState.ARMED
             self._persist_status()
@@ -364,7 +369,8 @@ class Supervisor:
             elif command == "attach-bedrock-x11":
                 display = str(payload.get("display", ""))
                 window_id = int(payload.get("window_id", 0))
-                result = self.attach_bedrock_x11(display, window_id)
+                allow_host = bool(payload.get("allow_host", False))
+                result = self.attach_bedrock_x11(display, window_id, allow_host=allow_host)
             elif command in {"arm-fake", "arm"}:
                 target_instance = str(payload.get("target_instance", "fake-instance"))
                 result = {"lease": self.arm(target_instance), "status": self.status()}

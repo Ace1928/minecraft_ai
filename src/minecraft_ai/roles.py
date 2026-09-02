@@ -94,11 +94,48 @@ BUILTIN_ROLES: dict[str, RoleProfile] = {
         utility_weights={"social": 1.0, "trading": 1.0, "gathering": 0.55},
         risk_tolerance=0.2,
     ),
+    "wiki_assistant": RoleProfile(
+        role_id="wiki_assistant",
+        description="In-game crafting guide, recipe advisor, and Minecraft knowledge expert.",
+        standing_goals=("answer_player_queries", "lookup_recipes", "guide_players"),
+        utility_weights={"social": 1.0, "knowledge": 1.0, "crafting": 0.9},
+        risk_tolerance=0.2,
+    ),
+    "miner": RoleProfile(
+        role_id="miner",
+        description="Specialized deep mining, cave exploration, ore extraction, and resource staging.",
+        standing_goals=("mine_ores", "explore_caves", "stage_resources", "maintain_mine_shafts"),
+        utility_weights={"mining": 1.0, "gathering": 0.9, "survival": 0.7},
+        risk_tolerance=0.55,
+    ),
+    "companion": RoleProfile(
+        role_id="companion",
+        description="Friendly companion who follows players, assists in tasks, and guards.",
+        standing_goals=("follow_player", "assist_player", "guard_player", "share_resources"),
+        utility_weights={"social": 1.0, "combat": 0.8, "gathering": 0.7},
+        risk_tolerance=0.5,
+    ),
 }
 
 
+_CUSTOM_ROLES: dict[str, RoleProfile] = {}
+
+
+def register_custom_role(role: RoleProfile) -> RoleProfile:
+    _CUSTOM_ROLES[role.role_id] = role
+    return role
+
+
 def get_role(role_id: str) -> RoleProfile:
+    if role_id in _CUSTOM_ROLES:
+        return _CUSTOM_ROLES[role_id]
     try:
         return BUILTIN_ROLES[role_id]
     except KeyError as exc:
-        raise KeyError(f"unknown built-in role: {role_id}") from exc
+        raise KeyError(f"unknown role: {role_id}") from exc
+
+
+def list_roles() -> list[RoleProfile]:
+    combined = dict(BUILTIN_ROLES)
+    combined.update(_CUSTOM_ROLES)
+    return list(combined.values())

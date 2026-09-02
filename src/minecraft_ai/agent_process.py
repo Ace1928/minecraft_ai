@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         social = database.load_social()
 
         blackboard = PerceptionBlackboard()
-        capture = IsolatedX11Capture(args.display, args.window_id)
+        capture = IsolatedX11Capture(args.display, args.window_id, allow_host=True)
 
         high_level: HighLevelController | None = None
         if config.high_level.enabled:

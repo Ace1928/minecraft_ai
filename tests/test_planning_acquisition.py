@@ -18,7 +18,7 @@ def _graph() -> KnowledgeGraph:
     version = GameVersion(edition=Edition.BEDROCK, version_id="test")
     graph = KnowledgeGraph(version)
     provenance = Provenance(
-        source_type="test",
+        source_type="manual_override",
         source_id="fixture",
         version_key=version.key,
         confidence=1.0,

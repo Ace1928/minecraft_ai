@@ -6,7 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
-from .cognition import CognitionContext, CognitionDecision, HighLevelController
+from .cognition import AutonomousCognitionEngine, CognitionContext, CognitionDecision, HighLevelController
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
 from .execution import SkillExecutor
 from .memory import MemoryStore
@@ -158,7 +158,7 @@ class AgentRuntime:
         send_command(
             "renew",
             lease_id=self.lease_id,
-            ttl_ms=max(750, self.lease_renew_ms * 2),
+            ttl_ms=max(2000, self.lease_renew_ms * 4),
         )
         self._last_renew_ns = now
 
@@ -207,9 +207,6 @@ class AgentRuntime:
         )
 
     def _start_cognition_if_due(self) -> None:
-        if self.high_level is None:
-            self._bootstrap_if_idle()
-            return
         if self._pending_decision is not None:
             return
         now = time.monotonic_ns()
@@ -217,11 +214,19 @@ class AgentRuntime:
         if now - self._last_cognition_ns < interval:
             return
         context = self._cognition_context()
-        self._pending_decision = self._pool.submit(
-            self.high_level.decide,
-            self.blackboard,
-            context,
-        )
+        if self.high_level is None:
+            engine = AutonomousCognitionEngine(self.skills)
+            self._pending_decision = self._pool.submit(
+                engine.decide,
+                self.blackboard,
+                context,
+            )
+        else:
+            self._pending_decision = self._pool.submit(
+                self.high_level.decide,
+                self.blackboard,
+                context,
+            )
         self._last_cognition_ns = now
         self.metrics.cognition_calls += 1
 
@@ -253,7 +258,11 @@ class AgentRuntime:
                 pass
         if decision.skill_id is not None:
             running = self.executor.run
-            if running is None or running.outcome != SkillOutcome.RUNNING:
+            if (
+                running is None
+                or running.outcome != SkillOutcome.RUNNING
+                or running.skill_id != decision.skill_id
+            ):
                 spec = self.skills.get(decision.skill_id)
                 self.executor.start(
                     spec,

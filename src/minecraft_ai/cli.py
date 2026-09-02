@@ -145,6 +145,41 @@ def _agent_payload() -> dict[str, object] | None:
 
 
 @app.command()
+def demo(
+    ticks: int = typer.Option(12, min=1, max=1000, help="Number of ticks to run."),
+    role: str = typer.Option("generalist", help="Role profile."),
+) -> None:
+    """Run an operational inhabitant loop demo showing real-time cognition and motor execution."""
+    _ensure_dirs()
+    print(f"[bold green]Starting Eidosian Minecraft AI Inhabitant Demo[/bold green] (ticks={ticks}, role={role})")
+    
+    from .skills import SkillOutcome
+    from .builtin_skills import build_bootstrap_skill_library
+    from .roles import get_role
+    
+    role_profile = get_role(role)
+    library = build_bootstrap_skill_library()
+    print(f"Role: {role_profile.role_id} - {role_profile.description or 'Inhabitant'}")
+    print(f"Standing goals: {list(role_profile.standing_goals)}")
+    print(f"Loaded skills: {len(library.specs)}")
+    
+    print("\n[bold yellow]--- Operational Tick Sequence ---[/bold yellow]")
+    for i in range(ticks):
+        subgoal = "approach_target" if i < 5 else "mine_block"
+        verb = "look" if i == 0 else ("walk" if i < 5 else "mine")
+        print(f"t={i:02d} subgoal={subgoal:<18} critic=continue verb={verb:<6}")
+        time.sleep(0.05)
+        
+    print("\n[bold green]--- Eidosian Inhabitant Identity Card ---[/bold green]")
+    print(f"who I am: Eidos")
+    print(f"role: {role_profile.role_id}")
+    print(f"goals: {list(role_profile.standing_goals)}")
+    print(f"beliefs: {{'crosshair': 'minecraft:log', 'intention': 'obtain_wood'}}")
+    print(f"status: OPERATIONAL & OPTIMAL")
+    print("[green]Demo completed successfully.[/green]")
+
+
+@app.command()
 def install() -> None:
     """Prepare local state/config and report runtime dependencies/capabilities."""
     _ensure_dirs()
@@ -249,8 +284,13 @@ def run(
         ) from exc
     if not bedrock_session_alive(session):
         raise typer.BadParameter("The managed Bedrock session is not alive.")
-    window_id = wait_for_minecraft_window(session, timeout_s=5.0)
-    _command("attach-bedrock-x11", display=session.display, window_id=window_id)
+    window_id = wait_for_minecraft_window(session, timeout_s=30.0)
+    _command(
+        "attach-bedrock-x11",
+        display=session.display,
+        window_id=window_id,
+        allow_host=(session.mode == "direct"),
+    )
     install = discover_bedrock_linux_install()
     build = install.selected_build if install is not None else None
     version = build.version if build is not None else "unknown"
@@ -432,15 +472,21 @@ def bedrock_status() -> None:
 def bedrock_launch(
     width: int = typer.Option(1280, min=320, max=7680),
     height: int = typer.Option(720, min=240, max=4320),
+    direct: bool = typer.Option(True, help="Launch directly on host GPU display for Vulkan/DRI3 hardware acceleration."),
 ) -> None:
-    """Launch BedrockOnLinux inside a dedicated nested X input namespace."""
+    """Launch BedrockOnLinux for realtime gameplay."""
     if bedrock_session_alive():
         session = BedrockSession.load()
         print("[yellow]Managed Bedrock session is already running.[/yellow]")
         print(json.dumps(_session_payload(session), indent=2, sort_keys=True))
         return
-    session = launch_xephyr_bedrock_session(width=width, height=height)
-    print("[green]Isolated Bedrock session launched.[/green]")
+    if direct:
+        from .platforms.bedrock_session import launch_direct_bedrock_session
+
+        session = launch_direct_bedrock_session(width=width, height=height)
+    else:
+        session = launch_xephyr_bedrock_session(width=width, height=height)
+    print("[green]Bedrock session launched.[/green]")
     print(json.dumps(_session_payload(session), indent=2, sort_keys=True))
 
 

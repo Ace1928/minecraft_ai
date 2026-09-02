@@ -65,7 +65,11 @@ class BedrockSession:
         staged.replace(path)
 
     def find_window(self) -> int | None:
-        return find_minecraft_window(self.display, host_display=self.host_display)
+        return find_minecraft_window(
+            self.display,
+            host_display=self.host_display,
+            allow_host=(self.mode == "direct"),
+        )
 
 
 def _pid_alive(pid: int) -> bool:
@@ -85,6 +89,8 @@ def bedrock_session_alive(session: BedrockSession | None = None) -> bool:
             current = BedrockSession.load()
         except (OSError, ValueError, TypeError, KeyError):
             return False
+    if current.mode == "direct":
+        return _pid_alive(current.launcher_pid)
     return _pid_alive(current.xserver_pid) and _x_socket(current.display).exists()
 
 
@@ -202,21 +208,68 @@ def launch_xephyr_bedrock_session(
         raise
 
 
+def launch_direct_bedrock_session(
+    *,
+    width: int = 1280,
+    height: int = 720,
+    launcher_command: tuple[str, ...] | None = None,
+) -> BedrockSession:
+    """Launch BedrockOnLinux directly on the host display with full GPU Vulkan DRI3 acceleration."""
+    if os.name != "posix" or not Path("/proc").is_dir():
+        raise IsolationError("managed Bedrock execution is currently Linux-only")
+    host_display = os.environ.get("DISPLAY", ":0").strip() or ":0"
+    if launcher_command is None:
+        install = discover_bedrock_linux_install()
+        command = install.launcher_command if install is not None else None
+        command = command or shutil.which("bedrock-on-linux")
+        if command is None:
+            raise IsolationError("bedrock-on-linux launcher was not found")
+        launcher_command = (command, "play")
+
+    env = dict(os.environ)
+    env["DISPLAY"] = host_display
+    launcher = subprocess.Popen(
+        list(launcher_command),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    session = BedrockSession(
+        display=host_display,
+        host_display=host_display,
+        xserver_pid=os.getpid(),
+        launcher_pid=launcher.pid,
+        width=width,
+        height=height,
+        created_ns=time.monotonic_ns(),
+        launcher_command=launcher_command,
+        mode="direct",
+    )
+    session.persist()
+    return session
+
+
 def wait_for_minecraft_window(
     session: BedrockSession,
     *,
     timeout_s: float = 120.0,
 ) -> int:
-    require_isolated_display(session.display, session.host_display)
+    require_isolated_display(
+        session.display,
+        session.host_display,
+        allow_host=(session.mode == "direct"),
+    )
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if not bedrock_session_alive(session):
-            raise IsolationError("isolated Bedrock X server stopped while waiting for Minecraft")
+            raise IsolationError("Bedrock server/launcher process stopped while waiting for Minecraft")
         window_id = session.find_window()
         if window_id is not None:
             return window_id
         time.sleep(0.25)
-    raise IsolationError("timed out waiting for Minecraft window on isolated display")
+    raise IsolationError("timed out waiting for Minecraft window on display")
 
 
 def stop_bedrock_session(session: BedrockSession | None = None) -> None:

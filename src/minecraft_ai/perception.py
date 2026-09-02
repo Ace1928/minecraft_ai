@@ -194,10 +194,12 @@ class PerceptionBlackboard:
         with self._lock:
             return self._frames.snapshot()
 
-    def fact(self, key: str, *, min_confidence: float = 0.0) -> PerceptionFact | None:
+    def fact(
+        self, key: str, *, min_confidence: float = 0.0, now_ns: int | None = None
+    ) -> PerceptionFact | None:
         with self._lock:
             fact = self._facts.get(key)
-            if fact is None or fact.confidence < min_confidence or not fact.fresh():
+            if fact is None or fact.confidence < min_confidence or not fact.fresh(now_ns=now_ns):
                 return None
             return fact
 

@@ -208,7 +208,107 @@ class RealtimePerceptionService:
             height=captured.height,
         )
         self.blackboard.publish(state)
+
+        # Fast 20Hz visual perception feature extraction
+        self._extract_fast_visual_features(captured)
         return state
+
+    def _extract_fast_visual_features(self, frame: CapturedFrame) -> None:
+        if not frame.bgra or frame.width <= 0 or frame.height <= 0:
+            return
+        now = time.monotonic_ns()
+        w = frame.width
+        h = frame.height
+        cx = w // 2
+        cy = h // 2
+
+        # Fast sampling of center region (crosshair / block in front)
+        center_samples = 0
+        brown_count = 0
+        gray_count = 0
+        green_count = 0
+        row_bytes = w * 4
+
+        # Sample a 30x30 region at screen center
+        for dy in range(-15, 15, 3):
+            sy = cy + dy
+            if sy < 0 or sy >= h:
+                continue
+            row_off = sy * row_bytes
+            for dx in range(-15, 15, 3):
+                sx = cx + dx
+                if sx < 0 or sx >= w:
+                    continue
+                off = row_off + sx * 4
+                b = frame.bgra[off]
+                g = frame.bgra[off + 1]
+                r = frame.bgra[off + 2]
+                center_samples += 1
+                # Wood/bark (brownish: R > B, R > G or R ~ G > B)
+                if r > 60 and g > 40 and r >= g and r > b + 15:
+                    brown_count += 1
+                # Stone (grayish: R ~ G ~ B)
+                elif abs(r - g) < 20 and abs(g - b) < 20 and r > 50 and r < 180:
+                    gray_count += 1
+                # Vegetation (greenish: G > R + 15 and G > B + 15)
+                elif g > r + 15 and g > b + 15:
+                    green_count += 1
+
+        # Sample upper vs lower screen for sky/horizon pitch detection
+        sky_samples = 0
+        upper_sky = 0
+        lower_sky = 0
+
+        # Sample top 15% and bottom 15%
+        for dx in range(w // 4, 3 * w // 4, w // 10):
+            # Top sample
+            off_top = (h // 8) * row_bytes + dx * 4
+            b_t, g_t, r_t = frame.bgra[off_top], frame.bgra[off_top + 1], frame.bgra[off_top + 2]
+            # Bottom sample
+            off_bot = (7 * h // 8) * row_bytes + dx * 4
+            b_b, g_b, r_b = frame.bgra[off_bot], frame.bgra[off_bot + 1], frame.bgra[off_bot + 2]
+            
+            sky_samples += 1
+            if b_t > 150 and g_t > 130 and r_t > 110: # Sky/cloud brightness
+                upper_sky += 1
+            if b_b > 150 and g_b > 130 and r_b > 110:
+                lower_sky += 1
+
+        looking_at_sky = bool(sky_samples > 0 and upper_sky >= (sky_samples * 0.7) and lower_sky >= (sky_samples * 0.5))
+
+        if center_samples > 0:
+            target_visible = (brown_count + gray_count + green_count) > (center_samples * 0.25)
+            target_mineable = (brown_count + gray_count) > (center_samples * 0.20)
+            
+            self.blackboard.merge_semantics(
+                instance_id=self.instance_id,
+                facts=(
+                    PerceptionFact(
+                        key="target.visible",
+                        value=target_visible,
+                        confidence=0.85,
+                        observed_ns=now,
+                        source="heuristic-vision-20hz",
+                        expires_after_ms=300,
+                    ),
+                    PerceptionFact(
+                        key="target.mineable",
+                        value=target_mineable,
+                        confidence=0.85,
+                        observed_ns=now,
+                        source="heuristic-vision-20hz",
+                        expires_after_ms=300,
+                    ),
+                    PerceptionFact(
+                        key="pitch.looking_up",
+                        value=looking_at_sky,
+                        confidence=0.80,
+                        observed_ns=now,
+                        source="heuristic-vision-20hz",
+                        expires_after_ms=300,
+                    ),
+                ),
+            )
 
     def request_semantics(
         self,

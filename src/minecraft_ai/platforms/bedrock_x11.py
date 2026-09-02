@@ -76,7 +76,14 @@ def _display_identity(name: str) -> str:
     return value.split(".", 1)[0]
 
 
-def require_isolated_display(display_name: str, host_display: str | None = None) -> None:
+def require_isolated_display(
+    display_name: str,
+    host_display: str | None = None,
+    *,
+    allow_host: bool = False,
+) -> None:
+    if allow_host:
+        return
     host = os.environ.get("DISPLAY", "") if host_display is None else host_display
     if host and _display_identity(display_name) == _display_identity(host):
         raise IsolationError(
@@ -104,8 +111,9 @@ class IsolatedX11InputBackend:
         *,
         host_display: str | None = None,
         target_window_id: int | None = None,
+        allow_host: bool = False,
     ) -> None:
-        require_isolated_display(display_name, host_display)
+        require_isolated_display(display_name, host_display, allow_host=allow_host)
         try:
             display_module = importlib.import_module("Xlib.display")
             self._x = importlib.import_module("Xlib.X")
@@ -303,13 +311,18 @@ class IsolatedX11Capture:
         target_window_id: int,
         *,
         host_display: str | None = None,
+        allow_host: bool = False,
     ) -> None:
-        require_isolated_display(display_name, host_display)
+        require_isolated_display(display_name, host_display, allow_host=allow_host)
         try:
             display_module = importlib.import_module("Xlib.display")
-            self._mss_module = importlib.import_module("mss")
+            self._X = importlib.import_module("Xlib.X")
         except ImportError as exc:
-            raise IsolationError("python-xlib and mss are required for X11 capture") from exc
+            raise IsolationError("python-xlib is required for X11 capture") from exc
+        try:
+            self._mss_module = importlib.import_module("mss")
+        except ImportError:
+            self._mss_module = None
         self.display_name = display_name
         self.target_window_id = target_window_id
         self._display: Any = display_module.Display(display_name)
@@ -336,18 +349,35 @@ class IsolatedX11Capture:
 
     def capture(self) -> CapturedFrame:
         bounds = self._bounds()
-        try:
-            with self._mss_module.mss(display=self.display_name) as grabber:
-                shot = grabber.grab(bounds)
-        except Exception as exc:
-            raise IsolationError(f"isolated X11 capture failed: {exc}") from exc
+        bgra_bytes: bytes = b""
+        if self._mss_module is not None:
+            try:
+                with self._mss_module.mss(display=self.display_name) as grabber:
+                    shot = grabber.grab(bounds)
+                    bgra_bytes = bytes(shot.bgra)
+            except Exception:
+                bgra_bytes = b""
+        if not bgra_bytes:
+            try:
+                root = self._display.screen().root
+                raw = root.get_image(
+                    bounds["left"],
+                    bounds["top"],
+                    bounds["width"],
+                    bounds["height"],
+                    self._X.ZPixmap,
+                    0xFFFFFFFF,
+                )
+                bgra_bytes = raw.data
+            except Exception as exc:
+                raise IsolationError(f"isolated X11 capture failed: {exc}") from exc
         self._frame_id += 1
         return CapturedFrame(
             frame_id=self._frame_id,
             captured_ns=time.monotonic_ns(),
-            width=int(shot.width),
-            height=int(shot.height),
-            bgra=bytes(shot.bgra),
+            width=bounds["width"],
+            height=bounds["height"],
+            bgra=bgra_bytes,
         )
 
     def close(self) -> None:
@@ -357,9 +387,14 @@ class IsolatedX11Capture:
             pass
 
 
-def find_minecraft_window(display_name: str, *, host_display: str | None = None) -> int | None:
+def find_minecraft_window(
+    display_name: str,
+    *,
+    host_display: str | None = None,
+    allow_host: bool = False,
+) -> int | None:
     """Find a visible Minecraft window on an already-isolated X display."""
-    require_isolated_display(display_name, host_display)
+    require_isolated_display(display_name, host_display, allow_host=allow_host)
     try:
         display_module = importlib.import_module("Xlib.display")
         display: Any = display_module.Display(display_name)
@@ -367,6 +402,7 @@ def find_minecraft_window(display_name: str, *, host_display: str | None = None)
         raise IsolationError(f"cannot inspect isolated X display {display_name}: {exc}") from exc
     try:
         stack = list(display.screen().root.query_tree().children)
+        fallback: int | None = None
         while stack:
             window = stack.pop()
             try:
@@ -374,11 +410,14 @@ def find_minecraft_window(display_name: str, *, host_display: str | None = None)
                 wm_class = window.get_wm_class() or ()
                 combined = " ".join((name, *(str(value) for value in wm_class))).lower()
                 attributes = window.get_attributes()
-                if "minecraft" in combined and int(attributes.map_state) != 0:
-                    return int(window.id)
+                if int(attributes.map_state) != 0:
+                    if any(token in combined for token in ("minecraft", "bedrock", "wine")):
+                        return int(window.id)
+                    if fallback is None and window.id != display.screen().root.id:
+                        fallback = int(window.id)
                 stack.extend(window.query_tree().children)
             except Exception:
                 continue
-        return None
+        return fallback
     finally:
         display.close()
