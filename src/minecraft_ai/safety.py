@@ -24,21 +24,45 @@ class SupervisorState(StrEnum):
 _ALLOWED_TRANSITIONS: dict[SupervisorState, frozenset[SupervisorState]] = {
     SupervisorState.STOPPED: frozenset({SupervisorState.STARTING}),
     SupervisorState.STARTING: frozenset(
-        {SupervisorState.SAFE_IDLE, SupervisorState.FAILSAFE, SupervisorState.STOPPING}
+        {
+            SupervisorState.SAFE_IDLE,
+            SupervisorState.FAILSAFE,
+            SupervisorState.STOPPING,
+        }
     ),
     SupervisorState.SAFE_IDLE: frozenset(
-        {SupervisorState.ARMED, SupervisorState.PAUSED, SupervisorState.STOPPING, SupervisorState.FAILSAFE}
+        {
+            SupervisorState.ARMED,
+            SupervisorState.PAUSED,
+            SupervisorState.STOPPING,
+            SupervisorState.FAILSAFE,
+        }
     ),
     SupervisorState.ARMED: frozenset(
-        {SupervisorState.RUNNING, SupervisorState.PAUSED, SupervisorState.STOPPING, SupervisorState.FAILSAFE}
+        {
+            SupervisorState.RUNNING,
+            SupervisorState.PAUSED,
+            SupervisorState.STOPPING,
+            SupervisorState.FAILSAFE,
+        }
     ),
     SupervisorState.RUNNING: frozenset(
-        {SupervisorState.PAUSED, SupervisorState.STOPPING, SupervisorState.FAILSAFE}
+        {
+            SupervisorState.PAUSED,
+            SupervisorState.STOPPING,
+            SupervisorState.FAILSAFE,
+        }
     ),
     SupervisorState.PAUSED: frozenset(
-        {SupervisorState.SAFE_IDLE, SupervisorState.STOPPING, SupervisorState.FAILSAFE}
+        {
+            SupervisorState.SAFE_IDLE,
+            SupervisorState.STOPPING,
+            SupervisorState.FAILSAFE,
+        }
     ),
-    SupervisorState.STOPPING: frozenset({SupervisorState.STOPPED, SupervisorState.FAILSAFE}),
+    SupervisorState.STOPPING: frozenset(
+        {SupervisorState.STOPPED, SupervisorState.FAILSAFE}
+    ),
     SupervisorState.FAILSAFE: frozenset({SupervisorState.STOPPED}),
 }
 
