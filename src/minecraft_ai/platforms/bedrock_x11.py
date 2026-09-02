@@ -334,14 +334,15 @@ def _wine_relative_motion_target(
     mouse_dx: int,
     mouse_dy: int,
 ) -> tuple[int, int]:
-    """Map physical mouse deltas through Wine's grabbed-pointer XTEST bridge.
+    """Map conventional relative mouse deltas onto the grabbed XTEST pointer.
 
-    Bedrock's Wine raw-input path derives its relative event from the requested
-    XTEST position back toward the grab centre. Empirical client-frame tests on
-    the isolated Xwayland display therefore show the opposite sign from the
-    requested absolute pointer displacement on both axes.
+    A positive X delta must turn the camera right and a positive Y delta must
+    turn it down, matching both desktop mouse convention and the VPT action
+    labels.  Live optical-flow calibration against the Bedrock client confirms
+    that Wine preserves the sign of the requested XTEST displacement; screen
+    features move in the opposite direction because the *camera* moved.
     """
-    return root_x - mouse_dx, root_y - mouse_dy
+    return root_x + mouse_dx, root_y + mouse_dy
 
 
 class IsolatedX11Capture:

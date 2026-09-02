@@ -55,8 +55,8 @@ def test_wine_client_crop_removes_window_decoration_without_reordering_pixels() 
     assert cropped == pixels[20:28] + pixels[36:44]
 
 
-def test_wine_grab_bridge_inverts_absolute_xtest_displacement() -> None:
-    assert _wine_relative_motion_target(640, 317, 20, -10) == (620, 327)
+def test_wine_grab_bridge_preserves_relative_mouse_direction() -> None:
+    assert _wine_relative_motion_target(640, 317, 20, -10) == (660, 307)
 
 
 def test_nested_session_is_not_alive_when_launcher_exited(tmp_path: Path, monkeypatch) -> None:
