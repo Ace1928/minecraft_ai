@@ -7,7 +7,12 @@ from minecraft_ai.memory import MemoryKind, MemoryRecord, MemoryStore
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.planning import Goal, GoalScorer
 from minecraft_ai.roles import BUILTIN_ROLES, get_role
-from minecraft_ai.runtime import _active_operator_messages, _semantic_deadline_ms
+from minecraft_ai.cognition import CognitionDecision
+from minecraft_ai.runtime import (
+    _active_operator_messages,
+    _selected_operator_message_id,
+    _semantic_deadline_ms,
+)
 from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
 from minecraft_ai.skills import SkillLibrary, SkillOutcome, SkillRun, SkillSpec, SkillStage
 
@@ -153,3 +158,46 @@ def test_acknowledged_operator_directive_remains_active_until_archived() -> None
     active = _active_operator_messages(messages)
 
     assert tuple(message.message_id for message in active) == ("instruction",)
+
+
+def test_urgent_correction_precedes_older_acknowledged_instruction() -> None:
+    messages = (
+        OperatorMessage(
+            message_id="old",
+            created_ns=1,
+            text="Keep collecting logs",
+            priority=0.8,
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),
+        OperatorMessage(
+            message_id="correction",
+            created_ns=2,
+            text="Stop and climb the hill",
+            kind=OperatorMessageKind.CORRECTION,
+            priority=1.0,
+            status=OperatorMessageStatus.DELIVERED,
+        ),
+    )
+
+    active = _active_operator_messages(messages)
+
+    assert tuple(message.message_id for message in active) == ("correction", "old")
+
+
+def test_only_selected_operator_goal_is_acknowledgeable() -> None:
+    pending = ("new-correction", "old-instruction")
+
+    assert (
+        _selected_operator_message_id(
+            CognitionDecision(chosen_goal_id="operator:new-correction"),
+            pending,
+        )
+        == "new-correction"
+    )
+    assert (
+        _selected_operator_message_id(
+            CognitionDecision(chosen_goal_id="role:generalist:0:survive"),
+            pending,
+        )
+        is None
+    )

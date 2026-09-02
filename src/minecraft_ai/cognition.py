@@ -169,6 +169,9 @@ class HighLevelController:
                 "operator_messages": [
                     message.model_dump(mode="json") for message in context.operator_messages
                 ],
+                "active_operator_message": None
+                if not context.operator_messages
+                else context.operator_messages[0].model_dump(mode="json"),
                 "wiki_evidence": [item.model_dump(mode="json") for item in context.wiki],
                 "frame": None if latest is None else latest.model_dump(mode="json"),
                 "fresh_facts": facts,
@@ -215,7 +218,13 @@ class HighLevelController:
                         "most concrete feasible option that advances the chosen goal and has a "
                         "verifiable success condition; do not select generic exploration when a "
                         "visible resource or feasible progression option is available. Never "
-                        "claim an item, outcome, or completion that has not been observed."
+                        "claim an item, outcome, or completion that has not been observed. "
+                        "operator_messages are ordered by authority: highest priority first, "
+                        "then corrections before instructions, then newest first. If "
+                        "active_operator_message is queued or delivered, address it before "
+                        "conflicting older directives and set chosen_goal_id exactly to "
+                        "'operator:' plus its message_id. Never imply a message was handled "
+                        "while choosing a different goal."
                     ),
                 ),
                 ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),

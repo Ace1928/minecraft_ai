@@ -43,7 +43,7 @@ def _active_operator_messages(
     messages: tuple[OperatorMessage, ...],
 ) -> tuple[OperatorMessage, ...]:
     """Retain acknowledged directives as commitments until explicitly archived."""
-    return tuple(
+    active = tuple(
         message
         for message in messages
         if message.status in {
@@ -56,6 +56,28 @@ def _active_operator_messages(
             in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
         )
     )
+    return tuple(
+        sorted(
+            active,
+            key=lambda message: (
+                message.priority,
+                message.kind == OperatorMessageKind.CORRECTION,
+                message.created_ns,
+            ),
+            reverse=True,
+        )
+    )
+
+
+def _selected_operator_message_id(
+    decision: CognitionDecision,
+    pending_message_ids: tuple[str, ...],
+) -> str | None:
+    prefix = "operator:"
+    if not decision.chosen_goal_id or not decision.chosen_goal_id.startswith(prefix):
+        return None
+    selected = decision.chosen_goal_id.removeprefix(prefix)
+    return selected if selected in pending_message_ids else None
 
 
 @dataclass
@@ -399,17 +421,21 @@ class AgentRuntime:
             return
         self._last_decision = decision
         if self.state_db is not None and self._pending_operator_message_ids:
-            response = decision.say or decision.reasoning_summary
-            for message_id in self._pending_operator_message_ids:
+            selected_message_id = _selected_operator_message_id(
+                decision,
+                self._pending_operator_message_ids,
+            )
+            if selected_message_id is not None:
+                response = decision.say or decision.reasoning_summary
                 try:
                     self.state_db.update_operator_message_status(
-                        message_id,
+                        selected_message_id,
                         OperatorMessageStatus.ACKNOWLEDGED,
                         timestamp_ns=time.time_ns(),
                         response_text=response,
                     )
                 except KeyError:
-                    continue
+                    pass
             self._pending_operator_message_ids = ()
         for question in decision.ask_perception:
             latest = self.blackboard.raw_latest()

@@ -47,6 +47,23 @@ class _ShelterSelectingModel:
         )
 
 
+class _CapturingModel(_ShelterSelectingModel):
+    def __init__(self) -> None:
+        super().__init__(chosen_goal_id="operator:correction")
+        self.initial_messages: tuple[ModelMessage, ...] = ()
+
+    def complete_structured(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        if not self.initial_messages:
+            self.initial_messages = messages
+        return super().complete_structured(messages, name=name, schema=schema)
+
+
 class _RepairingModel(_ShelterSelectingModel):
     def __init__(self) -> None:
         super().__init__()
@@ -172,3 +189,29 @@ def test_explicit_operator_reply_remains_available_as_social_output() -> None:
     decision = controller.decide(_board(), context)
 
     assert decision.say == "Gathering wood."
+
+
+def test_high_level_receives_explicit_active_operator_correction() -> None:
+    older = OperatorMessage(
+        message_id="old",
+        created_ns=1,
+        text="Keep gathering logs",
+    )
+    correction = OperatorMessage(
+        message_id="correction",
+        created_ns=2,
+        text="Stop and climb the hill",
+    )
+    context = _context()
+    context.operator_messages = (correction, older)
+    model = _CapturingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    controller.decide(_board(), context)
+
+    payload = json.loads(model.initial_messages[-1].content)
+    assert payload["active_operator_message"]["message_id"] == "correction"
+    assert (
+        "address it before conflicting older directives"
+        in model.initial_messages[0].content
+    )
