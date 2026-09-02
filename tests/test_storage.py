@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 import time
 
 from minecraft_ai.memory import MemoryKind, MemoryRecord
@@ -104,3 +105,36 @@ def test_memory_kind_filter(tmp_path: Path) -> None:
             )
         loaded = db.load_memories({MemoryKind.SPATIAL})
         assert set(loaded.records) == {"0"}
+
+
+def test_current_schema_open_does_not_reexecute_migration_ddl(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "state.sqlite3"
+    with StateDatabase(path):
+        pass
+
+    calls = 0
+
+    class ConnectionProxy:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self.connection = connection
+
+        def __getattr__(self, name: str):
+            return getattr(self.connection, name)
+
+        def executescript(self, script: str):
+            nonlocal calls
+            calls += 1
+            return self.connection.executescript(script)
+
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        "minecraft_ai.storage.sqlite3.connect",
+        lambda *args, **kwargs: ConnectionProxy(real_connect(*args, **kwargs)),
+    )
+    with StateDatabase(path):
+        pass
+
+    assert calls == 0

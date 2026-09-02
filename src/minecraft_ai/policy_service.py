@@ -207,6 +207,13 @@ class TemporalPolicyClient:
         self._consumed_miss_recorded = False
         self._discard_pending_response = False
 
+    def warmup(self) -> None:
+        """Load and verify the configured checkpoint before its first live action."""
+        frame = self.frame_provider()
+        if frame is None:
+            raise RuntimeError("cannot warm learned policy without a captured frame")
+        self._ensure_started(len(frame.bgra))
+
     def _ensure_started(self, required_size: int) -> None:
         if (
             self._process is not None
@@ -261,7 +268,7 @@ class TemporalPolicyClient:
             text=True,
             bufsize=1,
         )
-        ready = self._read_response(15.0)
+        ready = self._read_response(self.config.startup_timeout_s)
         if ready is None or ready.get("type") != "ready":
             raise RuntimeError(f"learned policy did not become ready: {ready}")
 
@@ -477,6 +484,13 @@ class GroundedPolicyRouter:
             close = getattr(policy, "close", None)
             if callable(close):
                 close()
+
+    def warmup(self) -> None:
+        """Preload both controllers so switching cannot stall live control."""
+        for policy in (self.primary, self.grounded):
+            warmup = getattr(policy, "warmup", None)
+            if callable(warmup):
+                warmup()
 
     def status(self) -> dict[str, object]:
         return {

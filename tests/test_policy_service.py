@@ -33,6 +33,7 @@ class _RoutingPolicy:
         self.key = key
         self.calls = 0
         self.resets = 0
+        self.warmups = 0
 
     def act(
         self,
@@ -47,6 +48,9 @@ class _RoutingPolicy:
     def reset(self) -> MotorAction:
         self.resets += 1
         return MotorAction(sequence=self.calls, keys_up=(self.key,))
+
+    def warmup(self) -> None:
+        self.warmups += 1
 
 
 def _tracked_board(*, age_ms: int = 0) -> PerceptionBlackboard:
@@ -97,6 +101,17 @@ def test_grounded_router_requires_fresh_track_and_supported_interaction() -> Non
     explore = MotorIntent(skill_id="explore", mode="explore")
     router.act(_tracked_board(), explore, sequence=4)
     assert grounded.calls == 1
+
+
+def test_grounded_router_prewarms_both_learned_controllers() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _RoutingPolicy("rocket", key="a")
+    router = GroundedPolicyRouter(primary, grounded)
+
+    router.warmup()
+
+    assert primary.warmups == 1
+    assert grounded.warmups == 1
 
 
 def _policy_config(tmp_path: Path, *, deadline_ms: int = 48) -> PolicyConfig:
@@ -152,6 +167,23 @@ def test_policy_config_requires_hashes_provenance_and_paths(tmp_path: Path) -> N
         _validate_policy_config(
             config.model_copy(update={"camera_pitch_limit": 20, "camera_recovery_release": 20})
         )
+
+
+def test_temporal_policy_warmup_requires_and_uses_current_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = CapturedFrame(frame_id=1, captured_ns=1, width=2, height=2, bgra=b"\0" * 16)
+    client = TemporalPolicyClient(
+        config=_policy_config(tmp_path).model_copy(update={"startup_timeout_s": 75.0}),
+        frame_provider=lambda: frame,
+    )
+    required_sizes: list[int] = []
+    monkeypatch.setattr(client, "_ensure_started", required_sizes.append)
+
+    client.warmup()
+
+    assert required_sizes == [len(frame.bgra)]
 
 
 def test_goal_instruction_prefers_semantic_skill_contract() -> None:

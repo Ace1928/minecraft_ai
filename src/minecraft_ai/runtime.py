@@ -107,6 +107,7 @@ class AgentRuntime:
     _last_decision: CognitionDecision | None = field(default=None, init=False)
     _pending_operator_message_ids: tuple[str, ...] = field(default=(), init=False)
     _last_operator_target_id: str | None = field(default=None, init=False)
+    _policy_warmup_error: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz <= 0:
@@ -130,6 +131,8 @@ class AgentRuntime:
         if self.perception.active_vlm is not None:
             self.perception.active_vlm.start()
         try:
+            self.telemetry.publish(self._telemetry_payload(state="warming"), force=True)
+            self._warmup_policy()
             while not self._stop.is_set():
                 tick_started = time.perf_counter()
                 self.tick()
@@ -165,6 +168,20 @@ class AgentRuntime:
                     self._failsafe(f"trajectory-flush:{type(exc).__name__}:{exc}")
             self.telemetry.publish(self._telemetry_payload(state="stopped"), force=True)
             self._pool.shutdown(wait=False, cancel_futures=True)
+
+    def _warmup_policy(self) -> None:
+        warmup = getattr(self.executor.policy, "warmup", None)
+        if not callable(warmup):
+            return
+        if self.perception.last_capture is None:
+            self.perception.capture_once()
+        try:
+            warmup()
+            self._policy_warmup_error = None
+        except Exception as exc:
+            # Keep the agent available on its fallback route while surfacing the
+            # exact checkpoint startup failure in operator telemetry.
+            self._policy_warmup_error = f"{type(exc).__name__}: {exc}"
 
     def tick(self) -> None:
         capture_started = time.perf_counter()
@@ -485,6 +502,7 @@ class AgentRuntime:
             "reasoning_summary": None if decision is None else decision.reasoning_summary,
             "cognition": cognition_status,
             "policy": policy_status,
+            "policy_warmup_error": self._policy_warmup_error,
             "perception": perception_status,
             "lease_heartbeat_error": self._lease_fault,
             "updated_monotonic_ns": time.monotonic_ns(),

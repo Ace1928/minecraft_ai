@@ -28,7 +28,8 @@ class StateDatabase:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path)
+        self.connection = sqlite3.connect(self.path, timeout=15.0)
+        self.connection.execute("PRAGMA busy_timeout=15000")
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA foreign_keys=ON")
         self._migrate()
@@ -43,6 +44,16 @@ class StateDatabase:
         self.close()
 
     def _migrate(self) -> None:
+        try:
+            current = self.connection.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc).casefold():
+                raise
+            current = None
+        if current is not None and int(current[0]) == SCHEMA_VERSION:
+            return
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS meta (

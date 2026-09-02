@@ -48,6 +48,7 @@ class PolicyConfig(BaseModel):
     research_only: bool = False
     device: str = "cpu"
     threads: int = Field(default=4, ge=1, le=64)
+    startup_timeout_s: float = Field(default=60.0, ge=5.0, le=600.0)
     deadline_ms: int = Field(default=48, ge=10, le=5000)
     action_hold_ms: int = Field(default=50, ge=50, le=250)
     stochastic: bool = True
