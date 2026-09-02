@@ -153,6 +153,52 @@ def test_grounded_router_prewarms_both_learned_controllers() -> None:
     assert grounded.warmups == 1
 
 
+def test_grounded_router_shares_one_physical_pitch_state(tmp_path: Path) -> None:
+    config = _policy_config(tmp_path).model_copy(
+        update={
+            "camera_max_step": 100,
+            "camera_pitch_limit": 100,
+            "camera_recovery_release": 50,
+        }
+    )
+    primary = TemporalPolicyClient(config=config, frame_provider=lambda: None)
+    grounded = TemporalPolicyClient(config=config, frame_provider=lambda: None)
+    router = GroundedPolicyRouter(primary, grounded)
+
+    primary._output_action(
+        LearnedPolicyOutput(
+            mouse_dy=30,
+            inference_ns=1,
+            model_version="primary",
+        ),
+        sequence=1,
+    )
+    grounded._output_action(
+        LearnedPolicyOutput(
+            mouse_dy=40,
+            inference_ns=1,
+            model_version="grounded",
+        ),
+        sequence=1,
+    )
+
+    assert primary.status()["estimated_pitch_units"] == 70
+    assert grounded.status()["estimated_pitch_units"] == 70
+
+    saturated = grounded._output_action(
+        LearnedPolicyOutput(
+            mouse_dy=50,
+            inference_ns=1,
+            model_version="grounded",
+        ),
+        sequence=2,
+    )
+
+    assert saturated.mouse_dy == 30
+    assert primary.status()["estimated_pitch_units"] == 100
+    assert router.status()["world_camera"] == {"estimated_pitch_units": 100}
+
+
 def test_grounded_router_rejects_stale_unbound_operator_region() -> None:
     primary = _RoutingPolicy("steve", key="w")
     grounded = _RoutingPolicy("rocket", key="a")
@@ -363,7 +409,7 @@ def test_cursor_motion_does_not_corrupt_world_pitch_estimate(tmp_path: Path) -> 
     assert (world_action.mouse_dx, world_action.mouse_dy) == (0, 3)
     assert (cursor_action.mouse_dx, cursor_action.mouse_dy) == (3, 3)
     assert (cursor_remainder.mouse_dx, cursor_remainder.mouse_dy) == (2, 2)
-    assert client._estimated_pitch_units == 3
+    assert client._world_camera_state.estimated_pitch_units == 3
     assert client._pending_camera_semantics == "world"
 
 
@@ -398,7 +444,7 @@ def test_camera_envelope_saturates_without_replacing_learned_task(
     upward = output.model_copy(update={"keys": (), "buttons": (), "mouse_dy": -9})
     client._output_action(upward, sequence=3)
     client._output_action(upward, sequence=4)
-    assert client._estimated_pitch_units == -1
+    assert client._world_camera_state.estimated_pitch_units == -1
     assert client._camera_recovery_active is False
 
 

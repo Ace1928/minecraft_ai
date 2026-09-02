@@ -56,6 +56,18 @@ class PolicyServiceMetrics:
 
 
 @dataclass
+class WorldCameraState:
+    """Actuator-domain pitch shared by all policies driving one game view.
+
+    Learned controllers retain independent temporal model states, but STEVE
+    and ROCKET move the same physical Minecraft camera. A per-client pitch
+    accumulator lets route switches spend the physical envelope repeatedly.
+    """
+
+    estimated_pitch_units: int = 0
+
+
+@dataclass
 class TemporalPolicyClient:
     """Deadline-aware client for an isolated learned temporal policy process."""
 
@@ -75,7 +87,10 @@ class TemporalPolicyClient:
     _pending_miss_recorded: bool = field(default=False, init=False)
     _consumed_miss_recorded: bool = field(default=False, init=False)
     _discard_pending_response: bool = field(default=False, init=False)
-    _estimated_pitch_units: int = field(default=0, init=False)
+    _world_camera_state: WorldCameraState = field(
+        default_factory=WorldCameraState,
+        init=False,
+    )
     _camera_recovery_active: bool = field(default=False, init=False)
     _pending_camera: tuple[int, int] = field(default=(0, 0), init=False)
     _pending_camera_semantics: Literal["world", "cursor"] = field(
@@ -92,6 +107,10 @@ class TemporalPolicyClient:
     def __post_init__(self) -> None:
         _validate_policy_config(self.config)
         self.policy_id = f"learned:{self.config.provider}:{self.config.model_version}"
+
+    def bind_world_camera_state(self, state: WorldCameraState) -> None:
+        """Bind this controller to the physical camera shared with its peers."""
+        self._world_camera_state = state
 
     def act(
         self,
@@ -180,7 +199,7 @@ class TemporalPolicyClient:
             "camera_max_step": self.config.camera_max_step,
             "camera_pitch_limit": self.config.camera_pitch_limit,
             "action_hold_ms": self.config.action_hold_ms,
-            "estimated_pitch_units": self._estimated_pitch_units,
+            "estimated_pitch_units": self._world_camera_state.estimated_pitch_units,
             "camera_recovery_active": self._camera_recovery_active,
             "button_zero_order_hold": True,
             "last_prediction": (
@@ -506,16 +525,17 @@ class TemporalPolicyClient:
         remaining_dy = pending_dy - mouse_dy
         pitch_limit = self.config.camera_pitch_limit
         if pitch_limit > 0 and self._pending_camera_semantics == "world":
-            proposed = self._estimated_pitch_units + mouse_dy
+            current_pitch = self._world_camera_state.estimated_pitch_units
+            proposed = current_pitch + mouse_dy
             bounded = max(-pitch_limit, min(pitch_limit, proposed))
-            bounded_dy = bounded - self._estimated_pitch_units
+            bounded_dy = bounded - current_pitch
             if bounded_dy != mouse_dy:
                 # The envelope rejected motion farther toward a pitch pole.
                 # Discard queued motion in that same direction so it cannot
                 # reappear after a later, valid correction moves away.
                 remaining_dy = 0
             mouse_dy = bounded_dy
-            self._estimated_pitch_units = bounded
+            self._world_camera_state.estimated_pitch_units = bounded
             # Saturation is sufficient: it preserves the learned controller's
             # task conditioning while preventing cumulative pitch runaway.
             # Replacing the task with a horizon-recovery prompt caused a live
@@ -591,6 +611,10 @@ class GroundedPolicyRouter:
     _switches: int = field(default=0, init=False)
     _grounded_track_id: str | None = field(default=None, init=False)
     _grounded_interaction_id: int | None = field(default=None, init=False)
+    _world_camera_state: WorldCameraState = field(
+        default_factory=WorldCameraState,
+        init=False,
+    )
 
     def __post_init__(self) -> None:
         if self.max_track_age_ms <= 0:
@@ -599,6 +623,10 @@ class GroundedPolicyRouter:
             raise ValueError("min_track_confidence must be in 0..1")
         self._active = self.primary
         self.policy_id = f"router:{self.primary.policy_id}+{self.grounded.policy_id}"
+        for policy in (self.primary, self.grounded):
+            bind = getattr(policy, "bind_world_camera_state", None)
+            if callable(bind):
+                bind(self._world_camera_state)
 
     def act(
         self,
@@ -659,6 +687,9 @@ class GroundedPolicyRouter:
             "switches": self._switches,
             "min_track_confidence": self.min_track_confidence,
             "max_track_age_ms": self.max_track_age_ms,
+            "world_camera": {
+                "estimated_pitch_units": self._world_camera_state.estimated_pitch_units,
+            },
             "primary": _policy_status(self.primary),
             "grounded": _policy_status(self.grounded),
         }
