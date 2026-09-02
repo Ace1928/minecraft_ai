@@ -327,8 +327,8 @@ class TemporalPolicyClient:
 
     def _output_action(self, output: LearnedPolicyOutput, sequence: int) -> MotorAction:
         mouse_dx, mouse_dy = self._filter_camera(output.mouse_dx, output.mouse_dy)
-        desired_keys = set() if self._camera_recovery_active else set(output.keys)
-        desired_buttons = set() if self._camera_recovery_active else set(output.buttons)
+        desired_keys = set(output.keys)
+        desired_buttons = set(output.buttons)
         action = MotorAction(
             sequence=sequence,
             keys_down=tuple(sorted(desired_keys - self._held_keys)),
@@ -363,13 +363,6 @@ class TemporalPolicyClient:
                 target = max(candidates, key=lambda track: track.confidence)
                 payload["target_track"] = target.model_dump(mode="json")
         payload["interaction_id"] = _rocket_interaction_id(intent.mode)
-        if not self._camera_recovery_active:
-            return payload
-        direction = "up" if self._estimated_pitch_units > 0 else "down"
-        payload["instruction"] = (
-            f"Stop moving and look {direction} until the camera returns to a level horizon. "
-            "Keep the view stable and do not attack or interact."
-        )
         return payload
 
     def _filter_camera(self, mouse_dx: int, mouse_dy: int) -> tuple[int, int]:
@@ -383,10 +376,12 @@ class TemporalPolicyClient:
             bounded = max(-pitch_limit, min(pitch_limit, proposed))
             mouse_dy = bounded - self._estimated_pitch_units
             self._estimated_pitch_units = bounded
-            if abs(bounded) >= pitch_limit:
-                self._camera_recovery_active = True
-            elif abs(bounded) <= self.config.camera_recovery_release:
-                self._camera_recovery_active = False
+            # Saturation is sufficient: it preserves the learned controller's
+            # task conditioning while preventing cumulative pitch runaway.
+            # Replacing the task with a horizon-recovery prompt caused a live
+            # deadlock because the policy could keep choosing the saturated
+            # direction while all locomotion/interaction was suppressed.
+            self._camera_recovery_active = False
         return mouse_dx, mouse_dy
 
     def _hold(self, sequence: int) -> MotorAction:

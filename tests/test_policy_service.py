@@ -117,7 +117,7 @@ def test_decoded_policy_camera_scale_is_bounded_adapter_calibration() -> None:
     assert output.mouse_dy == 5
 
 
-def test_camera_envelope_reconditions_learned_policy_without_scripted_motion(
+def test_camera_envelope_saturates_without_replacing_learned_task(
     tmp_path: Path,
 ) -> None:
     config = _policy_config(tmp_path).model_copy(
@@ -138,11 +138,12 @@ def test_camera_envelope_reconditions_learned_policy_without_scripted_motion(
 
     assert (first.mouse_dx, first.mouse_dy) == (3, 3)
     assert (second.mouse_dx, second.mouse_dy) == (3, 2)
-    assert second.keys_up == ("w",)
-    assert second.buttons_up == ("left",)
-    assert client._camera_recovery_active is True
+    assert second.keys_up == ()
+    assert second.buttons_up == ()
+    assert client._camera_recovery_active is False
     recovery = client._conditioned_intent(MotorIntent(skill_id="explore", mode="explore"))
-    assert "level horizon" in str(recovery["instruction"])
+    assert recovery["skill_id"] == "explore"
+    assert recovery["interaction_id"] == -1
 
     upward = output.model_copy(update={"keys": (), "buttons": (), "mouse_dy": -9})
     client._output_action(upward, sequence=3)
