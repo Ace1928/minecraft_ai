@@ -7,7 +7,8 @@ from minecraft_ai.memory import MemoryKind, MemoryRecord, MemoryStore
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.planning import Goal, GoalScorer
 from minecraft_ai.roles import BUILTIN_ROLES, get_role
-from minecraft_ai.runtime import _semantic_deadline_ms
+from minecraft_ai.runtime import _active_operator_messages, _semantic_deadline_ms
+from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
 from minecraft_ai.skills import SkillLibrary, SkillOutcome, SkillRun, SkillSpec, SkillStage
 
 
@@ -124,3 +125,31 @@ def test_empty_dependency_graph_is_valid() -> None:
 def test_semantic_request_deadline_is_bounded_below_query_cadence() -> None:
     assert _semantic_deadline_ms(2.0) == 500
     assert _semantic_deadline_ms(0.03) == 10_000
+
+
+def test_acknowledged_operator_directive_remains_active_until_archived() -> None:
+    messages = (
+        OperatorMessage(
+            message_id="instruction",
+            created_ns=1,
+            text="Collect three logs",
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),
+        OperatorMessage(
+            message_id="question",
+            created_ns=2,
+            text="What can you see?",
+            kind=OperatorMessageKind.QUESTION,
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),
+        OperatorMessage(
+            message_id="archived",
+            created_ns=3,
+            text="Old instruction",
+            status=OperatorMessageStatus.ARCHIVED,
+        ),
+    )
+
+    active = _active_operator_messages(messages)
+
+    assert tuple(message.message_id for message in active) == ("instruction",)

@@ -10,6 +10,7 @@ from minecraft_ai.platforms.bedrock_session import BedrockSession, bedrock_sessi
 from minecraft_ai.platforms.bedrock_x11 import (
     IsolationError,
     _crop_bgra,
+    _x11_keysym_name,
     _wine_relative_motion_target,
     require_isolated_display,
 )
@@ -60,6 +61,13 @@ def test_wine_grab_bridge_preserves_yaw_and_inverts_bedrock_pitch() -> None:
     # negative physical Y delta to produce that same camera motion.
     assert _wine_relative_motion_target(640, 317, 20, 10) == (660, 307)
     assert _wine_relative_motion_target(640, 317, -20, -10) == (620, 327)
+
+
+def test_bedrock_menu_navigation_uses_x11_arrow_keysyms() -> None:
+    assert _x11_keysym_name("up") == "Up"
+    assert _x11_keysym_name("down") == "Down"
+    assert _x11_keysym_name("left") == "Left"
+    assert _x11_keysym_name("right") == "Right"
 
 
 def test_nested_session_is_not_alive_when_launcher_exited(tmp_path: Path, monkeypatch) -> None:

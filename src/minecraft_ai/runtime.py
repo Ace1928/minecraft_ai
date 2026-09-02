@@ -22,7 +22,12 @@ from .planning import Goal
 from .roles import RoleProfile
 from .safety import MotorAction
 from .skills import SkillLibrary, SkillOutcome
-from .social import OperatorMessage, OperatorMessageStatus, SocialState
+from .social import (
+    OperatorMessage,
+    OperatorMessageKind,
+    OperatorMessageStatus,
+    SocialState,
+)
 from .telemetry import TelemetryPublisher
 from .trajectory import TrajectoryRecorder
 from .storage import StateDatabase
@@ -32,6 +37,25 @@ from .supervisor import send_command
 def _semantic_deadline_ms(semantic_hz: float) -> int:
     """Bound request lifetime independently from a slower query cadence."""
     return min(10_000, max(250, int(1000 / semantic_hz)))
+
+
+def _active_operator_messages(
+    messages: tuple[OperatorMessage, ...],
+) -> tuple[OperatorMessage, ...]:
+    """Retain acknowledged directives as commitments until explicitly archived."""
+    return tuple(
+        message
+        for message in messages
+        if message.status in {
+            OperatorMessageStatus.QUEUED,
+            OperatorMessageStatus.DELIVERED,
+        }
+        or (
+            message.status == OperatorMessageStatus.ACKNOWLEDGED
+            and message.kind
+            in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+        )
+    )
 
 
 @dataclass
@@ -272,7 +296,10 @@ class AgentRuntime:
             return
         context = self._cognition_context()
         self._pending_operator_message_ids = tuple(
-            message.message_id for message in context.operator_messages
+            message.message_id
+            for message in context.operator_messages
+            if message.status
+            in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
         )
         if self.state_db is not None:
             for message in context.operator_messages:
@@ -364,9 +391,15 @@ class AgentRuntime:
         memories = tuple(self.memories.retrieve(limit=20))
         operator_messages: tuple[OperatorMessage, ...] = ()
         if self.state_db is not None:
-            operator_messages = self.state_db.load_operator_messages(
-                statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED},
-                limit=20,
+            operator_messages = _active_operator_messages(
+                self.state_db.load_operator_messages(
+                    statuses={
+                        OperatorMessageStatus.QUEUED,
+                        OperatorMessageStatus.DELIVERED,
+                        OperatorMessageStatus.ACKNOWLEDGED,
+                    },
+                    limit=20,
+                )
             )
         return CognitionContext(
             role=self.role,
