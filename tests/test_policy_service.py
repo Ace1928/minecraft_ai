@@ -21,6 +21,7 @@ from minecraft_ai.policy_service import (
     GroundedPolicyRouter,
     TemporalPolicyClient,
     _apply_action_constraints,
+    _apply_discrete_action_contract,
     _crop_bbox_to_full,
     _decoded_policy_output,
     _fast_scene_belief,
@@ -933,6 +934,29 @@ def test_explicit_action_constraints_mask_only_prohibited_learned_bits() -> None
     assert int(constrained["forward"][0]) == 1
     assert int(decoded["attack"][0]) == 1
     assert suppressed == ("attack", "use")
+
+
+def test_close_inventory_learned_toggle_is_one_event_until_option_reset() -> None:
+    emitted: set[str] = set()
+    decoded = {
+        "inventory": numpy.asarray([1]),
+        "camera": numpy.asarray([[4, -2]]),
+    }
+    intent = {"mode": "close_inventory"}
+
+    first, first_suppressed = _apply_discrete_action_contract(decoded, intent, emitted)
+    repeated, repeated_suppressed = _apply_discrete_action_contract(
+        decoded,
+        intent,
+        emitted,
+    )
+
+    assert int(first["inventory"][0]) == 1
+    assert first_suppressed == ()
+    assert int(repeated["inventory"][0]) == 0
+    assert int(repeated["camera"][0][0]) == 4
+    assert repeated_suppressed == ("inventory:repeat",)
+    assert int(decoded["inventory"][0]) == 1
 
 
 def test_learned_static_gui_scene_blocks_world_policy_actions() -> None:

@@ -1421,6 +1421,7 @@ class _SteveOneBackend:
     instruction: str | None = field(init=False, default=None)
     inference_count: int = field(init=False, default=0)
     scene_model: Any = field(init=False, default=None)
+    discrete_actions_emitted: set[str] = field(init=False, default_factory=set)
 
     def __post_init__(self) -> None:
         _verify_sha256(self.model_path, self.model_sha256)
@@ -1459,6 +1460,7 @@ class _SteveOneBackend:
         self.condition = None
         self.instruction = None
         self.inference_count = 0
+        self.discrete_actions_emitted.clear()
 
     def infer(self, frame: Any, intent: dict[str, Any]) -> LearnedPolicyOutput:
         started = time.perf_counter_ns()
@@ -1471,6 +1473,7 @@ class _SteveOneBackend:
             )
             self.hidden_state = self.policy.initial_state(1, self.condition)
             self.instruction = instruction
+            self.discrete_actions_emitted.clear()
         rgb = _center_crop_16_9(frame[:, :, [2, 1, 0]], self.numpy)
         resized = self.cv2.resize(rgb, (128, 128), interpolation=self.cv2.INTER_LINEAR)
         image = self.torch.from_numpy(resized[None, None].copy()).to(self.device)
@@ -1495,7 +1498,13 @@ class _SteveOneBackend:
             "camera": action["camera"].cpu().numpy().reshape(1, 1),
         }
         decoded = self.transformer.policy2env(self.mapper.to_factored(raw))
-        decoded, suppressed = _apply_action_constraints(decoded, intent)
+        decoded, event_suppressed = _apply_discrete_action_contract(
+            decoded,
+            intent,
+            self.discrete_actions_emitted,
+        )
+        decoded, constraint_suppressed = _apply_action_constraints(decoded, intent)
+        suppressed = (*event_suppressed, *constraint_suppressed)
         scene_mode = None if scene_belief is None else scene_belief[0]
         scene_playable = None if scene_belief is None else scene_belief[1]
         scene_confidence = None if scene_belief is None else scene_belief[2]
@@ -1811,6 +1820,47 @@ def _apply_action_constraints(
         constrained[action] = safe_value
         if selected:
             suppressed.append(action)
+    return constrained, tuple(suppressed)
+
+
+def _apply_discrete_action_contract(
+    decoded: dict[str, Any],
+    intent: dict[str, Any],
+    emitted: set[str],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Make edge-triggered learned actions single-shot within one option run.
+
+    STEVE-1 predicts an action at every temporal step. Repeating a toggle while
+    Bedrock animates the first transition can close and immediately reopen the
+    same menu. The checkpoint still decides whether and when to emit the event;
+    this contract converts the selected event into one edge and then waits for
+    the skill executor's visual success/failure observation.
+    """
+    actions_by_mode = {"close_inventory": ("inventory",)}
+    actions = actions_by_mode.get(str(intent.get("mode") or "").casefold(), ())
+    if not actions:
+        return decoded, ()
+    constrained = decoded
+    suppressed: list[str] = []
+    for action in actions:
+        value = decoded.get(action)
+        if value is None:
+            continue
+        try:
+            selected = bool(value[0])
+        except (IndexError, TypeError, AttributeError):
+            continue
+        if not selected:
+            continue
+        if action not in emitted:
+            emitted.add(action)
+            continue
+        safe_value = value.copy()
+        safe_value[...] = 0
+        if constrained is decoded:
+            constrained = dict(decoded)
+        constrained[action] = safe_value
+        suppressed.append(f"{action}:repeat")
     return constrained, tuple(suppressed)
 
 
