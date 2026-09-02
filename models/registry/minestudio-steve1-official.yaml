@@ -34,13 +34,16 @@ runtime:
   measured_steady_step_ms: 156-210
   measured_service_step_ms: 204.07
   measured_date: 2026-09-02
-  camera_scale: 6.6666666667
-  camera_calibration: MineRL degrees converted to relative mouse counts at sensitivity 0.5
-  camera_actuator_step_limit: 12 relative counts at 20 Hz with lossless queued remainder
+  camera_scale: 47.96
+  camera_calibration: 17267 relative counts per full Bedrock yaw at mouse sensitivity 0.03
+  camera_actuator_step_limit: 96 relative counts at 20 Hz with lossless queued remainder
+  camera_pitch_envelope: 2000 relative counts
 evidence:
   - Prompt "mine a visible tree log" selected attack on a visible Bedrock tree.
   - Prompt "open the inventory" selected the inventory action with classifier-free guidance.
   - The isolated service preserved temporal state and returned a 204.07 ms steady prediction.
+  - A calibrated live Bedrock run selected 7 jumps, including 3 sprint-jumps, and 4 camera actions in its first 35 accepted predictions.
+  - The same run later plateaued at 422 repeated attack predictions without reacquiring the visible log, so it remains a baseline rather than a promoted controller.
 limitations:
   - The checkpoint artifact and original STEVE-1 repository do not declare a license.
   - It is restricted to local research evaluation and is not redistributable or promotable.

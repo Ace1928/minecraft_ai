@@ -31,8 +31,10 @@ runtime:
   target_status: unadapted-domain-transfer
   measured_device: AMD Ryzen 5 5500 CPU, 6 inference threads
   measured_live_step_ms: 299-585
-  camera_scale: 6.6666666667
-  camera_actuator_step_limit: 12 relative counts at 20 Hz with lossless queued remainder
+  camera_scale: 47.96
+  camera_calibration: 17267 relative counts per full Bedrock yaw at mouse sensitivity 0.03
+  camera_actuator_step_limit: 96 relative counts at 20 Hz with lossless queued remainder
+  camera_pitch_envelope: 2000 relative counts
   measured_date: 2026-09-03
 evidence:
   - The current-view target head localized an operator-selected Bedrock tree with greater than 0.999 existence probability.

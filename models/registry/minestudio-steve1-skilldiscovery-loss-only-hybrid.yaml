@@ -1,0 +1,42 @@
+schema_version: 1
+model_version: minestudio-steve1-skilldiscovery-loss-only-hybrid
+provider: CraftJarvis SkillDiscovery / MineStudio STEVE-1
+architecture: SkillDiscovery-tuned MineCLIP-conditioned VPT 2x temporal policy
+purpose: short-horizon text-conditioned native-interface Minecraft control candidate
+promotion_status: candidate-live-ab-test
+goal_conditioned: true
+temporal_memory: true
+research_only: true
+source:
+  policy_repository: https://huggingface.co/fatty-belly/SkillDiscovery-STEVE1-loss-only
+  policy_revision: ab5793f3b6f7dbb6e337743b5c3f544b4d3480c0
+  policy_license: Apache-2.0
+  conditioning_repository: https://huggingface.co/CraftJarvis/MineStudio_STEVE-1.official
+  conditioning_license: not-declared
+  integration_repository: https://github.com/CraftJarvis/MineStudio
+  integration_commit: 278aa8553668d591339dbf30d281594ed06ee882
+artifacts:
+  construction: policy tensors from SkillDiscovery plus missing conditioning tensors from official STEVE-1
+  config:
+    filename: config.json
+    sha256: a721384c345404e06b2f503705bd414cba94739c7825defc192726da5168dc52
+  weights:
+    filename: model.safetensors
+    sha256: c8e083f9de0d6bb8e404ae181310e7e7a0ddfef0ba36a6fbb66da19cac2eb8c5
+runtime:
+  edition_trained: Java
+  target_edition: Bedrock
+  target_status: unadapted-domain-transfer
+  condition_scale: 4.0
+  deterministic_text_condition: false
+  camera_scale: 47.96
+  camera_calibration: 17267 relative counts per full Bedrock yaw at mouse sensitivity 0.03
+  camera_actuator_step_limit: 96 relative counts at 20 Hz with lossless queued remainder
+  camera_pitch_envelope: 2000 relative counts
+evidence:
+  - The upstream model card reports a Skill Boundary Detection dataset improvement over randomly segmented training baselines.
+  - All locally assembled tensors, source revisions and artifact hashes are recorded in the machine-local provenance manifest.
+limitations:
+  - This is a reproducible hybrid artifact, not a byte-for-byte upstream checkpoint.
+  - The official STEVE-1 conditioning tensors have no declared license, so this candidate remains research-only.
+  - Upstream Java results do not establish Bedrock superiority; the live A/B and frozen Bedrock benchmark must decide promotion.
