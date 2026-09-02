@@ -116,7 +116,12 @@ class Supervisor:
             self.state = SupervisorState.SAFE_IDLE
             self._persist_status()
 
-    def replace_backend(self, backend: InputBackend) -> None:
+    def replace_backend(
+        self,
+        backend: InputBackend,
+        *,
+        preserve_world_camera: bool = False,
+    ) -> None:
         """Replace the motor backend only while completely unarmed."""
         with self._lock:
             if self.state != SupervisorState.SAFE_IDLE:
@@ -131,8 +136,9 @@ class Supervisor:
                     close()
             self.backend = backend
             self.motor = MotorGate(backend)
-            self.world_camera_pitch_units = 0
-            self.world_camera_updates = 0
+            if not preserve_world_camera:
+                self.world_camera_pitch_units = 0
+                self.world_camera_updates = 0
             self._persist_status()
 
     def attach_bedrock_x11(
@@ -144,9 +150,16 @@ class Supervisor:
             raise RuntimeError("host-display input is debug-only and cannot be armed")
         from .platforms.bedrock_x11 import IsolatedX11InputBackend
 
+        same_physical_target = (
+            getattr(self.backend, "display_name", None) == display
+            and getattr(self.backend, "target_window_id", None) == window_id
+        )
         backend = IsolatedX11InputBackend(display, target_window_id=window_id, allow_host=False)
         try:
-            self.replace_backend(backend)
+            self.replace_backend(
+                backend,
+                preserve_world_camera=same_physical_target,
+            )
         except Exception:
             backend.close()
             raise
