@@ -43,13 +43,36 @@ _KEYSYM_NAMES: dict[str, str] = {
     "9": "9",
 }
 _BUTTONS: dict[str, int] = {"left": 1, "middle": 2, "right": 3}
+_SHIFTED_ASCII = set('ABCDEFGHIJKLMNOPQRSTUVWXYZ~!@#$%^&*()_+{}|:"<>?')
+_SHIFT_MAP: dict[str, str] = {
+    "~": "`",
+    "!": "1",
+    "@": "2",
+    "#": "3",
+    "$": "4",
+    "%": "5",
+    "^": "6",
+    "&": "7",
+    "*": "8",
+    "(": "9",
+    ")": "0",
+    "_": "-",
+    "+": "=",
+    "{": "[",
+    "}": "]",
+    "|": "\\",
+    ":": ";",
+    '"': "'",
+    "<": ",",
+    ">": ".",
+    "?": "/",
+}
 
 
 def _display_identity(name: str) -> str:
     value = name.strip()
     if not value:
         raise IsolationError("isolated X display is required")
-    # :7 and :7.0 are the same X server for our isolation purposes.
     return value.split(".", 1)[0]
 
 
@@ -71,11 +94,7 @@ class CapturedFrame:
 
 
 class IsolatedX11InputBackend:
-    """Fast XTEST input connected only to a dedicated Bedrock X server.
-
-    The backend intentionally has no global-display fallback. `DISPLAY` for the
-    operator and `display_name` for Minecraft must identify different X servers.
-    """
+    """XTEST input connected only to a dedicated Bedrock X server."""
 
     backend_id = "bedrock-isolated-x11-xtest"
 
@@ -104,10 +123,19 @@ class IsolatedX11InputBackend:
             raise IsolationError(f"cannot open isolated X display {display_name}: {exc}") from exc
         self._held_keys: set[str] = set()
         self._held_buttons: set[str] = set()
+        self.release_count = 0
         self.live_capable = True
         if target_window_id is not None and not self.probe_target():
             self.close()
             raise IsolationError(f"target X window {target_window_id} is unavailable")
+
+    @property
+    def held_keys(self) -> frozenset[str]:
+        return frozenset(self._held_keys)
+
+    @property
+    def held_buttons(self) -> frozenset[str]:
+        return frozenset(self._held_buttons)
 
     def _keycode(self, key: str) -> int:
         normalized = key.lower()
@@ -161,9 +189,45 @@ class IsolatedX11InputBackend:
             self._held_buttons.add(button.lower())
         self._display.sync()
 
+    def type_chat(self, text: str) -> None:
+        """Type one bounded ASCII chat message through the isolated input server."""
+        if not self.probe_target():
+            self.release_all()
+            raise IsolationError("Bedrock target window disappeared")
+        if not text or len(text) > 256:
+            raise IsolationError("chat text must contain 1..256 characters")
+        if any(ord(char) < 32 or ord(char) > 126 for char in text):
+            raise IsolationError("isolated chat actuator currently supports printable ASCII only")
+        self.release_all()
+        self._tap_key("t")
+        self._display.sync()
+        time.sleep(0.04)
+        for char in text:
+            self._type_ascii(char)
+        self._tap_key("enter")
+        self._display.sync()
+
+    def _type_ascii(self, char: str) -> None:
+        if char == " ":
+            self._tap_key("space")
+            return
+        shifted = char in _SHIFTED_ASCII
+        base = _SHIFT_MAP.get(char, char.lower() if char.isalpha() else char)
+        if shifted:
+            shift = self._keycode("shift")
+            self._xtest.fake_input(self._display, self._x.KeyPress, shift)
+        try:
+            self._tap_key(base)
+        finally:
+            if shifted:
+                self._xtest.fake_input(self._display, self._x.KeyRelease, shift)
+
+    def _tap_key(self, key: str) -> None:
+        keycode = self._keycode(key)
+        self._xtest.fake_input(self._display, self._x.KeyPress, keycode)
+        self._xtest.fake_input(self._display, self._x.KeyRelease, keycode)
+
     def release_all(self) -> None:
-        # Release every key/button the backend advertises, not only local
-        # bookkeeping. This also repairs state after a lost acknowledgement.
         try:
             for key in sorted(set(_KEYSYM_NAMES) | self._held_keys):
                 try:
@@ -183,6 +247,7 @@ class IsolatedX11InputBackend:
         finally:
             self._held_keys.clear()
             self._held_buttons.clear()
+            self.release_count += 1
 
     def close(self) -> None:
         try:
@@ -259,7 +324,6 @@ class IsolatedX11Capture:
 
 def find_minecraft_window(display_name: str, *, host_display: str | None = None) -> int | None:
     """Find a visible Minecraft window on an already-isolated X display."""
-
     require_isolated_display(display_name, host_display)
     try:
         display_module = importlib.import_module("Xlib.display")
