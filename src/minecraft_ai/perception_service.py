@@ -138,13 +138,17 @@ class ActiveVLMWorker:
         png = _bgra_to_png(job.frame)
         prompt = (
             "Inspect this Minecraft Bedrock screenshot. Answer only JSON matching "
-            "{facts:object, confidences:object, tracks:array, chat:string[]}. Always include "
-            "scene.mode as one of world, gui, loading, menu, death, unknown; scene.playable "
-            "as a boolean; and perception.uncertainty from 0 to 1. In world mode report only "
-            "visible HUD state, immediate hazards, terrain affordances, and task-relevant "
-            "targets. Only report target.visible=true with target.dx and target.dy in -1..1 "
-            "when a target is visibly localized. Never infer hidden inventory, coordinates, "
-            "seed, biome, identity, or time of day. Track coordinates are normalized 0..1. "
+            "{facts:object, confidences:object, tracks:array, chat:string[]}. Every facts "
+            "value must be one scalar string, number, or boolean; never an array or object. "
+            "Every confidence value must be a number from 0 to 1. Always include scene.mode "
+            "as exactly one of world, gui, loading, menu, death, unknown; scene.playable as a "
+            "boolean; perception.uncertainty from 0 to 1; danger.immediate as a boolean; "
+            "obstacle.ahead as a boolean; target.visible as a boolean; and scene.summary as a "
+            "short string. In world mode report only visible HUD state, immediate hazards, "
+            "terrain affordances, and task-relevant targets. Only report target.visible=true "
+            "with target.dx and target.dy in -1..1 when a target is visibly localized. Never "
+            "infer hidden inventory, coordinates, seed, biome, identity, or time of day. "
+            "Track coordinates are normalized 0..1. "
             f"Question: {job.query.question}"
         )
         response = self.model.inspect(prompt, image_bytes=png, mime_type="image/png")
@@ -167,7 +171,7 @@ class ActiveVLMWorker:
                 confidence=max(0.0, min(1.0, observation.confidences.get(key, 0.7))),
                 observed_ns=now,
                 source=f"vlm:{self.model.model_id}:{job.query.query_id}",
-                expires_after_ms=max(250, job.query.deadline_ms * 3),
+                expires_after_ms=max(15_000, job.query.deadline_ms * 3),
             )
             for key, value in observation.facts.items()
         )

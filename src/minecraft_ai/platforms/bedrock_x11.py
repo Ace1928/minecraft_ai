@@ -370,7 +370,23 @@ class IsolatedX11Capture:
     def capture(self) -> CapturedFrame:
         bounds = self._bounds()
         bgra_bytes: bytes = b""
-        if self._mss_module is not None:
+        # Capture the target drawable first. Under nested Weston/Xwayland, root
+        # capture can succeed while returning an all-black uncomposited buffer;
+        # Wine's desktop window contains the actual Minecraft pixels.
+        try:
+            window = self._display.create_resource_object("window", self.target_window_id)
+            raw = window.get_image(
+                0,
+                0,
+                bounds["width"],
+                bounds["height"],
+                self._X.ZPixmap,
+                0xFFFFFFFF,
+            )
+            bgra_bytes = raw.data
+        except Exception:
+            bgra_bytes = b""
+        if not bgra_bytes and self._mss_module is not None:
             try:
                 with self._mss_module.mss(display=self.display_name) as grabber:
                     shot = grabber.grab(bounds)
