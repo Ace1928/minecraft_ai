@@ -69,6 +69,8 @@ class TemporalPolicyClient:
     _pending_miss_recorded: bool = field(default=False, init=False)
     _consumed_miss_recorded: bool = field(default=False, init=False)
     _discard_pending_response: bool = field(default=False, init=False)
+    _estimated_pitch_units: int = field(default=0, init=False)
+    _camera_recovery_active: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         _validate_policy_config(self.config)
@@ -103,8 +105,8 @@ class TemporalPolicyClient:
             if self._discard_pending_response:
                 response = None
                 self._discard_pending_response = False
-            self._submit(frame, intent)
             if response is None:
+                self._submit(frame, intent)
                 return self._hold(sequence)
             output = LearnedPolicyOutput.model_validate(response["output"])
             self.metrics.responses += 1
@@ -113,8 +115,11 @@ class TemporalPolicyClient:
             if output.inference_ns > self.config.deadline_ms * 1_000_000:
                 if not self._consumed_miss_recorded:
                     self.metrics.deadline_misses += 1
+                self._submit(frame, intent)
                 return self._release(sequence)
-            return self._output_action(output, sequence)
+            action = self._output_action(output, sequence)
+            self._submit(frame, intent)
+            return action
         except Exception as exc:
             self.metrics.failures += 1
             self.metrics.last_error = f"{type(exc).__name__}: {exc}"
@@ -141,6 +146,10 @@ class TemporalPolicyClient:
             "research_only": self.config.research_only,
             "condition_scale": self.config.condition_scale,
             "camera_scale": self.config.camera_scale,
+            "camera_max_step": self.config.camera_max_step,
+            "camera_pitch_limit": self.config.camera_pitch_limit,
+            "estimated_pitch_units": self._estimated_pitch_units,
+            "camera_recovery_active": self._camera_recovery_active,
             "process_alive": bool(process is not None and process.poll() is None),
             "requests": self.metrics.requests,
             "responses": self.metrics.responses,
@@ -277,7 +286,7 @@ class TemporalPolicyClient:
                 "length": len(frame.bgra),
                 "captured_ns": frame.captured_ns,
             },
-            "intent": intent.model_dump(mode="json"),
+            "intent": self._conditioned_intent(intent),
             "deadline_ns": deadline_ns,
         }
         self._process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
@@ -305,21 +314,50 @@ class TemporalPolicyClient:
         return payload
 
     def _output_action(self, output: LearnedPolicyOutput, sequence: int) -> MotorAction:
-        desired_keys = set(output.keys)
-        desired_buttons = set(output.buttons)
+        mouse_dx, mouse_dy = self._filter_camera(output.mouse_dx, output.mouse_dy)
+        desired_keys = set() if self._camera_recovery_active else set(output.keys)
+        desired_buttons = set() if self._camera_recovery_active else set(output.buttons)
         action = MotorAction(
             sequence=sequence,
             keys_down=tuple(sorted(desired_keys - self._held_keys)),
             keys_up=tuple(sorted(self._held_keys - desired_keys)),
             buttons_down=tuple(sorted(desired_buttons - self._held_buttons)),
             buttons_up=tuple(sorted(self._held_buttons - desired_buttons)),
-            mouse_dx=output.mouse_dx,
-            mouse_dy=output.mouse_dy,
+            mouse_dx=mouse_dx,
+            mouse_dy=mouse_dy,
             duration_ms=50,
         )
         self._held_keys = desired_keys
         self._held_buttons = desired_buttons
         return action
+
+    def _conditioned_intent(self, intent: MotorIntent) -> dict[str, object]:
+        payload = intent.model_dump(mode="json")
+        if not self._camera_recovery_active:
+            return payload
+        direction = "up" if self._estimated_pitch_units > 0 else "down"
+        payload["instruction"] = (
+            f"Stop moving and look {direction} until the camera returns to a level horizon. "
+            "Keep the view stable and do not attack or interact."
+        )
+        return payload
+
+    def _filter_camera(self, mouse_dx: int, mouse_dy: int) -> tuple[int, int]:
+        max_step = self.config.camera_max_step
+        if max_step > 0:
+            mouse_dx = max(-max_step, min(max_step, mouse_dx))
+            mouse_dy = max(-max_step, min(max_step, mouse_dy))
+        pitch_limit = self.config.camera_pitch_limit
+        if pitch_limit > 0:
+            proposed = self._estimated_pitch_units + mouse_dy
+            bounded = max(-pitch_limit, min(pitch_limit, proposed))
+            mouse_dy = bounded - self._estimated_pitch_units
+            self._estimated_pitch_units = bounded
+            if abs(bounded) >= pitch_limit:
+                self._camera_recovery_active = True
+            elif abs(bounded) <= self.config.camera_recovery_release:
+                self._camera_recovery_active = False
+        return mouse_dx, mouse_dy
 
     @staticmethod
     def _hold(sequence: int) -> MotorAction:
@@ -357,6 +395,11 @@ def _validate_policy_config(config: PolicyConfig) -> None:
             raise ValueError(f"learned policy {key} does not exist: {required[key]}")
     if config.license.lower() != "mit" and not config.research_only:
         raise ValueError(f"unapproved learned policy license: {config.license}")
+    if (
+        config.camera_pitch_limit > 0
+        and config.camera_recovery_release >= config.camera_pitch_limit
+    ):
+        raise ValueError("camera_recovery_release must be smaller than camera_pitch_limit")
 
 
 def _learned_scene_blocked(blackboard: PerceptionBlackboard) -> bool:

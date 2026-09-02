@@ -121,6 +121,39 @@ class OpenAICompatibleLocalModel:
         image_bytes: bytes,
         mime_type: str = "image/png",
     ) -> ModelResponse:
+        return self._inspect(
+            prompt,
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+        )
+
+    def inspect_structured(
+        self,
+        prompt: str,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        return self._inspect(
+            prompt,
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": name, "strict": True, "schema": schema},
+            },
+        )
+
+    def _inspect(
+        self,
+        prompt: str,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        response_format: dict[str, object] | None = None,
+    ) -> ModelResponse:
         import time
 
         started = time.perf_counter()
@@ -140,8 +173,10 @@ class OpenAICompatibleLocalModel:
                 }
             ],
             "temperature": 0.1,
-            "max_tokens": 256,
+            "max_tokens": 512,
         }
+        if response_format is not None:
+            payload["response_format"] = response_format
         with self._client() as client:
             response = client.post(
                 self.base_url.rstrip("/") + "/chat/completions",

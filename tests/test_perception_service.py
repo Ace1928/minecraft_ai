@@ -26,6 +26,44 @@ class _UnusedVisionModel:
         raise AssertionError((prompt, image_bytes, mime_type))
 
 
+class _StructuredVisionModel:
+    model_id = "structured-test-vlm"
+
+    def __init__(self) -> None:
+        self.schema: dict[str, object] | None = None
+
+    def inspect(self, prompt: str, *, image_bytes: bytes, mime_type: str) -> ModelResponse:
+        raise AssertionError("unstructured inspection must not be used when schema support exists")
+
+    def inspect_structured(
+        self,
+        prompt: str,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        assert "Every tracks entry must be an object" in prompt
+        assert image_bytes.startswith(b"\x89PNG")
+        assert mime_type == "image/png"
+        assert name == "minecraft_semantic_observation"
+        self.schema = schema
+        return ModelResponse(
+            text=(
+                '{"facts":{"scene.mode":"world","scene.playable":true,'
+                '"target.visible":true,"target.kind":"oak_log","target.mineable":true,'
+                '"target.near":false,"perception.uncertainty":0.1,'
+                '"danger.immediate":false,"obstacle.ahead":false,'
+                '"scene.summary":"Tree ahead"},"confidences":{},'
+                '"tracks":[{"label":"oak_log","confidence":0.9,"x":0.5,"y":0.5,'
+                '"width":0.2,"height":0.4}],"chat":[]}'
+            ),
+            model=self.model_id,
+            latency_ms=12.0,
+        )
+
+
 def _frame(pixels: bytes, *, width: int = 9, height: int = 8) -> CapturedFrame:
     return CapturedFrame(
         frame_id=1,
@@ -59,6 +97,24 @@ def test_frame_dhash_is_deterministic_and_tracks_visual_change() -> None:
 
     assert first == second
     assert perceptual_hash_distance(first, changed) == 64
+
+
+def test_active_vlm_prefers_strict_structured_vision_contract() -> None:
+    model = _StructuredVisionModel()
+    worker = ActiveVLMWorker(model, PerceptionBlackboard(), "bedrock:test")
+    frame = _frame(b"\0" * (9 * 8 * 4))
+    observation, latency_ms = worker._inspect(
+        SemanticJob(
+            query=ActivePerceptionQuery(query_id="q-structured", question="find wood", frame_id=1),
+            frame=frame,
+            frame_dhash=frame_dhash(frame),
+        )
+    )
+
+    assert model.schema is not None
+    assert observation.facts["target.kind"] == "oak_log"
+    assert observation.tracks[0].label == "oak_log"
+    assert latency_ms == 12.0
 
 
 def test_slow_vlm_result_survives_frame_age_when_scene_is_visually_unchanged() -> None:

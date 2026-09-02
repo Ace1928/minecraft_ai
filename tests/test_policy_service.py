@@ -66,6 +66,10 @@ def test_policy_config_requires_hashes_provenance_and_paths(tmp_path: Path) -> N
     _validate_policy_config(
         config.model_copy(update={"license": "unverified", "research_only": True})
     )
+    with pytest.raises(ValueError, match="camera_recovery_release"):
+        _validate_policy_config(
+            config.model_copy(update={"camera_pitch_limit": 20, "camera_recovery_release": 20})
+        )
 
 
 def test_goal_instruction_prefers_semantic_skill_contract() -> None:
@@ -109,6 +113,40 @@ def test_decoded_policy_camera_scale_is_bounded_adapter_calibration() -> None:
     assert output.buttons == ("left",)
     assert output.mouse_dx == -5
     assert output.mouse_dy == 5
+
+
+def test_camera_envelope_reconditions_learned_policy_without_scripted_motion(
+    tmp_path: Path,
+) -> None:
+    config = _policy_config(tmp_path).model_copy(
+        update={"camera_max_step": 3, "camera_pitch_limit": 5, "camera_recovery_release": 2}
+    )
+    client = TemporalPolicyClient(config=config, frame_provider=lambda: None)
+    output = LearnedPolicyOutput(
+        keys=("w",),
+        buttons=("left",),
+        mouse_dx=9,
+        mouse_dy=9,
+        inference_ns=1,
+        model_version="official-v1",
+    )
+
+    first = client._output_action(output, sequence=1)
+    second = client._output_action(output, sequence=2)
+
+    assert (first.mouse_dx, first.mouse_dy) == (3, 3)
+    assert (second.mouse_dx, second.mouse_dy) == (3, 2)
+    assert second.keys_up == ("w",)
+    assert second.buttons_up == ("left",)
+    assert client._camera_recovery_active is True
+    recovery = client._conditioned_intent(MotorIntent(skill_id="explore", mode="explore"))
+    assert "level horizon" in str(recovery["instruction"])
+
+    upward = output.model_copy(update={"keys": (), "buttons": (), "mouse_dy": -9})
+    client._output_action(upward, sequence=3)
+    client._output_action(upward, sequence=4)
+    assert client._estimated_pitch_units == -1
+    assert client._camera_recovery_active is False
 
 
 def test_async_policy_does_not_double_count_an_already_recorded_deadline_miss(

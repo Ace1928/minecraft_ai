@@ -170,10 +170,23 @@ class ActiveVLMWorker:
             "terrain affordances, and task-relevant targets. Only report target.visible=true "
             "with target.dx and target.dy in -1..1 when a target is visibly localized. Never "
             "infer hidden inventory, coordinates, seed, biome, identity, or time of day. "
-            "Track coordinates are normalized 0..1. "
+            "For a visible actionable resource include target.kind, target.mineable, and "
+            "target.near. Every tracks entry must be an object with exactly label:string, "
+            "confidence:number, x:number, y:number, width:number, height:number; coordinates "
+            "and sizes are normalized 0..1. Use tracks:[] when nothing should be tracked. "
             f"Question: {job.query.question}"
         )
-        response = self.model.inspect(prompt, image_bytes=png, mime_type="image/png")
+        structured = getattr(self.model, "inspect_structured", None)
+        if callable(structured):
+            response = structured(
+                prompt,
+                image_bytes=png,
+                mime_type="image/png",
+                name="minecraft_semantic_observation",
+                schema=SemanticObservation.model_json_schema(),
+            )
+        else:
+            response = self.model.inspect(prompt, image_bytes=png, mime_type="image/png")
         raw_text = _strip_code_fence(response.text)
         return SemanticObservation.model_validate(json.loads(raw_text)), response.latency_ms
 
