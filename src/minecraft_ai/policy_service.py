@@ -94,7 +94,7 @@ class TemporalPolicyClient:
         if sequence <= self._last_sequence:
             raise ValueError("motor policy sequence must increase monotonically")
         self._last_sequence = sequence
-        if _learned_scene_blocked(blackboard):
+        if _learned_scene_blocked(blackboard, intent):
             self.metrics.scene_blocks += 1
             return self._release(sequence)
         frame = self.frame_provider()
@@ -632,7 +632,12 @@ def _validate_policy_config(config: PolicyConfig) -> None:
         raise ValueError("camera_recovery_release must be smaller than camera_pitch_limit")
 
 
-def _learned_scene_blocked(blackboard: PerceptionBlackboard) -> bool:
+def _learned_scene_blocked(
+    blackboard: PerceptionBlackboard,
+    intent: MotorIntent | None = None,
+) -> bool:
+    if intent is not None and intent.mode.casefold() == "gui":
+        return False
     playable = blackboard.fact("scene.playable", min_confidence=0.7)
     if playable is None or bool(playable.value):
         return False

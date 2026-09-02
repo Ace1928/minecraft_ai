@@ -137,6 +137,22 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             policy_instruction="use the target",
         ),
         SkillSpec(
+            skill_id="activate_visible_gui_control",
+            version=1,
+            name="Activate visible GUI control",
+            description=(
+                "Use the explicitly grounded visible GUI control, verify the resulting screen "
+                "transition, and avoid emitting world locomotion while a menu is open"
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            parameters=("control",),
+            success_conditions=(SkillCondition(key="scene.playable", operator="truthy"),),
+            expected_effects=("gui_transition",),
+            max_duration_ms=10_000,
+            policy_ref="gui",
+            policy_instruction="click button",
+        ),
+        SkillSpec(
             skill_id="place_block",
             version=3,
             name="Place block",

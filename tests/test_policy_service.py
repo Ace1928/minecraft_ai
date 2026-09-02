@@ -490,6 +490,10 @@ def test_learned_static_gui_scene_blocks_world_policy_actions() -> None:
     )
 
     assert _learned_scene_blocked(board)
+    assert not _learned_scene_blocked(
+        board,
+        MotorIntent(skill_id="activate", mode="gui", instruction="click button"),
+    )
 
 
 def test_rocket_interaction_taxonomy_matches_published_control_contract() -> None:
