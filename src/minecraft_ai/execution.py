@@ -127,6 +127,7 @@ class SkillExecutor:
             skill_id=self._spec.skill_id,
             mode=self._spec.policy_ref or self._spec.skill_id,
             instruction=_policy_instruction(self._spec),
+            condition_scale=self._spec.policy_condition_scale,
             target_label=_target_label(self._parameters),
             parameters=self.policy_parameters,
         )

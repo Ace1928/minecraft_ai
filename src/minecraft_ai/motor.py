@@ -15,6 +15,7 @@ class MotorIntent(BaseModel):
     skill_id: str
     mode: str
     instruction: str | None = Field(default=None, min_length=1, max_length=1024)
+    condition_scale: float | None = Field(default=None, ge=0.0, le=12.0)
     target_label: str | None = None
     parameters: dict[str, str | int | float | bool] = Field(default_factory=dict)
 

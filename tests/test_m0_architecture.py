@@ -171,6 +171,7 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert exploration.policy_instruction == "Run around and explore the Minecraft world."
     assert obstacle.policy_ref == "traverse_obstacle"
     assert obstacle.policy_instruction == "jump forward"
+    assert obstacle.policy_condition_scale == 6.0
     assert obstacle.action_permissions.allow_jump is True
     assert obstacle.action_permissions.allow_attack is False
     assert obstacle.action_permissions.allow_use is False

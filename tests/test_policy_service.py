@@ -244,10 +244,10 @@ def test_grounded_router_shares_one_physical_pitch_state(tmp_path: Path) -> None
 
     assert primary.status()["estimated_pitch_units"] == -37
     assert grounded.status()["estimated_pitch_units"] == -37
-    assert grounded.status()["camera_recovery_active"] is False
+    assert grounded.status()["camera_envelope_saturated"] is False
 
 
-def test_restored_off_center_camera_recovers_to_release_envelope(
+def test_restored_off_center_camera_never_synthesizes_recovery_motion(
     tmp_path: Path,
 ) -> None:
     config = _policy_config(tmp_path).model_copy(
@@ -260,7 +260,7 @@ def test_restored_off_center_camera_recovers_to_release_envelope(
     client = TemporalPolicyClient(config=config, frame_provider=lambda: None)
     client.restore_world_camera_state(estimated_pitch_units=-16)
 
-    assert client.status()["camera_recovery_active"] is True
+    assert client.status()["camera_envelope_saturated"] is False
 
     learned = LearnedPolicyOutput(
         keys=("w",),
@@ -272,12 +272,12 @@ def test_restored_off_center_camera_recovers_to_release_envelope(
     first = client._output_action(learned, sequence=1)
     second = client._hold(sequence=2)
 
-    assert (first.mouse_dx, first.mouse_dy) == (2, 3)
+    assert (first.mouse_dx, first.mouse_dy) == (2, -3)
     assert first.keys_down == ("w",)
-    assert (second.mouse_dx, second.mouse_dy) == (0, 3)
-    assert client.status()["estimated_pitch_units"] == -10
-    assert client.status()["camera_recovery_active"] is False
-    assert client.status()["pending_camera"] == {"mouse_dx": 0, "mouse_dy": 0}
+    assert (second.mouse_dx, second.mouse_dy) == (0, -3)
+    assert client.status()["estimated_pitch_units"] == -22
+    assert client.status()["camera_envelope_saturated"] is False
+    assert client.status()["pending_camera"] == {"mouse_dx": 0, "mouse_dy": -14}
 
 
 def test_grounded_router_merges_temporally_filtered_target_feedback() -> None:
@@ -664,6 +664,13 @@ def test_goal_instruction_prefers_semantic_skill_contract() -> None:
     assert _intent_instruction({"skill_id": "mine_visible_log"}) == "mine visible log"
 
 
+def test_option_condition_scale_overrides_policy_default() -> None:
+    from minecraft_ai.policy_service import _intent_condition_scale
+
+    assert _intent_condition_scale({"condition_scale": 6.0}, default=4.0) == 6.0
+    assert _intent_condition_scale({}, default=4.0) == 4.0
+
+
 def test_decoded_policy_camera_scale_is_bounded_adapter_calibration() -> None:
     decoded = {
         "camera": [[10.0, -10.0]],
@@ -756,7 +763,7 @@ def test_cursor_motion_does_not_corrupt_world_pitch_estimate(tmp_path: Path) -> 
     assert client._pending_camera_semantics == "world"
 
 
-def test_camera_envelope_recovers_without_replacing_learned_task(
+def test_camera_envelope_clamps_without_replacing_learned_task(
     tmp_path: Path,
 ) -> None:
     config = _policy_config(tmp_path).model_copy(
@@ -779,23 +786,23 @@ def test_camera_envelope_recovers_without_replacing_learned_task(
     assert (second.mouse_dx, second.mouse_dy) == (3, 2)
     assert second.keys_up == ()
     assert second.buttons_up == ()
-    assert client._camera_recovery_active is True
+    assert client._camera_envelope_saturated is True
     recovery = client._conditioned_intent(MotorIntent(skill_id="explore", mode="explore"))
     assert recovery["skill_id"] == "explore"
     assert recovery["interaction_id"] == -1
 
-    recovered = client._output_action(output, sequence=3)
-    assert (recovered.mouse_dx, recovered.mouse_dy) == (3, -3)
-    assert recovered.keys_up == ()
-    assert recovered.buttons_up == ()
-    assert client._world_camera_state.estimated_pitch_units == 2
-    assert client._camera_recovery_active is False
+    saturated = client._output_action(output, sequence=3)
+    assert (saturated.mouse_dx, saturated.mouse_dy) == (3, 0)
+    assert saturated.keys_up == ()
+    assert saturated.buttons_up == ()
+    assert client._world_camera_state.estimated_pitch_units == 5
+    assert client._camera_envelope_saturated is True
 
     upward = output.model_copy(update={"keys": (), "buttons": (), "mouse_dy": -9})
     client._output_action(upward, sequence=4)
     client._output_action(upward, sequence=5)
-    assert client._world_camera_state.estimated_pitch_units == -4
-    assert client._camera_recovery_active is False
+    assert client._world_camera_state.estimated_pitch_units == -1
+    assert client._camera_envelope_saturated is False
 
 
 def test_camera_accumulator_preserves_motion_across_motor_ticks(tmp_path: Path) -> None:

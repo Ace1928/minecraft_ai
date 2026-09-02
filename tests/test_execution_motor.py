@@ -89,6 +89,7 @@ def test_skill_contract_becomes_learned_policy_instruction() -> None:
         description="Approach and mine a visible tree log",
         policy_ref="mine",
         policy_instruction="mine log",
+        policy_condition_scale=5.5,
     )
     executor.start(
         spec,
@@ -101,6 +102,7 @@ def test_skill_contract_becomes_learned_policy_instruction() -> None:
 
     assert policy.intent is not None
     assert policy.intent.instruction == "mine log"
+    assert policy.intent.condition_scale == 5.5
     assert policy.intent.target_label == "oak_log"
     assert executor.parameters == {"target": "oak_log", "wood": "oak"}
     assert executor.run is not None

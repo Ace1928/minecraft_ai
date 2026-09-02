@@ -122,7 +122,7 @@ class TemporalPolicyClient:
         default_factory=WorldCameraState,
         init=False,
     )
-    _camera_recovery_active: bool = field(default=False, init=False)
+    _camera_envelope_saturated: bool = field(default=False, init=False)
     _pending_camera: tuple[int, int] = field(default=(0, 0), init=False)
     _pending_camera_semantics: Literal["world", "cursor"] = field(
         default="world",
@@ -155,9 +155,9 @@ class TemporalPolicyClient:
     def restore_world_camera_state(self, *, estimated_pitch_units: int) -> None:
         """Restore actuator pitch owned by the persistent supervisor."""
         self._world_camera_state.estimated_pitch_units = estimated_pitch_units
-        self._camera_recovery_active = bool(
+        self._camera_envelope_saturated = bool(
             self.config.camera_pitch_limit > 0
-            and abs(estimated_pitch_units) > self.config.camera_recovery_release
+            and abs(estimated_pitch_units) >= self.config.camera_pitch_limit
         )
 
     def target_observation(self) -> GroundedTargetObservation | None:
@@ -278,7 +278,7 @@ class TemporalPolicyClient:
             "camera_pitch_limit": self.config.camera_pitch_limit,
             "action_hold_ms": self.config.action_hold_ms,
             "estimated_pitch_units": self._world_camera_state.estimated_pitch_units,
-            "camera_recovery_active": self._camera_recovery_active,
+            "camera_envelope_saturated": self._camera_envelope_saturated,
             "button_zero_order_hold": True,
             "last_prediction": (
                 None
@@ -665,10 +665,10 @@ class TemporalPolicyClient:
         CPU inference is slower than the 20 Hz actuator, so clipping that delta
         once permanently loses part of the learned action. Queue the converted
         relative motion and drain it over live motor ticks instead. If repeated
-        learned motion reaches a calibrated pitch pole, a bounded actuator
-        servo returns inside the release envelope while leaving locomotion and
-        interaction outputs intact. This is an actuator invariant, not a
-        replacement navigation policy or synthetic camera training target.
+        learned motion reaches the calibrated viewing envelope, further motion
+        toward that pole is rejected while learned motion back toward the
+        interior remains untouched. The actuator never synthesizes recentering
+        motion: STEVE or ROCKET chooses every emitted camera delta.
         """
 
         pending_dx, pending_dy = self._pending_camera
@@ -683,29 +683,27 @@ class TemporalPolicyClient:
         pitch_limit = self.config.camera_pitch_limit
         if pitch_limit > 0 and self._pending_camera_semantics == "world":
             current_pitch = self._world_camera_state.estimated_pitch_units
-            release = self.config.camera_recovery_release
-            if self._camera_recovery_active and abs(current_pitch) > release:
-                # Never replay the rejected vertical queue after recovery.
-                remaining_dy = 0
-                distance = abs(current_pitch) - release
-                recovery_step = distance if max_step <= 0 else min(max_step, distance)
-                mouse_dy = -recovery_step if current_pitch > 0 else recovery_step
+            if current_pitch > pitch_limit:
+                mouse_dy = min(0, mouse_dy)
                 current_pitch += mouse_dy
-                self._world_camera_state.estimated_pitch_units = current_pitch
-                self._camera_recovery_active = abs(current_pitch) > release
+                remaining_dy = 0
+            elif current_pitch < -pitch_limit:
+                mouse_dy = max(0, mouse_dy)
+                current_pitch += mouse_dy
+                remaining_dy = 0
             else:
-                self._camera_recovery_active = False
                 proposed = current_pitch + mouse_dy
                 bounded = max(-pitch_limit, min(pitch_limit, proposed))
                 bounded_dy = bounded - current_pitch
                 if bounded_dy != mouse_dy:
                     # The envelope rejected motion farther toward a pitch pole.
-                    # Discard it so it cannot reappear after the servo moves
-                    # back toward the useful central viewing envelope.
+                    # Discard it so it cannot reappear after a later learned
+                    # action moves back toward the useful viewing envelope.
                     remaining_dy = 0
-                    self._camera_recovery_active = True
                 mouse_dy = bounded_dy
-                self._world_camera_state.estimated_pitch_units = bounded
+                current_pitch = bounded
+            self._world_camera_state.estimated_pitch_units = current_pitch
+            self._camera_envelope_saturated = abs(current_pitch) >= pitch_limit
         self._pending_camera = (remaining_dx, remaining_dy)
         if remaining_dx == 0 and remaining_dy == 0:
             self._pending_camera_semantics = "world"
@@ -1502,6 +1500,7 @@ class _SteveOneBackend:
     hidden_state: Any = field(init=False, default=None)
     condition: Any = field(init=False, default=None)
     instruction: str | None = field(init=False, default=None)
+    active_condition_scale: float | None = field(init=False, default=None)
     inference_count: int = field(init=False, default=0)
     scene_model: Any = field(init=False, default=None)
     discrete_actions_emitted: set[str] = field(init=False, default_factory=set)
@@ -1542,6 +1541,7 @@ class _SteveOneBackend:
         self.hidden_state = None
         self.condition = None
         self.instruction = None
+        self.active_condition_scale = None
         self.inference_count = 0
         self.discrete_actions_emitted.clear()
 
@@ -1549,13 +1549,19 @@ class _SteveOneBackend:
         started = time.perf_counter_ns()
         self.inference_count += 1
         instruction = _intent_instruction(intent)
-        if instruction != self.instruction or self.condition is None:
+        condition_scale = _intent_condition_scale(intent, default=self.condition_scale)
+        if (
+            instruction != self.instruction
+            or condition_scale != self.active_condition_scale
+            or self.condition is None
+        ):
             self.condition = self.policy.prepare_condition(
-                {"cond_scale": self.condition_scale, "text": instruction},
+                {"cond_scale": condition_scale, "text": instruction},
                 deterministic=self.deterministic_condition,
             )
             self.hidden_state = self.policy.initial_state(1, self.condition)
             self.instruction = instruction
+            self.active_condition_scale = condition_scale
             self.discrete_actions_emitted.clear()
         rgb = _center_crop_16_9(frame[:, :, [2, 1, 0]], self.numpy)
         resized = self.cv2.resize(rgb, (128, 128), interpolation=self.cv2.INTER_LINEAR)
@@ -2071,6 +2077,14 @@ def _intent_instruction(intent: dict[str, Any]) -> str:
         return instruction.strip()
     skill_id = str(intent.get("skill_id") or "explore safely")
     return skill_id.replace("_", " ")
+
+
+def _intent_condition_scale(intent: dict[str, Any], *, default: float) -> float:
+    """Resolve an evidence-tuned option guidance scale without changing its actions."""
+    value = intent.get("condition_scale")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return max(0.0, min(12.0, float(value)))
 
 
 def _intent_camera_semantics(intent: dict[str, Any]) -> Literal["world", "cursor"]:

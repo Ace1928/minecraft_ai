@@ -206,7 +206,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="traverse_visible_obstacle",
-            version=2,
+            version=3,
             name="Traverse visible obstacle",
             description=(
                 "Use learned short-horizon movement and camera control to jump over or climb "
@@ -224,6 +224,12 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             # generic ``go explore`` latent. This remains a STEVE-1 option, not
             # an injected Space key or handcrafted obstacle reflex.
             policy_instruction="jump forward",
+            # Exact-frame action-distribution evaluation of the promoted
+            # official STEVE-1 checkpoint measured forward+jump probability
+            # rising from 0.242 at CFG 4 to 0.480 at CFG 6, with the latter
+            # becoming the modal action. Keep that evidence local to this
+            # option instead of globally over-guiding exploration/camera use.
+            policy_condition_scale=6.0,
             action_permissions=SkillActionPermissions(
                 allow_attack=False,
                 allow_use=False,

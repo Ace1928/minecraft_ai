@@ -63,6 +63,7 @@ class SkillSpec(BaseModel):
     max_duration_ms: int = Field(default=30_000, ge=50, le=3_600_000)
     policy_ref: str | None = None
     policy_instruction: str | None = Field(default=None, min_length=1, max_length=256)
+    policy_condition_scale: float | None = Field(default=None, ge=0.0, le=12.0)
     action_permissions: SkillActionPermissions = Field(default_factory=SkillActionPermissions)
     compatible_editions: tuple[str, ...] = ("bedrock", "java")
     compatible_versions: tuple[str, ...] = ()
