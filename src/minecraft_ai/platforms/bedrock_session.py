@@ -6,6 +6,7 @@ import shutil
 import signal
 import subprocess
 import time
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,12 @@ from typing import Any
 from platformdirs import user_runtime_dir
 
 from .bedrock_linux import discover_bedrock_linux_install
-from .bedrock_x11 import IsolationError, find_minecraft_window, require_isolated_display
+from .bedrock_x11 import (
+    IsolationError,
+    find_minecraft_window,
+    request_window_close,
+    require_isolated_display,
+)
 
 
 RUNTIME_DIR = Path(user_runtime_dir("minecraft-ai"))
@@ -31,6 +37,9 @@ class BedrockSession:
     created_ns: int
     launcher_command: tuple[str, ...]
     mode: str = "xephyr"
+    wayland_socket: str | None = None
+    compositor_log: str | None = None
+    launcher_log: str | None = None
 
     @classmethod
     def load(cls, path: Path = BEDROCK_SESSION_FILE) -> BedrockSession:
@@ -50,6 +59,13 @@ class BedrockSession:
             created_ns=int(raw["created_ns"]),
             launcher_command=tuple(command),
             mode=str(raw.get("mode", "xephyr")),
+            wayland_socket=None
+            if raw.get("wayland_socket") is None
+            else str(raw["wayland_socket"]),
+            compositor_log=None
+            if raw.get("compositor_log") is None
+            else str(raw["compositor_log"]),
+            launcher_log=None if raw.get("launcher_log") is None else str(raw["launcher_log"]),
         )
 
     def persist(self, path: Path = BEDROCK_SESSION_FILE) -> None:
@@ -212,6 +228,138 @@ def launch_xephyr_bedrock_session(
         raise
 
 
+def launch_weston_bedrock_session(
+    *,
+    width: int = 1280,
+    height: int = 720,
+    launcher_command: tuple[str, ...] | None = None,
+) -> BedrockSession:
+    """Launch Bedrock in a GPU-accelerated nested Weston/Xwayland compositor."""
+    if os.name != "posix" or not Path("/proc").is_dir():
+        raise IsolationError("managed Bedrock isolation is currently Linux-only")
+    host_display = os.environ.get("DISPLAY", "").strip()
+    host_wayland = os.environ.get("WAYLAND_DISPLAY", "").strip()
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if not host_display or not host_wayland or not runtime_dir:
+        raise IsolationError("a host Wayland session with DISPLAY is required")
+    weston = shutil.which("weston")
+    if weston is None:
+        raise IsolationError("Weston is not installed")
+    if width < 320 or height < 240:
+        raise IsolationError("isolated Bedrock resolution is too small")
+    if launcher_command is None:
+        install = discover_bedrock_linux_install()
+        command = install.launcher_command if install is not None else None
+        command = command or shutil.which("bedrock-on-linux")
+        if command is None:
+            raise IsolationError("bedrock-on-linux launcher was not found")
+        launcher_command = (command, "play")
+
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    nonce = f"{os.getpid()}-{time.monotonic_ns()}"
+    wayland_socket = f"minecraft-ai-{nonce}"
+    compositor_log = RUNTIME_DIR / f"weston-{nonce}.log"
+    launcher_log = RUNTIME_DIR / f"bedrock-launcher-{nonce}.log"
+    compositor = subprocess.Popen(
+        [
+            weston,
+            "--backend=wayland",
+            f"--socket={wayland_socket}",
+            f"--width={width}",
+            f"--height={height}",
+            "--renderer=gl",
+            "--xwayland",
+            "--shell=kiosk",
+            "--no-config",
+            f"--log={compositor_log}",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        display = _wait_for_weston_xwayland(compositor, compositor_log)
+        require_isolated_display(display, host_display)
+        env = dict(os.environ)
+        env["DISPLAY"] = display
+        env["WAYLAND_DISPLAY"] = wayland_socket
+        env["XDG_SESSION_TYPE"] = "wayland"
+        env["BOL_INPUT"] = "x11"
+        env.pop("BOL_DISPLAY", None)
+        with launcher_log.open("ab", buffering=0) as log:
+            launcher = subprocess.Popen(
+                list(launcher_command),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        session = BedrockSession(
+            display=display,
+            host_display=host_display,
+            xserver_pid=compositor.pid,
+            launcher_pid=launcher.pid,
+            width=width,
+            height=height,
+            created_ns=time.monotonic_ns(),
+            launcher_command=launcher_command,
+            mode="weston",
+            wayland_socket=wayland_socket,
+            compositor_log=str(compositor_log),
+            launcher_log=str(launcher_log),
+        )
+        session.persist()
+        return session
+    except Exception:
+        _terminate_process_group(compositor.pid)
+        raise
+
+
+def _wait_for_weston_xwayland(
+    compositor: subprocess.Popen[bytes],
+    log_path: Path,
+    *,
+    timeout_s: float = 10.0,
+) -> str:
+    pattern = re.compile(r"xserver listening on display (:\d+)")
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if compositor.poll() is not None:
+            detail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+            raise IsolationError(f"Weston exited before Xwayland was ready: {detail}")
+        try:
+            detail = log_path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            detail = ""
+        match = pattern.search(detail)
+        if match is not None and _x_socket(match.group(1)).exists():
+            return match.group(1)
+        time.sleep(0.05)
+    raise IsolationError(f"timed out waiting for Weston Xwayland; inspect {log_path}")
+
+
+def launch_isolated_bedrock_session(
+    *,
+    width: int = 1280,
+    height: int = 720,
+    launcher_command: tuple[str, ...] | None = None,
+) -> BedrockSession:
+    """Prefer the accelerated compositor, retaining Xephyr as a compatibility fallback."""
+    if shutil.which("weston") and os.environ.get("WAYLAND_DISPLAY"):
+        return launch_weston_bedrock_session(
+            width=width,
+            height=height,
+            launcher_command=launcher_command,
+        )
+    return launch_xephyr_bedrock_session(
+        width=width,
+        height=height,
+        launcher_command=launcher_command,
+    )
+
+
 def launch_direct_bedrock_session(
     *,
     width: int = 1280,
@@ -288,12 +436,24 @@ def stop_bedrock_session(session: BedrockSession | None = None) -> None:
             current = BedrockSession.load()
         except (OSError, ValueError, TypeError, KeyError):
             return
-    if current.mode not in {"xephyr", "direct"}:
+    if current.mode not in {"xephyr", "weston", "direct"}:
         raise IsolationError(f"unsupported Bedrock session mode: {current.mode!r}")
-    if current.mode == "xephyr":
+    if current.mode in {"xephyr", "weston"}:
         require_isolated_display(current.display, current.host_display)
-    _terminate_process_group(current.launcher_pid)
-    if current.mode == "xephyr":
+    window_id = current.find_window() if bedrock_session_alive(current) else None
+    if window_id is not None:
+        request_window_close(
+            current.display,
+            window_id,
+            host_display=current.host_display,
+            allow_host=(current.mode == "direct"),
+        )
+        deadline = time.monotonic() + 12.0
+        while time.monotonic() < deadline and _pid_alive(current.launcher_pid):
+            time.sleep(0.1)
+    if _pid_alive(current.launcher_pid):
+        _terminate_process_group(current.launcher_pid)
+    if current.mode in {"xephyr", "weston"}:
         _terminate_process_group(current.xserver_pid)
     try:
         persisted = BedrockSession.load()

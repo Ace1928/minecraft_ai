@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from minecraft_ai.platforms.bedrock_linux import _read_install_record
+from minecraft_ai.platforms.bedrock_session import BedrockSession, bedrock_session_alive
 from minecraft_ai.platforms.bedrock_x11 import IsolationError, require_isolated_display
 
 
@@ -41,3 +42,29 @@ def test_isolated_backend_refuses_host_x_server() -> None:
 
 def test_different_x_server_is_accepted() -> None:
     require_isolated_display(":71", host_display=":0")
+
+
+def test_nested_session_is_not_alive_when_launcher_exited(tmp_path: Path, monkeypatch) -> None:
+    session = BedrockSession(
+        display=":71",
+        host_display=":0",
+        xserver_pid=100,
+        launcher_pid=200,
+        width=1280,
+        height=720,
+        created_ns=1,
+        launcher_command=("bedrock-on-linux", "play"),
+        mode="weston",
+    )
+    monkeypatch.setattr(
+        "minecraft_ai.platforms.bedrock_session._pid_alive",
+        lambda pid: pid == 100,
+    )
+    socket_path = tmp_path / "X71"
+    socket_path.touch()
+    monkeypatch.setattr(
+        "minecraft_ai.platforms.bedrock_session._x_socket",
+        lambda _display: socket_path,
+    )
+
+    assert not bedrock_session_alive(session)

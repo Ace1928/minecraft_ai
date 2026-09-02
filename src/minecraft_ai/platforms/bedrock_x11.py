@@ -419,3 +419,36 @@ def find_minecraft_window(
         return fallback
     finally:
         display.close()
+
+
+def request_window_close(
+    display_name: str,
+    window_id: int,
+    *,
+    host_display: str | None = None,
+    allow_host: bool = False,
+) -> bool:
+    """Request a normal game shutdown so BedrockOnLinux can clear GPU state."""
+    require_isolated_display(display_name, host_display, allow_host=allow_host)
+    try:
+        display_module = importlib.import_module("Xlib.display")
+        event_module = importlib.import_module("Xlib.protocol.event")
+        display: Any = display_module.Display(display_name)
+    except Exception as exc:
+        raise IsolationError(f"cannot open X display {display_name}: {exc}") from exc
+    try:
+        window = display.create_resource_object("window", window_id)
+        protocols = display.intern_atom("WM_PROTOCOLS")
+        delete_window = display.intern_atom("WM_DELETE_WINDOW")
+        event = event_module.ClientMessage(
+            window=window,
+            client_type=protocols,
+            data=(32, [delete_window, int(time.time()), 0, 0, 0]),
+        )
+        window.send_event(event, event_mask=0)
+        display.flush()
+        return True
+    except Exception:
+        return False
+    finally:
+        display.close()

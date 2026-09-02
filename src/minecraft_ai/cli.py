@@ -37,7 +37,7 @@ from .platforms.bedrock_session import (
     BEDROCK_SESSION_FILE,
     BedrockSession,
     bedrock_session_alive,
-    launch_xephyr_bedrock_session,
+    launch_isolated_bedrock_session,
     stop_bedrock_session,
     wait_for_minecraft_window,
 )
@@ -123,6 +123,9 @@ def _session_payload(session: BedrockSession) -> dict[str, object]:
         "width": session.width,
         "height": session.height,
         "mode": session.mode,
+        "wayland_socket": session.wayland_socket,
+        "compositor_log": session.compositor_log,
+        "launcher_log": session.launcher_log,
         "alive": alive,
         "minecraft_window": session.find_window() if alive else None,
     }
@@ -217,7 +220,9 @@ def doctor() -> None:
             "running_instances": [instance.instance_id for instance in bedrock_instances],
         },
         "isolation": {
+            "weston": shutil.which("weston"),
             "xephyr": shutil.which("Xephyr"),
+            "preferred_backend": "weston" if shutil.which("weston") else "xephyr",
             "host_display": os.environ.get("DISPLAY"),
             "managed_session": _session_payload(session) if session is not None else None,
         },
@@ -276,7 +281,7 @@ def run(
         ) from exc
     if not bedrock_session_alive(session):
         raise typer.BadParameter("The managed Bedrock session is not alive.")
-    if session.mode != "xephyr":
+    if session.mode not in {"xephyr", "weston"}:
         raise typer.BadParameter(
             "Direct host-display sessions are observation/debug only and cannot be armed. "
             "Stop it and launch the default isolated session first."
@@ -486,7 +491,7 @@ def bedrock_launch(
         help="Launch on the host display for manual debugging; autonomous input stays disabled.",
     ),
 ) -> None:
-    """Launch BedrockOnLinux; isolated Xephyr is the production default."""
+    """Launch BedrockOnLinux in an accelerated isolated compositor."""
     if bedrock_session_alive():
         session = BedrockSession.load()
         print("[yellow]Managed Bedrock session is already running.[/yellow]")
@@ -501,7 +506,7 @@ def bedrock_launch(
             "motor control cannot be armed.[/yellow]"
         )
     else:
-        session = launch_xephyr_bedrock_session(width=width, height=height)
+        session = launch_isolated_bedrock_session(width=width, height=height)
     print("[green]Bedrock session launched.[/green]")
     print(json.dumps(_session_payload(session), indent=2, sort_keys=True))
 
