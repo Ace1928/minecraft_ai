@@ -1,5 +1,6 @@
-from pathlib import Path
+import hashlib
 import time
+from pathlib import Path
 
 import numpy
 import pytest
@@ -32,6 +33,7 @@ from minecraft_ai.policy_service import (
     _mineclip_scene_belief,
     _rocket_action_contract,
     _rocket_interaction_id,
+    _rocket_reference_frame,
     _track_mask,
     _validate_policy_config,
 )
@@ -103,6 +105,7 @@ def _operator_tracked_board(
     age_ms: int,
     reference_dhash: str | None = None,
     current_dhash: str | None = None,
+    reference_image_path: Path | None = None,
 ) -> PerceptionBlackboard:
     board = _tracked_board(age_ms=age_ms)
     current = board.latest()
@@ -110,6 +113,9 @@ def _operator_tracked_board(
     attributes = {"source": "operator", "grounding": "explicit-region"}
     if reference_dhash is not None:
         attributes["reference_dhash"] = reference_dhash
+    if reference_image_path is not None:
+        attributes["reference_image_path"] = str(reference_image_path)
+        attributes["reference_image_sha256"] = "a" * 64
     track = current.tracks[0].model_copy(
         update={"attributes": attributes}
     )
@@ -435,6 +441,57 @@ def test_grounded_router_holds_hash_bound_target_only_inside_active_option() -> 
     router.reset()
     rejected = router.act(board, mine, sequence=4)
     assert rejected.keys_down == ("w",)
+
+
+def test_grounded_router_admits_persisted_cross_view_reference(tmp_path: Path) -> None:
+    reference = tmp_path / "operator-reference.jpg"
+    reference.write_bytes(b"reference")
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _RoutingPolicy("rocket", key="a")
+    router = GroundedPolicyRouter(primary, grounded, max_track_age_ms=100)
+
+    action = router.act(
+        _operator_tracked_board(
+            age_ms=10_000,
+            current_dhash="fedcba9876543210",
+            reference_image_path=reference,
+        ),
+        MotorIntent(skill_id="approach", mode="approach"),
+        sequence=1,
+    )
+
+    assert action.keys_down == ("a",)
+    assert router.status()["active_route"] == "grounded"
+
+
+def test_rocket_reference_frame_verifies_persisted_artifact(tmp_path: Path) -> None:
+    payload = b"verified-reference"
+    reference = tmp_path / "operator-reference.jpg"
+    reference.write_bytes(payload)
+    expected = numpy.zeros((8, 12, 3), dtype=numpy.uint8)
+
+    class _CV2:
+        IMREAD_COLOR = 1
+
+        @staticmethod
+        def imread(path: str, mode: int) -> numpy.ndarray:
+            assert path == str(reference)
+            assert mode == _CV2.IMREAD_COLOR
+            return expected
+
+    track = {
+        "attributes": {
+            "reference_image_path": str(reference),
+            "reference_image_sha256": hashlib.sha256(payload).hexdigest(),
+        }
+    }
+
+    loaded = _rocket_reference_frame(track, numpy.ones((4, 4, 4)), _CV2)
+
+    assert loaded is expected
+    track["attributes"]["reference_image_sha256"] = "0" * 64
+    with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
+        _rocket_reference_frame(track, numpy.ones((4, 4, 4)), _CV2)
 
 
 def _policy_config(tmp_path: Path, *, deadline_ms: int = 48) -> PolicyConfig:

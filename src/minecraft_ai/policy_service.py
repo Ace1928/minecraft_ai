@@ -1005,8 +1005,8 @@ class GroundedPolicyRouter:
         )
         # Once ROCKET has captured a valid reference image, preserve that
         # recurrent option while the same target and interaction remain active.
-        # Skill completion/reset clears this lease, so a persisted screen box
-        # can never silently re-arm a new controller process.
+        # A stale rectangle alone cannot re-arm a process; a verified persisted
+        # cross-view image can, because it contains the actual visual reference.
         if (
             self._active_route == "grounded"
             and interaction_id == self._grounded_interaction_id
@@ -1021,6 +1021,7 @@ class GroundedPolicyRouter:
                 for track in candidates
                 if track.last_seen_ns >= cutoff
                 or _operator_reference_matches(track, current_hash)
+                or _operator_reference_artifact_available(track)
             ),
             None,
         )
@@ -1047,6 +1048,22 @@ def _operator_reference_matches(track: object, current_hash: object) -> bool:
         return perceptual_hash_distance(reference, observed) <= 6
     except ValueError:
         return False
+
+
+def _operator_reference_artifact_available(track: object) -> bool:
+    if not hasattr(track, "attributes"):
+        return False
+    attributes = track.attributes
+    if attributes.get("source") != "operator":
+        return False
+    path = attributes.get("reference_image_path")
+    digest = attributes.get("reference_image_sha256")
+    return (
+        isinstance(path, str)
+        and isinstance(digest, str)
+        and len(digest) == 64
+        and Path(path).is_file()
+    )
 
 
 def _policy_status(policy: MotorPolicy) -> dict[str, object]:
@@ -1675,14 +1692,26 @@ class _RocketTwoBackend:
             self.hidden_state = None
             self.grounding_signature = signature
             if isinstance(track, dict):
-                mask = _track_mask(frame.shape[0], frame.shape[1], track, self.numpy)
+                reference = _rocket_reference_frame(track, frame, self.cv2)
+                reference_rgb = reference[:, :, [2, 1, 0]]
+                mask = _track_mask(
+                    reference.shape[0],
+                    reference.shape[1],
+                    track,
+                    self.numpy,
+                )
                 mask = _center_crop_16_9(mask, self.numpy)
                 self.reference_mask = self.cv2.resize(
                     mask,
                     (224, 224),
                     interpolation=self.cv2.INTER_NEAREST,
                 ).astype(self.numpy.uint8)
-                self.reference_image = current.copy()
+                reference_rgb = _center_crop_16_9(reference_rgb, self.numpy)
+                self.reference_image = self.cv2.resize(
+                    reference_rgb,
+                    (224, 224),
+                    interpolation=self.cv2.INTER_LINEAR,
+                )
             else:
                 self.reference_mask = self.numpy.zeros((224, 224), dtype=self.numpy.uint8)
                 self.reference_image = self.numpy.zeros((224, 224, 3), dtype=self.numpy.uint8)
@@ -1885,6 +1914,23 @@ def _rocket_grounding_signature(track: object, interaction_id: int) -> str:
     if not isinstance(track, dict):
         return f"ungrounded:{interaction_id}"
     return f"{track.get('track_id', 'unknown')}:{interaction_id}"
+
+
+def _rocket_reference_frame(track: dict[str, Any], current_frame: Any, cv2_module: Any) -> Any:
+    """Load and verify a persisted cross-view image, or use the current view."""
+    attributes = track.get("attributes")
+    if not isinstance(attributes, dict):
+        return current_frame
+    path_value = attributes.get("reference_image_path")
+    digest = attributes.get("reference_image_sha256")
+    if not isinstance(path_value, str) or not isinstance(digest, str):
+        return current_frame
+    path = Path(path_value)
+    _verify_sha256(path, digest)
+    reference = cv2_module.imread(str(path), cv2_module.IMREAD_COLOR)
+    if reference is None or reference.ndim != 3 or reference.shape[2] != 3:
+        raise RuntimeError(f"unable to decode ROCKET-2 reference image {path}")
+    return reference
 
 
 def _track_mask(height: int, width: int, track: dict[str, Any], numpy_module: Any) -> Any:

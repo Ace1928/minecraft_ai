@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import urllib.request
@@ -8,6 +9,7 @@ from pathlib import Path
 
 from minecraft_ai.config import AppPaths
 from minecraft_ai.operator_server import OperatorRequestHandler
+from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.storage import StateDatabase
 
 
@@ -22,8 +24,17 @@ def test_operator_http_message_roundtrip(tmp_path: Path, monkeypatch) -> None:
     )
     monkeypatch.setattr("minecraft_ai.operator_server.app_paths", lambda: paths)
     monkeypatch.setattr(
-        "minecraft_ai.operator_server._current_agent_frame_dhash",
-        lambda: "0123456789abcdef",
+        "minecraft_ai.operator_server._current_agent_reference",
+        lambda: (
+            CapturedFrame(
+                frame_id=1,
+                captured_ns=1,
+                width=4,
+                height=4,
+                bgra=bytes([0, 128, 255, 255]) * 16,
+            ),
+            "0123456789abcdef",
+        ),
     )
     server = ThreadingHTTPServer(("127.0.0.1", 0), OperatorRequestHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -67,6 +78,11 @@ def test_operator_http_message_roundtrip(tmp_path: Path, monkeypatch) -> None:
         assert stored_target is not None
         assert stored_target.region.height == 0.5
         assert stored_target.attributes["reference_dhash"] == "0123456789abcdef"
+        reference_path = Path(str(stored_target.attributes["reference_image_path"]))
+        assert reference_path.is_file()
+        assert hashlib.sha256(reference_path.read_bytes()).hexdigest() == (
+            stored_target.attributes["reference_image_sha256"]
+        )
 
         with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=2) as response:
             assert json.load(response) == {"status": "ok"}

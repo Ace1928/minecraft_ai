@@ -1,6 +1,7 @@
 # ruff: noqa: E501
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import time
@@ -20,7 +21,7 @@ from .emergency import emergency_reason, emergency_stop_latched
 from .perception import ScreenRegion, Track
 from .perception_service import frame_dhash
 from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
-from .platforms.bedrock_x11 import IsolatedX11Capture
+from .platforms.bedrock_x11 import CapturedFrame, IsolatedX11Capture
 from .social import OperatorMessage, OperatorMessageKind
 from .storage import StateDatabase
 from .supervisor import STATUS_FILE, send_command, supervisor_alive
@@ -82,12 +83,12 @@ def operator_status() -> dict[str, object]:
     }
 
 
-def _current_agent_frame_dhash() -> str | None:
-    """Bind an operator screen region to the live view it was selected from.
+def _current_agent_reference() -> tuple[CapturedFrame, str] | None:
+    """Capture the exact view used for a durable operator grounding reference.
 
     The target can still be stored when no capture process is available (for
-    offline UI/state inspection), but only a live target receives the visual
-    reference needed for durable grounded-policy admission.
+    offline UI/state inspection), but only a live target receives the image and
+    perceptual hash needed for durable grounded-policy admission.
     """
     try:
         process = AgentProcess.load()
@@ -101,11 +102,34 @@ def _current_agent_frame_dhash() -> str | None:
         allow_host=False,
     )
     try:
-        return frame_dhash(capture.capture())
+        frame = capture.capture()
+        return frame, frame_dhash(frame)
     except (OSError, RuntimeError, ValueError):
         return None
     finally:
         capture.close()
+
+
+def _persist_operator_reference(track_id: str, frame: CapturedFrame) -> tuple[Path, str]:
+    """Persist a content-addressed ROCKET cross-view reference outside SQLite."""
+    image = Image.frombytes(
+        "RGBA",
+        (frame.width, frame.height),
+        frame.bgra,
+        "raw",
+        "BGRA",
+    ).convert("RGB")
+    output = BytesIO()
+    image.save(output, format="JPEG", quality=95, optimize=True)
+    payload = output.getvalue()
+    digest = hashlib.sha256(payload).hexdigest()
+    directory = app_paths().data_dir / "operator-target-references"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{track_id.removeprefix('operator:')}-{digest[:16]}.jpg"
+    temporary = path.with_suffix(".jpg.tmp")
+    temporary.write_bytes(payload)
+    temporary.replace(path)
+    return path, digest
 
 
 class OperatorRequestHandler(BaseHTTPRequestHandler):
@@ -239,11 +263,16 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             "source": "operator",
             "grounding": "explicit-region",
         }
-        reference_dhash = _current_agent_frame_dhash()
-        if reference_dhash is not None:
+        track_id = f"operator:{uuid.uuid4().hex}"
+        reference = _current_agent_reference()
+        if reference is not None:
+            frame, reference_dhash = reference
+            reference_path, reference_sha256 = _persist_operator_reference(track_id, frame)
             attributes["reference_dhash"] = reference_dhash
+            attributes["reference_image_path"] = str(reference_path)
+            attributes["reference_image_sha256"] = reference_sha256
         target = Track(
-            track_id=f"operator:{uuid.uuid4().hex}",
+            track_id=track_id,
             label=label,
             confidence=1.0,
             region=ScreenRegion(
