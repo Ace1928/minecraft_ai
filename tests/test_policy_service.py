@@ -78,6 +78,17 @@ def _tracked_board(*, age_ms: int = 0) -> PerceptionBlackboard:
     return board
 
 
+def _operator_tracked_board(*, age_ms: int) -> PerceptionBlackboard:
+    board = _tracked_board(age_ms=age_ms)
+    current = board.latest()
+    assert current is not None
+    track = current.tracks[0].model_copy(
+        update={"attributes": {"source": "operator", "grounding": "explicit-region"}}
+    )
+    board.upsert_semantic_track(instance_id=current.instance_id, track=track)
+    return board
+
+
 def test_grounded_router_requires_fresh_track_and_supported_interaction() -> None:
     primary = _RoutingPolicy("steve", key="w")
     grounded = _RoutingPolicy("rocket", key="a")
@@ -112,6 +123,21 @@ def test_grounded_router_prewarms_both_learned_controllers() -> None:
 
     assert primary.warmups == 1
     assert grounded.warmups == 1
+
+
+def test_grounded_router_keeps_explicit_cross_view_goal_until_cleared() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _RoutingPolicy("rocket", key="a")
+    router = GroundedPolicyRouter(primary, grounded, max_track_age_ms=100)
+
+    action = router.act(
+        _operator_tracked_board(age_ms=10_000),
+        MotorIntent(skill_id="mine", mode="mine"),
+        sequence=1,
+    )
+
+    assert action.keys_down == ("a",)
+    assert router.status()["active_route"] == "grounded"
 
 
 def _policy_config(tmp_path: Path, *, deadline_ms: int = 48) -> PolicyConfig:

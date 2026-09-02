@@ -517,7 +517,10 @@ class GroundedPolicyRouter:
         cutoff = time.monotonic_ns() - self.max_track_age_ms * 1_000_000
         return any(
             track.confidence >= self.min_track_confidence
-            and track.last_seen_ns >= cutoff
+            and (
+                track.attributes.get("source") == "operator"
+                or track.last_seen_ns >= cutoff
+            )
             and (
                 intent.target_label is None
                 or track.label.casefold() == intent.target_label.casefold()

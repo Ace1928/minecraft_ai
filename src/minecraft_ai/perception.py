@@ -167,6 +167,27 @@ class PerceptionBlackboard:
                 )
             return True
 
+    def upsert_semantic_track(self, *, instance_id: str, track: Track) -> bool:
+        """Add or replace one durable semantic track without discarding peers."""
+        with self._lock:
+            latest = self._frames.latest()
+            if latest is None or latest.instance_id != instance_id:
+                return False
+            tracks = {existing.track_id: existing for existing in self._semantic_tracks}
+            tracks[track.track_id] = track
+            self._semantic_tracks = tuple(tracks.values())
+            return True
+
+    def remove_semantic_track(self, track_id: str) -> bool:
+        """Remove one semantic track, returning whether it was present."""
+        with self._lock:
+            retained = tuple(
+                track for track in self._semantic_tracks if track.track_id != track_id
+            )
+            removed = len(retained) != len(self._semantic_tracks)
+            self._semantic_tracks = retained
+            return removed
+
     def _merge_facts_locked(self, facts: tuple[PerceptionFact, ...]) -> None:
         for fact in facts:
             existing = self._facts.get(fact.key)

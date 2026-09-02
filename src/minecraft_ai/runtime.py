@@ -297,14 +297,21 @@ class AgentRuntime:
         if self.state_db is None:
             return
         target = self.state_db.load_operator_target()
-        if target is None or target.track_id == self._last_operator_target_id:
+        if target is None:
+            if self._last_operator_target_id is not None:
+                self.blackboard.remove_semantic_track(self._last_operator_target_id)
+                self._last_operator_target_id = None
+            return
+        if target.track_id == self._last_operator_target_id:
             return
         latest = self.blackboard.raw_latest()
         if latest is None:
             return
-        if self.blackboard.merge_semantics(
+        if self._last_operator_target_id is not None:
+            self.blackboard.remove_semantic_track(self._last_operator_target_id)
+        if self.blackboard.upsert_semantic_track(
             instance_id=latest.instance_id,
-            tracks=(target,),
+            track=target,
         ):
             self._last_operator_target_id = target.track_id
 

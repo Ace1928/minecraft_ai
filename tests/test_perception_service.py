@@ -8,6 +8,8 @@ from minecraft_ai.perception import (
     FrameState,
     PerceptionBlackboard,
     PerceptionFact,
+    ScreenRegion,
+    Track,
 )
 from minecraft_ai.perception_service import (
     ActiveVLMWorker,
@@ -252,3 +254,36 @@ def test_slow_vlm_result_is_rejected_after_ui_band_changes() -> None:
 
     assert board.fact("scene.mode") is None
     assert worker.metrics.stale_rejections == 1
+
+
+def test_durable_track_upsert_and_removal_preserve_other_tracks() -> None:
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:test",
+            width=1280,
+            height=720,
+        )
+    )
+    for track_id in ("learned:tree", "operator:tree"):
+        assert board.upsert_semantic_track(
+            instance_id="bedrock:test",
+            track=Track(
+                track_id=track_id,
+                label="oak_log",
+                confidence=0.9,
+                region=ScreenRegion(x=0.4, y=0.2, width=0.1, height=0.4),
+                first_seen_ns=now,
+                last_seen_ns=now,
+            ),
+        )
+
+    assert {track.track_id for track in board.latest().tracks} == {
+        "learned:tree",
+        "operator:tree",
+    }
+    assert board.remove_semantic_track("operator:tree")
+    assert [track.track_id for track in board.latest().tracks] == ["learned:tree"]
