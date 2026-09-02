@@ -18,6 +18,7 @@ from .agent_lifecycle import AgentProcess, agent_alive, stop_agent_process
 from .config import app_paths
 from .emergency import emergency_reason, emergency_stop_latched
 from .perception import ScreenRegion, Track
+from .perception_service import frame_dhash
 from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
 from .platforms.bedrock_x11 import IsolatedX11Capture
 from .social import OperatorMessage, OperatorMessageKind
@@ -79,6 +80,32 @@ def operator_status() -> dict[str, object]:
             "reason": emergency_reason(),
         },
     }
+
+
+def _current_agent_frame_dhash() -> str | None:
+    """Bind an operator screen region to the live view it was selected from.
+
+    The target can still be stored when no capture process is available (for
+    offline UI/state inspection), but only a live target receives the visual
+    reference needed for durable grounded-policy admission.
+    """
+    try:
+        process = AgentProcess.load()
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if not agent_alive(process):
+        return None
+    capture = IsolatedX11Capture(
+        process.display,
+        process.window_id,
+        allow_host=False,
+    )
+    try:
+        return frame_dhash(capture.capture())
+    except (OSError, RuntimeError, ValueError):
+        return None
+    finally:
+        capture.close()
 
 
 class OperatorRequestHandler(BaseHTTPRequestHandler):
@@ -208,6 +235,13 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
         if not label:
             raise ValueError("target label is required")
         now_ns = time.monotonic_ns()
+        attributes: dict[str, str | int | float | bool] = {
+            "source": "operator",
+            "grounding": "explicit-region",
+        }
+        reference_dhash = _current_agent_frame_dhash()
+        if reference_dhash is not None:
+            attributes["reference_dhash"] = reference_dhash
         target = Track(
             track_id=f"operator:{uuid.uuid4().hex}",
             label=label,
@@ -220,7 +254,7 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             ),
             first_seen_ns=now_ns,
             last_seen_ns=now_ns,
-            attributes={"source": "operator", "grounding": "explicit-region"},
+            attributes=attributes,
         )
         with StateDatabase(app_paths().state_db) as database:
             database.save_operator_target(target)

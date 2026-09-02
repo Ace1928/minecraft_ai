@@ -559,6 +559,8 @@ class GroundedPolicyRouter:
     _active_route: str = field(default="primary", init=False)
     _last_sequence: int = field(default=-1, init=False)
     _switches: int = field(default=0, init=False)
+    _grounded_track_id: str | None = field(default=None, init=False)
+    _grounded_interaction_id: int | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if self.max_track_age_ms <= 0:
@@ -586,6 +588,9 @@ class GroundedPolicyRouter:
             self._active = selected
             self._active_route = route
             self._switches += 1
+        if route == "primary":
+            self._grounded_track_id = None
+            self._grounded_interaction_id = None
         action = selected.act(blackboard, intent, sequence=sequence)
         return action if release is None else _merge_policy_release(action, release)
 
@@ -596,6 +601,8 @@ class GroundedPolicyRouter:
         self._last_sequence = sequence
         self._active = self.primary
         self._active_route = "primary"
+        self._grounded_track_id = None
+        self._grounded_interaction_id = None
         return _merge_policy_release(
             MotorAction(sequence=sequence),
             _merge_policy_release(primary_release, grounded_release),
@@ -631,24 +638,63 @@ class GroundedPolicyRouter:
         blackboard: PerceptionBlackboard,
         intent: MotorIntent,
     ) -> bool:
-        if _rocket_interaction_id(intent.mode) < 0:
+        interaction_id = _rocket_interaction_id(intent.mode)
+        if interaction_id < 0:
             return False
         latest = blackboard.latest()
         if latest is None:
             return False
-        cutoff = time.monotonic_ns() - self.max_track_age_ms * 1_000_000
-        return any(
-            track.confidence >= self.min_track_confidence
-            and (
-                track.attributes.get("source") == "operator"
-                or track.last_seen_ns >= cutoff
-            )
+        candidates = tuple(
+            track
+            for track in latest.tracks
+            if track.confidence >= self.min_track_confidence
             and (
                 intent.target_label is None
                 or track.label.casefold() == intent.target_label.casefold()
             )
-            for track in latest.tracks
         )
+        # Once ROCKET has captured a valid reference image, preserve that
+        # recurrent option while the same target and interaction remain active.
+        # Skill completion/reset clears this lease, so a persisted screen box
+        # can never silently re-arm a new controller process.
+        if (
+            self._active_route == "grounded"
+            and interaction_id == self._grounded_interaction_id
+            and any(track.track_id == self._grounded_track_id for track in candidates)
+        ):
+            return True
+        cutoff = time.monotonic_ns() - self.max_track_age_ms * 1_000_000
+        current_hash = blackboard.fact("frame.dhash", min_confidence=1.0)
+        selected = next(
+            (
+                track
+                for track in candidates
+                if track.last_seen_ns >= cutoff
+                or _operator_reference_matches(track, current_hash)
+            ),
+            None,
+        )
+        if selected is None:
+            return False
+        self._grounded_track_id = selected.track_id
+        self._grounded_interaction_id = interaction_id
+        return True
+
+
+def _operator_reference_matches(track: object, current_hash: object) -> bool:
+    if not hasattr(track, "attributes") or not hasattr(current_hash, "value"):
+        return False
+    attributes = track.attributes
+    if attributes.get("source") != "operator":
+        return False
+    reference = attributes.get("reference_dhash")
+    observed = current_hash.value
+    if not isinstance(reference, str) or not isinstance(observed, str):
+        return False
+    try:
+        return perceptual_hash_distance(reference, observed) <= 6
+    except ValueError:
+        return False
 
 
 def _policy_status(policy: MotorPolicy) -> dict[str, object]:

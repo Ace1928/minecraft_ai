@@ -79,14 +79,36 @@ def _tracked_board(*, age_ms: int = 0) -> PerceptionBlackboard:
     return board
 
 
-def _operator_tracked_board(*, age_ms: int) -> PerceptionBlackboard:
+def _operator_tracked_board(
+    *,
+    age_ms: int,
+    reference_dhash: str | None = None,
+    current_dhash: str | None = None,
+) -> PerceptionBlackboard:
     board = _tracked_board(age_ms=age_ms)
     current = board.latest()
     assert current is not None
+    attributes = {"source": "operator", "grounding": "explicit-region"}
+    if reference_dhash is not None:
+        attributes["reference_dhash"] = reference_dhash
     track = current.tracks[0].model_copy(
-        update={"attributes": {"source": "operator", "grounding": "explicit-region"}}
+        update={"attributes": attributes}
     )
     board.upsert_semantic_track(instance_id=current.instance_id, track=track)
+    if current_dhash is not None:
+        board.merge_semantics(
+            instance_id=current.instance_id,
+            facts=(
+                PerceptionFact(
+                    key="frame.dhash",
+                    value=current_dhash,
+                    confidence=1.0,
+                    observed_ns=time.monotonic_ns(),
+                    source="bootstrap:test",
+                    expires_after_ms=1000,
+                ),
+            ),
+        )
     return board
 
 
@@ -105,13 +127,14 @@ def test_grounded_router_requires_fresh_track_and_supported_interaction() -> Non
     assert second.keys_up == ("w",)
     assert router.status()["active_route"] == "grounded"
 
-    third = router.act(_tracked_board(age_ms=500), mine, sequence=3)
+    router.reset()
+    third = router.act(_tracked_board(age_ms=500), mine, sequence=4)
     assert third.keys_down == ("w",)
-    assert third.keys_up == ("a",)
-    assert router.status()["switches"] == 2
+    assert third.keys_up == ()
+    assert router.status()["switches"] == 1
 
     explore = MotorIntent(skill_id="explore", mode="explore")
-    router.act(_tracked_board(), explore, sequence=4)
+    router.act(_tracked_board(), explore, sequence=5)
     assert grounded.calls == 1
 
 
@@ -126,7 +149,7 @@ def test_grounded_router_prewarms_both_learned_controllers() -> None:
     assert grounded.warmups == 1
 
 
-def test_grounded_router_keeps_explicit_cross_view_goal_until_cleared() -> None:
+def test_grounded_router_rejects_stale_unbound_operator_region() -> None:
     primary = _RoutingPolicy("steve", key="w")
     grounded = _RoutingPolicy("rocket", key="a")
     router = GroundedPolicyRouter(primary, grounded, max_track_age_ms=100)
@@ -137,8 +160,36 @@ def test_grounded_router_keeps_explicit_cross_view_goal_until_cleared() -> None:
         sequence=1,
     )
 
-    assert action.keys_down == ("a",)
-    assert router.status()["active_route"] == "grounded"
+    assert action.keys_down == ("w",)
+    assert router.status()["active_route"] == "primary"
+
+
+def test_grounded_router_holds_hash_bound_target_only_inside_active_option() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _RoutingPolicy("rocket", key="a")
+    router = GroundedPolicyRouter(primary, grounded, max_track_age_ms=100)
+    mine = MotorIntent(skill_id="mine", mode="mine")
+    board = _operator_tracked_board(
+        age_ms=10_000,
+        reference_dhash="0123456789abcdef",
+        current_dhash="0123456789abcdef",
+    )
+
+    admitted = router.act(board, mine, sequence=1)
+    assert admitted.keys_down == ("a",)
+
+    changed = board.fact("frame.dhash", min_confidence=1.0)
+    assert changed is not None
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(changed.model_copy(update={"value": "fedcba9876543210"}),),
+    )
+    held = router.act(board, mine, sequence=2)
+    assert held.keys_down == ("a",)
+
+    router.reset()
+    rejected = router.act(board, mine, sequence=4)
+    assert rejected.keys_down == ("w",)
 
 
 def _policy_config(tmp_path: Path, *, deadline_ms: int = 48) -> PolicyConfig:

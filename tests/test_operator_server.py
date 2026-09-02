@@ -21,6 +21,10 @@ def test_operator_http_message_roundtrip(tmp_path: Path, monkeypatch) -> None:
         knowledge_dir=tmp_path / "knowledge",
     )
     monkeypatch.setattr("minecraft_ai.operator_server.app_paths", lambda: paths)
+    monkeypatch.setattr(
+        "minecraft_ai.operator_server._current_agent_frame_dhash",
+        lambda: "0123456789abcdef",
+    )
     server = ThreadingHTTPServer(("127.0.0.1", 0), OperatorRequestHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -62,6 +66,7 @@ def test_operator_http_message_roundtrip(tmp_path: Path, monkeypatch) -> None:
             stored_target = database.load_operator_target()
         assert stored_target is not None
         assert stored_target.region.height == 0.5
+        assert stored_target.attributes["reference_dhash"] == "0123456789abcdef"
 
         with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=2) as response:
             assert json.load(response) == {"status": "ok"}
