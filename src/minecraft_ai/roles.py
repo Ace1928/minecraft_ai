@@ -103,7 +103,9 @@ BUILTIN_ROLES: dict[str, RoleProfile] = {
     ),
     "miner": RoleProfile(
         role_id="miner",
-        description="Specialized deep mining, cave exploration, ore extraction, and resource staging.",
+        description=(
+            "Specialized deep mining, cave exploration, ore extraction, and resource staging."
+        ),
         standing_goals=("mine_ores", "explore_caves", "stage_resources", "maintain_mine_shafts"),
         utility_weights={"mining": 1.0, "gathering": 0.9, "survival": 0.7},
         risk_tolerance=0.55,

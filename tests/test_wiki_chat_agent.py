@@ -23,9 +23,15 @@ def _fixture_graph() -> KnowledgeGraph:
         version_key=version.key,
         confidence=1.0,
     )
-    graph.add_node(KnowledgeNode(node_id="item:minecraft:planks", kind=NodeKind.ITEM, name="minecraft:planks"))
-    graph.add_node(KnowledgeNode(node_id="item:minecraft:stick", kind=NodeKind.ITEM, name="minecraft:stick"))
-    graph.add_node(KnowledgeNode(node_id="process:stick", kind=NodeKind.PROCESS, name="stick recipe"))
+    graph.add_node(
+        KnowledgeNode(node_id="item:minecraft:planks", kind=NodeKind.ITEM, name="minecraft:planks")
+    )
+    graph.add_node(
+        KnowledgeNode(node_id="item:minecraft:stick", kind=NodeKind.ITEM, name="minecraft:stick")
+    )
+    graph.add_node(
+        KnowledgeNode(node_id="process:stick", kind=NodeKind.PROCESS, name="stick recipe")
+    )
 
     graph.add_edge(
         KnowledgeEdge(

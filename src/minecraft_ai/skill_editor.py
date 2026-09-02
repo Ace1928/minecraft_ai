@@ -6,7 +6,6 @@ from typing import Sequence
 from .skills import (
     SkillCondition,
     SkillLibrary,
-    SkillOutcome,
     SkillRun,
     SkillSpec,
     SkillStage,
@@ -16,8 +15,22 @@ from .storage import StateDatabase
 
 
 @dataclass
-class SkillEditor:
-    """Continual skill growth, self-editing, and dynamic promotion pipeline."""
+class SkillPromotionEvidence:
+    benchmark_run_id: str
+    sample_count: int
+    successes: int
+    context_count: int
+    critical_safety_failures: int = 0
+    protected_regression: bool = False
+
+    @property
+    def success_rate(self) -> float:
+        return self.successes / self.sample_count if self.sample_count else 0.0
+
+
+@dataclass
+class SkillLifecycleManager:
+    """Offline skill authoring and evidence-gated lifecycle transitions."""
 
     library: SkillLibrary
     db: StateDatabase | None = None
@@ -92,9 +105,7 @@ class SkillEditor:
                     else tuple(failure_conditions)
                 ),
                 "recovery_skills": (
-                    current.recovery_skills
-                    if recovery_skills is None
-                    else tuple(recovery_skills)
+                    current.recovery_skills if recovery_skills is None else tuple(recovery_skills)
                 ),
                 "max_duration_ms": (
                     current.max_duration_ms if max_duration_ms is None else max_duration_ms
@@ -106,78 +117,65 @@ class SkillEditor:
             self.db.save_skill(updated)
         return updated
 
-    def record_and_evaluate(self, run: SkillRun) -> tuple[SkillStats, SkillSpec | None]:
+    def record(self, run: SkillRun) -> SkillStats:
         stats = self.library.record(run)
         if self.db is not None:
             self.db.save_skill_stats(run.skill_id, run.context_key, stats)
+        return stats
 
-        promoted_spec = self._try_auto_promote(run.skill_id)
-        return stats, promoted_spec
-
-    def _try_auto_promote(self, skill_id: str) -> SkillSpec | None:
+    def evaluate_and_promote(
+        self,
+        skill_id: str,
+        evidence: SkillPromotionEvidence,
+    ) -> SkillSpec | None:
+        """Promote only from an explicit held-out benchmark evidence record."""
         spec = self.library.get(skill_id)
         if spec.stage in {SkillStage.PREFERRED, SkillStage.RETIRED}:
             return None
-
-        # Aggregate stats across context keys
-        total_successes = sum(
-            st.successes for key, st in self.library.stats.items() if key[0] == skill_id
-        )
-        total_failures = sum(
-            st.failures + st.timeouts for key, st in self.library.stats.items() if key[0] == skill_id
-        )
-        attempts = total_successes + total_failures
-
-        if attempts < 3:
+        if evidence.critical_safety_failures or evidence.protected_regression:
             return None
+        requirements = {
+            SkillStage.CANDIDATE: (SkillStage.EXPERIMENTAL, 20, 3, 0.70),
+            SkillStage.EXPERIMENTAL: (SkillStage.TRUSTED, 50, 5, 0.80),
+            SkillStage.TRUSTED: (SkillStage.PREFERRED, 100, 8, 0.90),
+        }
+        requirement = requirements.get(spec.stage)
+        if requirement is None:
+            return None
+        next_stage, minimum_samples, minimum_contexts, minimum_rate = requirement
+        if (
+            evidence.sample_count < minimum_samples
+            or evidence.context_count < minimum_contexts
+            or evidence.success_rate < minimum_rate
+        ):
+            return None
+        promoted = self.library.promote(skill_id, next_stage)
+        if self.db is not None:
+            self.db.save_skill(promoted)
+        return promoted
 
-        success_rate = total_successes / attempts
-
-        next_stage: SkillStage | None = None
-        if spec.stage == SkillStage.CANDIDATE and success_rate >= 0.6:
-            next_stage = SkillStage.EXPERIMENTAL
-        elif spec.stage == SkillStage.EXPERIMENTAL and attempts >= 5 and success_rate >= 0.75:
-            next_stage = SkillStage.TRUSTED
-        elif spec.stage == SkillStage.TRUSTED and attempts >= 10 and success_rate >= 0.85:
-            next_stage = SkillStage.PREFERRED
-        elif success_rate < 0.2 and attempts >= 5:
-            next_stage = SkillStage.DEPRECATED
-
-        if next_stage is not None and next_stage != spec.stage:
-            promoted = self.library.promote(skill_id, next_stage)
-            if self.db is not None:
-                self.db.save_skill(promoted)
-            return promoted
-
-        return None
-
-    def evaluate_and_promote(self, skill_id: str) -> SkillSpec | None:
-        """Public endpoint to evaluate stats and auto-promote skill stage."""
-        return self._try_auto_promote(skill_id)
-
-    def synthesize_recovery_variant(
+    def draft_recovery_candidate(
         self,
         skill_id: str | SkillSpec,
         failure_reason: str = "consecutive_runtime_failures",
-        reason: str | None = None,
         fallback_skills: tuple[str, ...] = (),
     ) -> SkillSpec:
-        """Create a self-healed, adapted skill variant with additional failure recovery logic."""
+        """Draft an unpromoted recovery candidate for later held-out evaluation."""
         target_id = skill_id.skill_id if isinstance(skill_id, SkillSpec) else skill_id
-        effective_reason = reason or failure_reason
         parent = self.library.get(target_id)
-        new_id = f"{target_id}_adapted"
-        new_name = f"{parent.name} (Adapted)"
+        new_id = f"{target_id}_recovery_candidate"
+        new_name = f"{parent.name} recovery candidate"
 
-        # Append extra failure condition based on reason
-        extra_condition = SkillCondition(key=effective_reason.split(":")[-1], operator="truthy")
+        extra_condition = SkillCondition(key=failure_reason.split(":")[-1], operator="truthy")
         new_failures = parent.failure_conditions + (extra_condition,)
 
-        recovery = tuple(fallback_skills) if fallback_skills else (parent.recovery_skills or ("retreat",))
+        recovery = (
+            tuple(fallback_skills) if fallback_skills else (parent.recovery_skills or ("retreat",))
+        )
         return self.create_skill(
             skill_id=new_id,
             name=new_name,
-            description=f"Self-healed variant of {target_id} adapted for {effective_reason}",
+            description=f"Unpromoted recovery candidate for {target_id}: {failure_reason}",
             policy_ref=parent.policy_ref,
             parameters=parent.parameters,
             preconditions=parent.preconditions,
@@ -185,5 +183,5 @@ class SkillEditor:
             failure_conditions=new_failures,
             recovery_skills=recovery,
             max_duration_ms=parent.max_duration_ms,
-            stage=SkillStage.EXPERIMENTAL,
+            stage=SkillStage.CANDIDATE,
         )

@@ -214,7 +214,10 @@ def launch_direct_bedrock_session(
     height: int = 720,
     launcher_command: tuple[str, ...] | None = None,
 ) -> BedrockSession:
-    """Launch BedrockOnLinux directly on the host display with full GPU Vulkan DRI3 acceleration."""
+    """Launch a manual debug session on the host display.
+
+    The returned mode is intentionally rejected by the autonomous run path.
+    """
     if os.name != "posix" or not Path("/proc").is_dir():
         raise IsolationError("managed Bedrock execution is currently Linux-only")
     host_display = os.environ.get("DISPLAY", ":0").strip() or ":0"
@@ -239,7 +242,7 @@ def launch_direct_bedrock_session(
     session = BedrockSession(
         display=host_display,
         host_display=host_display,
-        xserver_pid=os.getpid(),
+        xserver_pid=0,
         launcher_pid=launcher.pid,
         width=width,
         height=height,
@@ -264,7 +267,9 @@ def wait_for_minecraft_window(
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if not bedrock_session_alive(session):
-            raise IsolationError("Bedrock server/launcher process stopped while waiting for Minecraft")
+            raise IsolationError(
+                "Bedrock server/launcher process stopped while waiting for Minecraft"
+            )
         window_id = session.find_window()
         if window_id is not None:
             return window_id
@@ -279,9 +284,13 @@ def stop_bedrock_session(session: BedrockSession | None = None) -> None:
             current = BedrockSession.load()
         except (OSError, ValueError, TypeError, KeyError):
             return
-    require_isolated_display(current.display, current.host_display)
+    if current.mode not in {"xephyr", "direct"}:
+        raise IsolationError(f"unsupported Bedrock session mode: {current.mode!r}")
+    if current.mode == "xephyr":
+        require_isolated_display(current.display, current.host_display)
     _terminate_process_group(current.launcher_pid)
-    _terminate_process_group(current.xserver_pid)
+    if current.mode == "xephyr":
+        _terminate_process_group(current.xserver_pid)
     try:
         persisted = BedrockSession.load()
     except (OSError, ValueError, TypeError, KeyError):

@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-
-from minecraft_ai.skill_editor import SkillEditor
+from minecraft_ai.skill_editor import SkillLifecycleManager, SkillPromotionEvidence
 from minecraft_ai.skills import (
     SkillCondition,
     SkillLibrary,
@@ -11,12 +8,11 @@ from minecraft_ai.skills import (
     SkillRun,
     SkillStage,
 )
-from minecraft_ai.storage import StateDatabase
 
 
 def test_skill_editor_creation_and_editing() -> None:
     library = SkillLibrary()
-    editor = SkillEditor(library)
+    editor = SkillLifecycleManager(library)
 
     spec = editor.create_skill(
         skill_id="custom_harvest",
@@ -36,9 +32,9 @@ def test_skill_editor_creation_and_editing() -> None:
     assert edited.description == "Updated description"
 
 
-def test_skill_auto_promotion() -> None:
+def test_skill_promotion_requires_explicit_benchmark_evidence() -> None:
     library = SkillLibrary()
-    editor = SkillEditor(library)
+    editor = SkillLifecycleManager(library)
 
     editor.create_skill(
         skill_id="test_skill",
@@ -46,7 +42,7 @@ def test_skill_auto_promotion() -> None:
         stage=SkillStage.CANDIDATE,
     )
 
-    # Record successful runs to trigger promotion
+    # Runtime observations alone never trigger promotion.
     for i in range(5):
         run = SkillRun(
             run_id=f"r_{i}",
@@ -55,15 +51,26 @@ def test_skill_auto_promotion() -> None:
             ended_ns=200,
             outcome=SkillOutcome.SUCCEEDED,
         )
-        editor.record_and_evaluate(run)
+        editor.record(run)
 
-    promoted = library.get("test_skill")
-    assert promoted.stage in {SkillStage.EXPERIMENTAL, SkillStage.TRUSTED, SkillStage.PREFERRED}
+    assert library.get("test_skill").stage == SkillStage.CANDIDATE
+
+    promoted = editor.evaluate_and_promote(
+        "test_skill",
+        SkillPromotionEvidence(
+            benchmark_run_id="benchmark-1",
+            sample_count=20,
+            successes=18,
+            context_count=4,
+        ),
+    )
+    assert promoted is not None
+    assert promoted.stage == SkillStage.EXPERIMENTAL
 
 
 def test_synthesize_recovery_variant() -> None:
     library = SkillLibrary()
-    editor = SkillEditor(library)
+    editor = SkillLifecycleManager(library)
 
     editor.create_skill(
         skill_id="mine_coal",
@@ -71,7 +78,8 @@ def test_synthesize_recovery_variant() -> None:
         policy_ref="mine",
     )
 
-    variant = editor.synthesize_recovery_variant("mine_coal", "failure:lava_near")
-    assert variant.skill_id == "mine_coal_adapted"
+    variant = editor.draft_recovery_candidate("mine_coal", "failure:lava_near")
+    assert variant.skill_id == "mine_coal_recovery_candidate"
+    assert variant.stage == SkillStage.CANDIDATE
     assert any(cond.key == "lava_near" for cond in variant.failure_conditions)
-    assert library.get("mine_coal_adapted") == variant
+    assert library.get("mine_coal_recovery_candidate") == variant

@@ -89,9 +89,7 @@ def discover_bedrock_linux_install() -> BedrockLinuxInstall | None:
     data_dir = Path(override).expanduser() if override else _xdg_data_home() / "bedrock-on-linux"
     prefix_override = os.environ.get("BOL_WINEPREFIX", "").strip()
     wine_prefix = (
-        Path(prefix_override).expanduser()
-        if prefix_override
-        else data_dir / "compatdata" / "pfx"
+        Path(prefix_override).expanduser() if prefix_override else data_dir / "compatdata" / "pfx"
     )
 
     launcher: str | None = None

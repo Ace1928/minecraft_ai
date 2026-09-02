@@ -150,7 +150,11 @@ def _matches(
     now_ns: int | None = None,
 ) -> bool:
     try:
-        fact = blackboard.fact(condition.key, min_confidence=condition.min_confidence, now_ns=now_ns)
+        fact = blackboard.fact(
+            condition.key,
+            min_confidence=condition.min_confidence,
+            now_ns=now_ns,
+        )
     except TypeError:
         fact = blackboard.fact(condition.key, min_confidence=condition.min_confidence)
     if condition.operator == "exists":

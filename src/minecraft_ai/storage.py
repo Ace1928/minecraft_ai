@@ -11,7 +11,7 @@ from .social import Promise, SharedProject, SocialState
 from .spatial import PlaceRecord, SpatialPlaceMemory
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class StateDatabase:
@@ -61,6 +61,7 @@ class StateDatabase:
                 failures INTEGER NOT NULL,
                 timeouts INTEGER NOT NULL,
                 cancellations INTEGER NOT NULL,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(skill_id, context_key)
             );
             CREATE TABLE IF NOT EXISTS goals (
@@ -79,9 +80,9 @@ class StateDatabase:
                 place_id TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
                 dimension TEXT NOT NULL,
-                x REAL NOT NULL,
-                y REAL NOT NULL,
-                z REAL NOT NULL,
+                x REAL,
+                y REAL,
+                z REAL,
                 payload TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_spatial_places_kind_dim
@@ -96,11 +97,45 @@ class StateDatabase:
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
+        elif int(current[0]) == 1:
+            self._migrate_v1_to_v2()
+            self.connection.execute(
+                "UPDATE meta SET value=? WHERE key='schema_version'",
+                (str(SCHEMA_VERSION),),
+            )
         elif int(current[0]) != SCHEMA_VERSION:
             raise RuntimeError(
                 f"unsupported state database schema {current[0]}; expected {SCHEMA_VERSION}"
             )
         self.connection.commit()
+
+    def _migrate_v1_to_v2(self) -> None:
+        stats_columns = {
+            str(row[1]) for row in self.connection.execute("PRAGMA table_info(skill_stats)")
+        }
+        if "consecutive_failures" not in stats_columns:
+            self.connection.execute(
+                "ALTER TABLE skill_stats ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0"
+            )
+        self.connection.executescript(
+            """
+            ALTER TABLE spatial_places RENAME TO spatial_places_v1;
+            CREATE TABLE spatial_places (
+                place_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                dimension TEXT NOT NULL,
+                x REAL,
+                y REAL,
+                z REAL,
+                payload TEXT NOT NULL
+            );
+            INSERT INTO spatial_places(place_id, kind, dimension, x, y, z, payload)
+                SELECT place_id, kind, dimension, x, y, z, payload FROM spatial_places_v1;
+            DROP TABLE spatial_places_v1;
+            CREATE INDEX idx_spatial_places_kind_dim
+                ON spatial_places(kind, dimension);
+            """
+        )
 
     def save_memory(self, record: MemoryRecord) -> None:
         self.connection.execute(
@@ -183,13 +218,15 @@ class StateDatabase:
         self.connection.execute(
             """
             INSERT INTO skill_stats(
-                skill_id, context_key, successes, failures, timeouts, cancellations
-            ) VALUES(?, ?, ?, ?, ?, ?)
+                skill_id, context_key, successes, failures, timeouts, cancellations,
+                consecutive_failures
+            ) VALUES(?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(skill_id, context_key) DO UPDATE SET
                 successes=excluded.successes,
                 failures=excluded.failures,
                 timeouts=excluded.timeouts,
-                cancellations=excluded.cancellations
+                cancellations=excluded.cancellations,
+                consecutive_failures=excluded.consecutive_failures
             """,
             (
                 skill_id,
@@ -198,6 +235,7 @@ class StateDatabase:
                 stats.failures,
                 stats.timeouts,
                 stats.cancellations,
+                stats.consecutive_failures,
             ),
         )
         self.connection.commit()
@@ -209,16 +247,26 @@ class StateDatabase:
             library.specs[spec.skill_id] = spec
         for row in self.connection.execute(
             """
-            SELECT skill_id, context_key, successes, failures, timeouts, cancellations
+            SELECT skill_id, context_key, successes, failures, timeouts, cancellations,
+                   consecutive_failures
             FROM skill_stats
             """
         ):
-            skill_id, context_key, successes, failures, timeouts, cancellations = row
+            (
+                skill_id,
+                context_key,
+                successes,
+                failures,
+                timeouts,
+                cancellations,
+                consecutive_failures,
+            ) = row
             library.stats[(str(skill_id), str(context_key))] = SkillStats(
                 successes=int(successes),
                 failures=int(failures),
                 timeouts=int(timeouts),
                 cancellations=int(cancellations),
+                consecutive_failures=int(consecutive_failures),
             )
         return library
 

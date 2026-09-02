@@ -23,14 +23,16 @@ def test_state_database_roundtrip(tmp_path: Path) -> None:
             )
         )
         db.save_skill(SkillSpec(skill_id="walk", name="Walk"))
-        db.save_skill_stats("walk", "flat", SkillStats(successes=7, failures=1))
+        db.save_skill_stats(
+            "walk",
+            "flat",
+            SkillStats(successes=7, failures=1, consecutive_failures=1),
+        )
         db.save_goal(Goal(goal_id="g1", description="Build roof"))
         db.save_promise(
             Promise(promise_id="p1", player="Alex", summary="Finish roof", created_ns=3)
         )
-        db.save_project(
-            SharedProject(project_id="build", name="House", created_ns=4, owner="Alex")
-        )
+        db.save_project(SharedProject(project_id="build", name="House", created_ns=4, owner="Alex"))
 
     with StateDatabase(path) as db:
         memories = db.load_memories()
@@ -38,6 +40,7 @@ def test_state_database_roundtrip(tmp_path: Path) -> None:
         skills = db.load_skills()
         assert skills.get("walk").name == "Walk"
         assert skills.stats[("walk", "flat")].successes == 7
+        assert skills.stats[("walk", "flat")].consecutive_failures == 1
         assert db.load_goals()[0].goal_id == "g1"
         social = db.load_social()
         assert social.promises["p1"].player == "Alex"

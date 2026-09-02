@@ -13,7 +13,7 @@ from .perception import PerceptionBlackboard
 from .planning import Goal
 from .roles import RoleProfile
 from .skills import SkillLibrary
-from .social import Promise
+from .social import Promise, PromiseStatus
 from .wiki import WikiEvidence
 
 
@@ -41,17 +41,15 @@ class CognitionContext:
     wiki: tuple[WikiEvidence, ...]
 
 
-from .tech_tree import Milestone, TechAge, TechTreeTracker
+class BootstrapCognitionPolicy:
+    """Small deterministic fallback for smoke tests and model outages.
 
-
-class AutonomousCognitionEngine:
-    """SOTA autonomous cognitive decision engine implementing hierarchical long-horizon planning,
-    dynamic tech-tree progression, spatial goal navigation, and conversational player interaction.
+    This is intentionally a reactive priority policy. It is not the strategic
+    executive and does not own progression knowledge.
     """
 
     def __init__(self, skills: SkillLibrary) -> None:
         self.skills = skills
-        self.tech_tree = TechTreeTracker()
         self._last_speech_time = 0.0
 
     def decide(
@@ -63,92 +61,70 @@ class AutonomousCognitionEngine:
         hostile = blackboard.fact("target.hostile_visible")
         target_vis = blackboard.fact("target.visible")
         target_mineable = blackboard.fact("target.mineable")
-        crosshair = blackboard.fact("crosshair")
         now_s = time.time()
 
-        # Update tech tree state with any observed inventory facts
-        inv_fact = blackboard.fact("inventory")
-        if inv_fact and isinstance(inv_fact.value, dict):
-            newly_unlocked = self.tech_tree.update_with_inventory(inv_fact.value)
-            for m in newly_unlocked:
-                self._last_speech_time = now_s
-                return CognitionDecision(
-                    reasoning_summary=f"Milestone achieved: {m.name}! Unlocked {m.description}",
-                    chosen_goal_id=m.milestone_id,
-                    skill_id="explore_forward",
-                    say=f"Milestone unlocked: {m.name}!",
-                )
-
-        # 1. Critical Survival & Hazard Interruption
         if danger and bool(danger.value):
-            say = "Hazard detected! Backing off to safety." if now_s - self._last_speech_time > 15 else None
-            if say:
-                self._last_speech_time = now_s
+            say = self._speech(now_s, "Hazard detected; backing off.", interval_s=15.0)
             return CognitionDecision(
-                reasoning_summary="Immediate hazard detected; retreating to safety zone.",
+                reasoning_summary="Bootstrap fallback observed an immediate hazard.",
                 chosen_goal_id="survive",
                 skill_id="retreat_from_danger",
                 say=say,
             )
 
         if hostile and bool(hostile.value):
-            say = "Hostile creature spotted; engaging in combat." if now_s - self._last_speech_time > 15 else None
-            if say:
-                self._last_speech_time = now_s
             return CognitionDecision(
-                reasoning_summary="Hostile target visible; initiating tactical combat.",
+                reasoning_summary="Bootstrap fallback observed a visible hostile.",
                 chosen_goal_id="survive",
                 skill_id="attack_visible_hostile",
-                say=say,
+                say=self._speech(now_s, "Hostile spotted; defending.", interval_s=15.0),
             )
 
-        # 2. Player Request & Social Promise Priority
         for promise in context.promises:
-            if not promise.fulfilled:
+            if promise.status in {PromiseStatus.PENDING, PromiseStatus.ACTIVE}:
                 return CognitionDecision(
-                    reasoning_summary=f"Fulfilling player promise: {promise.description}",
+                    reasoning_summary=f"Bootstrap fallback retained promise: {promise.summary}",
                     chosen_goal_id=f"promise:{promise.promise_id}",
                     skill_id="explore_forward",
-                    say=f"On it: {promise.description}" if now_s - self._last_speech_time > 20 else None,
+                    say=self._speech(now_s, f"Continuing: {promise.summary}", interval_s=20.0),
                 )
 
-        # 3. Dynamic Tech-Tree Milestone Planning
-        milestone = self.tech_tree.next_priority_milestone()
+        goal_id = context.goals[0].goal_id if context.goals else "explore"
         if target_vis and bool(target_vis.value):
             if target_mineable and bool(target_mineable.value):
-                say = f"Gathering resources for {milestone.name if milestone else 'progression'}." if now_s - self._last_speech_time > 30 else None
-                if say:
-                    self._last_speech_time = now_s
                 return CognitionDecision(
-                    reasoning_summary="Mineable resource target locked; mining block.",
-                    chosen_goal_id=milestone.milestone_id if milestone else "obtain_wood",
+                    reasoning_summary="Bootstrap fallback observed a mineable target.",
+                    chosen_goal_id=goal_id,
                     skill_id="mine_visible_block",
-                    say=say,
                 )
             return CognitionDecision(
-                reasoning_summary="Resource target visible; approaching target location.",
-                chosen_goal_id=milestone.milestone_id if milestone else "obtain_wood",
+                reasoning_summary="Bootstrap fallback observed a target.",
+                chosen_goal_id=goal_id,
                 skill_id="approach_visible_target",
             )
 
-        # 4. Long-Horizon Exploration & Tech Milestone Search
-        goal_name = milestone.name if milestone else "exploration"
         return CognitionDecision(
-            reasoning_summary=f"Surveying area for {goal_name} (Age: {self.tech_tree.current_age.value}).",
-            chosen_goal_id=milestone.milestone_id if milestone else "explore",
-            skill_id=milestone.skill_hint if (milestone and milestone.skill_hint in self.skills.specs) else "explore_forward",
+            reasoning_summary="Bootstrap fallback is collecting exploratory observations.",
+            chosen_goal_id=goal_id,
+            skill_id="explore_forward",
             ask_perception=("target.visible", "danger.immediate"),
         )
+
+    def _speech(self, now_s: float, text: str, *, interval_s: float) -> str | None:
+        if now_s - self._last_speech_time <= interval_s:
+            return None
+        self._last_speech_time = now_s
+        return text
 
 
 @dataclass
 class HighLevelController:
     model: LanguageModel
     skills: SkillLibrary
-    _autonomous: AutonomousCognitionEngine = field(init=False)
+    _bootstrap: BootstrapCognitionPolicy = field(init=False)
 
     def __post_init__(self) -> None:
-        self._autonomous = AutonomousCognitionEngine(self.skills)
+        self._bootstrap = BootstrapCognitionPolicy(self.skills)
 
     def decide(
         self,
@@ -188,7 +164,8 @@ class HighLevelController:
                         "You are the high-level controller of a Minecraft agent. Decide goals, "
                         "social responses, research/perception requests, and which available "
                         "closed-loop skill to execute. Return one JSON object matching: "
-                        "reasoning_summary:string, chosen_goal_id:string|null, skill_id:string|null, "
+                        "reasoning_summary:string, chosen_goal_id:string|null, "
+                        "skill_id:string|null, "
                         "skill_parameters:object, say:string|null, request_replan:boolean, "
                         "ask_perception:string[], research_query:string|null. "
                         "Use only listed skill ids."
@@ -199,10 +176,10 @@ class HighLevelController:
             response = self.model.complete(messages)
             decision = _parse_decision(response.text)
             if decision.skill_id is not None and decision.skill_id not in self.skills.specs:
-                return self._autonomous.decide(blackboard, context)
+                return self._bootstrap.decide(blackboard, context)
             return decision
         except Exception:
-            return self._autonomous.decide(blackboard, context)
+            return self._bootstrap.decide(blackboard, context)
 
 
 def _parse_decision(text: str) -> CognitionDecision:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from minecraft_ai.execution import SkillExecutor
-from minecraft_ai.motor import HeuristicMotorPolicy
+from minecraft_ai.motor import BootstrapMotorPolicy
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.skills import SkillCondition, SkillOutcome, SkillSpec
 
@@ -33,7 +33,7 @@ def _fact(key: str, value: str | int | float | bool) -> PerceptionFact:
 
 
 def test_running_skill_emits_bounded_motor_action() -> None:
-    policy = HeuristicMotorPolicy()
+    policy = BootstrapMotorPolicy()
     executor = SkillExecutor(policy)
     spec = SkillSpec(
         skill_id="approach",
@@ -58,7 +58,7 @@ def test_running_skill_emits_bounded_motor_action() -> None:
 
 
 def test_skill_success_releases_held_input() -> None:
-    policy = HeuristicMotorPolicy()
+    policy = BootstrapMotorPolicy()
     executor = SkillExecutor(policy)
     spec = SkillSpec(
         skill_id="mine",
@@ -80,7 +80,7 @@ def test_skill_success_releases_held_input() -> None:
 
 
 def test_failure_requests_recovery_and_releases() -> None:
-    policy = HeuristicMotorPolicy()
+    policy = BootstrapMotorPolicy()
     executor = SkillExecutor(policy)
     spec = SkillSpec(
         skill_id="mine",

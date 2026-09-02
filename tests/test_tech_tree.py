@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from minecraft_ai.tech_tree import Milestone, TechAge, TechTreeTracker, BUILTIN_MILESTONES
+from minecraft_ai.tech_tree import TechAge, TechTreeTracker, BUILTIN_MILESTONES
 
 
 def test_tech_tree_initialization() -> None:
     tracker = TechTreeTracker()
     assert len(tracker.milestones) == len(BUILTIN_MILESTONES)
     assert tracker.current_age == TechAge.WOOD_AGE
-    
+
     first = tracker.next_priority_milestone()
     assert first is not None
     assert first.milestone_id == "gather_logs"
@@ -15,7 +15,7 @@ def test_tech_tree_initialization() -> None:
 
 def test_tech_tree_progression_by_inventory() -> None:
     tracker = TechTreeTracker()
-    
+
     # Simulate picking up 4 oak logs
     unlocked = tracker.update_with_inventory({"oak_log": 4})
     assert len(unlocked) == 1

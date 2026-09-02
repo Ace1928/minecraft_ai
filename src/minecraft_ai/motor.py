@@ -40,12 +40,14 @@ def _number(blackboard: PerceptionBlackboard, key: str) -> float | None:
 
 
 @dataclass
-class DynamicSotaMotorPolicy:
-    """SOTA dynamic motor policy providing human-like responsiveness, 360° camera sweeps,
-    obstacle auto-climbing, proportional target lock, and combat/mining rhythms.
+class BootstrapMotorPolicy:
+    """Deterministic fallback used for smoke tests and demonstration collection.
+
+    This policy is deliberately hand-authored. It is a baseline and safety fallback,
+    never a learned behavior prior or a benchmark-backed preferred controller.
     """
 
-    policy_id: str = "dynamic-sota-v2"
+    policy_id: str = "bootstrap-motor-v1"
     mouse_gain: float = 35.0
     max_mouse_step: int = 120
     sweep_amplitude: float = 24.0
@@ -77,8 +79,6 @@ class DynamicSotaMotorPolicy:
         dy = _number(blackboard, "target.dy")
         obstacle_ahead = blackboard.fact("obstacle.ahead")
         danger = blackboard.fact("danger.immediate")
-        health = _number(blackboard, "player.health")
-
         mode = intent.mode.lower()
 
         pitch_up = blackboard.fact("pitch.looking_up")
@@ -87,7 +87,7 @@ class DynamicSotaMotorPolicy:
         if dx is not None:
             mouse_dx = _bounded_round(dx * self.mouse_gain, self.max_mouse_step)
         elif mode in {"explore", "reacquire", "navigate"}:
-            # Controlled 40-tick step-wise scan cycle (5 ticks turn right 16px, 15 ticks straight, 5 ticks turn left 16px, 15 ticks straight)
+            # Controlled 40-tick scan with five turning ticks in each direction.
             cycle = self._tick_count % 40
             if cycle < 5:
                 mouse_dx = 16
@@ -110,8 +110,9 @@ class DynamicSotaMotorPolicy:
             mouse_dy = -25
         elif mode in {"approach", "navigate", "explore", "mine", "attack", "use"}:
             desired_keys.add("w")
-            # Auto-jump over 1-block steps / terrain obstacles every N ticks or when obstacle detected
-            if (obstacle_ahead and bool(obstacle_ahead.value)) or (self._tick_count % self.jump_interval_ticks == 0):
+            obstacle_detected = bool(obstacle_ahead and obstacle_ahead.value)
+            periodic_jump = self._tick_count % self.jump_interval_ticks == 0
+            if obstacle_detected or periodic_jump:
                 desired_keys.add("space")
                 if obstacle_ahead and bool(obstacle_ahead.value) and (self._tick_count % 6 == 0):
                     # Lateral strafe to navigate around tree trunks / rock pillars
@@ -122,7 +123,8 @@ class DynamicSotaMotorPolicy:
                 desired_keys.add("space")
 
         # 3. Sprinting & Sneaking parameters
-        if bool(intent.parameters.get("sprint", False)) or (mode == "explore" and not (underwater and bool(underwater.value))):
+        exploring_on_land = mode == "explore" and not bool(underwater and underwater.value)
+        if bool(intent.parameters.get("sprint", False)) or exploring_on_land:
             desired_keys.add("ctrl")
         if bool(intent.parameters.get("sneak", False)):
             desired_keys.add("shift")
@@ -166,10 +168,6 @@ class DynamicSotaMotorPolicy:
         self._held_buttons.clear()
         self._last_sequence = sequence
         return action
-
-
-# Alias for backward compatibility
-HeuristicMotorPolicy = DynamicSotaMotorPolicy
 
 
 def _bounded_round(value: float, limit: int) -> int:

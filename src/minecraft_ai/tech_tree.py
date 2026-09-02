@@ -1,3 +1,9 @@
+"""Small deterministic progression fixture for tests and example curricula.
+
+Production planning must derive progression from exact-version knowledge and
+runtime evidence; this module is deliberately not imported by cognition.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -182,7 +188,7 @@ BUILTIN_MILESTONES: tuple[Milestone, ...] = (
 
 @dataclass
 class TechTreeTracker:
-    """Tracks persistent technology progression, unlocked milestones, and current priority goal."""
+    """Test-fixture tracker for the built-in linear example curriculum."""
 
     milestones: dict[str, Milestone] = field(default_factory=dict)
     completed_milestones: set[str] = field(default_factory=set)
@@ -194,9 +200,16 @@ class TechTreeTracker:
 
     @property
     def current_age(self) -> TechAge:
-        for age in (TechAge.WOOD_AGE, TechAge.STONE_AGE, TechAge.IRON_AGE, TechAge.DIAMOND_AGE):
+        for age in (
+            TechAge.WOOD_AGE,
+            TechAge.STONE_AGE,
+            TechAge.IRON_AGE,
+            TechAge.DIAMOND_AGE,
+        ):
             age_milestones = [m for m in self.milestones.values() if m.age == age]
-            if age_milestones and not all(m.milestone_id in self.completed_milestones for m in age_milestones):
+            if age_milestones and not all(
+                milestone.milestone_id in self.completed_milestones for milestone in age_milestones
+            ):
                 return age
         return TechAge.AUTOMATION_AGE
 

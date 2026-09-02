@@ -131,11 +131,11 @@ class Supervisor:
     ) -> dict[str, Any]:
         if emergency_stop_latched():
             raise RuntimeError("emergency stop is latched")
+        if allow_host:
+            raise RuntimeError("host-display input is debug-only and cannot be armed")
         from .platforms.bedrock_x11 import IsolatedX11InputBackend
 
-        backend = IsolatedX11InputBackend(
-            display, target_window_id=window_id, allow_host=allow_host
-        )
+        backend = IsolatedX11InputBackend(display, target_window_id=window_id, allow_host=False)
         try:
             self.replace_backend(backend)
         except Exception:

@@ -60,9 +60,7 @@ _ALLOWED_TRANSITIONS: dict[SupervisorState, frozenset[SupervisorState]] = {
             SupervisorState.FAILSAFE,
         }
     ),
-    SupervisorState.STOPPING: frozenset(
-        {SupervisorState.STOPPED, SupervisorState.FAILSAFE}
-    ),
+    SupervisorState.STOPPING: frozenset({SupervisorState.STOPPED, SupervisorState.FAILSAFE}),
     SupervisorState.FAILSAFE: frozenset({SupervisorState.STOPPED}),
 }
 

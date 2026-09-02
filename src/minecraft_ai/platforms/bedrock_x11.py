@@ -120,9 +120,7 @@ class IsolatedX11InputBackend:
             self._xk = importlib.import_module("Xlib.XK")
             self._xtest = importlib.import_module("Xlib.ext.xtest")
         except ImportError as exc:
-            raise IsolationError(
-                "python-xlib is required for isolated Bedrock X11 input"
-            ) from exc
+            raise IsolationError("python-xlib is required for isolated Bedrock X11 input") from exc
         self.display_name = display_name
         self.target_window_id = target_window_id
         try:
@@ -320,7 +318,7 @@ class IsolatedX11Capture:
         except ImportError as exc:
             raise IsolationError("python-xlib is required for X11 capture") from exc
         try:
-            self._mss_module = importlib.import_module("mss")
+            self._mss_module: Any | None = importlib.import_module("mss")
         except ImportError:
             self._mss_module = None
         self.display_name = display_name

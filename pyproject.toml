@@ -19,12 +19,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-vision = ["Pillow>=10.4", "numpy>=1.26"]
+vision = ["Pillow>=10.4", "numpy>=1.26,<2.4"]
 knowledge = ["httpx>=0.27"]
 bedrock-linux = ["python-xlib>=0.33", "mss>=9.0"]
 full = [
   "Pillow>=10.4",
-  "numpy>=1.26",
+  "numpy>=1.26,<2.4",
   "httpx>=0.27",
   "python-xlib>=0.33",
   "mss>=9.0",

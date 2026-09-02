@@ -30,6 +30,22 @@ class CaptureSource(Protocol):
     def close(self) -> None: ...
 
 
+class FastPerception(Protocol):
+    """Realtime visual inference boundary.
+
+    Learned implementations may set ``training_label_eligible`` only after
+    passing the perception promotion gate.
+    """
+
+    @property
+    def model_id(self) -> str: ...
+
+    @property
+    def training_label_eligible(self) -> bool: ...
+
+    def infer(self, frame: CapturedFrame) -> tuple[PerceptionFact, ...]: ...
+
+
 class SemanticTrack(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -166,14 +182,133 @@ class ActiveVLMWorker:
             for index, item in enumerate(observation.tracks)
         )
         chat = tuple(
-            ChatLine(text=text, observed_ns=now, confidence=0.7)
-            for text in observation.chat
+            ChatLine(text=text, observed_ns=now, confidence=0.7) for text in observation.chat
         )
         self.blackboard.merge_semantics(
             instance_id=self.instance_id,
             facts=facts,
             tracks=tracks,
             chat=chat,
+        )
+
+
+@dataclass(frozen=True)
+class BootstrapFastPerception:
+    """Cheap RGB fallback for smoke tests, never a source of training labels."""
+
+    model_id: str = "bootstrap-rgb-v1"
+    training_label_eligible: bool = False
+
+    def infer(self, frame: CapturedFrame) -> tuple[PerceptionFact, ...]:
+        if not frame.bgra or frame.width <= 0 or frame.height <= 0:
+            return ()
+        now = time.monotonic_ns()
+        width = frame.width
+        height = frame.height
+        center_x = width // 2
+        center_y = height // 2
+        row_bytes = width * 4
+
+        center_samples = 0
+        brown_count = 0
+        gray_count = 0
+        green_count = 0
+        for delta_y in range(-15, 15, 3):
+            sample_y = center_y + delta_y
+            if sample_y < 0 or sample_y >= height:
+                continue
+            row_offset = sample_y * row_bytes
+            for delta_x in range(-15, 15, 3):
+                sample_x = center_x + delta_x
+                if sample_x < 0 or sample_x >= width:
+                    continue
+                offset = row_offset + sample_x * 4
+                blue, green, red = frame.bgra[offset : offset + 3]
+                center_samples += 1
+                if red > 60 and green > 40 and red >= green and red > blue + 15:
+                    brown_count += 1
+                elif abs(red - green) < 20 and abs(green - blue) < 20 and 50 < red < 180:
+                    gray_count += 1
+                elif green > red + 15 and green > blue + 15:
+                    green_count += 1
+
+        sky_samples = 0
+        upper_sky = 0
+        lower_sky = 0
+        total_sky_brightness = 0.0
+        upper_color = (0, 0, 0)
+        lower_color = (0, 0, 0)
+        step = max(1, width // 10)
+        for sample_x in range(width // 4, max(width // 4 + 1, 3 * width // 4), step):
+            top_offset = min(height - 1, height // 8) * row_bytes + sample_x * 4
+            bottom_offset = min(height - 1, 7 * height // 8) * row_bytes + sample_x * 4
+            blue_top, green_top, red_top = frame.bgra[top_offset : top_offset + 3]
+            blue_bottom, green_bottom, red_bottom = frame.bgra[bottom_offset : bottom_offset + 3]
+            upper_color = (blue_top, green_top, red_top)
+            lower_color = (blue_bottom, green_bottom, red_bottom)
+            sky_samples += 1
+            total_sky_brightness += 0.299 * red_top + 0.587 * green_top + 0.114 * blue_top
+            if blue_top > 150 and green_top > 130 and red_top > 110:
+                upper_sky += 1
+            if blue_bottom > 150 and green_bottom > 130 and red_bottom > 110:
+                lower_sky += 1
+
+        looking_at_sky = bool(
+            sky_samples and upper_sky >= sky_samples * 0.7 and lower_sky >= sky_samples * 0.5
+        )
+        brightness = total_sky_brightness / max(1, sky_samples)
+        time_of_day = "day" if brightness > 135 else "dusk" if brightness > 75 else "night"
+        blue_top, green_top, red_top = upper_color
+        blue_bottom, _green_bottom, red_bottom = lower_color
+        is_underwater = bool(
+            blue_top > 120
+            and green_top > 100
+            and red_top < 40
+            and blue_bottom > 120
+            and red_bottom < 40
+        )
+
+        obstacle_samples = 0
+        solid_count = 0
+        for delta_y in range(20, 50, 5):
+            sample_y = center_y + delta_y
+            if sample_y >= height:
+                continue
+            row_offset = sample_y * row_bytes
+            for delta_x in range(-10, 10, 5):
+                sample_x = center_x + delta_x
+                if sample_x < 0 or sample_x >= width:
+                    continue
+                offset = row_offset + sample_x * 4
+                blue, green, red = frame.bgra[offset : offset + 3]
+                obstacle_samples += 1
+                if red + green + blue > 60:
+                    solid_count += 1
+
+        target_visible = bool(
+            center_samples and brown_count + gray_count + green_count > center_samples * 0.25
+        )
+        target_mineable = bool(center_samples and brown_count + gray_count > center_samples * 0.20)
+        obstacle_ahead = bool(obstacle_samples and solid_count >= obstacle_samples * 0.75)
+        source = f"bootstrap:{self.model_id}:not-training-label"
+        values: tuple[tuple[str, str | bool, float, int], ...] = (
+            ("target.visible", target_visible, 0.55, 300),
+            ("target.mineable", target_mineable, 0.50, 300),
+            ("pitch.looking_up", looking_at_sky, 0.50, 300),
+            ("environment.time_of_day", time_of_day, 0.45, 5000),
+            ("environment.underwater", is_underwater, 0.55, 500),
+            ("obstacle.ahead", obstacle_ahead, 0.50, 300),
+        )
+        return tuple(
+            PerceptionFact(
+                key=key,
+                value=value,
+                confidence=confidence,
+                observed_ns=now,
+                source=source,
+                expires_after_ms=expires_after_ms,
+            )
+            for key, value, confidence, expires_after_ms in values
         )
 
 
@@ -185,6 +320,7 @@ class RealtimePerceptionService:
     target_hz: float = 20.0
     stale_frame_ms: int = 500
     active_vlm: ActiveVLMWorker | None = None
+    fast_perception: FastPerception | None = field(default_factory=BootstrapFastPerception)
     _last_frame_ns: int | None = field(default=None, init=False)
     _last_capture: CapturedFrame | None = field(default=None, init=False)
 
@@ -209,166 +345,11 @@ class RealtimePerceptionService:
         )
         self.blackboard.publish(state)
 
-        # Fast 20Hz visual perception feature extraction
-        self._extract_fast_visual_features(captured)
+        if self.fast_perception is not None:
+            facts = self.fast_perception.infer(captured)
+            if facts:
+                self.blackboard.merge_semantics(instance_id=self.instance_id, facts=facts)
         return state
-
-    def _extract_fast_visual_features(self, frame: CapturedFrame) -> None:
-        if not frame.bgra or frame.width <= 0 or frame.height <= 0:
-            return
-        now = time.monotonic_ns()
-        w = frame.width
-        h = frame.height
-        cx = w // 2
-        cy = h // 2
-
-        # Fast sampling of center region (crosshair / block in front)
-        center_samples = 0
-        brown_count = 0
-        gray_count = 0
-        green_count = 0
-        row_bytes = w * 4
-
-        # Sample a 30x30 region at screen center
-        for dy in range(-15, 15, 3):
-            sy = cy + dy
-            if sy < 0 or sy >= h:
-                continue
-            row_off = sy * row_bytes
-            for dx in range(-15, 15, 3):
-                sx = cx + dx
-                if sx < 0 or sx >= w:
-                    continue
-                off = row_off + sx * 4
-                b = frame.bgra[off]
-                g = frame.bgra[off + 1]
-                r = frame.bgra[off + 2]
-                center_samples += 1
-                # Wood/bark (brownish: R > B, R > G or R ~ G > B)
-                if r > 60 and g > 40 and r >= g and r > b + 15:
-                    brown_count += 1
-                # Stone (grayish: R ~ G ~ B)
-                elif abs(r - g) < 20 and abs(g - b) < 20 and r > 50 and r < 180:
-                    gray_count += 1
-                # Vegetation (greenish: G > R + 15 and G > B + 15)
-                elif g > r + 15 and g > b + 15:
-                    green_count += 1
-
-        # Sample upper vs lower screen for sky/horizon pitch detection and day/night cycle
-        sky_samples = 0
-        upper_sky = 0
-        lower_sky = 0
-        total_sky_brightness = 0.0
-
-        # Sample top 15% and bottom 15%
-        for dx in range(w // 4, 3 * w // 4, w // 10):
-            # Top sample
-            off_top = (h // 8) * row_bytes + dx * 4
-            b_t, g_t, r_t = frame.bgra[off_top], frame.bgra[off_top + 1], frame.bgra[off_top + 2]
-            # Bottom sample
-            off_bot = (7 * h // 8) * row_bytes + dx * 4
-            b_b, g_b, r_b = frame.bgra[off_bot], frame.bgra[off_bot + 1], frame.bgra[off_bot + 2]
-            
-            sky_samples += 1
-            lum_t = 0.299 * r_t + 0.587 * g_t + 0.114 * b_t
-            total_sky_brightness += lum_t
-
-            if b_t > 150 and g_t > 130 and r_t > 110: # Sky/cloud brightness
-                upper_sky += 1
-            if b_b > 150 and g_b > 130 and r_b > 110:
-                lower_sky += 1
-
-        looking_at_sky = bool(sky_samples > 0 and upper_sky >= (sky_samples * 0.7) and lower_sky >= (sky_samples * 0.5))
-        avg_brightness = total_sky_brightness / max(1, sky_samples)
-        
-        # Day / Dusk / Night cycle estimation
-        if avg_brightness > 135:
-            time_of_day = "day"
-        elif avg_brightness > 75:
-            time_of_day = "dusk"
-        else:
-            time_of_day = "night"
-
-        # Check for underwater immersion (cyan/blue high, red very low across screen)
-        is_underwater = bool(b_t > 120 and g_t > 100 and r_t < 40 and b_b > 120 and r_b < 40)
-
-        # Obstacle proximity check directly below crosshair (foot/block barrier)
-        obstacle_samples = 0
-        solid_count = 0
-        for dy in range(20, 50, 5):
-            sy = cy + dy
-            if sy >= h:
-                continue
-            row_off = sy * row_bytes
-            for dx in range(-10, 10, 5):
-                sx = cx + dx
-                if sx < 0 or sx >= w:
-                    continue
-                off = row_off + sx * 4
-                b_o, g_o, r_o = frame.bgra[off], frame.bgra[off + 1], frame.bgra[off + 2]
-                obstacle_samples += 1
-                if (r_o + g_o + b_o) > 60: # Solid non-black block
-                    solid_count += 1
-
-        obstacle_ahead = bool(obstacle_samples > 0 and solid_count >= (obstacle_samples * 0.75))
-
-        if center_samples > 0:
-            target_visible = (brown_count + gray_count + green_count) > (center_samples * 0.25)
-            target_mineable = (brown_count + gray_count) > (center_samples * 0.20)
-            
-            self.blackboard.merge_semantics(
-                instance_id=self.instance_id,
-                facts=(
-                    PerceptionFact(
-                        key="target.visible",
-                        value=target_visible,
-                        confidence=0.85,
-                        observed_ns=now,
-                        source="heuristic-vision-20hz",
-                        expires_after_ms=300,
-                    ),
-                    PerceptionFact(
-                        key="target.mineable",
-                        value=target_mineable,
-                        confidence=0.85,
-                        observed_ns=now,
-                        source="heuristic-vision-20hz",
-                        expires_after_ms=300,
-                    ),
-                    PerceptionFact(
-                        key="pitch.looking_up",
-                        value=looking_at_sky,
-                        confidence=0.80,
-                        observed_ns=now,
-                        source="heuristic-vision-20hz",
-                        expires_after_ms=300,
-                    ),
-                    PerceptionFact(
-                        key="environment.time_of_day",
-                        value=time_of_day,
-                        confidence=0.75,
-                        observed_ns=now,
-                        source="heuristic-vision-20hz",
-                        expires_after_ms=5000,
-                    ),
-                    PerceptionFact(
-                        key="environment.underwater",
-                        value=is_underwater,
-                        confidence=0.90,
-                        observed_ns=now,
-                        source="heuristic-vision-20hz",
-                        expires_after_ms=500,
-                    ),
-                    PerceptionFact(
-                        key="obstacle.ahead",
-                        value=obstacle_ahead,
-                        confidence=0.80,
-                        observed_ns=now,
-                        source="heuristic-vision-20hz",
-                        expires_after_ms=300,
-                    ),
-                ),
-            )
 
     def request_semantics(
         self,

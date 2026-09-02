@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
 
 from .knowledge import KnowledgeGraph
 from .planning import DependencyPlanner
@@ -40,11 +39,16 @@ class WikiQueryAgent:
         lower = raw.lower()
 
         # Intent 1: Crafting / Recipe / How to get
-        if any(w in lower for w in ("craft", "make", "recipe", "build", "how do i get", "how to get")):
+        if any(
+            w in lower for w in ("craft", "make", "recipe", "build", "how do i get", "how to get")
+        ):
             return self._handle_recipe_query(raw, lower)
 
         # Intent 2: Spatial / Where is / Location
-        if any(w in lower for w in ("where", "location", "place", "find ore", "find base", "coordinates")):
+        if any(
+            w in lower
+            for w in ("where", "location", "place", "find ore", "find base", "coordinates")
+        ):
             return self._handle_spatial_query(raw, lower, current_x, current_y, current_z)
 
         # Intent 3: General Wiki / Lore / Entity behavior
@@ -63,19 +67,21 @@ class WikiQueryAgent:
                 options = planner.acquisition_options(node_id)
                 if options:
                     best = options[0]
-                    answer_parts.append(
-                        f"To craft {item_name}: Process requires {best.method}."
-                    )
+                    answer_parts.append(f"To craft {item_name}: Process requires {best.method}.")
                     for idx, req_group in enumerate(best.requirements, start=1):
-                        req_names = [plan.target.replace("item:minecraft:", "") for plan in req_group]
+                        req_names = [
+                            plan.target.replace("item:minecraft:", "") for plan in req_group
+                        ]
                         step_desc = f"Step {idx}: Obtain {' OR '.join(req_names)}"
                         recipe_steps.append(step_desc)
                         answer_parts.append(step_desc)
 
         if not answer_parts:
             # Fallback to wiki service search
-            if self.wiki_service is not None:
-                evidence = self.wiki_service.search(f"{item_name} crafting recipe", self.graph.version if self.graph else None)  # type: ignore[arg-type]
+            if self.wiki_service is not None and self.graph is not None:
+                evidence = self.wiki_service.search(
+                    f"{item_name} crafting recipe", self.graph.version
+                )
                 if evidence:
                     first = evidence[0]
                     answer_parts.append(f"{first.title}: {first.extract[:200]}")
@@ -87,7 +93,9 @@ class WikiQueryAgent:
                         wiki_sources=evidence[:2],
                     )
 
-            answer_parts.append(f"To make {item_name}, search your crafting menu or check vanilla recipes.")
+            answer_parts.append(
+                f"To make {item_name}, search your crafting menu or check vanilla recipes."
+            )
 
         return WikiQueryAnswer(
             query=raw,
@@ -124,9 +132,18 @@ class WikiQueryAgent:
 
         lines: list[str] = []
         place_names: list[str] = []
-        for utility, place in recommendations:
-            dist = place.distance_to(current_x, current_y, current_z)
-            line = f"{place.name} ({place.kind.value}) at X:{int(place.x)} Y:{int(place.y)} Z:{int(place.z)} ({int(dist)}m away)"
+        for _utility, place in recommendations:
+            metric = place.metric_xyz()
+            if metric is None:
+                line = f"{place.name} ({place.kind.value}); metric pose unavailable"
+            else:
+                x, y, z = metric
+                distance = place.distance_to(current_x, current_y, current_z)
+                suffix = "unknown distance" if distance is None else f"{int(distance)}m away"
+                line = (
+                    f"{place.name} ({place.kind.value}) at "
+                    f"X:{int(x)} Y:{int(y)} Z:{int(z)} ({suffix})"
+                )
             lines.append(line)
             place_names.append(place.name)
 
@@ -152,12 +169,29 @@ class WikiQueryAgent:
         return WikiQueryAnswer(
             query=raw,
             intent="wiki",
-            answer_text=f"Minecraft knowledge query: '{raw}'. Check the official Minecraft wiki for detailed stats.",
+            answer_text=(
+                f"Minecraft knowledge query: '{raw}'. "
+                "Check the official Minecraft wiki for detailed stats."
+            ),
         )
 
     def _extract_item_name(self, text: str) -> str:
         words = re.findall(r"\b[a-z0-9_]+\b", text)
-        skip = {"how", "do", "i", "craft", "make", "build", "recipe", "get", "for", "a", "an", "the", "to"}
+        skip = {
+            "how",
+            "do",
+            "i",
+            "craft",
+            "make",
+            "build",
+            "recipe",
+            "get",
+            "for",
+            "a",
+            "an",
+            "the",
+            "to",
+        }
         candidates = [w for w in words if w not in skip]
         if candidates:
             return "_".join(candidates)

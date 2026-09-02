@@ -24,17 +24,39 @@ class PlaceKind(StrEnum):
     WAYPOINT = "waypoint"
 
 
+class PoseSource(StrEnum):
+    VISUAL_ODOMETRY = "visual_odometry"
+    DEAD_RECKONING = "dead_reckoning"
+    LANDMARK_ALIGNMENT = "landmark_alignment"
+    PERMITTED_DEBUG = "permitted_debug"
+    UNKNOWN = "unknown"
+
+
+class PoseBelief(BaseModel):
+    """Uncertain player-relative pose; exact metric coordinates are optional."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    metric_xyz: tuple[float, float, float] | None = None
+    covariance_xyz: tuple[float, float, float] | None = None
+    heading_degrees: float | None = Field(default=None, ge=-360.0, le=360.0)
+    dimension: str = "overworld"
+    source: PoseSource = PoseSource.UNKNOWN
+
+
 class PlaceRecord(BaseModel):
-    """Spatial and episodic record of a specific location in the Minecraft world (PEM inspired)."""
+    """Spatial and episodic place record with optional metric localization."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     place_id: str = Field(min_length=1, max_length=256)
     name: str = Field(min_length=1, max_length=256)
     kind: PlaceKind
-    x: float
-    y: float
-    z: float
+    pose_belief: PoseBelief = Field(default_factory=PoseBelief)
+    # Legacy/debug coordinates remain readable during migration, but are optional.
+    x: float | None = None
+    y: float | None = None
+    z: float | None = None
     dimension: str = "overworld"
     biome: str | None = None
     discovered_ns: int
@@ -46,11 +68,26 @@ class PlaceRecord(BaseModel):
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     metadata: dict[str, str | int | float | bool] = Field(default_factory=dict)
 
-    def distance_to(self, x: float, y: float, z: float) -> float:
-        return math.sqrt((self.x - x) ** 2 + (self.y - y) ** 2 + (self.z - z) ** 2)
+    def metric_xyz(self) -> tuple[float, float, float] | None:
+        if self.pose_belief.metric_xyz is not None:
+            return self.pose_belief.metric_xyz
+        if self.x is None or self.y is None or self.z is None:
+            return None
+        return self.x, self.y, self.z
 
-    def horizontal_distance_to(self, x: float, z: float) -> float:
-        return math.sqrt((self.x - x) ** 2 + (self.z - z) ** 2)
+    def distance_to(self, x: float, y: float, z: float) -> float | None:
+        metric = self.metric_xyz()
+        if metric is None:
+            return None
+        own_x, own_y, own_z = metric
+        return math.sqrt((own_x - x) ** 2 + (own_y - y) ** 2 + (own_z - z) ** 2)
+
+    def horizontal_distance_to(self, x: float, z: float) -> float | None:
+        metric = self.metric_xyz()
+        if metric is None:
+            return None
+        own_x, _own_y, own_z = metric
+        return math.sqrt((own_x - x) ** 2 + (own_z - z) ** 2)
 
 
 @dataclass
@@ -99,6 +136,8 @@ class SpatialPlaceMemory:
                 continue
 
             dist = record.distance_to(x, y, z)
+            if dist is None:
+                continue
             if max_distance is not None and dist > max_distance:
                 continue
 
@@ -125,6 +164,8 @@ class SpatialPlaceMemory:
             if kind is not None and record.kind != kind:
                 continue
             dist = record.distance_to(x, y, z)
+            if dist is None:
+                continue
             if dist <= radius:
                 results.append((dist, record))
         results.sort(key=lambda item: item[0])
@@ -141,20 +182,16 @@ class SpatialPlaceMemory:
 
     def recommend_places(
         self,
-        current_x: float,
-        current_y: float,
-        current_z: float,
+        current_x: float | None,
+        current_y: float | None,
+        current_z: float | None,
         *,
         intent: str = "explore",
         dimension: str = "overworld",
         limit: int = 5,
         now_ns: int | None = None,
     ) -> list[tuple[float, PlaceRecord]]:
-        """SOTA Spatial Recommendation Engine.
-
-        Calculates utility based on distance penalty, safety rating, importance score,
-        and intent matching bonus (e.g. mining -> ORE_VEIN / MINE, shelter -> BASE / SHELTER).
-        """
+        """Rank known places without requiring privileged coordinates."""
         if limit < 1 or not self.places:
             return []
 
@@ -168,7 +205,12 @@ class SpatialPlaceMemory:
             "craft": {PlaceKind.BASE, PlaceKind.CRAFTING_SITE},
             "farm": {PlaceKind.FARM, PlaceKind.VILLAGE},
             "trade": {PlaceKind.VILLAGE},
-            "explore": {PlaceKind.LANDMARK, PlaceKind.PORTAL, PlaceKind.WAYPOINT, PlaceKind.VILLAGE},
+            "explore": {
+                PlaceKind.LANDMARK,
+                PlaceKind.PORTAL,
+                PlaceKind.WAYPOINT,
+                PlaceKind.VILLAGE,
+            },
             "danger": {PlaceKind.DANGER_ZONE, PlaceKind.DEATH_SPOT},
         }
 
@@ -182,8 +224,12 @@ class SpatialPlaceMemory:
             if record.dimension != dimension:
                 continue
 
-            dist = record.distance_to(current_x, current_y, current_z)
-            distance_score = 1.0 / (1.0 + (dist / 100.0))  # Distance decay
+            dist = (
+                record.distance_to(current_x, current_y, current_z)
+                if current_x is not None and current_y is not None and current_z is not None
+                else None
+            )
+            distance_score = 0.5 if dist is None else 1.0 / (1.0 + (dist / 100.0))
 
             age_s = max(0.0, (now - record.last_visited_ns) / 1e9)
             recency_score = math.exp(-age_s / (7 * 86_400.0))
@@ -216,7 +262,7 @@ class WaypointEdge:
 
 @dataclass
 class TopologicalWaypointGraph:
-    """A* graph pathfinding network connecting discovered places across the Minecraft world."""
+    """Route graph whose correctness does not depend on exact XYZ coordinates."""
 
     edges: dict[str, list[WaypointEdge]] = field(default_factory=dict)
 
@@ -232,13 +278,23 @@ class TopologicalWaypointGraph:
         if source_id not in self.edges:
             self.edges[source_id] = []
         self.edges[source_id].append(
-            WaypointEdge(source_id=source_id, target_id=target_id, distance=distance, safety=safety)
+            WaypointEdge(
+                source_id=source_id,
+                target_id=target_id,
+                distance=distance,
+                safety=safety,
+            )
         )
         if bidirectional:
             if target_id not in self.edges:
                 self.edges[target_id] = []
             self.edges[target_id].append(
-                WaypointEdge(source_id=target_id, target_id=source_id, distance=distance, safety=safety)
+                WaypointEdge(
+                    source_id=target_id,
+                    target_id=source_id,
+                    distance=distance,
+                    safety=safety,
+                )
             )
 
     def find_path(
@@ -247,43 +303,54 @@ class TopologicalWaypointGraph:
         goal_id: str,
         memory: SpatialPlaceMemory,
     ) -> list[str]:
-        """A* shortest path between two waypoints/places using spatial coordinates."""
+        """Find a minimum-risk route, using metric pose only as an optional heuristic."""
         if start_id == goal_id:
             return [start_id]
-        if start_id not in self.edges or goal_id not in memory.places:
+        if start_id not in self.edges:
             return []
 
         goal_place = memory.get(goal_id)
-        if goal_place is None:
-            return []
 
         import heapq
 
-        # Priority queue entries: (f_score, current_id, path)
-        open_set: list[tuple[float, str, list[str]]] = [(0.0, start_id, [start_id])]
-        visited: set[str] = set()
+        def heuristic(place_id: str) -> float:
+            place = memory.get(place_id)
+            if place is None or goal_place is None:
+                return 0.0
+            goal_metric = goal_place.metric_xyz()
+            if goal_metric is None:
+                return 0.0
+            return place.distance_to(*goal_metric) or 0.0
+
+        open_set: list[tuple[float, float, str, list[str]]] = [
+            (heuristic(start_id), 0.0, start_id, [start_id])
+        ]
+        best_cost: dict[str, float] = {start_id: 0.0}
 
         while open_set:
-            f_score, current_id, path = heapq.heappop(open_set)
-            if current_id in visited:
+            _estimated_total, cost_so_far, current_id, path = heapq.heappop(open_set)
+            if cost_so_far > best_cost.get(current_id, float("inf")):
                 continue
-            visited.add(current_id)
 
             if current_id == goal_id:
                 return path
 
             for edge in self.edges.get(current_id, []):
-                if not edge.traversable or edge.target_id in visited:
+                if not edge.traversable:
                     continue
-                target_place = memory.get(edge.target_id)
-                if target_place is None:
+                next_cost = cost_so_far + edge.distance / max(0.1, edge.safety)
+                if next_cost >= best_cost.get(edge.target_id, float("inf")):
                     continue
-                # Heuristic: remaining Euclidean distance to goal place
-                h = target_place.distance_to(goal_place.x, goal_place.y, goal_place.z)
-                cost = edge.distance / max(0.1, edge.safety)
-                g_score = f_score - (0 if len(path) == 1 else memory.get(current_id).distance_to(goal_place.x, goal_place.y, goal_place.z)) + cost
-                new_f = g_score + h
-                heapq.heappush(open_set, (new_f, edge.target_id, path + [edge.target_id]))
+                best_cost[edge.target_id] = next_cost
+                heapq.heappush(
+                    open_set,
+                    (
+                        next_cost + heuristic(edge.target_id),
+                        next_cost,
+                        edge.target_id,
+                        path + [edge.target_id],
+                    ),
+                )
 
         return []
 
@@ -311,8 +378,12 @@ def cluster_places_into_regions(
     cluster_radius: float = 64.0,
     dimension: str = "overworld",
 ) -> list[DynamicRegionCluster]:
-    """Clusters nearby spatial records into named macro-regions (e.g. Base District, Pine Forest Grove, Mining Camp)."""
-    places = [p for p in memory.places.values() if p.dimension == dimension]
+    """Cluster metric-localized records into named macro-regions."""
+    places = [
+        place
+        for place in memory.places.values()
+        if place.dimension == dimension and place.metric_xyz() is not None
+    ]
     if not places:
         return []
 
@@ -321,9 +392,12 @@ def cluster_places_into_regions(
         assigned = False
         for group in clusters:
             # Check distance to group center
-            cx = sum(p.x for p in group) / len(group)
-            cz = sum(p.z for p in group) / len(group)
-            if math.sqrt((place.x - cx) ** 2 + (place.z - cz) ** 2) <= cluster_radius:
+            coordinates = [item.metric_xyz() for item in group]
+            cx = sum(item[0] for item in coordinates if item is not None) / len(group)
+            cz = sum(item[2] for item in coordinates if item is not None) / len(group)
+            metric = place.metric_xyz()
+            assert metric is not None
+            if math.sqrt((metric[0] - cx) ** 2 + (metric[2] - cz) ** 2) <= cluster_radius:
                 group.append(place)
                 assigned = True
                 break
@@ -332,23 +406,28 @@ def cluster_places_into_regions(
 
     result: list[DynamicRegionCluster] = []
     for idx, group in enumerate(clusters):
-        xs = [p.x for p in group]
-        ys = [p.y for p in group]
-        zs = [p.z for p in group]
+        metrics = [place.metric_xyz() for place in group]
+        xs = [metric[0] for metric in metrics if metric is not None]
+        ys = [metric[1] for metric in metrics if metric is not None]
+        zs = [metric[2] for metric in metrics if metric is not None]
         resources: dict[str, int] = {}
         for p in group:
             for r in p.resource_types:
                 resources[r] = resources.get(r, 0) + 1
-        
+
         # Primary kind by frequency
         kind_counts: dict[PlaceKind, int] = {}
         for p in group:
             kind_counts[p.kind] = kind_counts.get(p.kind, 0) + 1
-        primary_kind = max(kind_counts, key=kind_counts.get) if kind_counts else PlaceKind.LANDMARK
+        primary_kind = (
+            max(kind_counts, key=lambda kind: kind_counts[kind])
+            if kind_counts
+            else PlaceKind.LANDMARK
+        )
 
         cluster = DynamicRegionCluster(
             cluster_id=f"region_{dimension}_{idx:03d}",
-            name=f"{primary_kind.value.replace('_', ' ').title()} Zone #{idx+1}",
+            name=f"{primary_kind.value.replace('_', ' ').title()} Zone #{idx + 1}",
             primary_kind=primary_kind,
             min_x=min(xs),
             max_x=max(xs),

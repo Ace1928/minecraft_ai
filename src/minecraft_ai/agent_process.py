@@ -10,7 +10,7 @@ from .cognition import HighLevelController
 from .config import app_paths, load_config
 from .execution import SkillExecutor
 from .models import OpenAICompatibleLocalModel
-from .motor import HeuristicMotorPolicy
+from .motor import BootstrapMotorPolicy
 from .perception import PerceptionBlackboard
 from .perception_service import ActiveVLMWorker, RealtimePerceptionService
 from .platforms.bedrock_x11 import IsolatedX11Capture
@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         social = database.load_social()
 
         blackboard = PerceptionBlackboard()
-        capture = IsolatedX11Capture(args.display, args.window_id, allow_host=True)
+        capture = IsolatedX11Capture(args.display, args.window_id, allow_host=False)
 
         high_level: HighLevelController | None = None
         if config.high_level.enabled:
@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             stale_frame_ms=config.stale_frame_ms,
             active_vlm=active_vlm,
         )
-        executor = SkillExecutor(HeuristicMotorPolicy())
+        executor = SkillExecutor(BootstrapMotorPolicy())
         runtime = AgentRuntime(
             perception=perception,
             blackboard=blackboard,

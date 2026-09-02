@@ -134,10 +134,37 @@ def test_topological_waypoint_graph_pathfinding() -> None:
 
     memory = SpatialPlaceMemory()
     now = time.time_ns()
-    p_base = PlaceRecord(place_id="base", name="Base", kind=PlaceKind.BASE, x=0.0, y=64.0, z=0.0, discovered_ns=now, last_visited_ns=now)
-    p_mid = PlaceRecord(place_id="mid_waypoint", name="Midpoint", kind=PlaceKind.WAYPOINT, x=50.0, y=64.0, z=0.0, discovered_ns=now, last_visited_ns=now)
-    p_mine = PlaceRecord(place_id="deep_mine", name="Deep Mine", kind=PlaceKind.MINE, x=100.0, y=20.0, z=0.0, discovered_ns=now, last_visited_ns=now)
-    
+    p_base = PlaceRecord(
+        place_id="base",
+        name="Base",
+        kind=PlaceKind.BASE,
+        x=0.0,
+        y=64.0,
+        z=0.0,
+        discovered_ns=now,
+        last_visited_ns=now,
+    )
+    p_mid = PlaceRecord(
+        place_id="mid_waypoint",
+        name="Midpoint",
+        kind=PlaceKind.WAYPOINT,
+        x=50.0,
+        y=64.0,
+        z=0.0,
+        discovered_ns=now,
+        last_visited_ns=now,
+    )
+    p_mine = PlaceRecord(
+        place_id="deep_mine",
+        name="Deep Mine",
+        kind=PlaceKind.MINE,
+        x=100.0,
+        y=20.0,
+        z=0.0,
+        discovered_ns=now,
+        last_visited_ns=now,
+    )
+
     memory.upsert(p_base)
     memory.upsert(p_mid)
     memory.upsert(p_mine)
@@ -155,9 +182,39 @@ def test_dynamic_region_clustering() -> None:
 
     memory = SpatialPlaceMemory()
     now = time.time_ns()
-    p1 = PlaceRecord(place_id="base_camp", name="Base Camp", kind=PlaceKind.BASE, x=10.0, y=64.0, z=10.0, resource_types=("wood",), discovered_ns=now, last_visited_ns=now)
-    p2 = PlaceRecord(place_id="crafting_hut", name="Crafting Hut", kind=PlaceKind.CRAFTING_SITE, x=15.0, y=64.0, z=12.0, resource_types=("crafting_table",), discovered_ns=now, last_visited_ns=now)
-    p3 = PlaceRecord(place_id="far_village", name="Far Village", kind=PlaceKind.VILLAGE, x=500.0, y=70.0, z=500.0, resource_types=("wheat",), discovered_ns=now, last_visited_ns=now)
+    p1 = PlaceRecord(
+        place_id="base_camp",
+        name="Base Camp",
+        kind=PlaceKind.BASE,
+        x=10.0,
+        y=64.0,
+        z=10.0,
+        resource_types=("wood",),
+        discovered_ns=now,
+        last_visited_ns=now,
+    )
+    p2 = PlaceRecord(
+        place_id="crafting_hut",
+        name="Crafting Hut",
+        kind=PlaceKind.CRAFTING_SITE,
+        x=15.0,
+        y=64.0,
+        z=12.0,
+        resource_types=("crafting_table",),
+        discovered_ns=now,
+        last_visited_ns=now,
+    )
+    p3 = PlaceRecord(
+        place_id="far_village",
+        name="Far Village",
+        kind=PlaceKind.VILLAGE,
+        x=500.0,
+        y=70.0,
+        z=500.0,
+        resource_types=("wheat",),
+        discovered_ns=now,
+        last_visited_ns=now,
+    )
 
     memory.upsert(p1)
     memory.upsert(p2)

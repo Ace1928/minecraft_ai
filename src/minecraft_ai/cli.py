@@ -89,9 +89,7 @@ def _command(command: str, **payload: object) -> dict[str, object]:
 
 
 def _graph_path(version: GameVersion) -> Path:
-    safe_version = "".join(
-        ch if ch.isalnum() or ch in ".-_" else "_" for ch in version.version_id
-    )
+    safe_version = "".join(ch if ch.isalnum() or ch in ".-_" else "_" for ch in version.version_id)
     return KNOWLEDGE_DIR / f"{version.edition.value}-{safe_version}.json"
 
 
@@ -149,34 +147,27 @@ def demo(
     ticks: int = typer.Option(12, min=1, max=1000, help="Number of ticks to run."),
     role: str = typer.Option("generalist", help="Role profile."),
 ) -> None:
-    """Run an operational inhabitant loop demo showing real-time cognition and motor execution."""
+    """Print an offline bootstrap smoke sequence without claiming live capability."""
     _ensure_dirs()
-    print(f"[bold green]Starting Eidosian Minecraft AI Inhabitant Demo[/bold green] (ticks={ticks}, role={role})")
-    
-    from .skills import SkillOutcome
     from .builtin_skills import build_bootstrap_skill_library
     from .roles import get_role
-    
+
     role_profile = get_role(role)
     library = build_bootstrap_skill_library()
+    print(f"[bold green]Bootstrap smoke sequence[/bold green] ticks={ticks} role={role}")
     print(f"Role: {role_profile.role_id} - {role_profile.description or 'Inhabitant'}")
     print(f"Standing goals: {list(role_profile.standing_goals)}")
     print(f"Loaded skills: {len(library.specs)}")
-    
-    print("\n[bold yellow]--- Operational Tick Sequence ---[/bold yellow]")
+
+    print("\n[bold yellow]--- Synthetic tick sequence ---[/bold yellow]")
     for i in range(ticks):
         subgoal = "approach_target" if i < 5 else "mine_block"
         verb = "look" if i == 0 else ("walk" if i < 5 else "mine")
         print(f"t={i:02d} subgoal={subgoal:<18} critic=continue verb={verb:<6}")
         time.sleep(0.05)
-        
-    print("\n[bold green]--- Eidosian Inhabitant Identity Card ---[/bold green]")
-    print(f"who I am: Eidos")
-    print(f"role: {role_profile.role_id}")
-    print(f"goals: {list(role_profile.standing_goals)}")
-    print(f"beliefs: {{'crosshair': 'minecraft:log', 'intention': 'obtain_wood'}}")
-    print(f"status: OPERATIONAL & OPTIMAL")
-    print("[green]Demo completed successfully.[/green]")
+
+    print("[green]Offline smoke sequence completed.[/green]")
+    print("No live-control, intelligence, or performance claim is implied.")
 
 
 @app.command()
@@ -284,12 +275,17 @@ def run(
         ) from exc
     if not bedrock_session_alive(session):
         raise typer.BadParameter("The managed Bedrock session is not alive.")
+    if session.mode != "xephyr":
+        raise typer.BadParameter(
+            "Direct host-display sessions are observation/debug only and cannot be armed. "
+            "Stop it and launch the default isolated session first."
+        )
     window_id = wait_for_minecraft_window(session, timeout_s=30.0)
     _command(
         "attach-bedrock-x11",
         display=session.display,
         window_id=window_id,
-        allow_host=(session.mode == "direct"),
+        allow_host=False,
     )
     install = discover_bedrock_linux_install()
     build = install.selected_build if install is not None else None
@@ -472,9 +468,13 @@ def bedrock_status() -> None:
 def bedrock_launch(
     width: int = typer.Option(1280, min=320, max=7680),
     height: int = typer.Option(720, min=240, max=4320),
-    direct: bool = typer.Option(True, help="Launch directly on host GPU display for Vulkan/DRI3 hardware acceleration."),
+    direct: bool = typer.Option(
+        False,
+        "--direct-debug",
+        help="Launch on the host display for manual debugging; autonomous input stays disabled.",
+    ),
 ) -> None:
-    """Launch BedrockOnLinux for realtime gameplay."""
+    """Launch BedrockOnLinux; isolated Xephyr is the production default."""
     if bedrock_session_alive():
         session = BedrockSession.load()
         print("[yellow]Managed Bedrock session is already running.[/yellow]")
@@ -484,6 +484,10 @@ def bedrock_launch(
         from .platforms.bedrock_session import launch_direct_bedrock_session
 
         session = launch_direct_bedrock_session(width=width, height=height)
+        print(
+            "[yellow]Direct debug session: capture inspection is allowed, but autonomous "
+            "motor control cannot be armed.[/yellow]"
+        )
     else:
         session = launch_xephyr_bedrock_session(width=width, height=height)
     print("[green]Bedrock session launched.[/green]")
