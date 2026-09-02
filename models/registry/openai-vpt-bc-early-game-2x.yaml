@@ -1,0 +1,33 @@
+schema_version: 1
+model_version: openai-vpt-bc-early-game-2x
+provider: openai
+architecture: VPT 2x MinecraftPolicy
+purpose: early-game human-interface temporal behavior prior
+promotion_status: candidate-live-domain-transfer
+goal_conditioned: false
+temporal_memory: true
+source:
+  repository: https://github.com/openai/Video-Pre-Training
+  commit: 095519fbd4ee0e9281d19f19601e45629de9ac3f
+  license: MIT
+artifacts:
+  model:
+    url: https://openaipublic.blob.core.windows.net/minecraft-rl/models/2x.model
+    sha256: 89f9c5dc7c73484350a4055e842952ba5b70f524126fbc147edf7a4b6f27ccb8
+  weights:
+    url: https://openaipublic.blob.core.windows.net/minecraft-rl/models/bc-early-game-2x.weights
+    sha256: d60aa4557a8e3465db7daaf46f69dcee674bccbec0e473cf077b2a01881c6bef
+runtime:
+  parameters: 248495294
+  edition_trained: Java
+  target_edition: Bedrock
+  target_status: unadapted-domain-transfer
+  measured_device: AMD Ryzen 5 5500 CPU, 4 inference threads
+  measured_mean_step_ms: 120.30
+  measured_p95_step_ms: 128.99
+  measured_date: 2026-09-02
+limitations:
+  - This behavior-cloned checkpoint is not goal conditioned.
+  - Java-to-Bedrock input, GUI and visual domain adaptation is not yet trained.
+  - The live service runs below the source policy's 20 Hz cadence on CPU.
+  - It is not eligible for preferred-policy claims until it beats the frozen Bedrock baseline.

@@ -62,6 +62,7 @@ class TemporalPolicyClient:
     _held_buttons: set[str] = field(default_factory=set, init=False)
     _last_sequence: int = field(default=-1, init=False)
     _pending_request_id: str | None = field(default=None, init=False)
+    _pending_deadline_ns: int = field(default=0, init=False)
     _pending_miss_recorded: bool = field(default=False, init=False)
     _consumed_miss_recorded: bool = field(default=False, init=False)
     _discard_pending_response: bool = field(default=False, init=False)
@@ -90,6 +91,8 @@ class TemporalPolicyClient:
             self._ensure_started(len(frame.bgra))
             response = self._consume_pending_response()
             if self._pending_request_id is not None:
+                if time.monotonic_ns() <= self._pending_deadline_ns:
+                    return self._hold(sequence)
                 if not self._pending_miss_recorded:
                     self.metrics.deadline_misses += 1
                     self._pending_miss_recorded = True
@@ -99,8 +102,11 @@ class TemporalPolicyClient:
                 self._discard_pending_response = False
             self._submit(frame, intent)
             if response is None:
-                return self._release(sequence)
+                return self._hold(sequence)
             output = LearnedPolicyOutput.model_validate(response["output"])
+            self.metrics.responses += 1
+            self.metrics.last_inference_ms = output.inference_ns / 1_000_000.0
+            self.metrics.last_error = None
             if output.inference_ns > self.config.deadline_ms * 1_000_000:
                 if not self._consumed_miss_recorded:
                     self.metrics.deadline_misses += 1
@@ -165,6 +171,7 @@ class TemporalPolicyClient:
             self._memory = None
         self._memory_size = 0
         self._pending_request_id = None
+        self._pending_deadline_ns = 0
         self._pending_miss_recorded = False
         self._consumed_miss_recorded = False
         self._discard_pending_response = False
@@ -228,6 +235,7 @@ class TemporalPolicyClient:
             return None
         request_id = self._pending_request_id
         self._pending_request_id = None
+        self._pending_deadline_ns = 0
         self._consumed_miss_recorded = self._pending_miss_recorded
         self._pending_miss_recorded = False
         if response.get("request_id") != request_id:
@@ -244,6 +252,7 @@ class TemporalPolicyClient:
         assert self._process.stdin is not None
         self._memory.buf[: len(frame.bgra)] = frame.bgra  # type: ignore[index]
         request_id = uuid.uuid4().hex
+        deadline_ns = time.monotonic_ns() + self.config.deadline_ms * 1_000_000
         request = {
             "type": "infer",
             "request_id": request_id,
@@ -254,12 +263,13 @@ class TemporalPolicyClient:
                 "captured_ns": frame.captured_ns,
             },
             "intent": intent.model_dump(mode="json"),
-            "deadline_ns": time.monotonic_ns() + self.config.deadline_ms * 1_000_000,
+            "deadline_ns": deadline_ns,
         }
         self._process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
         self._process.stdin.flush()
         self.metrics.requests += 1
         self._pending_request_id = request_id
+        self._pending_deadline_ns = deadline_ns
         self._pending_miss_recorded = False
 
     def _read_response(self, timeout_s: float) -> dict[str, Any] | None:
@@ -280,9 +290,6 @@ class TemporalPolicyClient:
         return payload
 
     def _output_action(self, output: LearnedPolicyOutput, sequence: int) -> MotorAction:
-        self.metrics.responses += 1
-        self.metrics.last_inference_ms = output.inference_ns / 1_000_000.0
-        self.metrics.last_error = None
         desired_keys = set(output.keys)
         desired_buttons = set(output.buttons)
         action = MotorAction(
@@ -298,6 +305,11 @@ class TemporalPolicyClient:
         self._held_keys = desired_keys
         self._held_buttons = desired_buttons
         return action
+
+    @staticmethod
+    def _hold(sequence: int) -> MotorAction:
+        """Preserve the most recent held state while one bounded inference is pending."""
+        return MotorAction(sequence=sequence, duration_ms=50)
 
     def _release(self, sequence: int) -> MotorAction:
         action = MotorAction(
