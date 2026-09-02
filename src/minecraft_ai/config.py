@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import yaml
+from platformdirs import user_config_dir, user_data_dir
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ModelConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    model_id: str = ""
+    base_url: str = "http://127.0.0.1:8080/v1"
+    api_key: str = "local"
+    timeout_s: float = Field(default=60.0, gt=0.0, le=600.0)
+
+
+class RuntimeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    role: str = "generalist"
+    motor_hz: float = Field(default=20.0, ge=5.0, le=60.0)
+    cognition_hz: float = Field(default=0.5, gt=0.0, le=10.0)
+    semantic_hz: float = Field(default=2.0, gt=0.0, le=20.0)
+    stale_frame_ms: int = Field(default=500, ge=100, le=5000)
+    lease_renew_ms: int = Field(default=500, ge=100, le=2000)
+    high_level: ModelConfig = Field(default_factory=ModelConfig)
+    vision_language: ModelConfig = Field(default_factory=ModelConfig)
+    online_wiki: bool = True
+
+
+@dataclass(frozen=True)
+class AppPaths:
+    config_dir: Path
+    data_dir: Path
+    config_file: Path
+    state_db: Path
+    wiki_cache: Path
+    knowledge_dir: Path
+
+
+def app_paths() -> AppPaths:
+    config_dir = Path(user_config_dir("minecraft-ai"))
+    data_dir = Path(user_data_dir("minecraft-ai"))
+    return AppPaths(
+        config_dir=config_dir,
+        data_dir=data_dir,
+        config_file=config_dir / "config.yaml",
+        state_db=data_dir / "state.sqlite3",
+        wiki_cache=data_dir / "wiki-cache",
+        knowledge_dir=data_dir / "knowledge",
+    )
+
+
+def default_config() -> RuntimeConfig:
+    return RuntimeConfig()
+
+
+def load_config(path: Path | None = None) -> RuntimeConfig:
+    selected = app_paths().config_file if path is None else path
+    if not selected.exists():
+        return default_config()
+    raw = yaml.safe_load(selected.read_text(encoding="utf-8"))
+    if raw is None:
+        return default_config()
+    if not isinstance(raw, dict):
+        raise ValueError(f"configuration root must be a mapping: {selected}")
+    return RuntimeConfig.model_validate(raw)
+
+
+def save_config(config: RuntimeConfig, path: Path | None = None) -> Path:
+    selected = app_paths().config_file if path is None else path
+    selected.parent.mkdir(parents=True, exist_ok=True)
+    payload = config.model_dump(mode="json")
+    staged = selected.with_name(f".{selected.name}.tmp")
+    staged.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    try:
+        staged.chmod(0o600)
+    except OSError:
+        pass
+    staged.replace(selected)
+    return selected
+
+
+def ensure_default_config() -> Path:
+    paths = app_paths()
+    if paths.config_file.exists():
+        return paths.config_file
+    return save_config(default_config(), paths.config_file)
