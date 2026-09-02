@@ -149,8 +149,11 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     skills = build_bootstrap_skill_library()
     gather = skills.get("gather_nearby_wood")
     crafting = skills.get("craft_crafting_table")
+    retreat = skills.get("retreat_from_danger")
 
     assert "visible trunk" in gather.description
     assert gather.success_conditions[0].key == "inventory.logs"
     assert "Bedrock crafting interface" in crafting.description
     assert crafting.success_conditions[0].key == "inventory.crafting_table"
+    assert retreat.preconditions[0].key == "danger.immediate"
+    assert retreat.preconditions[0].operator == "truthy"

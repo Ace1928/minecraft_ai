@@ -97,6 +97,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 "the camera stable enough to verify the escape route"
             ),
             stage=SkillStage.TRUSTED,
+            preconditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             success_conditions=(SkillCondition(key="danger.immediate", operator="falsy"),),
             expected_effects=("safe_distance",),
             max_duration_ms=10_000,
