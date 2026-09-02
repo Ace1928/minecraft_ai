@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import importlib
 import os
 import time
@@ -11,6 +13,55 @@ from ..safety import MotorAction, MotorLease, MotorRejected
 
 class IsolationError(RuntimeError):
     pass
+
+
+class _NativeRelativeMouse:
+    """Issue genuine relative XTEST motion on the isolated X server.
+
+    python-xlib's ``xtest.fake_input`` exposes the protocol's absolute motion
+    request but not ``XTestFakeRelativeMotionEvent``. Bedrock uses a grabbed,
+    recentered pointer, so reconstructing an absolute coordinate races that
+    recenter and produces discontinuous camera jumps.
+    """
+
+    def __init__(self, display_name: str) -> None:
+        x11_path = ctypes.util.find_library("X11")
+        xtst_path = ctypes.util.find_library("Xtst")
+        if x11_path is None or xtst_path is None:
+            raise IsolationError("libX11 and libXtst are required for relative mouse input")
+        try:
+            self._x11 = ctypes.CDLL(x11_path)
+            self._xtst = ctypes.CDLL(xtst_path)
+        except OSError as exc:
+            raise IsolationError(f"cannot load native XTEST libraries: {exc}") from exc
+        self._x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        self._x11.XOpenDisplay.restype = ctypes.c_void_p
+        self._x11.XFlush.argtypes = [ctypes.c_void_p]
+        self._x11.XFlush.restype = ctypes.c_int
+        self._xtst.XTestFakeRelativeMotionEvent.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_ulong,
+        ]
+        self._xtst.XTestFakeRelativeMotionEvent.restype = ctypes.c_int
+        display_pointer = self._x11.XOpenDisplay(display_name.encode("utf-8"))
+        if not display_pointer:
+            raise IsolationError(f"cannot open {display_name} for native relative mouse input")
+        self._display = ctypes.c_void_p(int(display_pointer))
+
+    def move(self, mouse_dx: int, mouse_dy: int) -> None:
+        accepted = int(
+            self._xtst.XTestFakeRelativeMotionEvent(
+                self._display,
+                mouse_dx,
+                mouse_dy,
+                0,
+            )
+        )
+        if accepted == 0:
+            raise IsolationError("isolated X server rejected relative mouse input")
+        self._x11.XFlush(self._display)
 
 
 _KEYSYM_NAMES: dict[str, str] = {
@@ -155,6 +206,7 @@ class IsolatedX11InputBackend:
         if target_window_id is not None and not self.probe_target():
             self.close()
             raise IsolationError(f"target X window {target_window_id} is unavailable")
+        self._relative_mouse = _NativeRelativeMouse(display_name)
 
     @property
     def held_keys(self) -> frozenset[str]:
@@ -220,16 +272,7 @@ class IsolatedX11InputBackend:
                 action.mouse_dx,
                 action.mouse_dy,
             )
-            # XTEST interprets x/y as relative deltas when root is X.NONE,
-            # which is python-xlib's default here.  Passing pointer position +
-            # delta therefore amplified every learned camera action by hundreds
-            # of pixels and repeatedly drove Bedrock to a pitch pole.
-            self._xtest.fake_input(
-                self._display,
-                self._x.MotionNotify,
-                x=relative_x,
-                y=relative_y,
-            )
+            self._relative_mouse.move(relative_x, relative_y)
         for key in action.keys_down:
             self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))
             self._held_keys.add(key.lower())
