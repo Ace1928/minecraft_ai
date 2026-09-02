@@ -2,14 +2,23 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from minecraft_ai.knowledge import Edition, GameVersion, KnowledgeGraph
 from minecraft_ai.memory import MemoryKind, MemoryRecord, MemoryStore
-from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
+from minecraft_ai.perception import (
+    FrameState,
+    PerceptionBlackboard,
+    PerceptionFact,
+    ScreenRegion,
+    Track,
+)
 from minecraft_ai.planning import Goal, GoalScorer
 from minecraft_ai.roles import BUILTIN_ROLES, get_role
 from minecraft_ai.cognition import CognitionDecision
 from minecraft_ai.runtime import (
     _active_operator_messages,
+    _operator_target_facts,
     _selected_operator_message_id,
     _semantic_deadline_ms,
     _semantic_refresh_allowed,
@@ -154,6 +163,58 @@ def test_optional_semantics_yield_to_cognition_and_operator_work() -> None:
             **blocked,
         }
         assert not _semantic_refresh_allowed(**inputs)
+
+
+def test_matching_operator_region_publishes_geometry_without_guessing_semantics() -> None:
+    target = Track(
+        track_id="operator:oak",
+        label="oak_log",
+        confidence=1.0,
+        region=ScreenRegion(x=0.15, y=0.10, width=0.10, height=0.30),
+        first_seen_ns=1,
+        last_seen_ns=1,
+        attributes={
+            "source": "operator",
+            "reference_dhash": "0123456789abcdef",
+        },
+    )
+    current_hash = PerceptionFact(
+        key="frame.dhash",
+        value="0123456789abcdef",
+        confidence=1.0,
+        observed_ns=1,
+        source="bootstrap:test",
+    )
+
+    facts = {fact.key: fact for fact in _operator_target_facts(target, current_hash, now_ns=2)}
+
+    assert facts["target.visible"].value is True
+    assert facts["target.kind"].value == "oak_log"
+    assert facts["target.dx"].value == pytest.approx(-0.6)
+    assert facts["target.dy"].value == pytest.approx(-0.5)
+    assert "target.mineable" not in facts
+    assert "target.near" not in facts
+
+
+def test_changed_frame_invalidates_operator_region_facts() -> None:
+    target = Track(
+        track_id="operator:oak",
+        label="oak_log",
+        confidence=1.0,
+        region=ScreenRegion(x=0.15, y=0.10, width=0.10, height=0.30),
+        first_seen_ns=1,
+        last_seen_ns=1,
+        attributes={"source": "operator", "reference_dhash": "0000000000000000"},
+    )
+    changed = PerceptionFact(
+        key="frame.dhash",
+        value="ffffffffffffffff",
+        confidence=1.0,
+        observed_ns=1,
+        source="bootstrap:test",
+    )
+
+    assert _operator_target_facts(target, changed, now_ns=2) == ()
 
 
 def test_newest_acknowledged_operator_directive_remains_active() -> None:

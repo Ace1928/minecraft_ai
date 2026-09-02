@@ -90,16 +90,24 @@ def test_skill_contract_becomes_learned_policy_instruction() -> None:
         policy_ref="mine",
         policy_instruction="mine log",
     )
-    executor.start(spec, run_id="r1", parameters={"wood": "oak"}, now_ns=100)
+    executor.start(
+        spec,
+        run_id="r1",
+        parameters={"target": "oak_log", "wood": "oak"},
+        now_ns=100,
+    )
 
     executor.tick(_board(), sequence=1, now_ns=200)
 
     assert policy.intent is not None
     assert policy.intent.instruction == "mine log"
-    assert executor.parameters == {"wood": "oak"}
+    assert policy.intent.target_label == "oak_log"
+    assert executor.parameters == {"target": "oak_log", "wood": "oak"}
     assert executor.run is not None
-    assert executor.run.parameters == {"wood": "oak"}
-    assert executor.instruction == "Approach and mine a visible tree log. Parameters: wood=oak"
+    assert executor.run.parameters == {"target": "oak_log", "wood": "oak"}
+    assert executor.instruction == (
+        "Approach and mine a visible tree log. Parameters: target=oak_log, wood=oak"
+    )
 
 
 def test_skill_success_releases_held_input() -> None:

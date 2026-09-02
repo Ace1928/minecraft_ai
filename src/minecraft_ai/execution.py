@@ -109,6 +109,7 @@ class SkillExecutor:
             skill_id=self._spec.skill_id,
             mode=self._spec.policy_ref or self._spec.skill_id,
             instruction=_policy_instruction(self._spec),
+            target_label=_target_label(self._parameters),
             parameters=self._parameters,
         )
         action = self.policy.act(blackboard, intent, sequence=sequence)
@@ -164,6 +165,13 @@ def _policy_instruction(spec: SkillSpec) -> str:
     intended for an LLM or an operator.
     """
     return spec.policy_instruction or spec.description.strip() or spec.name.strip()
+
+
+def _target_label(parameters: dict[str, str | int | float | bool]) -> str | None:
+    target = parameters.get("target")
+    if not isinstance(target, str) or not target.strip():
+        return None
+    return target.strip()
 
 
 def conditions_satisfied(

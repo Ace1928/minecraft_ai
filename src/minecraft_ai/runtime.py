@@ -17,8 +17,8 @@ from .datasets import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
 from .execution import SkillExecutor
 from .memory import MemoryStore
-from .perception import ActivePerceptionQuery, PerceptionBlackboard
-from .perception_service import RealtimePerceptionService
+from .perception import ActivePerceptionQuery, PerceptionBlackboard, PerceptionFact, Track
+from .perception_service import RealtimePerceptionService, perceptual_hash_distance
 from .planning import Goal
 from .roles import RoleProfile
 from .safety import MotorAction
@@ -53,6 +53,54 @@ def _semantic_refresh_allowed(
         or cognition_pending
         or operator_message_pending
         or not worker_available
+    )
+
+
+def _operator_target_facts(
+    target: Track,
+    current_hash: PerceptionFact | None,
+    *,
+    now_ns: int | None = None,
+) -> tuple[PerceptionFact, ...]:
+    """Convert a still-matching explicit region into geometric target facts.
+
+    This does not infer object identity beyond the operator's label, mineability,
+    range, or task success. The reference frame hash prevents a stale rectangle
+    from becoming semantic ground truth after the view materially changes.
+    """
+    reference = target.attributes.get("reference_dhash")
+    observed = None if current_hash is None else current_hash.value
+    if (
+        target.attributes.get("source") != "operator"
+        or not isinstance(reference, str)
+        or not isinstance(observed, str)
+    ):
+        return ()
+    try:
+        if perceptual_hash_distance(reference, observed) > 6:
+            return ()
+    except ValueError:
+        return ()
+    observed_ns = time.monotonic_ns() if now_ns is None else now_ns
+    center_x = target.region.x + target.region.width / 2.0
+    center_y = target.region.y + target.region.height / 2.0
+    source = f"operator:explicit-grounding:{target.track_id}"
+    values: tuple[tuple[str, str | float | bool], ...] = (
+        ("target.visible", True),
+        ("target.kind", target.label),
+        ("target.dx", max(-1.0, min(1.0, 2.0 * center_x - 1.0))),
+        ("target.dy", max(-1.0, min(1.0, 2.0 * center_y - 1.0))),
+    )
+    return tuple(
+        PerceptionFact(
+            key=key,
+            value=value,
+            confidence=1.0,
+            observed_ns=observed_ns,
+            source=source,
+            expires_after_ms=250,
+        )
+        for key, value in values
     )
 
 
@@ -398,6 +446,13 @@ class AgentRuntime:
                 self.blackboard.remove_semantic_track(self._last_operator_target_id)
                 self._last_operator_target_id = None
             return
+        current_hash = self.blackboard.fact("frame.dhash", min_confidence=1.0)
+        target_facts = _operator_target_facts(target, current_hash)
+        if target_facts:
+            self.blackboard.merge_semantics(
+                instance_id=self.perception.instance_id,
+                facts=target_facts,
+            )
         if target.track_id == self._last_operator_target_id:
             return
         latest = self.blackboard.raw_latest()
