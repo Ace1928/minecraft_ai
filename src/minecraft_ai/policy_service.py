@@ -37,6 +37,9 @@ class LearnedPolicyOutput(BaseModel):
     mouse_dy: int = 0
     inference_ns: int = Field(ge=0)
     model_version: str
+    target_exists_probability: float | None = Field(default=None, ge=0.0, le=1.0)
+    target_point_yx: tuple[float, float] | None = None
+    target_bbox_xyxy: tuple[float, float, float, float] | None = None
 
 
 @dataclass
@@ -178,6 +181,11 @@ class TemporalPolicyClient:
                     "buttons": self._last_prediction.buttons,
                     "mouse_dx": self._last_prediction.mouse_dx,
                     "mouse_dy": self._last_prediction.mouse_dy,
+                    "target_exists_probability": (
+                        self._last_prediction.target_exists_probability
+                    ),
+                    "target_point_yx": self._last_prediction.target_point_yx,
+                    "target_bbox_xyxy": self._last_prediction.target_bbox_xyxy,
                 }
             ),
             "last_emitted_camera": {
@@ -965,11 +973,15 @@ class _RocketTwoBackend:
         }
         decoded = self.transformer.policy2env(self.mapper.to_factored(raw))
         self.previous_action = self._decoded_previous_action(decoded)
+        exists_probability, point_yx, bbox_xyxy = _rocket_target_estimate(self.policy)
         return _decoded_policy_output(
             decoded,
             inference_ns=time.perf_counter_ns() - started,
             model_version=self.model_version,
             camera_scale=self.camera_scale,
+            target_exists_probability=exists_probability,
+            target_point_yx=point_yx,
+            target_bbox_xyxy=bbox_xyxy,
         )
 
     def _empty_previous_action(self) -> dict[str, Any]:
@@ -1067,6 +1079,9 @@ def _decoded_policy_output(
     inference_ns: int,
     model_version: str,
     camera_scale: float = 1.0,
+    target_exists_probability: float | None = None,
+    target_point_yx: tuple[float, float] | None = None,
+    target_bbox_xyxy: tuple[float, float, float, float] | None = None,
 ) -> LearnedPolicyOutput:
     keys: set[str] = set()
     buttons: set[str] = set()
@@ -1099,7 +1114,41 @@ def _decoded_policy_output(
         mouse_dy=int(round(float(pitch) * camera_scale)),
         inference_ns=inference_ns,
         model_version=model_version,
+        target_exists_probability=target_exists_probability,
+        target_point_yx=target_point_yx,
+        target_bbox_xyxy=target_bbox_xyxy,
     )
+
+
+def _rocket_target_estimate(
+    policy: Any,
+) -> tuple[
+    float | None,
+    tuple[float, float] | None,
+    tuple[float, float, float, float] | None,
+]:
+    """Read ROCKET-2's published auxiliary current-view localization heads."""
+    cached = getattr(policy, "cache_latents", None)
+    if not isinstance(cached, dict):
+        return None, None, None
+    exist = cached.get("exist")
+    point = cached.get("point")
+    bbox = cached.get("bbox")
+    if exist is None or point is None or bbox is None:
+        return None, None, None
+    probability = float(exist.detach().sigmoid().cpu().reshape(-1)[0].item())
+    point_values = [
+        float(value) for value in point.detach().cpu().reshape(-1).tolist()[:2]
+    ]
+    bbox_values = [
+        float(value) for value in bbox.detach().cpu().reshape(-1).tolist()[:4]
+    ]
+    if len(point_values) != 2 or len(bbox_values) != 4:
+        return probability, None, None
+    point_yx = tuple(max(0.0, min(1.0, value)) for value in point_values)
+    x0, y0, x1, y1 = (max(0.0, min(1.0, value)) for value in bbox_values)
+    bbox_xyxy = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+    return probability, (point_yx[0], point_yx[1]), bbox_xyxy
 
 
 def _center_crop_16_9(frame: Any, numpy_module: Any) -> Any:

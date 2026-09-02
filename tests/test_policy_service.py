@@ -441,6 +441,9 @@ def test_policy_status_exposes_predicted_and_emitted_camera(tmp_path: Path) -> N
         "buttons": ("left",),
         "mouse_dx": 9,
         "mouse_dy": -9,
+        "target_exists_probability": None,
+        "target_point_yx": None,
+        "target_bbox_xyxy": None,
     }
     assert status["last_emitted_camera"] == {"mouse_dx": 1, "mouse_dy": -1}
     assert status["predicted_camera_total"] == {"mouse_dx": 9, "mouse_dy": -9}
