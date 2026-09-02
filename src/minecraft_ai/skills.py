@@ -70,6 +70,7 @@ class SkillStats:
     failures: int = 0
     timeouts: int = 0
     cancellations: int = 0
+    consecutive_failures: int = 0
 
     @property
     def attempts(self) -> int:
@@ -105,10 +106,13 @@ class SkillLibrary:
         stats = self.stats.setdefault(key, SkillStats())
         if run.outcome == SkillOutcome.SUCCEEDED:
             stats.successes += 1
+            stats.consecutive_failures = 0
         elif run.outcome == SkillOutcome.FAILED:
             stats.failures += 1
+            stats.consecutive_failures += 1
         elif run.outcome == SkillOutcome.TIMED_OUT:
             stats.timeouts += 1
+            stats.consecutive_failures += 1
         elif run.outcome == SkillOutcome.CANCELLED:
             stats.cancellations += 1
         return stats
