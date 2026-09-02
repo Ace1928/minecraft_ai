@@ -20,6 +20,8 @@ class _Window:
     name: str | None = None
     wm_class: tuple[str, ...] = ()
     tree: _Tree | None = None
+    width: int = 1
+    height: int = 1
 
     def get_wm_name(self) -> str | None:
         return self.name
@@ -30,6 +32,9 @@ class _Window:
     def query_tree(self) -> _Tree:
         assert self.tree is not None
         return self.tree
+
+    def get_geometry(self) -> _Window:
+        return self
 
 
 @dataclass
@@ -44,18 +49,22 @@ class _Display:
 def _wine_tree() -> tuple[_Display, _Window, _Window, _Window]:
     root = _Window(1)
     desktop = _Window(2, "Wine Desktop", ("explorer.exe", "explorer.exe"))
+    ime = _Window(5, "Default IME", ("minecraft.windows.exe",))
     minecraft = _Window(
         3,
         "Minecraft",
         ("minecraft.windows.exe", "minecraft.windows.exe"),
+        width=1280,
+        height=720,
     )
     drawable = _Window(4)
     root.tree = _Tree(parent=root, children=[desktop])
-    desktop.tree = _Tree(parent=root, children=[minecraft])
+    desktop.tree = _Tree(parent=root, children=[ime, minecraft])
+    ime.tree = _Tree(parent=desktop)
     minecraft.tree = _Tree(parent=desktop, children=[drawable])
     drawable.tree = _Tree(parent=minecraft)
     display = _Display(
-        {item.id: item for item in (root, desktop, minecraft, drawable)}
+        {item.id: item for item in (root, desktop, ime, minecraft, drawable)}
     )
     return display, desktop, minecraft, drawable
 

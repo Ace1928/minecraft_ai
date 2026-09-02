@@ -157,18 +157,32 @@ def _resolve_minecraft_input_window(display: Any, target_window_id: int) -> Any:
     """
 
     target = display.create_resource_object("window", target_window_id)
-    stack = [target]
-    while stack:
-        window = stack.pop()
+    try:
+        candidates = [target, *target.query_tree().children]
+    except Exception:
+        return target
+    for window in candidates:
         try:
             name = str(window.get_wm_name() or "")
-            wm_class = window.get_wm_class() or ()
-            identity = " ".join((name, *(str(value) for value in wm_class))).casefold()
-            if "minecraft" in identity:
+            if "minecraft" in name.casefold():
                 return window
-            stack.extend(reversed(window.query_tree().children))
         except Exception:
             continue
+    fallback: tuple[int, Any] | None = None
+    for window in candidates:
+        try:
+            wm_class = window.get_wm_class() or ()
+            identity = " ".join(str(value) for value in wm_class).casefold()
+            if "minecraft" not in identity:
+                continue
+            geometry = window.get_geometry()
+            area = int(geometry.width) * int(geometry.height)
+            if fallback is None or area > fallback[0]:
+                fallback = area, window
+        except Exception:
+            continue
+    if fallback is not None:
+        return fallback[1]
     return target
 
 
