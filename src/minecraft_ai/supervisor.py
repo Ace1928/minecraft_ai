@@ -14,6 +14,7 @@ from typing import Any
 
 from platformdirs import user_runtime_dir
 
+from .emergency import emergency_reason, emergency_stop_latched
 from .safety import (
     FakeInputBackend,
     MotorGate,
@@ -49,12 +50,7 @@ class ControlEndpoint:
 
 
 class Supervisor:
-    """Independent lifecycle owner for Minecraft AI.
-
-    Phase 0 uses FakeInputBackend only. Concrete Minecraft input backends must
-    satisfy docs/SAFETY.md and can be wired in later without changing control
-    ownership.
-    """
+    """Independent lifecycle owner for Minecraft AI."""
 
     def __init__(self, *, role: str = "generalist", watchdog_interval_s: float = 0.05) -> None:
         self.role = role
@@ -78,6 +74,11 @@ class Supervisor:
             self._persist_status()
 
     def start(self) -> None:
+        if emergency_stop_latched():
+            self.last_fault = emergency_reason() or "emergency-stop-latched"
+            self.motor.revoke("emergency-stop-latched")
+            self._persist_status()
+            raise RuntimeError("emergency stop is latched; explicitly reset it before starting")
         self.transition(SupervisorState.STARTING)
         self.transition(SupervisorState.SAFE_IDLE)
 
@@ -96,6 +97,8 @@ class Supervisor:
 
     def resume(self) -> None:
         with self._lock:
+            if emergency_stop_latched():
+                raise RuntimeError("emergency stop is latched")
             if self.state == SupervisorState.SAFE_IDLE:
                 return
             if self.state != SupervisorState.PAUSED:
@@ -107,6 +110,8 @@ class Supervisor:
     def arm(self, target_instance: str) -> dict[str, Any]:
         """Create a motor lease, then atomically expose the ARMED state."""
         with self._lock:
+            if emergency_stop_latched():
+                raise RuntimeError("emergency stop is latched")
             if self.state != SupervisorState.SAFE_IDLE:
                 raise RuntimeError(f"cannot arm from {self.state}")
             validate_transition(self.state, SupervisorState.ARMED)
@@ -126,6 +131,9 @@ class Supervisor:
     def activate(self) -> None:
         """Enter RUNNING only while a valid motor lease is already held."""
         with self._lock:
+            if emergency_stop_latched():
+                self.fail("emergency-stop-latched")
+                return
             if self.state != SupervisorState.ARMED:
                 raise RuntimeError(f"cannot activate from {self.state}")
             lease = self.motor.lease
@@ -193,6 +201,7 @@ class Supervisor:
                 "held_buttons": sorted(self.backend.held_buttons),
                 "release_count": self.backend.release_count,
                 "last_fault": self.last_fault,
+                "emergency_stop_latched": emergency_stop_latched(),
                 "uptime_s": round(
                     (time.monotonic_ns() - self.started_monotonic_ns) / 1e9,
                     3,
@@ -222,6 +231,10 @@ class Supervisor:
 
         try:
             while not self._stop.is_set():
+                if emergency_stop_latched():
+                    self.fail(emergency_reason() or "emergency-stop-latched")
+                    self.stop()
+                    break
                 if self.motor.check_expiry():
                     self.fail("motor-lease-watchdog-expired")
                 try:
@@ -310,12 +323,7 @@ def send_command(command: str, **payload: Any) -> dict[str, Any]:
 
 
 def supervisor_alive() -> bool:
-    """Use authenticated control-plane reachability as the liveness check.
-
-    Do not use `os.kill(pid, 0)`: that POSIX probe does not have portable
-    semantics on Windows. A stale endpoint simply fails the authenticated
-    status request and is treated as not alive.
-    """
+    """Use authenticated control-plane reachability as the liveness check."""
     try:
         send_command("status")
     except Exception:
