@@ -212,7 +212,7 @@ def test_wrong_lease_target_fails_closed() -> None:
         assert bridge.held_buttons == set()
 
 
-def test_bridge_action_deadline_never_exceeds_lease() -> None:
+def test_bridge_uses_relative_ttls_bounded_by_local_lease() -> None:
     with running_bridge() as bridge:
         backend = ScopedBridgeBackend(
             BridgeEndpoint(
@@ -231,9 +231,15 @@ def test_bridge_action_deadline_never_exceeds_lease() -> None:
             max_action_duration_ms=90,
         )
         gate.apply(lease.lease_id, MotorAction(sequence=0, keys_down=("w",), duration_ms=90))
+
+        lease_messages = [msg for msg in bridge.messages if msg.get("kind") == "lease_bind"]
         input_messages = [msg for msg in bridge.messages if msg.get("kind") == "input"]
+        assert len(lease_messages) == 1
         assert len(input_messages) == 1
-        assert int(input_messages[0]["deadline_monotonic_ns"]) <= lease.expires_monotonic_ns
+        assert 1 <= int(lease_messages[0]["ttl_ms"]) <= 100
+        assert 1 <= int(input_messages[0]["ttl_ms"]) <= 90
+        assert "expires_monotonic_ns" not in lease_messages[0]
+        assert "deadline_monotonic_ns" not in input_messages[0]
 
 
 def test_expired_gate_revokes_remote_inputs() -> None:
