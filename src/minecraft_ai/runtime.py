@@ -27,6 +27,7 @@ class RuntimeMetrics:
     motor_actions: int = 0
     cognition_calls: int = 0
     semantic_requests: int = 0
+    chat_messages: int = 0
     skill_successes: int = 0
     skill_failures: int = 0
     started_ns: int = field(default_factory=time.monotonic_ns)
@@ -244,6 +245,12 @@ class AgentRuntime:
                 frame_id=latest.frame_id,
             )
             self.perception.request_semantics(query)
+        if decision.say:
+            try:
+                send_command("chat", lease_id=self.lease_id, text=decision.say)
+                self.metrics.chat_messages += 1
+            except Exception:
+                pass
         if decision.skill_id is not None:
             running = self.executor.run
             if running is None or running.outcome != SkillOutcome.RUNNING:
