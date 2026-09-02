@@ -342,7 +342,7 @@ def _train(args: argparse.Namespace) -> dict[str, Any]:
     train_images = torch.stack([item.image for item in by_split["train"]])
     train_labels = torch.tensor([item.label for item in by_split["train"]], dtype=torch.long)
     best_state: dict[str, torch.Tensor] | None = None
-    best_score = (-math.inf, -math.inf)
+    best_score = (-math.inf, -math.inf, -math.inf)
     best_epoch = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -361,7 +361,16 @@ def _train(args: argparse.Namespace) -> dict[str, Any]:
                 by_split["validation"],
                 confidence_threshold=args.confidence_threshold,
             )
-            score = (float(validation["accuracy"]), -float(validation["loss"]))
+            train_evaluation = _evaluate(
+                model,
+                by_split["train"],
+                confidence_threshold=args.confidence_threshold,
+            )
+            score = (
+                float(validation["accuracy"]),
+                float(train_evaluation["accuracy"]),
+                -float(validation["loss"]),
+            )
             if score > best_score:
                 best_score = score
                 best_epoch = epoch
@@ -379,12 +388,16 @@ def _train(args: argparse.Namespace) -> dict[str, Any]:
         )
         for split, split_samples in by_split.items()
     }
+    train_metrics = split_metrics["train"]
     test_metrics = split_metrics["test"]
     validation_metrics = split_metrics["validation"]
     inventory_metrics = test_metrics["per_class"]["inventory"]
     validation_inventory_metrics = validation_metrics["per_class"]["inventory"]
     promotion_eligible = bool(
-        validation_metrics["accuracy"] >= args.minimum_validation_accuracy
+        train_metrics["accuracy"] >= args.minimum_train_accuracy
+        and train_metrics["false_inventory_rate"]
+        <= args.maximum_false_inventory_rate
+        and validation_metrics["accuracy"] >= args.minimum_validation_accuracy
         and validation_metrics["false_inventory_rate"]
         <= args.maximum_false_inventory_rate
         and validation_inventory_metrics["confident_recall"]
@@ -424,6 +437,7 @@ def _train(args: argparse.Namespace) -> dict[str, Any]:
         "metrics": split_metrics,
         "promotion_gate": {
             "eligible": promotion_eligible,
+            "minimum_train_accuracy": args.minimum_train_accuracy,
             "minimum_validation_accuracy": args.minimum_validation_accuracy,
             "minimum_test_accuracy": args.minimum_test_accuracy,
             "maximum_false_inventory_rate": args.maximum_false_inventory_rate,
@@ -465,9 +479,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--epochs", type=int, default=160)
     parser.add_argument("--batch-size", type=int, default=24)
-    parser.add_argument("--learning-rate", type=float, default=3e-3)
+    parser.add_argument("--learning-rate", type=float, default=5e-4)
     parser.add_argument("--evaluate-every", type=int, default=4)
     parser.add_argument("--confidence-threshold", type=float, default=0.80)
+    parser.add_argument("--minimum-train-accuracy", type=float, default=0.98)
     parser.add_argument("--minimum-validation-accuracy", type=float, default=0.98)
     parser.add_argument("--minimum-test-accuracy", type=float, default=0.98)
     parser.add_argument("--maximum-false-inventory-rate", type=float, default=0.0)
