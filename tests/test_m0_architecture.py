@@ -149,12 +149,14 @@ def test_supervisor_rejects_host_display_input_even_when_requested() -> None:
 def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> None:
     skills = build_bootstrap_skill_library()
     gather = skills.get("gather_nearby_wood")
+    approach = skills.get("approach_visible_target")
     crafting = skills.get("craft_crafting_table")
     retreat = skills.get("retreat_from_danger")
     escape = skills.get("escape_submersion")
     close_inventory = skills.get("close_open_inventory")
 
     assert "visible trunk" in gather.description
+    assert approach.initiation_alternatives[0][0].key == "target.reference_available"
     assert gather.success_conditions[0].key == "inventory.logs"
     assert "Bedrock crafting interface" in crafting.description
     assert crafting.success_conditions[0].key == "inventory.crafting_table"

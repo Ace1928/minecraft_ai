@@ -20,7 +20,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
     specs = (
         SkillSpec(
             skill_id="approach_visible_target",
-            version=4,
+            version=5,
             name="Approach visible target",
             description=(
                 "Approach the visually localized target across safe terrain, keep it near the "
