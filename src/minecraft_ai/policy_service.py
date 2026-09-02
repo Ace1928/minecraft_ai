@@ -1555,13 +1555,18 @@ class _SteveOneBackend:
             "camera": action["camera"].cpu().numpy().reshape(1, 1),
         }
         decoded = self.transformer.policy2env(self.mapper.to_factored(raw))
+        decoded, scene_suppressed = _apply_observed_scene_action_contract(
+            decoded,
+            intent,
+            scene_belief,
+        )
         decoded, event_suppressed = _apply_discrete_action_contract(
             decoded,
             intent,
             self.discrete_actions_emitted,
         )
         decoded, constraint_suppressed = _apply_action_constraints(decoded, intent)
-        suppressed = (*event_suppressed, *constraint_suppressed)
+        suppressed = (*scene_suppressed, *event_suppressed, *constraint_suppressed)
         scene_mode = None if scene_belief is None else scene_belief[0]
         scene_playable = None if scene_belief is None else scene_belief[1]
         scene_confidence = None if scene_belief is None else scene_belief[2]
@@ -1931,6 +1936,45 @@ def _apply_discrete_action_contract(
         constrained[action] = safe_value
         suppressed.append(f"{action}:repeat")
     return constrained, tuple(suppressed)
+
+
+def _apply_observed_scene_action_contract(
+    decoded: dict[str, Any],
+    intent: dict[str, Any],
+    scene_belief: tuple[
+        Literal["world", "inventory", "chat", "unknown"],
+        bool | None,
+        float,
+        dict[str, float],
+        str,
+    ]
+    | None,
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """Prevent a learned toggle from undoing its verified transition.
+
+    The fast scene head and STEVE action are inferred from the same consumed
+    frame. If that frame is already a confidently playable world, applying a
+    newly predicted inventory toggle would reopen the menu before the executor
+    can consume the visual success event on its next tick.
+    """
+    if (
+        str(intent.get("mode") or "").casefold() != "close_inventory"
+        or scene_belief is None
+        or scene_belief[1] is not True
+    ):
+        return decoded, ()
+    inventory = decoded.get("inventory")
+    if inventory is None:
+        return decoded, ()
+    try:
+        selected = bool(inventory[0])
+        safe_inventory = inventory.copy()
+        safe_inventory[...] = 0
+    except (IndexError, TypeError, AttributeError):
+        return decoded, ()
+    if not selected:
+        return decoded, ()
+    return {**decoded, "inventory": safe_inventory}, ("inventory:scene-playable",)
 
 
 def _rocket_interaction_id(mode: str) -> int:

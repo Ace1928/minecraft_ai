@@ -28,6 +28,7 @@ from minecraft_ai.policy_service import (
     _fast_scene_belief,
     _intent_camera_scale,
     _intent_camera_semantics,
+    _apply_observed_scene_action_contract,
     _intent_instruction,
     _learned_scene_blocked,
     _mineclip_scene_belief,
@@ -1046,6 +1047,31 @@ def test_close_inventory_learned_toggle_is_one_event_until_option_reset() -> Non
     assert int(repeated["inventory"][0]) == 0
     assert int(repeated["camera"][0][0]) == 4
     assert repeated_suppressed == ("inventory:repeat",)
+    assert int(decoded["inventory"][0]) == 1
+
+
+def test_close_inventory_does_not_reopen_verified_playable_scene() -> None:
+    decoded = {
+        "inventory": numpy.asarray([1]),
+        "camera": numpy.asarray([[4, -2]]),
+    }
+    world_scene = (
+        "world",
+        True,
+        0.99,
+        {"world": 0.99, "inventory": 0.01},
+        "bedrock-fast-scene-v1",
+    )
+
+    constrained, suppressed = _apply_observed_scene_action_contract(
+        decoded,
+        {"mode": "close_inventory"},
+        world_scene,
+    )
+
+    assert int(constrained["inventory"][0]) == 0
+    assert int(constrained["camera"][0][0]) == 4
+    assert suppressed == ("inventory:scene-playable",)
     assert int(decoded["inventory"][0]) == 1
 
 
