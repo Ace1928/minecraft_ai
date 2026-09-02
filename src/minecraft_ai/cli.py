@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -20,13 +21,26 @@ from .emergency import (
     terminate_registered_supervisor,
 )
 from .knowledge import Edition, GameVersion, KnowledgeGraph
-from .knowledge.importers import import_java_datapack
+from .knowledge.importers import import_java_datapack, import_minecraft_data
 from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
+from .platforms.bedrock_session import (
+    BEDROCK_SESSION_FILE,
+    BedrockSession,
+    bedrock_session_alive,
+    launch_xephyr_bedrock_session,
+    stop_bedrock_session,
+    wait_for_minecraft_window,
+)
+from .roles import BUILTIN_ROLES
 from .supervisor import CONTROL_FILE, STATUS_FILE, send_command, supervisor_alive
 
 app = typer.Typer(help="Minecraft AI lifecycle and tooling CLI.")
 knowledge_app = typer.Typer(help="Versioned game knowledge commands.")
+bedrock_app = typer.Typer(help="BedrockOnLinux isolated-session commands.")
+roles_app = typer.Typer(help="Agent role/archetype commands.")
 app.add_typer(knowledge_app, name="knowledge")
+app.add_typer(bedrock_app, name="bedrock")
+app.add_typer(roles_app, name="roles")
 
 APP_NAME = "minecraft-ai"
 DATA_DIR = Path(user_data_dir(APP_NAME))
@@ -72,9 +86,35 @@ def _load_graph(path: Path) -> KnowledgeGraph:
     return KnowledgeGraph.from_dict(payload)
 
 
+def _bedrock_version_or_error(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    install = discover_bedrock_linux_install()
+    if install is not None and install.selected_build is not None:
+        return install.selected_build.version
+    raise typer.BadParameter(
+        "No exact Bedrock version was supplied or detected from BedrockOnLinux. "
+        "Pass --version explicitly."
+    )
+
+
+def _session_payload(session: BedrockSession) -> dict[str, object]:
+    return {
+        "display": session.display,
+        "host_display": session.host_display,
+        "xserver_pid": session.xserver_pid,
+        "launcher_pid": session.launcher_pid,
+        "width": session.width,
+        "height": session.height,
+        "mode": session.mode,
+        "alive": bedrock_session_alive(session),
+        "minecraft_window": session.find_window() if bedrock_session_alive(session) else None,
+    }
+
+
 @app.command()
 def install() -> None:
-    """Prepare local directories and report the platform profile."""
+    """Prepare local state and report all runtime dependencies/capabilities."""
     _ensure_dirs()
     print("[green]Minecraft AI bootstrap prepared.[/green]")
     doctor()
@@ -84,8 +124,15 @@ def install() -> None:
 def doctor() -> None:
     """Report platform capabilities without enabling live control."""
     _ensure_dirs()
-    bol = discover_bedrock_linux_install() if platform.system() == "Linux" else None
-    bedrock_instances = find_bedrock_linux_instances() if platform.system() == "Linux" else []
+    linux = platform.system() == "Linux"
+    bol = discover_bedrock_linux_install() if linux else None
+    bedrock_instances = find_bedrock_linux_instances() if linux else []
+    selected_build = bol.selected_build if bol is not None else None
+    session: BedrockSession | None
+    try:
+        session = BedrockSession.load() if BEDROCK_SESSION_FILE.exists() else None
+    except (OSError, ValueError, TypeError, KeyError):
+        session = None
     profile = {
         "os": platform.system(),
         "release": platform.release(),
@@ -105,43 +152,90 @@ def doctor() -> None:
             "data_dir": str(bol.data_dir) if bol is not None else None,
             "wine_prefix": str(bol.wine_prefix) if bol is not None else None,
             "launcher": bol.launcher_command if bol is not None else None,
+            "selected_version": selected_build.version if selected_build is not None else None,
+            "selected_channel": selected_build.edition_id if selected_build is not None else None,
             "running_instances": [instance.instance_id for instance in bedrock_instances],
         },
-        "scoped_input": "not-installed",
-        "live_input": False,
+        "isolation": {
+            "xephyr": shutil.which("Xephyr"),
+            "host_display": os.environ.get("DISPLAY"),
+            "managed_session": _session_payload(session) if session is not None else None,
+        },
+        "python_optional_modules": {
+            "xlib": _module_available("Xlib"),
+            "mss": _module_available("mss"),
+            "httpx": _module_available("httpx"),
+            "pillow": _module_available("PIL"),
+            "numpy": _module_available("numpy"),
+        },
     }
     print(json.dumps(profile, indent=2, sort_keys=True))
+
+
+def _module_available(name: str) -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec(name) is not None
 
 
 @app.command()
 def run(
     role: str = typer.Option("generalist", help="Role/archetype profile."),
     edition: Edition = typer.Option(DEFAULT_EDITION, "--edition"),
-    live: bool = typer.Option(False, help="Request live input when a gated backend exists."),
+    live: bool = typer.Option(False, help="Attach the isolated Bedrock motor backend."),
 ) -> None:
-    """Start the independent supervisor in SAFE_IDLE."""
+    """Start the independent supervisor; optionally attach isolated Bedrock input."""
     _ensure_dirs()
+    if role not in BUILTIN_ROLES:
+        raise typer.BadParameter(f"unknown role {role!r}; see `minecraft-ai roles list`")
     if emergency_stop_latched():
         raise typer.BadParameter(
             "Emergency stop is latched. Run `minecraft-ai reset-emergency-stop` "
             "explicitly before starting again."
         )
-    if live:
-        raise typer.BadParameter(
-            "Live input is not enabled yet. The independent supervisor and "
-            "scoped-input backend must pass docs/SAFETY.md first."
-        )
-    if supervisor_alive():
-        current = send_command("status")
-        print("[yellow]Supervisor is already running.[/yellow]")
-        print(json.dumps(current, indent=2, sort_keys=True))
+    if live and edition != Edition.BEDROCK:
+        raise typer.BadParameter("The production live backend currently targets Bedrock on Linux.")
+    if not supervisor_alive():
+        _start_supervisor(role)
+    current = send_command("status")
+    print(
+        f"[green]Supervisor ready[/green] role={role} "
+        f"edition={edition.value} state={current['state']}"
+    )
+    if not live:
+        print("Motor control remains SAFE_IDLE/unarmed.")
         return
 
+    try:
+        session = BedrockSession.load()
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise typer.BadParameter(
+            "No managed isolated Bedrock session exists. Run `minecraft-ai bedrock launch` first."
+        ) from exc
+    if not bedrock_session_alive(session):
+        raise typer.BadParameter("The managed Bedrock session is not alive.")
+    window_id = wait_for_minecraft_window(session, timeout_s=5.0)
+    _command("attach-bedrock-x11", display=session.display, window_id=window_id)
+    install = discover_bedrock_linux_install()
+    build = install.selected_build if install is not None else None
+    target = f"bedrock:{build.version if build is not None else 'unknown'}:x11:{window_id}"
+    armed = _command("arm", target_instance=target)
+    lease = armed.get("lease")
+    if not isinstance(lease, dict) or not isinstance(lease.get("lease_id"), str):
+        raise typer.BadParameter("supervisor did not return a valid motor lease")
+    _command("activate")
+    print(
+        "[bold green]LIVE BEDROCK BACKEND ARMED[/bold green] "
+        f"display={session.display} window={window_id}"
+    )
+    print("No host-global input backend is enabled. Emergency stop remains independently latched.")
+
+
+def _start_supervisor(role: str) -> None:
     try:
         CONTROL_FILE.unlink()
     except FileNotFoundError:
         pass
-
     with LOG_FILE.open("ab", buffering=0) as log:
         subprocess.Popen(
             [sys.executable, "-m", "minecraft_ai.supervisor", "--role", role],
@@ -151,19 +245,11 @@ def run(
             start_new_session=True,
             close_fds=(os.name != "nt"),
         )
-
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline:
         if supervisor_alive():
-            current = send_command("status")
-            print(
-                f"[green]Supervisor started[/green] role={role} "
-                f"edition={edition.value} state={current['state']}"
-            )
-            print("Live motor control remains disabled by design.")
             return
         time.sleep(0.05)
-
     raise typer.BadParameter(f"supervisor failed to start; inspect {LOG_FILE}")
 
 
@@ -202,13 +288,11 @@ def stop() -> None:
     if not CONTROL_FILE.exists():
         print("[bold red]STOPPED[/bold red] — no supervisor endpoint exists.")
         return
-
     try:
         send_command("stop")
     except Exception as exc:
         print(f"[yellow]Control socket stop failed ({exc}); using OS fallback.[/yellow]")
         terminate_registered_supervisor()
-
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         if not supervisor_alive():
@@ -220,11 +304,7 @@ def stop() -> None:
 
 @app.command("emergency-stop")
 def emergency_stop(reason: str = typer.Option("operator-emergency-stop", "--reason")) -> None:
-    """Latch a stop and terminate the registered supervisor without using IPC.
-
-    This is deliberately independent of cognition and the authenticated control
-    socket. The latch survives process restarts and must be explicitly reset.
-    """
+    """Latch a stop and terminate the registered supervisor without using IPC."""
     engage_emergency_stop(reason)
     terminated = terminate_registered_supervisor()
     print("[bold red]EMERGENCY STOP LATCHED[/bold red]")
@@ -251,11 +331,75 @@ def logs(lines: int = typer.Option(80, min=1, max=2000)) -> None:
     print("\n".join(content[-lines:]))
 
 
-@app.command(hidden=True)
-def arm_fake(target_instance: str = "fake-instance") -> None:
-    """Phase-0 test hook. Never controls Minecraft or the desktop."""
-    result = _command("arm-fake", target_instance=target_instance)
-    print(json.dumps(result, indent=2, sort_keys=True))
+@bedrock_app.command("status")
+def bedrock_status() -> None:
+    """Show BedrockOnLinux install/build/process and managed isolation status."""
+    install = discover_bedrock_linux_install()
+    instances = find_bedrock_linux_instances()
+    try:
+        session = BedrockSession.load()
+    except (OSError, ValueError, TypeError, KeyError):
+        session = None
+    payload = {
+        "install": None
+        if install is None
+        else {
+            "data_dir": str(install.data_dir),
+            "wine_prefix": str(install.wine_prefix),
+            "launcher": install.launcher_command,
+            "selected_build": None
+            if install.selected_build is None
+            else {
+                "edition": install.selected_build.edition_id,
+                "version": install.selected_build.version,
+                "root": str(install.selected_build.game_root),
+            },
+        },
+        "processes": [instance.instance_id for instance in instances],
+        "managed_session": _session_payload(session) if session is not None else None,
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@bedrock_app.command("launch")
+def bedrock_launch(
+    width: int = typer.Option(1280, min=320, max=7680),
+    height: int = typer.Option(720, min=240, max=4320),
+) -> None:
+    """Launch BedrockOnLinux inside a dedicated nested X input namespace."""
+    if bedrock_session_alive():
+        session = BedrockSession.load()
+        print("[yellow]Managed Bedrock session is already running.[/yellow]")
+        print(json.dumps(_session_payload(session), indent=2, sort_keys=True))
+        return
+    session = launch_xephyr_bedrock_session(width=width, height=height)
+    print("[green]Isolated Bedrock session launched.[/green]")
+    print(json.dumps(_session_payload(session), indent=2, sort_keys=True))
+
+
+@bedrock_app.command("stop")
+def bedrock_stop() -> None:
+    """Stop the managed Bedrock nested session and its launcher process group."""
+    if supervisor_alive():
+        current = send_command("status")
+        if bool(current.get("live_capable")):
+            send_command("pause")
+    stop_bedrock_session()
+    print("[bold red]Managed Bedrock session stopped.[/bold red]")
+
+
+@roles_app.command("list")
+def roles_list() -> None:
+    payload = {
+        role_id: {
+            "description": role.description,
+            "standing_goals": list(role.standing_goals),
+            "risk_tolerance": role.risk_tolerance,
+            "utility_weights": role.utility_weights,
+        }
+        for role_id, role in sorted(BUILTIN_ROLES.items())
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @app.command()
@@ -266,21 +410,21 @@ def wiki(query: str) -> None:
 
 @knowledge_app.command("sync")
 def knowledge_sync(
-    version: str = typer.Option(..., "--version", help="Exact Minecraft version identifier."),
+    version: str | None = typer.Option(None, "--version", help="Exact Minecraft version."),
     data_root: Path = typer.Option(..., "--data-root", exists=True, file_okay=False),
     edition: Edition = typer.Option(DEFAULT_EDITION, "--edition"),
     output: Path | None = typer.Option(None, "--output"),
 ) -> None:
     """Compile exact-version machine-readable game data into a provenance graph."""
     _ensure_dirs()
-    game_version = GameVersion(edition=edition, version_id=version)
+    resolved_version = _bedrock_version_or_error(version) if edition == Edition.BEDROCK else version
+    if not resolved_version:
+        raise typer.BadParameter("--version is required for Java knowledge sync")
+    game_version = GameVersion(edition=edition, version_id=resolved_version)
     if edition == Edition.JAVA:
         graph = import_java_datapack(data_root, game_version)
     else:
-        raise typer.BadParameter(
-            "Bedrock is the default edition, but its exact-version importer has not landed yet. "
-            "No Java fallback will be used."
-        )
+        graph = import_minecraft_data(data_root, game_version)
     errors = graph.validate()
     if errors:
         raise typer.BadParameter("compiled graph failed validation: " + "; ".join(errors[:10]))
