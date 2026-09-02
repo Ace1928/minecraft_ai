@@ -274,11 +274,16 @@ class AgentRuntime:
                 pass
         if decision.skill_id is not None:
             running = self.executor.run
-            if (
-                running is None
-                or running.outcome != SkillOutcome.RUNNING
-                or running.skill_id != decision.skill_id
-            ):
+            if running is not None and running.outcome == SkillOutcome.RUNNING:
+                if running.skill_id != decision.skill_id:
+                    self.executor.cancel()
+                    spec = self.skills.get(decision.skill_id)
+                    self.executor.start(
+                        spec,
+                        run_id=uuid.uuid4().hex,
+                        parameters=decision.skill_parameters,
+                    )
+            else:
                 spec = self.skills.get(decision.skill_id)
                 self.executor.start(
                     spec,
