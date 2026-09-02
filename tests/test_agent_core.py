@@ -296,6 +296,7 @@ def test_realtime_skill_stats_survive_transient_database_contention() -> None:
     runtime.state_db = database
     runtime.metrics = RuntimeMetrics()
     runtime._pending_skill_stats = {("navigate", "default"): SkillStats(successes=1)}
+    runtime._pending_operator_status_updates = {}
     runtime._last_storage_retry_ns = 0
 
     runtime._flush_pending_skill_stats(force=True)
@@ -307,6 +308,51 @@ def test_realtime_skill_stats_survive_transient_database_contention() -> None:
     runtime._flush_pending_skill_stats(force=True)
 
     assert not runtime._pending_skill_stats
+    assert runtime.metrics.last_storage_error is None
+
+
+def test_realtime_operator_ack_survives_transient_database_contention() -> None:
+    class _FlakyDatabase:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def update_operator_message_status(
+            self,
+            message_id: str,
+            status: OperatorMessageStatus,
+            *,
+            timestamp_ns: int,
+            response_text: str | None = None,
+        ) -> None:
+            del message_id, status, timestamp_ns, response_text
+            self.calls += 1
+            if self.calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+
+    database = _FlakyDatabase()
+    runtime = object.__new__(AgentRuntime)
+    runtime.state_db = database
+    runtime.metrics = RuntimeMetrics()
+    runtime._pending_skill_stats = {}
+    runtime._pending_operator_status_updates = {}
+    runtime._last_operator_storage_retry_ns = 0
+
+    persisted = runtime._persist_operator_message_status(
+        "operator-1",
+        OperatorMessageStatus.ACKNOWLEDGED,
+        timestamp_ns=123,
+        response_text="I am continuing the current plan.",
+    )
+
+    assert not persisted
+    assert runtime.metrics.storage_contentions == 1
+    assert runtime.metrics.operator_responses == 0
+    assert "operator-1" in runtime._pending_operator_status_updates
+
+    runtime._flush_pending_operator_status_updates(force=True)
+
+    assert not runtime._pending_operator_status_updates
+    assert runtime.metrics.operator_responses == 1
     assert runtime.metrics.last_storage_error is None
 
 

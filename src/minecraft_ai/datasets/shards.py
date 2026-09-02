@@ -145,33 +145,39 @@ class TrajectoryShardWriter:
         from ..storage import StateDatabase
 
         with StateDatabase(self.state_db_path) as database:
-            database.save_trajectory_shard(
-                shard_id=artifact.shard_id,
-                trajectory_id=artifact.trajectory_id,
-                path=str(artifact.path),
-                sha256=artifact.sha256,
-                first_step_index=artifact.first_step_index,
-                last_step_index=artifact.last_step_index,
-                step_count=artifact.step_count,
-                bytes_count=artifact.bytes,
-            )
-            for sample in self._samples:
-                database.save_trajectory_step_index(
-                    trajectory_id=self.manifest.trajectory_id,
-                    step_index=sample.step.step_index,
-                    captured_ns=sample.step.captured_ns,
-                    accepted_ns=sample.step.accepted_ns,
+            # Publish the shard and every contained frame index in one short
+            # transaction. Per-frame commits caused a burst of 257 competing
+            # writer acquisitions and could starve the realtime operator path.
+            with database.connection:
+                database.save_trajectory_shard(
                     shard_id=artifact.shard_id,
-                    sample_key=f"{sample.step.step_index:012d}",
-                    frame_hash=sample.step.frame_hash,
-                    action_json=sample.step.action.model_dump_json(),
-                    action_level=sample.step.action_level.value,
-                    skill_run_id=sample.step.skill_run_id,
-                    skill_id=sample.step.skill_id,
-                    goal_id=sample.step.goal_id,
-                    plan_node_id=sample.step.plan_node_id,
-                    correction_of_step=sample.step.correction_of_step,
+                    trajectory_id=artifact.trajectory_id,
+                    path=str(artifact.path),
+                    sha256=artifact.sha256,
+                    first_step_index=artifact.first_step_index,
+                    last_step_index=artifact.last_step_index,
+                    step_count=artifact.step_count,
+                    bytes_count=artifact.bytes,
+                    commit=False,
                 )
+                for sample in self._samples:
+                    database.save_trajectory_step_index(
+                        trajectory_id=self.manifest.trajectory_id,
+                        step_index=sample.step.step_index,
+                        captured_ns=sample.step.captured_ns,
+                        accepted_ns=sample.step.accepted_ns,
+                        shard_id=artifact.shard_id,
+                        sample_key=f"{sample.step.step_index:012d}",
+                        frame_hash=sample.step.frame_hash,
+                        action_json=sample.step.action.model_dump_json(),
+                        action_level=sample.step.action_level.value,
+                        skill_run_id=sample.step.skill_run_id,
+                        skill_id=sample.step.skill_id,
+                        goal_id=sample.step.goal_id,
+                        plan_node_id=sample.step.plan_node_id,
+                        correction_of_step=sample.step.correction_of_step,
+                        commit=False,
+                    )
         self._artifacts.append(artifact)
         self._shard_index += 1
         self._reset_open_shard()

@@ -677,6 +677,7 @@ class StateDatabase:
         last_step_index: int,
         step_count: int,
         bytes_count: int,
+        commit: bool = True,
     ) -> None:
         self.connection.execute(
             """
@@ -703,7 +704,8 @@ class StateDatabase:
                 bytes_count,
             ),
         )
-        self.connection.commit()
+        if commit:
+            self.connection.commit()
 
     def save_trajectory_step_index(
         self,
@@ -722,6 +724,7 @@ class StateDatabase:
         goal_id: str | None,
         plan_node_id: str | None,
         correction_of_step: int | None,
+        commit: bool = True,
     ) -> None:
         self.connection.execute(
             """
@@ -761,7 +764,8 @@ class StateDatabase:
                 correction_of_step,
             ),
         )
-        self.connection.commit()
+        if commit:
+            self.connection.commit()
 
     def save_benchmark_report(self, report: BenchmarkReport) -> None:
         """Persist an immutable benchmark report and its task-level evidence."""

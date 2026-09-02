@@ -58,6 +58,11 @@ def _semantic_refresh_allowed(
     )
 
 
+def _sqlite_writer_contention(exc: sqlite3.OperationalError) -> bool:
+    detail = str(exc).casefold()
+    return "locked" in detail or "busy" in detail
+
+
 def _operator_target_facts(
     target: Track,
     current_hash: PerceptionFact | None,
@@ -299,6 +304,10 @@ class AgentRuntime:
     _pool: concurrent.futures.ThreadPoolExecutor = field(init=False)
     _last_decision: CognitionDecision | None = field(default=None, init=False)
     _pending_operator_message_ids: tuple[str, ...] = field(default=(), init=False)
+    _pending_operator_status_updates: dict[
+        str,
+        tuple[OperatorMessageStatus, int, str | None],
+    ] = field(default_factory=dict, init=False)
     _recent_skill_runs: deque[SkillRun] = field(
         default_factory=lambda: deque(maxlen=8),
         init=False,
@@ -313,6 +322,7 @@ class AgentRuntime:
         init=False,
     )
     _last_storage_retry_ns: int = field(default=0, init=False)
+    _last_operator_storage_retry_ns: int = field(default=0, init=False)
 
     def __post_init__(self) -> None:
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz <= 0:
@@ -415,6 +425,7 @@ class AgentRuntime:
                 )
             return
         self.metrics.consecutive_stale_frames = 0
+        self._flush_pending_operator_status_updates()
         self.telemetry.publish(self._telemetry_payload(state="running"))
         self._consume_cognition()
         self._start_cognition_if_due()
@@ -628,7 +639,7 @@ class AgentRuntime:
         if self.state_db is not None:
             for message in context.operator_messages:
                 if message.status == OperatorMessageStatus.QUEUED:
-                    self.state_db.update_operator_message_status(
+                    self._persist_operator_message_status(
                         message.message_id,
                         OperatorMessageStatus.DELIVERED,
                         timestamp_ns=time.time_ns(),
@@ -684,16 +695,12 @@ class AgentRuntime:
             )
             if selected_message_id is not None:
                 response = decision.say or decision.reasoning_summary
-                try:
-                    self.state_db.update_operator_message_status(
-                        selected_message_id,
-                        OperatorMessageStatus.ACKNOWLEDGED,
-                        timestamp_ns=time.time_ns(),
-                        response_text=response,
-                    )
-                    self.metrics.operator_responses += 1
-                except KeyError:
-                    pass
+                self._persist_operator_message_status(
+                    selected_message_id,
+                    OperatorMessageStatus.ACKNOWLEDGED,
+                    timestamp_ns=time.time_ns(),
+                    response_text=response,
+                )
             self._pending_operator_message_ids = ()
         for question in decision.ask_perception:
             latest = self.blackboard.raw_latest()
@@ -757,7 +764,73 @@ class AgentRuntime:
                 return
             else:
                 self._pending_skill_stats.pop(key, None)
-                self.metrics.last_storage_error = None
+                self._clear_storage_error_if_drained()
+
+    def _persist_operator_message_status(
+        self,
+        message_id: str,
+        status: OperatorMessageStatus,
+        *,
+        timestamp_ns: int,
+        response_text: str | None = None,
+    ) -> bool:
+        """Commit an operator transition or retain it for bounded retry.
+
+        Operator conversation is durable control-plane state, but it must not
+        be able to terminate the 20 Hz motor process when a trajectory shard is
+        publishing. The newest transition for each message supersedes an older
+        pending transition and remains visible as storage backlog telemetry.
+        """
+        if self.state_db is None:
+            return False
+        update = (status, timestamp_ns, response_text)
+        try:
+            self.state_db.update_operator_message_status(
+                message_id,
+                status,
+                timestamp_ns=timestamp_ns,
+                response_text=response_text,
+            )
+        except KeyError:
+            self._pending_operator_status_updates.pop(message_id, None)
+            return False
+        except sqlite3.OperationalError as exc:
+            if not _sqlite_writer_contention(exc):
+                raise
+            self._pending_operator_status_updates[message_id] = update
+            self._last_operator_storage_retry_ns = time.monotonic_ns()
+            self.metrics.storage_contentions += 1
+            self.metrics.last_storage_error = f"{type(exc).__name__}: {exc}"
+            return False
+        self._pending_operator_status_updates.pop(message_id, None)
+        if status == OperatorMessageStatus.ACKNOWLEDGED:
+            self.metrics.operator_responses += 1
+        self._clear_storage_error_if_drained()
+        return True
+
+    def _flush_pending_operator_status_updates(self, *, force: bool = False) -> None:
+        if self.state_db is None or not self._pending_operator_status_updates:
+            return
+        now = time.monotonic_ns()
+        if (
+            not force
+            and now - self._last_operator_storage_retry_ns < 1_000_000_000
+        ):
+            return
+        self._last_operator_storage_retry_ns = now
+        for message_id, update in tuple(self._pending_operator_status_updates.items()):
+            status, timestamp_ns, response_text = update
+            if not self._persist_operator_message_status(
+                message_id,
+                status,
+                timestamp_ns=timestamp_ns,
+                response_text=response_text,
+            ):
+                return
+
+    def _clear_storage_error_if_drained(self) -> None:
+        if not self._pending_skill_stats and not self._pending_operator_status_updates:
+            self.metrics.last_storage_error = None
 
     def _queued_operator_message_waiting(self) -> bool:
         if self.state_db is None:
@@ -853,7 +926,10 @@ class AgentRuntime:
             "stale_frame_skips": self.metrics.stale_frame_skips,
             "consecutive_stale_frames": self.metrics.consecutive_stale_frames,
             "storage_contentions": self.metrics.storage_contentions,
-            "storage_backlog": len(self._pending_skill_stats),
+            "storage_backlog": (
+                len(self._pending_skill_stats)
+                + len(self._pending_operator_status_updates)
+            ),
             "last_storage_error": self.metrics.last_storage_error,
             "active_skill": None if running is None else running.skill_id,
             "active_skill_parameters": (
