@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -102,52 +103,111 @@ class RingBuffer(Generic[T]):
 
 @dataclass
 class PerceptionBlackboard:
-    """Thread-safe-at-service-boundary typed state store.
-
-    Services should publish immutable FrameState snapshots rather than sharing
-    mutable detector internals. Stale semantic facts are filtered on read.
-    """
+    """Thread-safe typed state store shared by fast capture and semantic workers."""
 
     frame_capacity: int = 90
     _frames: RingBuffer[FrameState] = field(init=False)
     _facts: dict[str, PerceptionFact] = field(default_factory=dict)
+    _semantic_tracks: tuple[Track, ...] = ()
+    _chat: tuple[ChatLine, ...] = ()
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
 
     def __post_init__(self) -> None:
         self._frames = RingBuffer(self.frame_capacity)
 
     def publish(self, frame: FrameState) -> None:
-        previous = self._frames.latest()
-        if previous is not None:
-            if frame.instance_id != previous.instance_id:
-                raise ValueError("perception instance identity changed")
-            if frame.frame_id <= previous.frame_id:
-                raise ValueError("frame ids must increase monotonically")
-            if frame.captured_ns <= previous.captured_ns:
-                raise ValueError("frame timestamps must increase monotonically")
-        self._frames.append(frame)
-        for fact in frame.facts:
+        """Publish a real captured frame; capture sequence is never VLM-generated."""
+        with self._lock:
+            previous = self._frames.latest()
+            if previous is not None:
+                if frame.instance_id != previous.instance_id:
+                    raise ValueError("perception instance identity changed")
+                if frame.frame_id <= previous.frame_id:
+                    raise ValueError("frame ids must increase monotonically")
+                if frame.captured_ns <= previous.captured_ns:
+                    raise ValueError("frame timestamps must increase monotonically")
+            self._frames.append(frame)
+            self._merge_facts_locked(frame.facts)
+            if frame.tracks:
+                self._semantic_tracks = frame.tracks
+            if frame.chat:
+                self._chat = frame.chat
+
+    def merge_semantics(
+        self,
+        *,
+        instance_id: str,
+        facts: tuple[PerceptionFact, ...] = (),
+        tracks: tuple[Track, ...] = (),
+        chat: tuple[ChatLine, ...] = (),
+    ) -> bool:
+        """Merge late semantic results without fabricating capture timestamps.
+
+        Returns False when the originating instance is no longer current.
+        """
+        with self._lock:
+            latest = self._frames.latest()
+            if latest is None or latest.instance_id != instance_id:
+                return False
+            self._merge_facts_locked(facts)
+            if tracks:
+                newest_track_ns = max(track.last_seen_ns for track in tracks)
+                current_track_ns = max(
+                    (track.last_seen_ns for track in self._semantic_tracks),
+                    default=-1,
+                )
+                if newest_track_ns >= current_track_ns:
+                    self._semantic_tracks = tracks
+            if chat:
+                combined = {f"{line.observed_ns}:{line.text}": line for line in self._chat}
+                for line in chat:
+                    combined[f"{line.observed_ns}:{line.text}"] = line
+                self._chat = tuple(
+                    sorted(combined.values(), key=lambda line: line.observed_ns)[-100:]
+                )
+            return True
+
+    def _merge_facts_locked(self, facts: tuple[PerceptionFact, ...]) -> None:
+        for fact in facts:
             existing = self._facts.get(fact.key)
             if existing is None or fact.observed_ns >= existing.observed_ns:
                 self._facts[fact.key] = fact
 
     def latest(self) -> FrameState | None:
-        return self._frames.latest()
+        with self._lock:
+            frame = self._frames.latest()
+            if frame is None:
+                return None
+            return frame.model_copy(
+                update={
+                    "tracks": self._semantic_tracks or frame.tracks,
+                    "chat": self._chat,
+                    "facts": tuple(self.fresh_facts().values()),
+                }
+            )
+
+    def raw_latest(self) -> FrameState | None:
+        with self._lock:
+            return self._frames.latest()
 
     def frames(self) -> tuple[FrameState, ...]:
-        return self._frames.snapshot()
+        with self._lock:
+            return self._frames.snapshot()
 
     def fact(self, key: str, *, min_confidence: float = 0.0) -> PerceptionFact | None:
-        fact = self._facts.get(key)
-        if fact is None or fact.confidence < min_confidence or not fact.fresh():
-            return None
-        return fact
+        with self._lock:
+            fact = self._facts.get(key)
+            if fact is None or fact.confidence < min_confidence or not fact.fresh():
+                return None
+            return fact
 
     def fresh_facts(self, *, min_confidence: float = 0.0) -> dict[str, PerceptionFact]:
-        return {
-            key: fact
-            for key, fact in self._facts.items()
-            if fact.confidence >= min_confidence and fact.fresh()
-        }
+        with self._lock:
+            return {
+                key: fact
+                for key, fact in self._facts.items()
+                if fact.confidence >= min_confidence and fact.fresh()
+            }
 
 
 class ActivePerceptionQuery(BaseModel):
