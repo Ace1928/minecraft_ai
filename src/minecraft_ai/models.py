@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import base64
 import importlib
+import threading
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+_LOCAL_MODEL_INFERENCE_LOCK = threading.Lock()
 
 
 class ModelMessage(BaseModel):
@@ -99,14 +103,19 @@ class OpenAICompatibleLocalModel:
         }
         if response_format is not None:
             payload["response_format"] = response_format
-        with self._client() as client:
-            response = client.post(
-                self.base_url.rstrip("/") + "/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload,
-            )
-            response.raise_for_status()
-            raw = response.json()
+        # Multiple local llama.cpp servers may share one GPU. Concurrent VLM
+        # prefill and strategic decoding caused both requests to take roughly
+        # six times longer on the managed machine. Serialize local inference
+        # at the process boundary while capture and motor loops remain async.
+        with _LOCAL_MODEL_INFERENCE_LOCK:
+            with self._client() as client:
+                response = client.post(
+                    self.base_url.rstrip("/") + "/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=payload,
+                )
+                response.raise_for_status()
+                raw = response.json()
         text = _extract_chat_text(raw)
         return ModelResponse(
             text=text,
@@ -177,14 +186,15 @@ class OpenAICompatibleLocalModel:
         }
         if response_format is not None:
             payload["response_format"] = response_format
-        with self._client() as client:
-            response = client.post(
-                self.base_url.rstrip("/") + "/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload,
-            )
-            response.raise_for_status()
-            raw = response.json()
+        with _LOCAL_MODEL_INFERENCE_LOCK:
+            with self._client() as client:
+                response = client.post(
+                    self.base_url.rstrip("/") + "/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=payload,
+                )
+                response.raise_for_status()
+                raw = response.json()
         text = _extract_chat_text(raw)
         return ModelResponse(
             text=text,
