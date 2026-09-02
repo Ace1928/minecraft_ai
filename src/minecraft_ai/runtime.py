@@ -68,6 +68,8 @@ class AgentRuntime:
     _last_renew_ns: int = field(default=0, init=False)
     _last_cognition_ns: int = field(default=0, init=False)
     _last_semantic_ns: int = field(default=0, init=False)
+    _lease_thread: threading.Thread | None = field(default=None, init=False)
+    _lease_fault: str | None = field(default=None, init=False)
     _pending_decision: concurrent.futures.Future[CognitionDecision] | None = field(
         default=None,
         init=False,
@@ -89,6 +91,12 @@ class AgentRuntime:
 
     def run_forever(self) -> None:
         period = 1.0 / self.motor_hz
+        self._lease_thread = threading.Thread(
+            target=self._lease_heartbeat,
+            name="minecraft-ai-lease-heartbeat",
+            daemon=True,
+        )
+        self._lease_thread.start()
         if self.perception.active_vlm is not None:
             self.perception.active_vlm.start()
         try:
@@ -103,6 +111,9 @@ class AgentRuntime:
             self._failsafe(f"agent-runtime:{type(exc).__name__}:{exc}")
             raise
         finally:
+            self._stop.set()
+            if self._lease_thread is not None:
+                self._lease_thread.join(timeout=2.0)
             try:
                 current = self.executor.run
                 if current is not None and current.outcome == SkillOutcome.RUNNING:
@@ -133,7 +144,6 @@ class AgentRuntime:
         self.telemetry.publish(self._telemetry_payload(state="running"))
         if self.perception.stale():
             raise RuntimeError("capture stream is stale")
-        self._renew_lease_if_due()
         self._consume_cognition()
         self._request_semantics_if_due(frame.frame_id)
         self._start_cognition_if_due()
@@ -172,16 +182,20 @@ class AgentRuntime:
                     )
                     break
 
-    def _renew_lease_if_due(self) -> None:
-        now = time.monotonic_ns()
-        if now - self._last_renew_ns < self.lease_renew_ms * 1_000_000:
-            return
-        send_command(
-            "renew",
-            lease_id=self.lease_id,
-            ttl_ms=max(2000, self.lease_renew_ms * 4),
-        )
-        self._last_renew_ns = now
+    def _lease_heartbeat(self) -> None:
+        """Keep the motor lease alive independently of inference/cognition latency."""
+        interval_s = self.lease_renew_ms / 1000.0
+        ttl_ms = min(5000, max(3000, self.lease_renew_ms * 8))
+        while not self._stop.is_set():
+            try:
+                send_command("renew", lease_id=self.lease_id, ttl_ms=ttl_ms)
+                self._last_renew_ns = time.monotonic_ns()
+                self._lease_fault = None
+            except Exception as exc:
+                self._lease_fault = f"{type(exc).__name__}: {exc}"
+                self._stop.set()
+                return
+            self._stop.wait(interval_s)
 
     def _send_motor(self, action: MotorAction) -> None:
         accepted = send_command(
@@ -386,6 +400,7 @@ class AgentRuntime:
             "chosen_goal_id": None if decision is None else decision.chosen_goal_id,
             "reasoning_summary": None if decision is None else decision.reasoning_summary,
             "policy": policy_status,
+            "lease_heartbeat_error": self._lease_fault,
             "updated_monotonic_ns": time.monotonic_ns(),
         }
 

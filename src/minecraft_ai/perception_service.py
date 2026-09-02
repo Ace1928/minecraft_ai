@@ -217,18 +217,8 @@ class BootstrapFastPerception:
         if not frame.bgra or frame.width <= 0 or frame.height <= 0:
             return ()
         now = time.monotonic_ns()
-        pixel_count = frame.width * frame.height
-        sample_stride = max(4, pixel_count // 4096) * 4
-        luma_total = 0.0
-        samples = 0
-        for offset in range(0, len(frame.bgra) - 3, sample_stride):
-            blue, green, red = frame.bgra[offset : offset + 3]
-            luma_total += 0.299 * red + 0.587 * green + 0.114 * blue
-            samples += 1
-        mean_luma = luma_total / max(1, samples)
         source = f"bootstrap:{self.model_id}:not-training-label"
-        values: tuple[tuple[str, float | bool, float, int], ...] = (
-            ("image.mean_luma", round(mean_luma / 255.0, 4), 1.0, 500),
+        values: tuple[tuple[str, bool, float, int], ...] = (
             ("perception.bootstrap_active", True, 1.0, 500),
         )
         return tuple(
