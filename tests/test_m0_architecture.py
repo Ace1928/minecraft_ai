@@ -154,6 +154,8 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     retreat = skills.get("retreat_from_danger")
     escape = skills.get("escape_submersion")
     close_inventory = skills.get("close_open_inventory")
+    exploration = skills.get("explore_forward")
+    obstacle = skills.get("traverse_visible_obstacle")
 
     assert "visible trunk" in gather.description
     assert approach.initiation_alternatives[0][0].key == "target.reference_available"
@@ -164,8 +166,14 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert retreat.action_permissions.allow_attack is False
     assert retreat.action_permissions.allow_use is False
     assert retreat.action_permissions.allow_jump is True
-    assert skills.get("explore_forward").action_permissions.allow_attack is False
-    assert skills.get("explore_forward").action_permissions.allow_jump is True
+    assert exploration.action_permissions.allow_attack is False
+    assert exploration.action_permissions.allow_jump is True
+    assert exploration.policy_instruction == "Run around and explore the Minecraft world."
+    assert obstacle.policy_ref == "traverse_obstacle"
+    assert obstacle.policy_instruction == "jump forward"
+    assert obstacle.action_permissions.allow_jump is True
+    assert obstacle.action_permissions.allow_attack is False
+    assert obstacle.action_permissions.allow_use is False
     assert close_inventory.policy_ref == "close_inventory"
     assert close_inventory.policy_instruction == "close inventory"
     assert close_inventory.success_conditions[0].key == "scene.playable"

@@ -157,7 +157,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="explore_forward",
-            version=6,
+            version=7,
             name="Explore forward",
             description=(
                 "Traverse visible open terrain to discover a genuinely new area, keep the view "
@@ -170,11 +170,33 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=("escape_submersion", "retreat_from_danger"),
             max_duration_ms=12_000,
             policy_ref="explore",
-            # Use the exact public STEVE-1 evaluation prompt. Its text prior is
-            # not an instruction-following LLM: paraphrases can map to materially
-            # different behavior latents. The checkpoint still chooses every
-            # key, camera delta, and jump; this is learned goal conditioning.
-            policy_instruction="go explore",
+            # This published-style command produced locomotion, camera control,
+            # and jumps in the frozen live-frame probe. The shorter STEVE paper
+            # prompt ``go explore`` collapsed to forward-only motion on the same
+            # Bedrock corner frame. The checkpoint still chooses every action.
+            policy_instruction="Run around and explore the Minecraft world.",
+            action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
+        ),
+        SkillSpec(
+            skill_id="traverse_visible_obstacle",
+            version=1,
+            name="Traverse visible obstacle",
+            description=(
+                "Use learned short-horizon movement and camera control to jump over or climb "
+                "out of the visible terrain obstruction, then hand control back for replanning"
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            parameters=("allow_attack", "allow_use", "allow_jump"),
+            failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
+            expected_effects=("obstacle_crossed", "locomotion_progress"),
+            recovery_skills=("escape_submersion", "retreat_from_danger"),
+            max_duration_ms=8_000,
+            policy_ref="traverse_obstacle",
+            # Frozen-frame evaluation on the current Bedrock corner produced
+            # learned jump on 20/40 policy decisions, versus 0/40 for the
+            # generic ``go explore`` latent. This remains a STEVE-1 option, not
+            # an injected Space key or handcrafted obstacle reflex.
+            policy_instruction="jump forward",
             action_permissions=SkillActionPermissions(allow_attack=False, allow_use=False),
         ),
         SkillSpec(
