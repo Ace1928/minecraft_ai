@@ -367,16 +367,6 @@ class HighLevelController:
         danger = blackboard.fact("danger.immediate", min_confidence=0.7)
         if danger is not None and bool(danger.value):
             return decision
-        executable = (
-            decision.skill_id is not None
-            and decision.skill_id in self.skills.specs
-            and conditions_satisfied(
-                self.skills.get(decision.skill_id).preconditions,
-                blackboard,
-            )
-        )
-        if not executable and decision.say is None:
-            return decision
         parameters = dict(decision.skill_parameters)
         parameters.update(_explicit_action_constraints(active.text))
         return decision.model_copy(

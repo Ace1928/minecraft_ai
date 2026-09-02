@@ -81,6 +81,33 @@ class _CapturingModel(_ShelterSelectingModel):
         )
 
 
+class _IdleCapturingModel(_ShelterSelectingModel):
+    def complete_structured(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        del messages, name, schema
+        return ModelResponse(
+            text=json.dumps(
+                {
+                    "reasoning_summary": "No option selected yet",
+                    "chosen_goal_id": "role:generalist:0:survive",
+                    "skill_id": None,
+                    "skill_parameters": {},
+                    "say": None,
+                    "request_replan": True,
+                    "ask_perception": ["terrain.safe_direction"],
+                    "research_query": None,
+                }
+            ),
+            model=self.model_id,
+            latency_ms=1.0,
+        )
+
+
 class _RepairingModel(_ShelterSelectingModel):
     def __init__(self) -> None:
         super().__init__()
@@ -288,6 +315,28 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
     )
     assert decision.chosen_goal_id == "operator:correction"
     assert decision.say == "I am climbing the hill now."
+
+
+def test_fresh_operator_directive_owns_idle_replan_decision() -> None:
+    message = OperatorMessage(
+        message_id="new-correction",
+        created_ns=2,
+        text="Use the selected open terrain gap. Do not attack.",
+        status=OperatorMessageStatus.DELIVERED,
+    )
+    context = _context()
+    context.operator_messages = (message,)
+    controller = HighLevelController(
+        _IdleCapturingModel(),
+        build_bootstrap_skill_library(),
+    )
+
+    decision = controller.decide(_board(), context)
+
+    assert decision.chosen_goal_id == "operator:new-correction"
+    assert decision.skill_id is None
+    assert decision.request_replan is True
+    assert decision.skill_parameters["allow_attack"] is False
 
 
 def test_prior_agent_response_is_not_replayed_as_operator_instruction() -> None:
