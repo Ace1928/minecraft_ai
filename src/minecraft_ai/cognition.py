@@ -191,13 +191,11 @@ class HighLevelController:
                             for condition in skill.success_conditions
                         ],
                         "expected_effects": list(skill.expected_effects),
-                        "currently_feasible": conditions_satisfied(
-                            skill.preconditions,
-                            blackboard,
-                        ),
+                        "currently_feasible": True,
                         "measured_competence": self.skills.contextual_score(skill.skill_id),
                     }
                     for skill in self.skills.specs.values()
+                    if conditions_satisfied(skill.preconditions, blackboard)
                 ],
             }
             messages = (
@@ -211,7 +209,9 @@ class HighLevelController:
                         "skill_id:string|null, "
                         "skill_parameters:object, say:string|null, request_replan:boolean, "
                         "ask_perception:string[], research_query:string|null. "
-                        "Use only listed skill ids. Set say only when directly replying to a "
+                        "The skills list contains only options executable from current fresh "
+                        "observations. Use only listed skill ids. Set say only when directly "
+                        "replying to a "
                         "fresh operator/player message or when urgent social communication is "
                         "needed; ordinary private reasoning must not open in-game chat. Treat "
                         "fresh_facts as the only authoritative observed game state. Prefer the "

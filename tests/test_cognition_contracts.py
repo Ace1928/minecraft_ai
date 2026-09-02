@@ -211,6 +211,10 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
 
     payload = json.loads(model.initial_messages[-1].content)
     assert payload["active_operator_message"]["message_id"] == "correction"
+    assert "explore_forward" in {skill["skill_id"] for skill in payload["skills"]}
+    assert "establish_basic_shelter" not in {
+        skill["skill_id"] for skill in payload["skills"]
+    }
     assert (
         "address it before conflicting older directives"
         in model.initial_messages[0].content

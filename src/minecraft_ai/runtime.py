@@ -133,6 +133,7 @@ class AgentRuntime:
     _pending_operator_message_ids: tuple[str, ...] = field(default=(), init=False)
     _last_operator_target_id: str | None = field(default=None, init=False)
     _policy_warmup_error: str | None = field(default=None, init=False)
+    _cognition_requested: bool = field(default=True, init=False)
 
     def __post_init__(self) -> None:
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz <= 0:
@@ -252,6 +253,7 @@ class AgentRuntime:
             self._send_motor(result.action)
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
         if result.run.outcome != SkillOutcome.RUNNING:
+            self._cognition_requested = True
             stats = self.skills.record(result.run)
             if self.state_db is not None:
                 self.state_db.save_skill_stats(
@@ -377,7 +379,12 @@ class AgentRuntime:
             return
         now = time.monotonic_ns()
         interval = int(1e9 / self.cognition_hz)
-        if now - self._last_cognition_ns < interval:
+        operator_waiting = self._queued_operator_message_waiting()
+        if (
+            not self._cognition_requested
+            and not operator_waiting
+            and now - self._last_cognition_ns < interval
+        ):
             return
         context = self._cognition_context()
         self._pending_operator_message_ids = tuple(
@@ -408,6 +415,7 @@ class AgentRuntime:
                 context,
             )
         self._last_cognition_ns = now
+        self._cognition_requested = False
         self.metrics.cognition_calls += 1
 
     def _consume_cognition(self) -> None:
@@ -418,6 +426,15 @@ class AgentRuntime:
         try:
             decision = future.result()
         except Exception:
+            self._last_cognition_ns = time.monotonic_ns()
+            return
+        self._last_cognition_ns = time.monotonic_ns()
+        if self._queued_operator_message_waiting():
+            # This decision was produced from an older context snapshot. A
+            # fresh operator message has higher authority and must be included
+            # before any skill switch or acknowledgement is applied.
+            self._pending_operator_message_ids = ()
+            self._cognition_requested = True
             return
         self._last_decision = decision
         if self.state_db is not None and self._pending_operator_message_ids:
@@ -474,6 +491,16 @@ class AgentRuntime:
                     run_id=uuid.uuid4().hex,
                     parameters=decision.skill_parameters,
                 )
+
+    def _queued_operator_message_waiting(self) -> bool:
+        if self.state_db is None:
+            return False
+        return bool(
+            self.state_db.load_operator_messages(
+                statuses={OperatorMessageStatus.QUEUED},
+                limit=1,
+            )
+        )
 
     def _cognition_context(self) -> CognitionContext:
         goals = tuple((*role_standing_goals(self.role), *self.custom_goals))
