@@ -14,7 +14,7 @@ from .perception import PerceptionBlackboard
 from .planning import Goal
 from .roles import RoleProfile
 from .skills import SkillLibrary
-from .social import OperatorMessage, OperatorMessageStatus, Promise, PromiseStatus
+from .social import OperatorMessage, OperatorMessageKind, Promise, PromiseStatus
 from .wiki import WikiEvidence
 
 
@@ -221,13 +221,29 @@ class HighLevelController:
                         "claim an item, outcome, or completion that has not been observed. "
                         "operator_messages are ordered by authority: highest priority first, "
                         "then corrections before instructions, then newest first. If "
-                        "active_operator_message is queued or delivered, address it before "
-                        "conflicting older directives and set chosen_goal_id exactly to "
-                        "'operator:' plus its message_id. Never imply a message was handled "
-                        "while choosing a different goal."
+                        "active_operator_message is present, it is the current directive and "
+                        "must be addressed before any conflicting standing goal. Its status "
+                        "'acknowledged' means received, not completed or superseded. For a "
+                        "current instruction or correction, set chosen_goal_id exactly to "
+                        "'operator:' plus its message_id until a newer directive supersedes it. "
+                        "Never imply a message was handled while choosing a different goal."
                     ),
                 ),
                 ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
+                *(
+                    ()
+                    if not context.operator_messages
+                    else (
+                        ModelMessage(
+                            role="user",
+                            content=(
+                                "ACTIVE OPERATOR DIRECTIVE (highest authority; follow this "
+                                "literal current request and do not substitute an older task): "
+                                + context.operator_messages[0].model_dump_json()
+                            ),
+                        ),
+                    )
+                ),
             )
             decision = self._complete(messages)
             decision = self._scope_operator_decision(decision, blackboard, context)
@@ -278,16 +294,16 @@ class HighLevelController:
         blackboard: PerceptionBlackboard,
         context: CognitionContext,
     ) -> CognitionDecision:
-        pending = next(
+        active = next(
             (
                 message
                 for message in context.operator_messages
-                if message.status
-                in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+                if message.kind
+                in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
             ),
             None,
         )
-        if pending is None:
+        if active is None:
             return decision
         danger = blackboard.fact("danger.immediate", min_confidence=0.7)
         if danger is not None and bool(danger.value):
@@ -303,7 +319,7 @@ class HighLevelController:
         if not executable and decision.say is None:
             return decision
         return decision.model_copy(
-            update={"chosen_goal_id": f"operator:{pending.message_id}"}
+            update={"chosen_goal_id": f"operator:{active.message_id}"}
         )
 
     def status(self) -> dict[str, object]:
