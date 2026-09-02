@@ -31,6 +31,7 @@ from .emergency import (
 )
 from .knowledge import Edition, GameVersion, KnowledgeGraph
 from .knowledge.importers import import_java_datapack, import_minecraft_data
+from .human_recording import HumanRecordingRequest, record_human_session
 from .eval import (
     BenchmarkRunner,
     TraceMetricAccumulator,
@@ -452,6 +453,97 @@ def dashboard(
     _ensure_dirs()
     print(f"[green]Operator dashboard[/green] http://{host}:{port}/")
     serve_operator_dashboard(host=host, port=port)
+
+
+@app.command("record-human")
+def record_human(
+    duration_s: float = typer.Option(300.0, "--duration", min=1.0, max=86_400.0),
+    capture_hz: float = typer.Option(20.0, "--capture-hz", min=5.0, max=60.0),
+    label: str = typer.Option("human-demonstration", "--label"),
+    task_id: str | None = typer.Option(None, "--task"),
+    fov: float | None = typer.Option(None, "--fov", min=30.0, max=180.0),
+    mouse_sensitivity: float | None = typer.Option(
+        None,
+        "--mouse-sensitivity",
+        min=0.0,
+        max=1.0,
+    ),
+    takeover: bool = typer.Option(
+        False,
+        "--takeover",
+        help="Stop autonomous control and pause its supervisor before recording.",
+    ),
+    resume_live: bool = typer.Option(
+        False,
+        "--resume-live",
+        help="Explicitly restart autonomous play after recording finishes.",
+    ),
+) -> None:
+    """Record Bedrock pixels and raw human input through the isolated display."""
+    _ensure_dirs()
+    if task_id is not None:
+        try:
+            bedrock_baseline_suite().task(task_id)
+        except KeyError as exc:
+            raise typer.BadParameter(f"unknown benchmark task: {task_id}") from exc
+    config = load_config()
+    was_alive = agent_alive()
+    if was_alive and not takeover:
+        raise typer.BadParameter(
+            "The autonomous agent is running. Pass --takeover to prevent mixed human/model labels."
+        )
+    if was_alive:
+        stop_agent_process()
+        if supervisor_alive():
+            _command("pause")
+    try:
+        session = BedrockSession.load()
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise typer.BadParameter(
+            "No managed isolated Bedrock session exists. Run `minecraft-ai bedrock launch` first."
+        ) from exc
+    if not bedrock_session_alive(session) or session.mode not in {"xephyr", "weston"}:
+        raise typer.BadParameter("Human recording requires a live managed isolated session.")
+    window_id = wait_for_minecraft_window(session, timeout_s=10.0)
+    install = discover_bedrock_linux_install()
+    build = install.selected_build if install is not None else None
+    version = build.version if build is not None else "unknown"
+    paths = app_paths()
+    print(
+        "[bold green]HUMAN BEDROCK RECORDING[/bold green] "
+        f"duration={duration_s:.1f}s rate={capture_hz:.1f}Hz display={session.display}"
+    )
+    print("Focus the Bedrock window and play normally; Ctrl-C also seals the trajectory.")
+    manifest = record_human_session(
+        HumanRecordingRequest(
+            display=session.display,
+            window_id=window_id,
+            instance_id=f"bedrock:{version}:x11:{window_id}",
+            role=config.role,
+            game_version=version,
+            artifact_root=paths.data_dir / "trajectories",
+            state_db_path=paths.state_db,
+            duration_s=duration_s,
+            capture_hz=capture_hz,
+            label=label,
+            task_id=task_id,
+            fov=fov,
+            mouse_sensitivity=mouse_sensitivity,
+            shard_steps=config.trajectory.shard_steps,
+            queue_size=config.trajectory.queue_size,
+        )
+    )
+    destination = paths.data_dir / "trajectories" / manifest.trajectory_id
+    print(
+        "[green]Sealed human trajectory[/green] "
+        f"steps={manifest.accepted_steps} dropped={manifest.dropped_steps} -> {destination}"
+    )
+    if resume_live:
+        if supervisor_alive():
+            state = str(send_command("status").get("state", ""))
+            if state == "PAUSED":
+                _command("resume")
+        run(role=config.role, edition=Edition.BEDROCK, live=True)
 
 
 @dataset_app.command("inspect")
