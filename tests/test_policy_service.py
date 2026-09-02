@@ -15,10 +15,12 @@ from minecraft_ai.perception import (
 )
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.policy_service import (
+    GroundedTargetObservation,
     LearnedPolicyOutput,
     GroundedPolicyRouter,
     TemporalPolicyClient,
     _apply_action_constraints,
+    _crop_bbox_to_full,
     _decoded_policy_output,
     _intent_camera_scale,
     _intent_camera_semantics,
@@ -56,6 +58,15 @@ class _RoutingPolicy:
 
     def warmup(self) -> None:
         self.warmups += 1
+
+
+class _TargetFeedbackPolicy(_RoutingPolicy):
+    def __init__(self, policy_id: str, *, key: str) -> None:
+        super().__init__(policy_id, key=key)
+        self.observation: GroundedTargetObservation | None = None
+
+    def target_observation(self) -> GroundedTargetObservation | None:
+        return self.observation
 
 
 def _tracked_board(*, age_ms: int = 0) -> PerceptionBlackboard:
@@ -197,6 +208,70 @@ def test_grounded_router_shares_one_physical_pitch_state(tmp_path: Path) -> None
     assert saturated.mouse_dy == 30
     assert primary.status()["estimated_pitch_units"] == 100
     assert router.status()["world_camera"] == {"estimated_pitch_units": 100}
+
+
+def test_grounded_router_merges_temporally_filtered_target_feedback() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _TargetFeedbackPolicy("rocket", key="a")
+    router = GroundedPolicyRouter(primary, grounded)
+    board = _tracked_board()
+    router.act(board, MotorIntent(skill_id="approach", mode="approach"), sequence=1)
+    observed_ns = time.monotonic_ns()
+    grounded.observation = GroundedTargetObservation(
+        observed_ns=observed_ns,
+        probability=0.95,
+        point_yx=(0.5, 0.6),
+        bbox_xyxy=(0.4, 0.2, 0.7, 0.8),
+        model_version="rocket-test",
+    )
+
+    assert router.merge_perception(board)
+    visible = board.fact("target.visible", now_ns=observed_ns)
+    assert visible is not None and visible.value is True
+    target_dx = board.fact("target.dx", now_ns=observed_ns)
+    assert target_dx is not None and target_dx.value == pytest.approx(0.2)
+    updated = board.latest()
+    assert updated is not None
+    track = next(track for track in updated.tracks if track.track_id == "log-1")
+    assert track.region.x == pytest.approx(0.4)
+    assert track.region.y == pytest.approx(0.2)
+    assert track.region.width == pytest.approx(0.3)
+    assert track.region.height == pytest.approx(0.6)
+    assert track.attributes["tracking_model_version"] == "rocket-test"
+    assert not router.merge_perception(board)
+
+    grounded.observation = grounded.observation.__class__(
+        observed_ns=observed_ns + 1,
+        probability=0.0,
+        point_yx=None,
+        bbox_xyxy=None,
+        model_version="rocket-test",
+    )
+    assert router.merge_perception(board)
+    after_one_miss = board.fact("target.visible", now_ns=observed_ns + 1)
+    assert after_one_miss is not None and after_one_miss.value is True
+
+    grounded.observation = grounded.observation.__class__(
+        observed_ns=observed_ns + 2,
+        probability=0.0,
+        point_yx=None,
+        bbox_xyxy=None,
+        model_version="rocket-test",
+    )
+    assert router.merge_perception(board)
+    after_two_misses = board.fact("target.visible", now_ns=observed_ns + 2)
+    assert after_two_misses is not None and after_two_misses.value is False
+
+
+def test_policy_crop_box_maps_back_to_wide_full_frame() -> None:
+    mapped = _crop_bbox_to_full(1279, 635, (0.0, 0.25, 1.0, 0.75))
+
+    assert mapped is not None
+    x0, y0, x1, y1 = mapped
+    assert x0 == pytest.approx(75 / 1279)
+    assert x1 == pytest.approx((75 + 1129) / 1279)
+    assert y0 == pytest.approx(0.25)
+    assert y1 == pytest.approx(0.75)
 
 
 def test_grounded_router_rejects_stale_unbound_operator_region() -> None:
@@ -748,6 +823,7 @@ def test_rocket_interaction_taxonomy_matches_published_control_contract() -> Non
     assert _rocket_interaction_id("attack") == 0
     assert _rocket_interaction_id("gather_wood") == 2
     assert _rocket_interaction_id("interact") == 3
+    assert _rocket_interaction_id("gui") == 3
     assert _rocket_interaction_id("craft_planks") == 4
     assert _rocket_interaction_id("hotbar") == 5
     assert _rocket_interaction_id("approach") == 6

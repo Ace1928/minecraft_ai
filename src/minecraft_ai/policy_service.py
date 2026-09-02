@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .config import PolicyConfig
 from .motor import MotorIntent, MotorPolicy
-from .perception import PerceptionBlackboard
+from .perception import PerceptionBlackboard, PerceptionFact, ScreenRegion
 from .perception_service import perceptual_hash_distance
 from .platforms.bedrock_x11 import CapturedFrame
 from .safety import MotorAction
@@ -67,6 +67,17 @@ class WorldCameraState:
     estimated_pitch_units: int = 0
 
 
+@dataclass(frozen=True)
+class GroundedTargetObservation:
+    """One ROCKET auxiliary localization result tied to its captured frame."""
+
+    observed_ns: int
+    probability: float
+    point_yx: tuple[float, float] | None
+    bbox_xyxy: tuple[float, float, float, float] | None
+    model_version: str
+
+
 @dataclass
 class TemporalPolicyClient:
     """Deadline-aware client for an isolated learned temporal policy process."""
@@ -86,6 +97,8 @@ class TemporalPolicyClient:
     _pending_deadline_ns: int = field(default=0, init=False)
     _pending_miss_recorded: bool = field(default=False, init=False)
     _consumed_miss_recorded: bool = field(default=False, init=False)
+    _pending_frame_captured_ns: int = field(default=0, init=False)
+    _consumed_frame_captured_ns: int = field(default=0, init=False)
     _discard_pending_response: bool = field(default=False, init=False)
     _world_camera_state: WorldCameraState = field(
         default_factory=WorldCameraState,
@@ -103,6 +116,10 @@ class TemporalPolicyClient:
     _emitted_camera_total: tuple[int, int] = field(default=(0, 0), init=False)
     _accepted_predictions: int = field(default=0, init=False)
     _learned_action_counts: dict[str, int] = field(default_factory=dict, init=False)
+    _last_target_observation: GroundedTargetObservation | None = field(
+        default=None,
+        init=False,
+    )
 
     def __post_init__(self) -> None:
         _validate_policy_config(self.config)
@@ -111,6 +128,9 @@ class TemporalPolicyClient:
     def bind_world_camera_state(self, state: WorldCameraState) -> None:
         """Bind this controller to the physical camera shared with its peers."""
         self._world_camera_state = state
+
+    def target_observation(self) -> GroundedTargetObservation | None:
+        return self._last_target_observation
 
     def act(
         self,
@@ -236,6 +256,11 @@ class TemporalPolicyClient:
                 "mouse_dy": self._emitted_camera_total[1],
             },
             "accepted_predictions": self._accepted_predictions,
+            "target_observation_ns": (
+                None
+                if self._last_target_observation is None
+                else self._last_target_observation.observed_ns
+            ),
             "learned_action_counts": dict(sorted(self._learned_action_counts.items())),
             "process_alive": bool(process is not None and process.poll() is None),
             "requests": self.metrics.requests,
@@ -277,7 +302,10 @@ class TemporalPolicyClient:
         self._pending_deadline_ns = 0
         self._pending_miss_recorded = False
         self._consumed_miss_recorded = False
+        self._pending_frame_captured_ns = 0
+        self._consumed_frame_captured_ns = 0
         self._discard_pending_response = False
+        self._last_target_observation = None
         self._pending_camera = (0, 0)
         self._pending_camera_semantics = "world"
 
@@ -356,8 +384,10 @@ class TemporalPolicyClient:
         if response is None:
             return None
         request_id = self._pending_request_id
+        self._consumed_frame_captured_ns = self._pending_frame_captured_ns
         self._pending_request_id = None
         self._pending_deadline_ns = 0
+        self._pending_frame_captured_ns = 0
         self._consumed_miss_recorded = self._pending_miss_recorded
         self._pending_miss_recorded = False
         if response.get("request_id") != request_id:
@@ -397,6 +427,7 @@ class TemporalPolicyClient:
         self.metrics.requests += 1
         self._pending_request_id = request_id
         self._pending_deadline_ns = deadline_ns
+        self._pending_frame_captured_ns = frame.captured_ns
         self._pending_miss_recorded = False
 
     def _read_response(self, timeout_s: float) -> dict[str, Any] | None:
@@ -419,6 +450,17 @@ class TemporalPolicyClient:
     def _output_action(self, output: LearnedPolicyOutput, sequence: int) -> MotorAction:
         self._record_learned_action(output)
         self._last_prediction = output
+        if (
+            output.target_exists_probability is not None
+            and self._consumed_frame_captured_ns > 0
+        ):
+            self._last_target_observation = GroundedTargetObservation(
+                observed_ns=self._consumed_frame_captured_ns,
+                probability=output.target_exists_probability,
+                point_yx=output.target_point_yx,
+                bbox_xyxy=output.target_bbox_xyxy,
+                model_version=output.model_version,
+            )
         self._predicted_camera_total = (
             self._predicted_camera_total[0] + output.mouse_dx,
             self._predicted_camera_total[1] + output.mouse_dy,
@@ -604,6 +646,7 @@ class GroundedPolicyRouter:
     grounded: MotorPolicy
     min_track_confidence: float = 0.65
     max_track_age_ms: int = 15_000
+    target_confidence_alpha: float = 0.2
     policy_id: str = field(init=False)
     _active: MotorPolicy = field(init=False)
     _active_route: str = field(default="primary", init=False)
@@ -611,6 +654,8 @@ class GroundedPolicyRouter:
     _switches: int = field(default=0, init=False)
     _grounded_track_id: str | None = field(default=None, init=False)
     _grounded_interaction_id: int | None = field(default=None, init=False)
+    _grounded_confidence: float = field(default=0.0, init=False)
+    _last_grounded_feedback_ns: int = field(default=0, init=False)
     _world_camera_state: WorldCameraState = field(
         default_factory=WorldCameraState,
         init=False,
@@ -621,6 +666,8 @@ class GroundedPolicyRouter:
             raise ValueError("max_track_age_ms must be positive")
         if not 0.0 <= self.min_track_confidence <= 1.0:
             raise ValueError("min_track_confidence must be in 0..1")
+        if not 0.0 < self.target_confidence_alpha <= 1.0:
+            raise ValueError("target_confidence_alpha must be in (0, 1]")
         self._active = self.primary
         self.policy_id = f"router:{self.primary.policy_id}+{self.grounded.policy_id}"
         for policy in (self.primary, self.grounded):
@@ -649,6 +696,8 @@ class GroundedPolicyRouter:
         if route == "primary":
             self._grounded_track_id = None
             self._grounded_interaction_id = None
+            self._grounded_confidence = 0.0
+            self._last_grounded_feedback_ns = 0
         action = selected.act(blackboard, intent, sequence=sequence)
         return action if release is None else _merge_policy_release(action, release)
 
@@ -661,6 +710,8 @@ class GroundedPolicyRouter:
         self._active_route = "primary"
         self._grounded_track_id = None
         self._grounded_interaction_id = None
+        self._grounded_confidence = 0.0
+        self._last_grounded_feedback_ns = 0
         return _merge_policy_release(
             MotorAction(sequence=sequence),
             _merge_policy_release(primary_release, grounded_release),
@@ -687,12 +738,128 @@ class GroundedPolicyRouter:
             "switches": self._switches,
             "min_track_confidence": self.min_track_confidence,
             "max_track_age_ms": self.max_track_age_ms,
+            "target_confidence_alpha": self.target_confidence_alpha,
             "world_camera": {
                 "estimated_pitch_units": self._world_camera_state.estimated_pitch_units,
             },
             "primary": _policy_status(self.primary),
             "grounded": _policy_status(self.grounded),
         }
+
+    def merge_perception(self, blackboard: PerceptionBlackboard) -> bool:
+        """Publish ROCKET's learned current-view localization as online belief.
+
+        The auxiliary head is an inference signal, not evaluator ground truth or
+        a training label. An exponential temporal belief prevents one noisy
+        frame from destroying an otherwise stable recurrent target lease.
+        """
+        if self._active_route != "grounded" or self._grounded_track_id is None:
+            return False
+        observe = getattr(self.grounded, "target_observation", None)
+        if not callable(observe):
+            return False
+        observation = observe()
+        if not isinstance(observation, GroundedTargetObservation):
+            return False
+        if observation.observed_ns <= self._last_grounded_feedback_ns:
+            return False
+        now_ns = time.monotonic_ns()
+        if now_ns - observation.observed_ns > self.max_track_age_ms * 1_000_000:
+            return False
+        latest = blackboard.latest()
+        if latest is None:
+            return False
+        target = next(
+            (
+                track
+                for track in latest.tracks
+                if track.track_id == self._grounded_track_id
+            ),
+            None,
+        )
+        if target is None:
+            return False
+        raw_confidence = max(0.0, min(1.0, observation.probability))
+        alpha = self.target_confidence_alpha
+        self._grounded_confidence = (
+            raw_confidence
+            if self._grounded_confidence <= 0.0
+            else alpha * raw_confidence + (1.0 - alpha) * self._grounded_confidence
+        )
+        region = target.region
+        point_yx = _crop_point_to_full(
+            latest.width,
+            latest.height,
+            observation.point_yx,
+        )
+        bbox_xyxy = _crop_bbox_to_full(
+            latest.width,
+            latest.height,
+            observation.bbox_xyxy,
+        )
+        if raw_confidence >= self.min_track_confidence and bbox_xyxy is not None:
+            x0, y0, x1, y1 = bbox_xyxy
+            if x1 > x0 and y1 > y0:
+                region = ScreenRegion(x=x0, y=y0, width=x1 - x0, height=y1 - y0)
+        source = (
+            f"learned:{self.grounded.policy_id}:aux-localization:not-training-label"
+        )
+        attributes = dict(target.attributes)
+        attributes.update(
+            {
+                "tracking_source": source,
+                "tracking_model_version": observation.model_version,
+                "target_exists_probability": round(raw_confidence, 6),
+            }
+        )
+        updated_track = target.model_copy(
+            update={
+                "confidence": self._grounded_confidence,
+                "region": region,
+                "last_seen_ns": observation.observed_ns,
+                "attributes": attributes,
+            }
+        )
+        visible = self._grounded_confidence >= self.min_track_confidence
+        fact_values: list[tuple[str, str | int | float | bool, float]] = [
+            ("target.exists_probability", raw_confidence, 1.0),
+            ("target.tracking_confidence", self._grounded_confidence, 1.0),
+            (
+                "target.visible",
+                visible,
+                max(self._grounded_confidence, 1.0 - self._grounded_confidence),
+            ),
+            ("target.kind", target.label, self._grounded_confidence),
+        ]
+        if point_yx is not None and raw_confidence >= self.min_track_confidence:
+            point_y, point_x = point_yx
+            fact_values.extend(
+                (
+                    ("target.dx", max(-1.0, min(1.0, 2.0 * point_x - 1.0)), raw_confidence),
+                    ("target.dy", max(-1.0, min(1.0, 2.0 * point_y - 1.0)), raw_confidence),
+                )
+            )
+        facts = tuple(
+            PerceptionFact(
+                key=key,
+                value=value,
+                confidence=confidence,
+                observed_ns=observation.observed_ns,
+                source=source,
+                expires_after_ms=min(1500, self.max_track_age_ms),
+            )
+            for key, value, confidence in fact_values
+        )
+        self._last_grounded_feedback_ns = observation.observed_ns
+        track_updated = blackboard.upsert_semantic_track(
+            instance_id=latest.instance_id,
+            track=updated_track,
+        )
+        facts_updated = blackboard.merge_semantics(
+            instance_id=latest.instance_id,
+            facts=facts,
+        )
+        return track_updated and facts_updated
 
     def _has_grounded_target(
         self,
@@ -739,6 +906,8 @@ class GroundedPolicyRouter:
             return False
         self._grounded_track_id = selected.track_id
         self._grounded_interaction_id = interaction_id
+        self._grounded_confidence = selected.confidence
+        self._last_grounded_feedback_ns = 0
         return True
 
 
@@ -1282,9 +1451,9 @@ def _rocket_interaction_id(mode: str) -> int:
         return 0
     if normalized in {"mine", "gather_wood", "gather", "break"}:
         return 2
-    if normalized in {"use", "interact"}:
+    if normalized in {"use", "interact", "gui"}:
         return 3
-    if normalized.startswith("craft") or normalized == "gui":
+    if normalized.startswith("craft"):
         return 4
     if normalized in {"switch", "hotbar"}:
         return 5
@@ -1426,6 +1595,53 @@ def _center_crop_16_9(frame: Any, numpy_module: Any) -> Any:
     crop_height = int(round(width / target_ratio))
     y0 = max(0, (height - crop_height) // 2)
     return numpy_module.ascontiguousarray(frame[y0 : y0 + crop_height, :])
+
+
+def _crop_point_to_full(
+    width: int,
+    height: int,
+    point_yx: tuple[float, float] | None,
+) -> tuple[float, float] | None:
+    """Map a normalized point from the policy's 16:9 crop to the full frame."""
+    if point_yx is None or width <= 0 or height <= 0:
+        return None
+    point_y, point_x = point_yx
+    target_ratio = 16.0 / 9.0
+    if width / height > target_ratio:
+        crop_width = int(round(height * target_ratio))
+        left = max(0, (width - crop_width) // 2)
+        point_x = (left + point_x * crop_width) / width
+    elif width / height < target_ratio:
+        crop_height = int(round(width / target_ratio))
+        top = max(0, (height - crop_height) // 2)
+        point_y = (top + point_y * crop_height) / height
+    return (
+        max(0.0, min(1.0, point_y)),
+        max(0.0, min(1.0, point_x)),
+    )
+
+
+def _crop_bbox_to_full(
+    width: int,
+    height: int,
+    bbox_xyxy: tuple[float, float, float, float] | None,
+) -> tuple[float, float, float, float] | None:
+    """Map a normalized policy crop box back into full-frame coordinates."""
+    if bbox_xyxy is None:
+        return None
+    x0, y0, x1, y1 = bbox_xyxy
+    top_left = _crop_point_to_full(width, height, (y0, x0))
+    bottom_right = _crop_point_to_full(width, height, (y1, x1))
+    if top_left is None or bottom_right is None:
+        return None
+    full_y0, full_x0 = top_left
+    full_y1, full_x1 = bottom_right
+    return (
+        min(full_x0, full_x1),
+        min(full_y0, full_y1),
+        max(full_x0, full_x1),
+        max(full_y0, full_y1),
+    )
 
 
 def _verify_sha256(path: Path, expected: str) -> None:

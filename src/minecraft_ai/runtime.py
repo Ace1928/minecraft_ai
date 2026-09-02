@@ -322,6 +322,7 @@ class AgentRuntime:
         self.metrics.frames += 1
         self.metrics.last_capture_ms = (time.perf_counter() - capture_started) * 1000.0
         self._merge_operator_target()
+        self._merge_policy_perception()
         if self.perception.stale():
             self.metrics.stale_frame_skips += 1
             self.metrics.consecutive_stale_frames += 1
@@ -354,6 +355,7 @@ class AgentRuntime:
             sequence=self._sequence,
             now_ns=time.monotonic_ns(),
         )
+        self._merge_policy_perception()
         if result.action is not None:
             self._send_motor(result.action)
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
@@ -483,6 +485,12 @@ class AgentRuntime:
             track=target,
         ):
             self._last_operator_target_id = target.track_id
+
+    def _merge_policy_perception(self) -> None:
+        """Merge optional learned motor-side perception into the blackboard."""
+        merge = getattr(self.executor.policy, "merge_perception", None)
+        if callable(merge):
+            merge(self.blackboard)
 
     def _semantic_question(self, skill_id: str | None) -> str:
         if skill_id is None:
