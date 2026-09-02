@@ -5,6 +5,7 @@ reference runtime. Java Edition adapters remain optional compatibility paths.
 """
 
 from .bedrock_linux import (
+    BedrockBuild,
     BedrockLinuxInstall,
     BedrockLinuxInstance,
     discover_bedrock_linux_install,
@@ -12,6 +13,7 @@ from .bedrock_linux import (
 )
 
 __all__ = [
+    "BedrockBuild",
     "BedrockLinuxInstall",
     "BedrockLinuxInstance",
     "discover_bedrock_linux_install",
