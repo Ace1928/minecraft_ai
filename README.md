@@ -4,25 +4,33 @@ A self-contained, open-source project for building a persistent Minecraft agent 
 
 > Status: architecture/bootstrap phase. Live control is intentionally disabled until the independent safety supervisor and scoped-input backends pass their release gates.
 
+## Reference platform
+
+The primary/default runtime is **Minecraft Bedrock Edition for Windows running on Linux through BedrockOnLinux/WineGDK**. The project should be optimized, tested, documented, and packaged for that environment first.
+
+Java Edition remains an optional compatibility target. It must not determine default CLI behavior, safety assumptions, knowledge defaults, capture design, or input architecture.
+
 ## Design goals
 
+- **Bedrock-first:** Bedrock Edition under Linux/WineGDK is the reference runtime and default edition.
 - **Human-style play:** raw visual observations plus key/mouse action semantics; no privileged world-state commands in strict mode.
 - **Two-speed intelligence:** real-time perception and a fast local motor policy underneath slower multimodal planning, reflection, conversation, and knowledge retrieval.
 - **Continual skills:** create, verify, refine, compose, score, distill, and retire reusable closed-loop skills.
-- **Version-aware knowledge:** derive recipes, loot, tags, advancements/achievements, item/block data, and progression dependencies for the exact game edition/version; augment this with cited wiki retrieval.
-- **Progression-aware autonomy:** reason over achievements/advancements, technology tiers, custom goals, builds, exploration, and role-specific standing goals.
+- **Version-aware knowledge:** derive recipes, loot, tags, achievements, item/block data, and progression dependencies for the exact Bedrock version; augment this with cited wiki retrieval.
+- **Progression-aware autonomy:** reason over achievements, technology tiers, custom goals, builds, exploration, and role-specific standing goals.
 - **Player interaction:** treat chat, requests, promises, shared projects, and in-game questions as first-class events.
 - **Archetypes:** configurable roles such as farmer, trader, builder, redstone engineer, fighter, mob farmer, explorer, speedrunner, boss hunter, Nether specialist, shopkeeper, or custom roles.
 - **One-command operation:** install/doctor/run/pause/resume/stop/status from one CLI with automatic model/runtime setup where licensing and platform permissions allow it.
-- **Cross-platform core:** Windows, Linux, and macOS; x86-64 and ARM64 where Minecraft and the selected model runtime are available.
-- **Scoped control:** prefer per-instance input so the agent cannot steal the operator's desktop. Global input is a compatibility fallback, never the preferred backend.
+- **Concurrent desktop use:** the operator must be able to use other Linux applications while the Bedrock agent plays whenever the selected backend passes isolation tests.
+- **Scoped control:** prefer control isolated to the Bedrock Wine/container/session boundary. Host-global input is a compatibility fallback, never the preferred backend.
 - **Fail-safe stopping:** a separate supervisor, heartbeat watchdog, key-release on failure, and operator-owned stop paths that the agent cannot intercept.
 
 ## Target architecture
 
 ```text
-Minecraft video/audio/chat
+BedrockOnLinux / Minecraft.Windows.exe
           |
+          | video + audio + chat/UI
           v
 +----------------------------+
 | real-time perception       |  10-30 Hz tracking/encoding
@@ -63,7 +71,7 @@ minecraft-ai status
 minecraft-ai pause
 minecraft-ai resume
 minecraft-ai stop
-minecraft-ai knowledge sync
+minecraft-ai knowledge sync --version <bedrock-version>
 minecraft-ai wiki "How do I make a crafter?"
 ```
 
@@ -71,16 +79,28 @@ minecraft-ai wiki "How do I make a crafter?"
 
 ## Edition support
 
-The core is edition-neutral. Edition adapters provide version detection, authoritative data extraction, window/capture behavior, chat integration, and input backends.
+The core remains edition-neutral, but defaults are intentionally not neutral.
 
-- **Java Edition:** first-class target. Preferred concurrent-desktop control is a minimal client-side bridge that injects the same key/mouse semantics into one game instance without taking global OS focus. Strict mode still derives gameplay decisions from human-visible observations.
-- **Bedrock Edition:** supported through version-aware data and platform adapters. Scoped background input is platform-dependent; isolated-session/focused control is used where safe per-instance injection is unavailable.
+- **Bedrock Edition — default/reference target:** Linux host running the Windows Bedrock client through BedrockOnLinux/WineGDK. Runtime discovery tracks the BedrockOnLinux data root, managed Wine prefix, and `Minecraft.Windows.exe` process identity. Capture/input work should first target this environment and preserve host-desktop independence.
+- **Java Edition — optional compatibility target:** may use a minimal client-side bridge for per-instance control. Java-specific code must remain behind an adapter boundary and must not be required for ordinary Bedrock operation.
+
+### Bedrock Linux control strategy
+
+Preferred order:
+
+1. identify the exact Bedrock process/session and Wine prefix;
+2. capture only that game surface/session;
+3. inject gameplay-equivalent input inside the isolated Bedrock/Wine execution boundary where technically reliable;
+4. otherwise use a dedicated nested compositor/session whose input cannot leak to the host desktop;
+5. use host-global desktop injection only with explicit opt-in and a persistent warning.
+
+The release criterion is behavioral: while the agent is actively moving, looking, mining, fighting, or using inventory UI, the operator must be able to type and use the host desktop without receiving agent input.
 
 ## Knowledge and progression
 
-Every running instance resolves to an immutable `GameVersion` identity. The knowledge pipeline builds a provenance-carrying graph from exact-version machine-readable game data where available, then adds secondary normalized data and wiki explanations.
+Every running instance resolves to an immutable `GameVersion` identity. The Bedrock knowledge pipeline builds a provenance-carrying graph from exact-version machine-readable data where available, then adds secondary normalized data and wiki explanations.
 
-Core edge classes include crafting/cooking/smithing/brewing dependencies, loot/drop sources, tool requirements, biome/dimension/structure availability, trades, advancement/achievement prerequisites, and observed world-specific routes/resources.
+Core edge classes include crafting/cooking/smithing/brewing dependencies, loot/drop sources, tool requirements, biome/dimension/structure availability, trades, achievement prerequisites, and observed world-specific routes/resources.
 
 Plans are generated from this graph instead of a hard-coded recipe list.
 
