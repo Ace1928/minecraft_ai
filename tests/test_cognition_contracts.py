@@ -8,10 +8,15 @@ from minecraft_ai.cognition import CognitionContext, HighLevelController
 from minecraft_ai.models import ModelMessage, ModelResponse
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.roles import get_role
+from minecraft_ai.social import OperatorMessage
 
 
 class _ShelterSelectingModel:
     model_id = "contract-test"
+
+    def __init__(self, *, chosen_goal_id: str = "survive", say: str | None = None) -> None:
+        self.chosen_goal_id = chosen_goal_id
+        self.say = say
 
     def complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse:
         return self.complete_structured(messages, name="decision", schema={})
@@ -28,10 +33,10 @@ class _ShelterSelectingModel:
             text=json.dumps(
                 {
                     "reasoning_summary": "Build shelter now",
-                    "chosen_goal_id": "survive",
+                    "chosen_goal_id": self.chosen_goal_id,
                     "skill_id": "establish_basic_shelter",
                     "skill_parameters": {},
-                    "say": None,
+                    "say": self.say,
                     "request_replan": False,
                     "ask_perception": [],
                     "research_query": None,
@@ -93,3 +98,32 @@ def test_high_level_can_execute_observably_feasible_skill() -> None:
 
     assert decision.skill_id == "establish_basic_shelter"
     assert decision.request_replan is False
+
+
+def test_private_cognition_cannot_leak_into_game_chat() -> None:
+    controller = HighLevelController(
+        _ShelterSelectingModel(say="private chain of thought"),
+        build_bootstrap_skill_library(),
+    )
+
+    decision = controller.decide(_board(), _context())
+
+    assert decision.say is None
+
+
+def test_explicit_operator_reply_remains_available_as_social_output() -> None:
+    message = OperatorMessage(
+        message_id="message-1",
+        created_ns=time.time_ns(),
+        text="What are you doing?",
+    )
+    context = _context()
+    context.operator_messages = (message,)
+    controller = HighLevelController(
+        _ShelterSelectingModel(chosen_goal_id="operator:message-1", say="Gathering wood."),
+        build_bootstrap_skill_library(),
+    )
+
+    decision = controller.decide(_board(), context)
+
+    assert decision.say == "Gathering wood."

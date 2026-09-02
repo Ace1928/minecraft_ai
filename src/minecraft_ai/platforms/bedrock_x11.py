@@ -257,6 +257,14 @@ class IsolatedX11InputBackend:
             for char in text:
                 self._type_ascii(char)
             self._tap_key("enter")
+            # Bedrock's full chat screen retains two nested UI layers after a
+            # submitted message (compose, then history). Return explicitly to
+            # the world so the learned policy never receives chat pixels as a
+            # playable scene. This behavior was verified on the managed client.
+            time.sleep(0.04)
+            self._tap_key("escape")
+            time.sleep(0.04)
+            self._tap_key("escape")
         except Exception:
             # Never strand the player in a half-typed chat overlay.
             try:

@@ -219,6 +219,11 @@ class HighLevelController:
             else:
                 response = self.model.complete(messages)
             decision = _parse_decision(response.text)
+            operator_goal_ids = {
+                f"operator:{message.message_id}" for message in context.operator_messages
+            }
+            if decision.say is not None and decision.chosen_goal_id not in operator_goal_ids:
+                decision = decision.model_copy(update={"say": None})
             if decision.skill_id is not None and decision.skill_id not in self.skills.specs:
                 return self._bootstrap.decide(blackboard, context)
             if decision.skill_id is not None:
