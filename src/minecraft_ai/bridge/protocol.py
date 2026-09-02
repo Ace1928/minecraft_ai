@@ -7,7 +7,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
 PROTOCOL_VERSION = 1
 
 
@@ -38,6 +37,42 @@ class BridgeHello(BaseModel):
     capabilities: frozenset[BridgeCapability]
 
 
+class Authenticate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["authenticate"] = "authenticate"
+    protocol_version: int = PROTOCOL_VERSION
+    token: str = Field(min_length=24, max_length=512)
+    expected_instance_id: str = Field(min_length=8, max_length=256)
+
+
+class LeaseBind(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["lease_bind"] = "lease_bind"
+    protocol_version: int = PROTOCOL_VERSION
+    lease_id: str = Field(min_length=16, max_length=128)
+    supervisor_session_id: str = Field(min_length=16, max_length=128)
+    target_instance_id: str = Field(min_length=8, max_length=256)
+    expires_monotonic_ns: int = Field(gt=0)
+    allowed_actions: frozenset[Literal["keyboard", "button", "mouse"]]
+    max_action_duration_ms: int = Field(ge=1, le=1000)
+    first_sequence: int = Field(ge=0)
+
+    def expired(self, now_ns: int | None = None) -> bool:
+        now = time.monotonic_ns() if now_ns is None else now_ns
+        return now >= self.expires_monotonic_ns
+
+
+class LeaseClear(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["lease_clear"] = "lease_clear"
+    protocol_version: int = PROTOCOL_VERSION
+    lease_id: str | None = Field(default=None, max_length=128)
+    reason: str = Field(min_length=1, max_length=256)
+
+
 class InputCommand(BaseModel):
     """Bounded per-instance input semantics.
 
@@ -58,6 +93,7 @@ class InputCommand(BaseModel):
     buttons_up: tuple[str, ...] = ()
     mouse_dx: int = Field(default=0, ge=-4096, le=4096)
     mouse_dy: int = Field(default=0, ge=-4096, le=4096)
+    duration_ms: int = Field(default=0, ge=0, le=1000)
 
     @field_validator("keys_down", "keys_up", "buttons_down", "buttons_up")
     @classmethod
@@ -97,7 +133,17 @@ class BridgeAck(BaseModel):
     kind: Literal["ack"] = "ack"
     protocol_version: int = PROTOCOL_VERSION
     sequence: int = Field(ge=0)
-    instance_id: str
+    instance_id: str = Field(min_length=8, max_length=256)
+
+
+class BridgeError(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["error"] = "error"
+    protocol_version: int = PROTOCOL_VERSION
+    code: str = Field(min_length=1, max_length=128)
+    message: str = Field(min_length=1, max_length=1024)
+    release_all: bool = True
 
 
 class ChatEvent(BaseModel):
