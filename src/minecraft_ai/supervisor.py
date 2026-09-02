@@ -14,7 +14,7 @@ from typing import Any
 
 from platformdirs import user_runtime_dir
 
-from .safety import FakeInputBackend, MotorGate, SupervisorState, validate_transition
+from .safety import FakeInputBackend, MotorGate, SupervisorState, allowed_targets, validate_transition
 
 APP_NAME = "minecraft-ai"
 RUNTIME_DIR = Path(user_runtime_dir(APP_NAME))
@@ -128,7 +128,7 @@ class Supervisor:
             self.last_fault = reason
             self.motor.revoke(reason)
             if self.state != SupervisorState.FAILSAFE:
-                if SupervisorState.FAILSAFE in self._allowed_targets():
+                if SupervisorState.FAILSAFE in allowed_targets(self.state):
                     self.state = SupervisorState.FAILSAFE
             self._persist_status()
 
@@ -261,11 +261,6 @@ class Supervisor:
                 CONTROL_FILE.unlink()
             except FileNotFoundError:
                 pass
-
-    def _allowed_targets(self) -> frozenset[SupervisorState]:
-        from .safety import _ALLOWED_TRANSITIONS
-
-        return _ALLOWED_TRANSITIONS[self.state]
 
 
 def send_command(command: str, **payload: Any) -> dict[str, Any]:
