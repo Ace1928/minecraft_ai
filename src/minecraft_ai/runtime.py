@@ -237,8 +237,13 @@ class AgentRuntime:
         self.metrics.consecutive_stale_frames = 0
         self.telemetry.publish(self._telemetry_payload(state="running"))
         self._consume_cognition()
-        self._request_semantics_if_due(frame.frame_id)
         self._start_cognition_if_due()
+        # A queued/delivered operator message has priority over an optional VLM
+        # refresh on the shared local accelerator. This keeps corrections from
+        # waiting behind a long semantic request while normal unattended play
+        # continues to refresh semantics at its configured cadence.
+        if not self._pending_operator_message_ids:
+            self._request_semantics_if_due(frame.frame_id)
 
         active = self.executor.run
         if active is None or active.outcome != SkillOutcome.RUNNING:
