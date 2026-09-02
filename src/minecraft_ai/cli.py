@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import platform
-import signal
 import subprocess
 import sys
 import time
@@ -13,10 +12,17 @@ import typer
 from platformdirs import user_data_dir, user_runtime_dir
 from rich import print
 
+from .emergency import (
+    clear_emergency_stop,
+    emergency_reason,
+    emergency_stop_latched,
+    engage_emergency_stop,
+    terminate_registered_supervisor,
+)
 from .knowledge import Edition, GameVersion, KnowledgeGraph
 from .knowledge.importers import import_java_datapack
 from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
-from .supervisor import CONTROL_FILE, STATUS_FILE, ControlEndpoint, send_command, supervisor_alive
+from .supervisor import CONTROL_FILE, STATUS_FILE, send_command, supervisor_alive
 
 app = typer.Typer(help="Minecraft AI lifecycle and tooling CLI.")
 knowledge_app = typer.Typer(help="Versioned game knowledge commands.")
@@ -90,6 +96,10 @@ def doctor() -> None:
         "data_dir": str(DATA_DIR),
         "runtime_dir": str(RUNTIME_DIR),
         "supervisor": "running" if supervisor_alive() else "stopped",
+        "emergency_stop": {
+            "latched": emergency_stop_latched(),
+            "reason": emergency_reason(),
+        },
         "bedrock_on_linux": {
             "detected": bol is not None,
             "data_dir": str(bol.data_dir) if bol is not None else None,
@@ -109,13 +119,13 @@ def run(
     edition: Edition = typer.Option(DEFAULT_EDITION, "--edition"),
     live: bool = typer.Option(False, help="Request live input when a gated backend exists."),
 ) -> None:
-    """Start the independent supervisor in SAFE_IDLE.
-
-    Bedrock Edition is the default runtime. Phase 0 intentionally exposes only
-    the fake motor backend; `--live` fails closed until a scoped Bedrock backend
-    passes the safety gates.
-    """
+    """Start the independent supervisor in SAFE_IDLE."""
     _ensure_dirs()
+    if emergency_stop_latched():
+        raise typer.BadParameter(
+            "Emergency stop is latched. Run `minecraft-ai reset-emergency-stop` "
+            "explicitly before starting again."
+        )
     if live:
         raise typer.BadParameter(
             "Live input is not enabled yet. The independent supervisor and "
@@ -165,6 +175,8 @@ def status() -> None:
     else:
         payload = _read_status_file()
         payload["supervisor_reachable"] = False
+        payload["emergency_stop_latched"] = emergency_stop_latched()
+        payload["emergency_stop_reason"] = emergency_reason()
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
@@ -178,28 +190,24 @@ def pause() -> None:
 @app.command()
 def resume() -> None:
     """Return a paused supervisor to SAFE_IDLE; this never arms live input."""
+    if emergency_stop_latched():
+        raise typer.BadParameter("Emergency stop is latched; reset it explicitly first.")
     payload = _command("resume")
     print(f"[green]{payload['state']}[/green] — live input remains unarmed.")
 
 
 @app.command()
 def stop() -> None:
-    """Stop through the control socket, with a process-level fallback."""
+    """Normal stop: control socket first, OS-level PID termination as fallback."""
     if not CONTROL_FILE.exists():
         print("[bold red]STOPPED[/bold red] — no supervisor endpoint exists.")
         return
 
-    endpoint: ControlEndpoint | None = None
     try:
-        endpoint = ControlEndpoint.load()
         send_command("stop")
     except Exception as exc:
-        print(f"[yellow]Control socket stop failed ({exc}); using process fallback.[/yellow]")
-        if endpoint is not None:
-            try:
-                os.kill(endpoint.pid, signal.SIGTERM)
-            except (OSError, ProcessLookupError):
-                pass
+        print(f"[yellow]Control socket stop failed ({exc}); using OS fallback.[/yellow]")
+        terminate_registered_supervisor()
 
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
@@ -207,7 +215,30 @@ def stop() -> None:
             print("[bold red]STOPPED[/bold red] — supervisor is no longer reachable.")
             return
         time.sleep(0.05)
-    raise typer.BadParameter("supervisor did not stop; use the independent OS/process stop path")
+    raise typer.BadParameter("supervisor did not stop; use `minecraft-ai emergency-stop`")
+
+
+@app.command("emergency-stop")
+def emergency_stop(reason: str = typer.Option("operator-emergency-stop", "--reason")) -> None:
+    """Latch a stop and terminate the registered supervisor without using IPC.
+
+    This is deliberately independent of cognition and the authenticated control
+    socket. The latch survives process restarts and must be explicitly reset.
+    """
+    engage_emergency_stop(reason)
+    terminated = terminate_registered_supervisor()
+    print("[bold red]EMERGENCY STOP LATCHED[/bold red]")
+    print(f"OS-level supervisor termination attempted: {terminated}")
+    print("The agent cannot be restarted until `minecraft-ai reset-emergency-stop` is run.")
+
+
+@app.command("reset-emergency-stop")
+def reset_emergency_stop() -> None:
+    """Clear the persistent stop latch. This does not start or arm the agent."""
+    if supervisor_alive():
+        raise typer.BadParameter("Stop the supervisor before resetting the emergency latch.")
+    clear_emergency_stop()
+    print("[green]Emergency stop latch cleared.[/green] Agent remains stopped.")
 
 
 @app.command()
