@@ -247,6 +247,39 @@ def test_grounded_router_shares_one_physical_pitch_state(tmp_path: Path) -> None
     assert grounded.status()["camera_recovery_active"] is False
 
 
+def test_restored_off_center_camera_recovers_to_release_envelope(
+    tmp_path: Path,
+) -> None:
+    config = _policy_config(tmp_path).model_copy(
+        update={
+            "camera_max_step": 3,
+            "camera_pitch_limit": 100,
+            "camera_recovery_release": 10,
+        }
+    )
+    client = TemporalPolicyClient(config=config, frame_provider=lambda: None)
+    client.restore_world_camera_state(estimated_pitch_units=-16)
+
+    assert client.status()["camera_recovery_active"] is True
+
+    learned = LearnedPolicyOutput(
+        keys=("w",),
+        mouse_dx=2,
+        mouse_dy=-20,
+        inference_ns=1,
+        model_version="official-v1",
+    )
+    first = client._output_action(learned, sequence=1)
+    second = client._hold(sequence=2)
+
+    assert (first.mouse_dx, first.mouse_dy) == (2, 3)
+    assert first.keys_down == ("w",)
+    assert (second.mouse_dx, second.mouse_dy) == (0, 3)
+    assert client.status()["estimated_pitch_units"] == -10
+    assert client.status()["camera_recovery_active"] is False
+    assert client.status()["pending_camera"] == {"mouse_dx": 0, "mouse_dy": 0}
+
+
 def test_grounded_router_merges_temporally_filtered_target_feedback() -> None:
     primary = _RoutingPolicy("steve", key="w")
     grounded = _TargetFeedbackPolicy("rocket", key="a")

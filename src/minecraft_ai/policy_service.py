@@ -155,9 +155,9 @@ class TemporalPolicyClient:
     def restore_world_camera_state(self, *, estimated_pitch_units: int) -> None:
         """Restore actuator pitch owned by the persistent supervisor."""
         self._world_camera_state.estimated_pitch_units = estimated_pitch_units
-        limit = self.config.camera_pitch_limit
         self._camera_recovery_active = bool(
-            limit > 0 and abs(estimated_pitch_units) >= limit
+            self.config.camera_pitch_limit > 0
+            and abs(estimated_pitch_units) > self.config.camera_recovery_release
         )
 
     def target_observation(self) -> GroundedTargetObservation | None:

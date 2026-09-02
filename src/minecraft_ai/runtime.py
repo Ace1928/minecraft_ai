@@ -856,8 +856,10 @@ class AgentRuntime:
             "storage_backlog": len(self._pending_skill_stats),
             "last_storage_error": self.metrics.last_storage_error,
             "active_skill": None if running is None else running.skill_id,
-            "active_skill_parameters": self.executor.parameters,
-            "active_instruction": self.executor.instruction,
+            "active_skill_parameters": (
+                {} if running is None else self.executor.policy_parameters
+            ),
+            "active_instruction": None if running is None else self.executor.instruction,
             "skill_outcome": None if running is None else running.outcome.value,
             "recent_skill_runs": [
                 run.model_dump(mode="json") for run in self._recent_skill_runs
