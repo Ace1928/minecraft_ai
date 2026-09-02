@@ -130,9 +130,12 @@ class ActiveVLMWorker:
         return SemanticObservation.model_validate(json.loads(raw_text))
 
     def _publish(self, job: SemanticJob, observation: SemanticObservation) -> None:
-        latest = self.blackboard.latest()
-        # Never publish semantic results onto a different/newer instance.
+        latest = self.blackboard.raw_latest()
         if latest is None or latest.instance_id != self.instance_id:
+            return
+        # If a very old semantic job survived long enough to be irrelevant,
+        # discard it instead of contaminating the current tactical state.
+        if latest.frame_id - job.query.frame_id > 120:
             return
         now = time.monotonic_ns()
         facts = tuple(
@@ -166,20 +169,11 @@ class ActiveVLMWorker:
             ChatLine(text=text, observed_ns=now, confidence=0.7)
             for text in observation.chat
         )
-        # Semantic result is a new monotonic state snapshot derived from the
-        # same captured image, not a mutation of the old FrameState.
-        self.blackboard.publish(
-            FrameState(
-                frame_id=latest.frame_id + 1,
-                captured_ns=max(now, latest.captured_ns + 1),
-                instance_id=self.instance_id,
-                width=latest.width,
-                height=latest.height,
-                player=latest.player,
-                tracks=tracks or latest.tracks,
-                chat=chat,
-                facts=facts,
-            )
+        self.blackboard.merge_semantics(
+            instance_id=self.instance_id,
+            facts=facts,
+            tracks=tracks,
+            chat=chat,
         )
 
 
@@ -192,13 +186,20 @@ class RealtimePerceptionService:
     stale_frame_ms: int = 500
     active_vlm: ActiveVLMWorker | None = None
     _last_frame_ns: int | None = field(default=None, init=False)
+    _last_capture: CapturedFrame | None = field(default=None, init=False)
+
+    @property
+    def last_capture(self) -> CapturedFrame | None:
+        return self._last_capture
 
     def capture_once(self) -> FrameState:
         captured = self.capture_source.capture()
         if self._last_frame_ns is not None and captured.captured_ns <= self._last_frame_ns:
             raise RuntimeError("capture timestamps are not monotonic")
         self._last_frame_ns = captured.captured_ns
-        frame_id = (self.blackboard.latest().frame_id + 1) if self.blackboard.latest() else 0
+        self._last_capture = captured
+        previous = self.blackboard.raw_latest()
+        frame_id = previous.frame_id + 1 if previous is not None else 0
         state = FrameState(
             frame_id=frame_id,
             captured_ns=captured.captured_ns,
@@ -209,13 +210,20 @@ class RealtimePerceptionService:
         self.blackboard.publish(state)
         return state
 
-    def request_semantics(self, query: ActivePerceptionQuery, frame: CapturedFrame) -> bool:
+    def request_semantics(
+        self,
+        query: ActivePerceptionQuery,
+        frame: CapturedFrame | None = None,
+    ) -> bool:
         if self.active_vlm is None:
             return False
-        return self.active_vlm.submit(SemanticJob(query=query, frame=frame))
+        selected = self._last_capture if frame is None else frame
+        if selected is None:
+            return False
+        return self.active_vlm.submit(SemanticJob(query=query, frame=selected))
 
     def stale(self, now_ns: int | None = None) -> bool:
-        latest = self.blackboard.latest()
+        latest = self.blackboard.raw_latest()
         if latest is None:
             return True
         now = time.monotonic_ns() if now_ns is None else now_ns
