@@ -3,7 +3,7 @@ model_version: minestudio-steve1-official
 provider: CraftJarvis MineStudio / STEVE-1
 architecture: MineCLIP-conditioned VPT 2x temporal policy
 purpose: short-horizon text-conditioned native-interface Minecraft control
-promotion_status: research-only-candidate-live-domain-transfer
+promotion_status: research-only-live-baseline
 goal_conditioned: true
 temporal_memory: true
 research_only: true
@@ -44,6 +44,7 @@ evidence:
   - The isolated service preserved temporal state and returned a 204.07 ms steady prediction.
   - A calibrated live Bedrock run selected 7 jumps, including 3 sprint-jumps, and 4 camera actions in its first 35 accepted predictions.
   - The same run later plateaued at 422 repeated attack predictions without reacquiring the visible log, so it remains a baseline rather than a promoted controller.
+  - It remains selected over the SkillDiscovery hybrid because it is a complete upstream text-conditioned checkpoint and produced stronger live jump/camera behavior; neither candidate completed the wood-gathering task.
 limitations:
   - The checkpoint artifact and original STEVE-1 repository do not declare a license.
   - It is restricted to local research evaluation and is not redistributable or promotable.

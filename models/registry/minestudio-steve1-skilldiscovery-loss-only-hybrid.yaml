@@ -3,7 +3,7 @@ model_version: minestudio-steve1-skilldiscovery-loss-only-hybrid
 provider: CraftJarvis SkillDiscovery / MineStudio STEVE-1
 architecture: SkillDiscovery-tuned MineCLIP-conditioned VPT 2x temporal policy
 purpose: short-horizon text-conditioned native-interface Minecraft control candidate
-promotion_status: candidate-live-ab-test
+promotion_status: rejected-live-domain-transfer-candidate
 goal_conditioned: true
 temporal_memory: true
 research_only: true
@@ -36,7 +36,10 @@ runtime:
 evidence:
   - The upstream model card reports a Skill Boundary Detection dataset improvement over randomly segmented training baselines.
   - All locally assembled tensors, source revisions and artifact hashes are recorded in the machine-local provenance manifest.
+  - In a live Bedrock A/B, the candidate emitted 83 forward, 7 camera, 3 jump and 2 attack selections in its first 106 accepted predictions.
+  - The candidate avoided the official checkpoint's immediate attack loop but drove repeatedly into the same obstruction and did not complete the wood-gathering option.
 limitations:
   - This is a reproducible hybrid artifact, not a byte-for-byte upstream checkpoint.
   - The official STEVE-1 conditioning tensors have no declared license, so this candidate remains research-only.
   - Upstream Java results do not establish Bedrock superiority; the live A/B and frozen Bedrock benchmark must decide promotion.
+  - The live A/B did not beat the complete official checkpoint on controlled movement, jumping or task completion, so it is not selected for runtime use.

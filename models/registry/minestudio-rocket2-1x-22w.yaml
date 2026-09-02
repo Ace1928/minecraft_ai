@@ -40,8 +40,10 @@ evidence:
   - The current-view target head localized an operator-selected Bedrock tree with greater than 0.999 existence probability.
   - The predicted bounding box overlapped the explicit operator target region on the live Bedrock frame.
   - The isolated process preserves the released 128-step recurrent state and previous-action input.
+  - A 90-second live grounded Bedrock attempt returned 339 predictions with 113 camera, 9 forward, 217 attack and 0 jump selections; it did not acquire a log.
 limitations:
   - Target localization does not prove successful interaction or task completion.
   - A deterministic Bedrock probe selected the generic drop bit, which is outside the released ROCKET-2 recurrent action contract and is now masked.
   - Java-to-Bedrock visual, GUI and input domain adaptation is not yet trained.
   - It is not eligible for preferred-policy claims until it beats the frozen Bedrock suite.
+  - High localization confidence did not imply successful control in the live wood-gathering attempt.
