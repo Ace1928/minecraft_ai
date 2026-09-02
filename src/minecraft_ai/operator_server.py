@@ -4,8 +4,11 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import threading
 import time
 import uuid
+from collections import OrderedDict
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -21,6 +24,7 @@ from .emergency import emergency_reason, emergency_stop_latched
 from .perception import ScreenRegion, Track
 from .perception_service import frame_dhash
 from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
+from .platforms.bedrock_session import BedrockSession, bedrock_session_alive
 from .platforms.bedrock_x11 import CapturedFrame, IsolatedX11Capture
 from .social import OperatorMessage, OperatorMessageKind
 from .storage import StateDatabase
@@ -29,6 +33,53 @@ from .telemetry import read_telemetry
 
 
 MAX_BODY_BYTES = 16 * 1024
+FRAME_REFERENCE_TTL_NS = 120 * 1_000_000_000
+MAX_FRAME_REFERENCES = 8
+
+
+@dataclass(frozen=True)
+class _FrameReference:
+    frame: CapturedFrame
+    dhash: str
+    cached_ns: int
+
+
+_frame_references: OrderedDict[str, _FrameReference] = OrderedDict()
+_frame_references_lock = threading.Lock()
+
+
+def _cache_frame_reference(frame: CapturedFrame, dhash: str) -> str:
+    """Retain the exact displayed frame long enough for an operator selection.
+
+    Selection coordinates are meaningful only for the pixels the operator saw.
+    A second capture at submit time can have a different camera pose, especially
+    while a motor policy is active, so the browser carries this opaque token
+    back when it commits a target.
+    """
+    token = uuid.uuid4().hex
+    now_ns = time.monotonic_ns()
+    with _frame_references_lock:
+        stale_before = now_ns - FRAME_REFERENCE_TTL_NS
+        stale = [
+            key
+            for key, reference in _frame_references.items()
+            if reference.cached_ns < stale_before
+        ]
+        for key in stale:
+            _frame_references.pop(key, None)
+        _frame_references[token] = _FrameReference(frame=frame, dhash=dhash, cached_ns=now_ns)
+        while len(_frame_references) > MAX_FRAME_REFERENCES:
+            _frame_references.popitem(last=False)
+    return token
+
+
+def _consume_frame_reference(token: str) -> tuple[CapturedFrame, str] | None:
+    now_ns = time.monotonic_ns()
+    with _frame_references_lock:
+        reference = _frame_references.pop(token, None)
+    if reference is None or now_ns - reference.cached_ns > FRAME_REFERENCE_TTL_NS:
+        return None
+    return reference.frame, reference.dhash
 
 
 def _read_json_file(path: Path) -> dict[str, object] | None:
@@ -83,31 +134,35 @@ def operator_status() -> dict[str, object]:
     }
 
 
-def _current_agent_reference() -> tuple[CapturedFrame, str] | None:
-    """Capture the exact view used for a durable operator grounding reference.
-
-    The target can still be stored when no capture process is available (for
-    offline UI/state inspection), but only a live target receives the image and
-    perceptual hash needed for durable grounded-policy admission.
-    """
+def _capture_live_bedrock_frame() -> CapturedFrame | None:
+    """Capture Bedrock even while the agent process is safely disarmed."""
+    targets: list[tuple[str, int]] = []
     try:
         process = AgentProcess.load()
     except (OSError, ValueError, TypeError, KeyError):
-        return None
-    if not agent_alive(process):
-        return None
-    capture = IsolatedX11Capture(
-        process.display,
-        process.window_id,
-        allow_host=False,
-    )
+        process = None
+    if process is not None:
+        targets.append((process.display, process.window_id))
     try:
-        frame = capture.capture()
-        return frame, frame_dhash(frame)
-    except (OSError, RuntimeError, ValueError):
-        return None
-    finally:
-        capture.close()
+        session = BedrockSession.load()
+    except (OSError, ValueError, TypeError, KeyError):
+        session = None
+    if session is not None and bedrock_session_alive(session):
+        window_id = session.find_window()
+        if window_id is not None and (session.display, window_id) not in targets:
+            targets.append((session.display, window_id))
+    for display, window_id in targets:
+        try:
+            capture = IsolatedX11Capture(display, window_id, allow_host=False)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        try:
+            return capture.capture()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        finally:
+            capture.close()
+    return None
 
 
 def _persist_operator_reference(track_id: str, frame: CapturedFrame) -> tuple[Path, str]:
@@ -216,29 +271,13 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.CREATED, message.model_dump(mode="json"))
 
     def _get_frame(self) -> None:
-        try:
-            process = AgentProcess.load()
-        except (OSError, ValueError, TypeError, KeyError):
+        frame = _capture_live_bedrock_frame()
+        if frame is None:
             self._send_json(
                 HTTPStatus.SERVICE_UNAVAILABLE,
-                {"error": "agent capture process is not running"},
+                {"error": "isolated Bedrock capture is not available"},
             )
             return
-        if not agent_alive(process):
-            self._send_json(
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                {"error": "agent capture process is not running"},
-            )
-            return
-        capture = IsolatedX11Capture(
-            process.display,
-            process.window_id,
-            allow_host=False,
-        )
-        try:
-            frame = capture.capture()
-        finally:
-            capture.close()
         image = Image.frombytes(
             "RGBA",
             (frame.width, frame.height),
@@ -248,39 +287,56 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
         ).convert("RGB")
         output = BytesIO()
         image.save(output, format="JPEG", quality=86, optimize=True)
-        self._send_bytes(HTTPStatus.OK, output.getvalue(), "image/jpeg")
+        frame_token = _cache_frame_reference(frame, frame_dhash(frame))
+        self._send_bytes(
+            HTTPStatus.OK,
+            output.getvalue(),
+            "image/jpeg",
+            extra_headers={"X-Minecraft-Frame-Token": frame_token},
+        )
 
     def _post_target(self, payload: dict[str, Any]) -> None:
-        allowed = {"label", "x", "y", "width", "height"}
+        allowed = {"label", "x", "y", "width", "height", "frame_token"}
         unexpected = sorted(set(payload) - allowed)
         if unexpected:
             raise ValueError(f"unsupported fields: {', '.join(unexpected)}")
         label = str(payload.get("label", "target")).strip()[:80]
         if not label:
             raise ValueError("target label is required")
+        frame_token = str(payload.get("frame_token", "")).strip()
+        if not frame_token:
+            raise ValueError(
+                "target frame token is required; select the target on a fresh live frame"
+            )
+        region = ScreenRegion(
+            x=float(payload["x"]),
+            y=float(payload["y"]),
+            width=float(payload["width"]),
+            height=float(payload["height"]),
+        )
+        if region.x + region.width > 1.0 or region.y + region.height > 1.0:
+            raise ValueError("target region must be fully contained in the displayed frame")
+        reference = _consume_frame_reference(frame_token)
+        if reference is None:
+            raise ValueError("target frame expired; refresh the live frame and select it again")
         now_ns = time.monotonic_ns()
         attributes: dict[str, str | int | float | bool] = {
             "source": "operator",
             "grounding": "explicit-region",
         }
         track_id = f"operator:{uuid.uuid4().hex}"
-        reference = _current_agent_reference()
-        if reference is not None:
-            frame, reference_dhash = reference
-            reference_path, reference_sha256 = _persist_operator_reference(track_id, frame)
-            attributes["reference_dhash"] = reference_dhash
-            attributes["reference_image_path"] = str(reference_path)
-            attributes["reference_image_sha256"] = reference_sha256
+        frame, reference_dhash = reference
+        reference_path, reference_sha256 = _persist_operator_reference(track_id, frame)
+        attributes["reference_dhash"] = reference_dhash
+        attributes["reference_image_path"] = str(reference_path)
+        attributes["reference_image_sha256"] = reference_sha256
+        attributes["reference_frame_id"] = frame.frame_id
+        attributes["reference_captured_ns"] = frame.captured_ns
         target = Track(
             track_id=track_id,
             label=label,
             confidence=1.0,
-            region=ScreenRegion(
-                x=float(payload["x"]),
-                y=float(payload["y"]),
-                width=float(payload["width"]),
-                height=float(payload["height"]),
-            ),
+            region=region,
             first_seen_ns=now_ns,
             last_seen_ns=now_ns,
             attributes=attributes,
@@ -317,13 +373,22 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             "application/json; charset=utf-8",
         )
 
-    def _send_bytes(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
+    def _send_bytes(
+        self,
+        status: HTTPStatus,
+        body: bytes,
+        content_type: str,
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -381,8 +446,9 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 .facts{margin:9px 0 0;max-height:220px;overflow:auto;white-space:pre-wrap;color:#b8d8ca;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}
 .metric{background:#09130f;border:1px solid #1d3028;border-radius:8px;padding:9px}.metric b{display:block;font-size:17px;margin-top:3px}
 .viewer{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:#030705;line-height:0;user-select:none;touch-action:none}
-.viewer img{display:block;width:100%;height:auto;min-height:220px;object-fit:contain}.selection{position:absolute;border:2px solid var(--cyan);background:#70d7e829;box-shadow:0 0 0 1px #001a;display:none;pointer-events:none}
+.viewer img{display:block;width:100%;height:auto;object-fit:contain}.selection{position:absolute;border:2px solid var(--cyan);background:#70d7e829;box-shadow:0 0 0 1px #001a;display:none;pointer-events:none}
 .prediction{position:absolute;border:2px dashed var(--amber);background:#ffc76618;box-shadow:0 0 12px #ffc76688;display:none;pointer-events:none}
+.target-review{display:flex;align-items:center;gap:12px;margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:9px;background:#09130f}.target-review[hidden]{display:none}.target-review canvas{width:160px;height:90px;object-fit:contain;background:#020403;border:1px solid #31483e;border-radius:6px}.target-review b,.target-review span{display:block}.target-review span{color:var(--muted);font-size:12px;margin-top:4px}
 .ok{color:var(--green)}.bad{color:var(--red)}.amber{color:var(--amber)}#notice{min-height:20px;margin-top:9px;color:var(--muted)}
 @media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}.wide{grid-column:span 2}}
 @media(max-width:540px){main{padding:16px}.grid{grid-template-columns:1fr}.wide,.full{grid-column:1}.row{flex-direction:column}.live{display:none}}
@@ -399,6 +465,7 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 <div class="card"><div class="label">Camera state</div><div class="value" id="camera">—</div><div id="cameraMode" class="label"></div></div>
 <div class="card wide"><div class="label">Latest cognition</div><div class="reason" id="reason">Waiting for agent telemetry.</div><div class="label" id="outcome"></div></div></section>
 <section class="card"><h2>Ground ROCKET-2 on the live Bedrock frame</h2><div class="viewer" id="viewer"><img id="worldFrame" alt="Live Bedrock frame" draggable="false"><div class="selection" id="selection"></div><div class="prediction" id="prediction" title="ROCKET-2 learned current-view prediction"></div></div>
+<div class="target-review" id="targetReview" hidden><canvas id="targetPreview" width="320" height="180"></canvas><div><b>Exact target pixels</b><span>This frame is frozen until you arm or clear the selection. Confirm the crop matches the label.</span></div></div>
 <div class="row"><input id="targetLabel" maxlength="80" value="log" aria-label="Target label"><button id="setTarget">Run ROCKET-2 on selection</button><button class="secondary" id="clearTarget">Clear target</button></div><div id="targetNotice" class="label">Drag a tight box around the object, then submit it as ROCKET-2's cross-view reference.</div></section>
 <section class="card"><h2>Fresh learned perception</h2><pre class="facts" id="facts">Waiting for perception facts.</pre></section>
 <section class="two"><div class="card"><h2>Talk to the high-level agent</h2><textarea id="text" maxlength="2000" placeholder="Give an instruction, ask a question, provide feedback, or correct its current approach…"></textarea>
@@ -411,14 +478,18 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 const $=id=>document.getElementById(id);const esc=v=>v??'—';
 async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);return d}
 function cls(el,good){el.className='value '+(good?'ok':'bad')}
-let dragging=false,startX=0,startY=0,targetBox=null;const viewer=$('viewer'),selection=$('selection'),prediction=$('prediction'),worldFrame=$('worldFrame');
-function point(e){const r=worldFrame.getBoundingClientRect();return{x:Math.max(0,Math.min(r.width,e.clientX-r.left)),y:Math.max(0,Math.min(r.height,e.clientY-r.top)),w:r.width,h:r.height}}
-function drawBox(box){selection.style.display='block';selection.style.left=(box.x*100)+'%';selection.style.top=(box.y*100)+'%';selection.style.width=(box.width*100)+'%';selection.style.height=(box.height*100)+'%'}
-function drawPrediction(raw,confidence){if(!raw||raw.length!==4||!worldFrame.naturalWidth){prediction.style.display='none';return}const w=worldFrame.naturalWidth,h=worldFrame.naturalHeight,r=16/9;let ox=0,oy=0,cw=w,ch=h;if(w/h>r){cw=h*r;ox=(w-cw)/2}else{ch=w/r;oy=(h-ch)/2}const x=(ox+raw[0]*cw)/w,y=(oy+raw[1]*ch)/h,x1=(ox+raw[2]*cw)/w,y1=(oy+raw[3]*ch)/h;prediction.style.display='block';prediction.style.left=(x*100)+'%';prediction.style.top=(y*100)+'%';prediction.style.width=(Math.max(0,x1-x)*100)+'%';prediction.style.height=(Math.max(0,y1-y)*100)+'%';prediction.title='ROCKET-2 learned target · '+Math.round((confidence||0)*100)+'%'}
-viewer.onpointerdown=e=>{if(!worldFrame.complete)return;const p=point(e);dragging=true;startX=p.x;startY=p.y;viewer.setPointerCapture(e.pointerId);targetBox={x:p.x/p.w,y:p.y/p.h,width:.001,height:.001};drawBox(targetBox)};
+let dragging=false,startX=0,startY=0,targetBox=null,displayedFrameToken=null,frameObjectUrl=null,frameLoading=false;const viewer=$('viewer'),selection=$('selection'),prediction=$('prediction'),worldFrame=$('worldFrame'),targetReview=$('targetReview'),targetPreview=$('targetPreview');
+function imageRect(){const r=worldFrame.getBoundingClientRect(),nw=worldFrame.naturalWidth,nh=worldFrame.naturalHeight;if(!nw||!nh)return{left:r.left,top:r.top,width:r.width,height:r.height};const imageRatio=nw/nh,boxRatio=r.width/r.height;let width=r.width,height=r.height,left=r.left,top=r.top;if(boxRatio>imageRatio){width=r.height*imageRatio;left+=(r.width-width)/2}else if(boxRatio<imageRatio){height=r.width/imageRatio;top+=(r.height-height)/2}return{left,top,width,height}}
+function point(e){const r=imageRect();return{x:Math.max(0,Math.min(r.width,e.clientX-r.left)),y:Math.max(0,Math.min(r.height,e.clientY-r.top)),w:r.width,h:r.height}}
+function placeBox(el,box){const r=imageRect(),v=viewer.getBoundingClientRect();el.style.display='block';el.style.left=(r.left-v.left+box.x*r.width)+'px';el.style.top=(r.top-v.top+box.y*r.height)+'px';el.style.width=(box.width*r.width)+'px';el.style.height=(box.height*r.height)+'px'}
+function drawBox(box){placeBox(selection,box)}
+function drawPrediction(raw,confidence){if(!raw||raw.length!==4||!worldFrame.naturalWidth){prediction.style.display='none';return}const w=worldFrame.naturalWidth,h=worldFrame.naturalHeight,r=16/9;let ox=0,oy=0,cw=w,ch=h;if(w/h>r){cw=h*r;ox=(w-cw)/2}else{ch=w/r;oy=(h-ch)/2}const x=(ox+raw[0]*cw)/w,y=(oy+raw[1]*ch)/h,x1=(ox+raw[2]*cw)/w,y1=(oy+raw[3]*ch)/h;placeBox(prediction,{x,y,width:Math.max(0,x1-x),height:Math.max(0,y1-y)});prediction.title='ROCKET-2 learned target · '+Math.round((confidence||0)*100)+'%'}
+function drawTargetPreview(){if(!targetBox||!worldFrame.naturalWidth){targetReview.hidden=true;return}const c=targetPreview.getContext('2d'),w=worldFrame.naturalWidth,h=worldFrame.naturalHeight,sw=targetBox.width*w,sh=targetBox.height*h,scale=Math.min(targetPreview.width/sw,targetPreview.height/sh),dw=sw*scale,dh=sh*scale,dx=(targetPreview.width-dw)/2,dy=(targetPreview.height-dh)/2;c.clearRect(0,0,targetPreview.width,targetPreview.height);c.imageSmoothingEnabled=false;c.drawImage(worldFrame,targetBox.x*w,targetBox.y*h,sw,sh,dx,dy,dw,dh);targetReview.hidden=false}
+viewer.onpointerdown=e=>{if(!displayedFrameToken||!worldFrame.complete||!worldFrame.naturalWidth)return;const p=point(e);dragging=true;startX=p.x;startY=p.y;viewer.setPointerCapture(e.pointerId);targetBox={x:p.x/p.w,y:p.y/p.h,width:.001,height:.001};drawBox(targetBox);targetReview.hidden=true};
 viewer.onpointermove=e=>{if(!dragging)return;const p=point(e),x=Math.min(startX,p.x),y=Math.min(startY,p.y);targetBox={x:x/p.w,y:y/p.h,width:Math.max(1,Math.abs(p.x-startX))/p.w,height:Math.max(1,Math.abs(p.y-startY))/p.h};drawBox(targetBox)};
-viewer.onpointerup=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId)};
-function refreshFrame(){if(!dragging)worldFrame.src='/api/frame.png?t='+Date.now()}
+viewer.onpointerup=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId);drawTargetPreview();$('targetNotice').textContent='Review the frozen crop, then arm it only if the pixels match the label.'};
+viewer.onpointercancel=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId);drawTargetPreview()};
+async function refreshFrame(){if(dragging||targetBox||frameLoading)return;frameLoading=true;try{const r=await fetch('/api/frame.png?t='+Date.now());if(!r.ok)throw Error('live frame unavailable');const token=r.headers.get('X-Minecraft-Frame-Token');if(!token)throw Error('live frame has no reference token');const blob=await r.blob(),url=URL.createObjectURL(blob),old=frameObjectUrl;displayedFrameToken=null;await new Promise((resolve,reject)=>{worldFrame.onload=resolve;worldFrame.onerror=reject;worldFrame.src=url});frameObjectUrl=url;displayedFrameToken=token;if(old)URL.revokeObjectURL(old)}catch(e){}finally{frameLoading=false}}
 async function refresh(){try{const s=await api('/api/status');$('dot').style.background='var(--green)';$('connection').textContent='Live telemetry';
 const bi=s.bedrock.instances.length>0; $('bedrock').textContent=bi?'RUNNING':'STOPPED';cls($('bedrock'),bi);$('version').textContent=esc(s.bedrock.version);
 const sup=esc(s.supervisor.state);$('supervisor').textContent=sup;cls($('supervisor'),s.supervisor_reachable&&sup!=='FAILSAFE');
@@ -432,8 +503,8 @@ $('frames').textContent=esc(t.frames||0);$('actions').textContent=esc(t.motor_ac
 async function messages(){try{const d=await api('/api/messages');const feed=$('feed');feed.replaceChildren();if(!d.messages.length){const x=document.createElement('div');x.className='label';x.textContent='No messages yet';feed.append(x);return}
 d.messages.forEach(m=>{const box=document.createElement('div');box.className='msg';const meta=document.createElement('div');meta.className='meta';const k=document.createElement('span');k.className='kind';k.textContent=m.kind;const when=document.createElement('span');when.textContent=new Date(m.created_ns/1e6).toLocaleTimeString();const status=document.createElement('span');status.textContent=m.status;meta.append(k,when,status);const text=document.createElement('div');text.className='text';text.textContent=m.text;box.append(meta,text);if(m.response_text){const reply=document.createElement('div');reply.className='text ok';reply.textContent='Agent: '+m.response_text;box.append(reply)}feed.append(box)})}catch(e){}}
 $('send').onclick=async()=>{const text=$('text').value.trim();if(!text)return;try{await api('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,kind:$('kind').value,priority:Number($('priority').value)})});$('text').value='';$('notice').textContent='Delivered to the durable cognition inbox.';messages()}catch(e){$('notice').textContent=e.message}};
-$('setTarget').onclick=async()=>{if(!targetBox||targetBox.width<.005||targetBox.height<.005){$('targetNotice').textContent='Drag a non-empty target region first.';return}try{const t=await api('/api/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...targetBox,label:$('targetLabel').value.trim()||'target'})});$('targetNotice').textContent='ROCKET-2 target armed: '+t.label+' · '+t.track_id}catch(e){$('targetNotice').textContent=e.message}};
-$('clearTarget').onclick=async()=>{try{await api('/api/target/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});targetBox=null;selection.style.display='none';$('targetNotice').textContent='Grounded target cleared.'}catch(e){$('targetNotice').textContent=e.message}};
+$('setTarget').onclick=async()=>{if(!targetBox||targetBox.width<.005||targetBox.height<.005){$('targetNotice').textContent='Drag a non-empty target region first.';return}if(!displayedFrameToken){$('targetNotice').textContent='The reference frame expired; wait for a fresh frame and select again.';targetBox=null;selection.style.display='none';targetReview.hidden=true;refreshFrame();return}try{const t=await api('/api/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...targetBox,frame_token:displayedFrameToken,label:$('targetLabel').value.trim()||'target'})});targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;$('targetNotice').textContent='ROCKET-2 target armed from exact frozen pixels: '+t.label+' · '+t.track_id;refreshFrame()}catch(e){$('targetNotice').textContent=e.message;targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;refreshFrame()}};
+$('clearTarget').onclick=async()=>{try{await api('/api/target/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;$('targetNotice').textContent='Grounded target cleared.';refreshFrame()}catch(e){$('targetNotice').textContent=e.message}};
 $('pause').onclick=async()=>{try{await api('/api/control/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('notice').textContent='Agent paused; motor capability revoked.';refresh()}catch(e){$('notice').textContent=e.message}};
 $('resume').onclick=async()=>{try{await api('/api/control/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('notice').textContent='Supervisor returned to safe idle. Live control was not armed.';refresh()}catch(e){$('notice').textContent=e.message}};
 refresh();messages();refreshFrame();setInterval(refresh,500);setInterval(messages,2000);setInterval(refreshFrame,1000);
