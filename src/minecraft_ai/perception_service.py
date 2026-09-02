@@ -407,7 +407,9 @@ class BootstrapFastPerception:
         ]
         safety_source = "safety:bedrock-hud-v1:not-training-label"
         safety_values: tuple[tuple[str, str | int | float | bool], ...] = ()
-        if bedrock_death_screen_present(frame):
+        death_screen = bedrock_death_screen_present(frame)
+        ui_overlay = bedrock_ui_chrome_present(frame)
+        if death_screen:
             safety_values = (
                 ("scene.playable", False),
                 ("scene.ui_overlay", True),
@@ -425,6 +427,17 @@ class BootstrapFastPerception:
                     ("environment.underwater", True),
                     ("danger.immediate", True),
                     ("danger.drowning", True),
+                )
+            elif not ui_overlay:
+                # In a playable HUD, disappearance of a previously visible air
+                # meter is the observable surface transition needed to terminate
+                # a learned water-escape option. Do not clear generic danger;
+                # another perception source may still observe a different hazard.
+                safety_values = (
+                    ("player.air_visible", False),
+                    ("player.submerged", False),
+                    ("environment.underwater", False),
+                    ("danger.drowning", False),
                 )
         facts.extend(
             PerceptionFact(

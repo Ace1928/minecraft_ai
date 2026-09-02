@@ -37,7 +37,8 @@ def test_bootstrap_rgb_perception_cannot_supply_training_labels() -> None:
 
     assert perception.training_label_eligible is False
     assert facts
-    assert all(fact.source.startswith("bootstrap:") for fact in facts)
+    assert all(fact.source.startswith(("bootstrap:", "safety:")) for fact in facts)
+    assert all("not-training-label" in fact.source for fact in facts)
     assert all("not-training-label" in fact.source for fact in facts)
 
 
@@ -150,6 +151,7 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     gather = skills.get("gather_nearby_wood")
     crafting = skills.get("craft_crafting_table")
     retreat = skills.get("retreat_from_danger")
+    escape = skills.get("escape_submersion")
 
     assert "visible trunk" in gather.description
     assert gather.success_conditions[0].key == "inventory.logs"
@@ -157,3 +159,6 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert crafting.success_conditions[0].key == "inventory.crafting_table"
     assert retreat.preconditions[0].key == "danger.immediate"
     assert retreat.preconditions[0].operator == "truthy"
+    assert escape.preconditions[0].key == "environment.underwater"
+    assert escape.success_conditions[0].operator == "falsy"
+    assert escape.policy_instruction == "swim to the surface and leave the water"

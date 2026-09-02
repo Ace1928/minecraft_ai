@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.knowledge import Edition, GameVersion, KnowledgeGraph
 from minecraft_ai.memory import MemoryKind, MemoryRecord, MemoryStore
 from minecraft_ai.perception import (
@@ -18,6 +19,7 @@ from minecraft_ai.roles import BUILTIN_ROLES, get_role
 from minecraft_ai.cognition import CognitionDecision
 from minecraft_ai.runtime import (
     _active_operator_messages,
+    _first_feasible_recovery,
     _operator_target_facts,
     _selected_operator_message_id,
     _semantic_deadline_ms,
@@ -215,6 +217,48 @@ def test_changed_frame_invalidates_operator_region_facts() -> None:
     )
 
     assert _operator_target_facts(target, changed, now_ns=2) == ()
+
+
+def test_recovery_selection_requires_observed_option_preconditions() -> None:
+    skills = build_bootstrap_skill_library()
+    recoveries = ("escape_submersion", "retreat_from_danger")
+    board = PerceptionBlackboard()
+    now = time.monotonic_ns()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:test",
+            width=1280,
+            height=635,
+        )
+    )
+
+    assert _first_feasible_recovery(skills, recoveries, board) is None
+
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(
+            PerceptionFact(
+                key="environment.underwater",
+                value=True,
+                confidence=0.995,
+                observed_ns=now,
+                source="safety:test",
+            ),
+            PerceptionFact(
+                key="danger.immediate",
+                value=True,
+                confidence=0.995,
+                observed_ns=now,
+                source="safety:test",
+            ),
+        ),
+    )
+
+    selected = _first_feasible_recovery(skills, recoveries, board)
+    assert selected is not None
+    assert selected.skill_id == "escape_submersion"
 
 
 def test_newest_acknowledged_operator_directive_remains_active() -> None:

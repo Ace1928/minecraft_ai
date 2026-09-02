@@ -15,14 +15,14 @@ from .cognition import (
 )
 from .datasets import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
-from .execution import SkillExecutor
+from .execution import SkillExecutor, conditions_satisfied
 from .memory import MemoryStore
 from .perception import ActivePerceptionQuery, PerceptionBlackboard, PerceptionFact, Track
 from .perception_service import RealtimePerceptionService, perceptual_hash_distance
 from .planning import Goal
 from .roles import RoleProfile
 from .safety import MotorAction
-from .skills import SkillLibrary, SkillOutcome, SkillRun
+from .skills import SkillLibrary, SkillOutcome, SkillRun, SkillSpec
 from .social import (
     OperatorMessage,
     OperatorMessageKind,
@@ -102,6 +102,21 @@ def _operator_target_facts(
         )
         for key, value in values
     )
+
+
+def _first_feasible_recovery(
+    skills: SkillLibrary,
+    recovery_ids: tuple[str, ...],
+    blackboard: PerceptionBlackboard,
+) -> SkillSpec | None:
+    """Select recovery by current observed preconditions, preserving declared order."""
+    for recovery_id in recovery_ids:
+        if recovery_id not in skills.specs:
+            continue
+        candidate = skills.get(recovery_id)
+        if conditions_satisfied(candidate.preconditions, blackboard):
+            return candidate
+    return None
 
 
 def _active_operator_messages(
@@ -358,14 +373,17 @@ class AgentRuntime:
             elif result.run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
                 self.metrics.skill_failures += 1
 
-            for recovery_id in result.recovery_skills:
-                if recovery_id in self.skills.specs:
-                    self.executor.start(
-                        self.skills.get(recovery_id),
-                        run_id=uuid.uuid4().hex,
-                        context_key=result.run.context_key,
-                    )
-                    break
+            recovery = _first_feasible_recovery(
+                self.skills,
+                result.recovery_skills,
+                self.blackboard,
+            )
+            if recovery is not None:
+                self.executor.start(
+                    recovery,
+                    run_id=uuid.uuid4().hex,
+                    context_key=result.run.context_key,
+                )
 
     def _lease_heartbeat(self) -> None:
         """Keep the motor lease alive independently of inference/cognition latency."""

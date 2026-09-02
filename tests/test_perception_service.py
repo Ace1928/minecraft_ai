@@ -150,7 +150,10 @@ def test_bedrock_air_hud_rejects_nonmatching_world_pixels() -> None:
 
     assert bedrock_air_bubbles(frame) is None
     facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
-    assert "player.submerged" not in facts
+    assert facts["player.submerged"].value is False
+    assert facts["environment.underwater"].value is False
+    assert facts["danger.drowning"].value is False
+    assert "danger.immediate" not in facts
 
 
 def test_bedrock_death_screen_blocks_world_control_without_emitting_action() -> None:

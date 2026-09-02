@@ -26,7 +26,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             success_conditions=(SkillCondition(key="target.near", operator="truthy"),),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("near_target",),
-            recovery_skills=("retreat_from_danger", "reacquire_target"),
+            recovery_skills=(
+                "escape_submersion",
+                "retreat_from_danger",
+                "reacquire_target",
+            ),
             max_duration_ms=15_000,
             policy_ref="approach",
             policy_instruction="approach the visible target",
@@ -64,7 +68,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             success_conditions=(SkillCondition(key="target.broken", operator="truthy"),),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("block_broken", "resource_gathered"),
-            recovery_skills=("reacquire_target", "retreat_from_danger"),
+            recovery_skills=(
+                "escape_submersion",
+                "reacquire_target",
+                "retreat_from_danger",
+            ),
             max_duration_ms=20_000,
             policy_ref="mine",
             policy_instruction="mine the target block",
@@ -83,7 +91,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             success_conditions=(SkillCondition(key="target.hostile_defeated", operator="truthy"),),
             failure_conditions=(SkillCondition(key="player.critical_health", operator="truthy"),),
             expected_effects=("hostile_defeated",),
-            recovery_skills=("retreat_from_danger",),
+            recovery_skills=("escape_submersion", "retreat_from_danger"),
             max_duration_ms=30_000,
             policy_ref="attack",
             policy_instruction="fight the target",
@@ -105,6 +113,26 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             policy_instruction="escape danger",
         ),
         SkillSpec(
+            skill_id="escape_submersion",
+            version=1,
+            name="Escape submersion",
+            description=(
+                "Swim to the visible surface, keep moving until the air HUD disappears, and "
+                "leave the water onto stable dry ground"
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            preconditions=(
+                SkillCondition(key="environment.underwater", operator="truthy"),
+            ),
+            success_conditions=(
+                SkillCondition(key="environment.underwater", operator="falsy"),
+            ),
+            expected_effects=("player_resurfaced", "dry_ground_reached"),
+            max_duration_ms=12_000,
+            policy_ref="escape_submersion",
+            policy_instruction="swim to the surface and leave the water",
+        ),
+        SkillSpec(
             skill_id="explore_forward",
             version=4,
             name="Explore forward",
@@ -116,7 +144,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             parameters=("allow_attack", "allow_use", "allow_jump"),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("new_area_observed",),
-            recovery_skills=("retreat_from_danger",),
+            recovery_skills=("escape_submersion", "retreat_from_danger"),
             max_duration_ms=12_000,
             policy_ref="explore",
             # Keep the motor command within STEVE-1's short-horizon text
@@ -188,7 +216,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             success_conditions=(SkillCondition(key="inventory.logs", operator="gte", value=3),),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("inventory.logs>=3", "wood_resource_acquired"),
-            recovery_skills=("retreat_from_danger", "reacquire_target"),
+            recovery_skills=(
+                "escape_submersion",
+                "retreat_from_danger",
+                "reacquire_target",
+            ),
             max_duration_ms=90_000,
             policy_ref="gather_wood",
             policy_instruction="mine log",
@@ -246,7 +278,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             ),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("safe_spawn_area", "environment.shelter_enclosed"),
-            recovery_skills=("retreat_from_danger",),
+            recovery_skills=("escape_submersion", "retreat_from_danger"),
             max_duration_ms=180_000,
             policy_ref="build_shelter",
             policy_instruction="build a shelter",
