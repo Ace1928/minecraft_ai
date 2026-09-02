@@ -12,8 +12,9 @@ from .execution import SkillExecutor
 from .memory import MemoryStore
 from .perception import ActivePerceptionQuery, PerceptionBlackboard
 from .perception_service import RealtimePerceptionService
-from .planning import Goal, GoalSource
+from .planning import Goal
 from .roles import RoleProfile
+from .safety import MotorAction
 from .skills import SkillLibrary, SkillOutcome
 from .social import SocialState
 from .supervisor import send_command
@@ -88,7 +89,8 @@ class AgentRuntime:
             raise
         finally:
             try:
-                if self.executor.run is not None and self.executor.run.outcome == SkillOutcome.RUNNING:
+                current = self.executor.run
+                if current is not None and current.outcome == SkillOutcome.RUNNING:
                     release = self.executor.cancel().action
                     if release is not None:
                         self._send_motor(release)
@@ -126,13 +128,11 @@ class AgentRuntime:
             self._send_motor(result.action)
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
         if result.run.outcome != SkillOutcome.RUNNING:
-            stats = self.skills.record(result.run)
+            self.skills.record(result.run)
             if result.run.outcome == SkillOutcome.SUCCEEDED:
                 self.metrics.skill_successes += 1
             elif result.run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
                 self.metrics.skill_failures += 1
-            # Recovery stays local: choose the first known recovery instead of
-            # forcing a strategic-model round trip for routine execution failure.
             for recovery_id in result.recovery_skills:
                 if recovery_id in self.skills.specs:
                     self.executor.start(
@@ -141,22 +141,25 @@ class AgentRuntime:
                         context_key=result.run.context_key,
                     )
                     break
-            _ = stats
 
     def _renew_lease_if_due(self) -> None:
         now = time.monotonic_ns()
         if now - self._last_renew_ns < self.lease_renew_ms * 1_000_000:
             return
-        send_command("renew", lease_id=self.lease_id, ttl_ms=max(750, self.lease_renew_ms * 2))
+        send_command(
+            "renew",
+            lease_id=self.lease_id,
+            ttl_ms=max(750, self.lease_renew_ms * 2),
+        )
         self._last_renew_ns = now
 
-    def _send_motor(self, action: object) -> None:
-        payload = action.model_dump(mode="json") if hasattr(action, "model_dump") else action
-        send_command("motor-action", lease_id=self.lease_id, action=payload)
-        if hasattr(action, "sequence"):
-            self._sequence = int(action.sequence) + 1
-        else:
-            self._sequence += 1
+    def _send_motor(self, action: MotorAction) -> None:
+        send_command(
+            "motor-action",
+            lease_id=self.lease_id,
+            action=action.model_dump(mode="json"),
+        )
+        self._sequence = action.sequence + 1
         self.metrics.motor_actions += 1
 
     def _request_semantics_if_due(self, frame_id: int) -> None:
@@ -190,7 +193,8 @@ class AgentRuntime:
         spec = self.skills.get(skill_id)
         return (
             f"For skill {spec.name!r}, determine its preconditions, success/failure signals, "
-            "target visibility and normalized target.dx/target.dy. Include immediate danger and chat."
+            "target visibility and normalized target.dx/target.dy. Include immediate danger "
+            "and chat."
         )
 
     def _start_cognition_if_due(self) -> None:
@@ -259,13 +263,9 @@ class AgentRuntime:
             return
         goals = role_standing_goals(self.role)
         scheduler = CurriculumScheduler(self.role)
-        chosen = scheduler.choose(
+        scheduler.choose(
             [CurriculumCandidate(goal=goal, progression_novelty=0.4) for goal in goals]
         )
-        # Without a high-level model there is no reliable semantic binding from
-        # arbitrary role goal to skills, so choose a conservative exploration
-        # baseline. This mode exists for plumbing tests/data capture, not SOTA play.
-        _ = chosen
         if "explore_forward" in self.skills.specs:
             self.executor.start(
                 self.skills.get("explore_forward"),
