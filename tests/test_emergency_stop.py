@@ -9,7 +9,10 @@ from minecraft_ai.safety import SupervisorState
 from minecraft_ai.supervisor import Supervisor
 
 
-def test_emergency_latch_persists_reason_and_clears(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_emergency_latch_persists_reason_and_clears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     latch = tmp_path / "EMERGENCY_STOP"
     monkeypatch.setattr(emergency, "EMERGENCY_STOP_FILE", latch)
 
@@ -24,7 +27,10 @@ def test_emergency_latch_persists_reason_and_clears(tmp_path: Path, monkeypatch:
     assert emergency.emergency_reason() is None
 
 
-def test_supervisor_refuses_start_while_latched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_supervisor_refuses_start_while_latched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     latch = tmp_path / "EMERGENCY_STOP"
     monkeypatch.setattr(emergency, "EMERGENCY_STOP_FILE", latch)
     emergency.engage_emergency_stop("do-not-start")
@@ -39,7 +45,10 @@ def test_supervisor_refuses_start_while_latched(tmp_path: Path, monkeypatch: pyt
     assert supervisor.last_fault == "do-not-start"
 
 
-def test_latch_blocks_resume_and_rearming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_latch_blocks_resume_and_rearming(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     latch = tmp_path / "EMERGENCY_STOP"
     monkeypatch.setattr(emergency, "EMERGENCY_STOP_FILE", latch)
 
@@ -55,7 +64,10 @@ def test_latch_blocks_resume_and_rearming(tmp_path: Path, monkeypatch: pytest.Mo
     assert supervisor.motor.lease is None
 
 
-def test_latch_while_armed_prevents_activation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_latch_while_armed_prevents_activation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     latch = tmp_path / "EMERGENCY_STOP"
     monkeypatch.setattr(emergency, "EMERGENCY_STOP_FILE", latch)
 
