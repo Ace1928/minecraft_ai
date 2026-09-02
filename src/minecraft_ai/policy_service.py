@@ -63,6 +63,7 @@ class TemporalPolicyClient:
     _memory_size: int = field(default=0, init=False)
     _held_keys: set[str] = field(default_factory=set, init=False)
     _held_buttons: set[str] = field(default_factory=set, init=False)
+    _held_until_ns: int = field(default=0, init=False)
     _last_sequence: int = field(default=-1, init=False)
     _pending_request_id: str | None = field(default=None, init=False)
     _pending_deadline_ns: int = field(default=0, init=False)
@@ -340,6 +341,7 @@ class TemporalPolicyClient:
         )
         self._held_keys = desired_keys
         self._held_buttons = desired_buttons
+        self._held_until_ns = time.monotonic_ns() + action.duration_ms * 1_000_000
         return action
 
     def _conditioned_intent(
@@ -387,9 +389,11 @@ class TemporalPolicyClient:
                 self._camera_recovery_active = False
         return mouse_dx, mouse_dy
 
-    @staticmethod
-    def _hold(sequence: int) -> MotorAction:
-        """Preserve the most recent held state while one bounded inference is pending."""
+    def _hold(self, sequence: int) -> MotorAction:
+        """Respect the model's 50 ms action timing while inference is pending."""
+        if self._held_keys or self._held_buttons:
+            if time.monotonic_ns() >= self._held_until_ns:
+                return self._release(sequence)
         return MotorAction(sequence=sequence, duration_ms=50)
 
     def _release(self, sequence: int) -> MotorAction:
@@ -400,6 +404,7 @@ class TemporalPolicyClient:
         )
         self._held_keys.clear()
         self._held_buttons.clear()
+        self._held_until_ns = 0
         return action
 
 

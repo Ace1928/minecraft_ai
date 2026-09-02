@@ -183,7 +183,7 @@ def test_async_policy_does_not_double_count_an_already_recorded_deadline_miss(
     assert client.metrics.deadline_misses == 0
 
 
-def test_async_policy_preserves_held_state_inside_inference_deadline(
+def test_async_policy_preserves_held_state_only_inside_action_duration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -193,6 +193,7 @@ def test_async_policy_preserves_held_state_inside_inference_deadline(
         frame_provider=lambda: frame,
     )
     client._held_keys = {"w"}
+    client._held_until_ns = time.monotonic_ns() + 40_000_000
     client._pending_request_id = "in-flight"
     client._pending_deadline_ns = time.monotonic_ns() + 100_000_000
     monkeypatch.setattr(client, "_ensure_started", lambda _size: None)
@@ -207,6 +208,35 @@ def test_async_policy_preserves_held_state_inside_inference_deadline(
     assert action.keys_up == ()
     assert client._held_keys == {"w"}
     assert client.metrics.deadline_misses == 0
+
+
+def test_async_policy_releases_expired_action_while_inference_is_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = CapturedFrame(frame_id=1, captured_ns=1, width=1, height=1, bgra=b"\0" * 4)
+    client = TemporalPolicyClient(
+        config=_policy_config(tmp_path, deadline_ms=150),
+        frame_provider=lambda: frame,
+    )
+    client._held_keys = {"shift", "w"}
+    client._held_buttons = {"left"}
+    client._held_until_ns = time.monotonic_ns() - 1
+    client._pending_request_id = "in-flight"
+    client._pending_deadline_ns = time.monotonic_ns() + 100_000_000
+    monkeypatch.setattr(client, "_ensure_started", lambda _size: None)
+    monkeypatch.setattr(client, "_consume_pending_response", lambda: None)
+
+    action = client.act(
+        PerceptionBlackboard(),
+        MotorIntent(skill_id="explore", mode="explore"),
+        sequence=1,
+    )
+
+    assert action.keys_up == ("shift", "w")
+    assert action.buttons_up == ("left",)
+    assert not client._held_keys
+    assert not client._held_buttons
 
 
 def test_learned_static_gui_scene_blocks_world_policy_actions() -> None:
