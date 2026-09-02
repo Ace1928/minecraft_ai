@@ -342,3 +342,37 @@ def test_repeated_timed_out_option_is_repaired_to_different_learned_option() -> 
     assert decision.skill_id == "reacquire_target"
     assert model.calls == 2
     assert controller.metrics.retry_repairs == 1
+
+
+def test_repair_cannot_alternate_between_two_recently_failed_options() -> None:
+    library = build_bootstrap_skill_library()
+    explore = SkillRun(
+        run_id="explore-2",
+        skill_id="explore_forward",
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.TIMED_OUT,
+        failure_reason="skill-timeout",
+    )
+    reacquire = explore.model_copy(
+        update={
+            "run_id": "reacquire-2",
+            "skill_id": "reacquire_target",
+            "outcome": SkillOutcome.FAILED,
+            "failure_reason": "target-not-found",
+        }
+    )
+    for run in (explore, explore, reacquire, reacquire):
+        library.record(run.model_copy(update={"run_id": f"{run.run_id}-{time.time_ns()}"}))
+    context = _context()
+    context.recent_skill_runs = (reacquire, explore)
+    model = _RetryRepairingModel()
+    controller = HighLevelController(model, library)
+
+    decision = controller.decide(_board(), context)
+
+    assert decision.skill_id is None
+    assert decision.request_replan is True
+    assert model.calls == 2
+    assert controller.metrics.retry_repairs == 1
+    assert controller.metrics.last_error == "repeated-option-blocked:explore_forward"

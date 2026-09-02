@@ -258,10 +258,11 @@ class HighLevelController:
                         "allow_use:false, or allow_jump:false so the policy contract can enforce "
                         "it without replacing learned movement. "
                         "recent_skill_runs and each skill's evaluation counters are empirical "
-                        "execution evidence. Never repeat the same failed or timed-out option "
-                        "unchanged when its consecutive failures are at least two; select a "
+                        "execution evidence. Do not select any option that recently failed or "
+                        "timed out and still has at least two consecutive failures; select a "
                         "different feasible learned option, request missing perception, or "
-                        "return no skill with request_replan true. "
+                        "return no skill with request_replan true. A fresh operator correction "
+                        "may authorize one new evidence-producing retry. "
                         "Never imply a message was handled while choosing a different goal."
                     ),
                 ),
@@ -314,12 +315,14 @@ class HighLevelController:
                         ),
                         missing=missing,
                     )
-                if self._repeated_failed_option(decision, context):
+                blocked_run = self._blocking_skill_run(decision, context)
+                if blocked_run is not None:
                     return self._repair_repeated_failure(
                         messages,
                         decision,
                         blackboard,
                         context,
+                        blocked_run,
                     )
             self.metrics.last_error = None
             return decision
@@ -425,27 +428,39 @@ class HighLevelController:
             )
         return payloads
 
-    def _repeated_failed_option(
+    def _blocking_skill_run(
         self,
         decision: CognitionDecision,
         context: CognitionContext,
-    ) -> bool:
+    ) -> SkillRun | None:
         if decision.skill_id is None or not context.recent_skill_runs:
-            return False
+            return None
         if context.operator_messages and context.operator_messages[0].status in {
             OperatorMessageStatus.QUEUED,
             OperatorMessageStatus.DELIVERED,
         }:
             # A fresh, explicit operator retry gets one evidence-producing attempt.
-            return False
-        recent = context.recent_skill_runs[0]
-        if recent.skill_id != decision.skill_id or recent.outcome not in {
-            SkillOutcome.FAILED,
-            SkillOutcome.TIMED_OUT,
-        }:
-            return False
-        stats = self.skills.stats.get((decision.skill_id, recent.context_key))
-        return stats is not None and stats.consecutive_failures >= 2
+            return None
+        for recent in context.recent_skill_runs:
+            if recent.skill_id != decision.skill_id or recent.outcome not in {
+                SkillOutcome.FAILED,
+                SkillOutcome.TIMED_OUT,
+            }:
+                continue
+            stats = self.skills.stats.get((decision.skill_id, recent.context_key))
+            if stats is not None and stats.consecutive_failures >= 2:
+                return recent
+        return None
+
+    def _recently_blocked_skill_ids(self, context: CognitionContext) -> set[str]:
+        blocked: set[str] = set()
+        for run in context.recent_skill_runs:
+            if run.outcome not in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
+                continue
+            stats = self.skills.stats.get((run.skill_id, run.context_key))
+            if stats is not None and stats.consecutive_failures >= 2:
+                blocked.add(run.skill_id)
+        return blocked
 
     def _repair_repeated_failure(
         self,
@@ -453,16 +468,17 @@ class HighLevelController:
         decision: CognitionDecision,
         blackboard: PerceptionBlackboard,
         context: CognitionContext,
+        blocked_run: SkillRun,
     ) -> CognitionDecision:
         failed_skill = decision.skill_id
         assert failed_skill is not None
+        blocked_skill_ids = self._recently_blocked_skill_ids(context)
         feasible = sorted(
             skill.skill_id
             for skill in self.skills.specs.values()
-            if skill.skill_id != failed_skill
+            if skill.skill_id not in blocked_skill_ids
             and conditions_satisfied(skill.preconditions, blackboard)
         )
-        recent = context.recent_skill_runs[0]
         self.metrics.repairs += 1
         self.metrics.retry_repairs += 1
         repair_messages = (
@@ -472,9 +488,11 @@ class HighLevelController:
                 role="user",
                 content=(
                     f"That decision is rejected by empirical execution evidence: option "
-                    f"{failed_skill!r} just ended as {recent.outcome.value!r} with reason "
-                    f"{recent.failure_reason!r} and has repeated consecutive failures. Do not "
-                    "restart it unchanged. Select a different feasible learned option from "
+                    f"{failed_skill!r} recently ended as {blocked_run.outcome.value!r} with "
+                    f"reason {blocked_run.failure_reason!r} and has repeated consecutive "
+                    "failures. Recently blocked options are "
+                    f"{json.dumps(sorted(blocked_skill_ids))}. Do not alternate back to any of "
+                    "them. Select a different feasible learned option from "
                     f"{json.dumps(feasible)}, or return skill_id null, request_replan true, "
                     "and request the perception needed to choose safely. Preserve the current "
                     "goal and explicit operator action constraints."
