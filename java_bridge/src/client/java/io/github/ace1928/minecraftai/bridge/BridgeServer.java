@@ -194,16 +194,17 @@ public final class BridgeServer implements AutoCloseable {
             sendError(writer, "target_mismatch", "Lease targets another Minecraft instance", true);
             return;
         }
-        long expires = longValue(message, "expires_monotonic_ns");
+        int ttlMs = integer(message, "ttl_ms");
         long firstSequence = longValue(message, "first_sequence");
-        if (expires <= System.nanoTime()) {
-            clearLease("lease-already-expired");
-            sendError(writer, "lease_expired", "Lease is already expired", true);
+        if (ttlMs < 1 || ttlMs > 5000) {
+            clearLease("lease-ttl-invalid");
+            sendError(writer, "lease_ttl_invalid", "Lease TTL is outside safety bounds", true);
             return;
         }
+        long expiresNs = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(ttlMs);
         lease = new Lease(
             string(message, "lease_id"),
-            expires,
+            expiresNs,
             Math.max(0L, firstSequence - 1L),
             integer(message, "max_action_duration_ms")
         );
@@ -220,10 +221,16 @@ public final class BridgeServer implements AutoCloseable {
             return;
         }
         long now = System.nanoTime();
-        long deadline = longValue(message, "deadline_monotonic_ns");
-        if (current.expiresNs() <= now || deadline <= now || deadline > current.expiresNs()) {
+        int ttlMs = integer(message, "ttl_ms");
+        long requestedDeadlineNs = now + TimeUnit.MILLISECONDS.toNanos(Math.max(ttlMs, 0));
+        if (
+            current.expiresNs() <= now
+                || ttlMs < 1
+                || ttlMs > current.maxActionDurationMs()
+                || requestedDeadlineNs > current.expiresNs()
+        ) {
             failClosed("input-deadline-invalid");
-            sendError(writer, "deadline_invalid", "Input deadline is stale or outside lease", true);
+            sendError(writer, "deadline_invalid", "Input TTL is stale or outside lease", true);
             return;
         }
         if (sequence <= current.lastSequence()) {
