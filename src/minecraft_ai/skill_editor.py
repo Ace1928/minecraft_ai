@@ -37,9 +37,11 @@ class SkillEditor:
         max_duration_ms: int = 30_000,
         stage: SkillStage = SkillStage.CANDIDATE,
     ) -> SkillSpec:
+        existing = self.library.specs.get(skill_id)
+        version = (existing.version + 1) if existing is not None else 1
         spec = SkillSpec(
             skill_id=skill_id,
-            version=1,
+            version=version,
             name=name,
             description=description,
             stage=stage,
