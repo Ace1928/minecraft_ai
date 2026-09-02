@@ -85,7 +85,8 @@ class HighLevelController:
                     "or privileged world-state commands. Return one JSON object matching: "
                     "reasoning_summary:string, chosen_goal_id:string|null, skill_id:string|null, "
                     "skill_parameters:object, say:string|null, request_replan:boolean, "
-                    "ask_perception:string[], research_query:string|null. Use only listed skill ids."
+                    "ask_perception:string[], research_query:string|null. "
+                    "Use only listed skill ids."
                 ),
             ),
             ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
