@@ -362,6 +362,37 @@ def test_changed_frame_invalidates_operator_region_facts() -> None:
     assert _operator_target_facts(target, changed, now_ns=2) == ()
 
 
+def test_changed_frame_preserves_verified_cross_view_reference_fact(tmp_path) -> None:
+    reference = tmp_path / "target.jpg"
+    reference.write_bytes(b"reference")
+    target = Track(
+        track_id="operator:oak",
+        label="oak_log",
+        confidence=1.0,
+        region=ScreenRegion(x=0.15, y=0.10, width=0.10, height=0.30),
+        first_seen_ns=1,
+        last_seen_ns=1,
+        attributes={
+            "source": "operator",
+            "reference_dhash": "0000000000000000",
+            "reference_image_path": str(reference),
+            "reference_image_sha256": "a" * 64,
+        },
+    )
+    changed = PerceptionFact(
+        key="frame.dhash",
+        value="ffffffffffffffff",
+        confidence=1.0,
+        observed_ns=1,
+        source="bootstrap:test",
+    )
+
+    facts = _operator_target_facts(target, changed, now_ns=2)
+
+    assert tuple(fact.key for fact in facts) == ("target.reference_available",)
+    assert facts[0].value is True
+
+
 def test_recovery_selection_requires_observed_option_preconditions() -> None:
     skills = build_bootstrap_skill_library()
     recoveries = ("escape_submersion", "retreat_from_danger")

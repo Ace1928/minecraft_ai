@@ -105,9 +105,7 @@ class SkillExecutor:
         ):
             return self._finish(SkillOutcome.SUCCEEDED, now, None)
         if not self._initiated:
-            if self._spec.preconditions and not conditions_satisfied(
-                self._spec.preconditions, blackboard, now_ns=now
-            ):
+            if not initiation_satisfied(self._spec, blackboard, now_ns=now):
                 return self._finish(
                     SkillOutcome.FAILED,
                     now,
@@ -214,6 +212,22 @@ def conditions_satisfied(
 ) -> bool:
     """Evaluate a complete semantic option condition set against fresh observations."""
     return all(_matches(condition, blackboard, now_ns=now_ns) for condition in conditions)
+
+
+def initiation_satisfied(
+    spec: SkillSpec,
+    blackboard: PerceptionBlackboard,
+    now_ns: int | None = None,
+) -> bool:
+    """Evaluate OR-of-AND initiation groups for a learned option contract."""
+    groups = tuple(
+        group
+        for group in (spec.preconditions, *spec.initiation_alternatives)
+        if group
+    )
+    if not groups:
+        return True
+    return any(conditions_satisfied(group, blackboard, now_ns=now_ns) for group in groups)
 
 
 def _first_matching(

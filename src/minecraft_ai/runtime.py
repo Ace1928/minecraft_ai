@@ -7,6 +7,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .cognition import (
     BootstrapCognitionPolicy,
@@ -16,7 +17,7 @@ from .cognition import (
 )
 from .datasets import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
-from .execution import SkillExecutor, conditions_satisfied
+from .execution import SkillExecutor, initiation_satisfied
 from .memory import MemoryStore
 from .perception import ActivePerceptionQuery, PerceptionBlackboard, PerceptionFact, Track
 from .perception_service import RealtimePerceptionService, perceptual_hash_distance
@@ -69,20 +70,40 @@ def _operator_target_facts(
     range, or task success. The reference frame hash prevents a stale rectangle
     from becoming semantic ground truth after the view materially changes.
     """
+    if target.attributes.get("source") != "operator":
+        return ()
+    observed_ns = time.monotonic_ns() if now_ns is None else now_ns
+    facts: list[PerceptionFact] = []
+    reference_path = target.attributes.get("reference_image_path")
+    reference_sha256 = target.attributes.get("reference_image_sha256")
+    if (
+        isinstance(reference_path, str)
+        and isinstance(reference_sha256, str)
+        and len(reference_sha256) == 64
+        and Path(reference_path).is_file()
+    ):
+        facts.append(
+            PerceptionFact(
+                key="target.reference_available",
+                value=True,
+                confidence=1.0,
+                observed_ns=observed_ns,
+                source=f"operator:cross-view-reference:{target.track_id}",
+                expires_after_ms=250,
+            )
+        )
     reference = target.attributes.get("reference_dhash")
     observed = None if current_hash is None else current_hash.value
     if (
-        target.attributes.get("source") != "operator"
-        or not isinstance(reference, str)
+        not isinstance(reference, str)
         or not isinstance(observed, str)
     ):
-        return ()
+        return tuple(facts)
     try:
         if perceptual_hash_distance(reference, observed) > 6:
-            return ()
+            return tuple(facts)
     except ValueError:
-        return ()
-    observed_ns = time.monotonic_ns() if now_ns is None else now_ns
+        return tuple(facts)
     center_x = target.region.x + target.region.width / 2.0
     center_y = target.region.y + target.region.height / 2.0
     source = f"operator:explicit-grounding:{target.track_id}"
@@ -92,7 +113,7 @@ def _operator_target_facts(
         ("target.dx", max(-1.0, min(1.0, 2.0 * center_x - 1.0))),
         ("target.dy", max(-1.0, min(1.0, 2.0 * center_y - 1.0))),
     )
-    return tuple(
+    facts.extend(
         PerceptionFact(
             key=key,
             value=value,
@@ -103,6 +124,7 @@ def _operator_target_facts(
         )
         for key, value in values
     )
+    return tuple(facts)
 
 
 def _first_feasible_recovery(
@@ -115,7 +137,7 @@ def _first_feasible_recovery(
         if recovery_id not in skills.specs:
             continue
         candidate = skills.get(recovery_id)
-        if conditions_satisfied(candidate.preconditions, blackboard):
+        if initiation_satisfied(candidate, blackboard):
             return candidate
     return None
 
@@ -141,7 +163,7 @@ def _observed_scene_recovery(
     if skill_id not in skills.specs:
         return None
     candidate = skills.get(skill_id)
-    return candidate if conditions_satisfied(candidate.preconditions, blackboard) else None
+    return candidate if initiation_satisfied(candidate, blackboard) else None
 
 
 def _active_operator_messages(

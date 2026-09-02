@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .execution import conditions_satisfied
+from .execution import initiation_satisfied
 from .memory import MemoryRecord
 from .models import LanguageModel, ModelMessage
 from .perception import PerceptionBlackboard
@@ -311,9 +311,14 @@ class HighLevelController:
                 )
             if decision.skill_id is not None:
                 selected = self.skills.get(decision.skill_id)
-                if not conditions_satisfied(selected.preconditions, blackboard):
+                if not initiation_satisfied(selected, blackboard):
                     missing = tuple(
-                        condition.key for condition in selected.preconditions
+                        condition.key
+                        for group in (
+                            selected.preconditions,
+                            *selected.initiation_alternatives,
+                        )
+                        for condition in group
                     )
                     return self._repair_infeasible(
                         messages,
@@ -410,7 +415,7 @@ class HighLevelController:
     ) -> list[dict[str, object]]:
         payloads: list[dict[str, object]] = []
         for skill in self.skills.specs.values():
-            if not conditions_satisfied(skill.preconditions, blackboard):
+            if not initiation_satisfied(skill, blackboard):
                 continue
             stats = self.skills.stats.get((skill.skill_id, "default"))
             payloads.append(
@@ -423,6 +428,10 @@ class HighLevelController:
                     "preconditions": [
                         condition.model_dump(mode="json")
                         for condition in skill.preconditions
+                    ],
+                    "initiation_alternatives": [
+                        [condition.model_dump(mode="json") for condition in group]
+                        for group in skill.initiation_alternatives
                     ],
                     "invariants": [
                         condition.model_dump(mode="json")
@@ -497,7 +506,7 @@ class HighLevelController:
             skill.skill_id
             for skill in self.skills.specs.values()
             if skill.skill_id not in blocked_skill_ids
-            and conditions_satisfied(skill.preconditions, blackboard)
+            and initiation_satisfied(skill, blackboard)
         )
         self.metrics.repairs += 1
         self.metrics.retry_repairs += 1
@@ -571,7 +580,7 @@ class HighLevelController:
         feasible = sorted(
             skill.skill_id
             for skill in self.skills.specs.values()
-            if conditions_satisfied(skill.preconditions, blackboard)
+            if initiation_satisfied(skill, blackboard)
         )
         self.metrics.repairs += 1
         repair_messages = (

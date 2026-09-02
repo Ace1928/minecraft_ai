@@ -44,6 +44,7 @@ class SkillLifecycleManager:
         policy_ref: str | None = None,
         parameters: Sequence[str] = (),
         preconditions: Sequence[SkillCondition] = (),
+        initiation_alternatives: Sequence[Sequence[SkillCondition]] = (),
         invariants: Sequence[SkillCondition] = (),
         success_conditions: Sequence[SkillCondition] = (),
         failure_conditions: Sequence[SkillCondition] = (),
@@ -61,6 +62,9 @@ class SkillLifecycleManager:
             stage=stage,
             parameters=tuple(parameters),
             preconditions=tuple(preconditions),
+            initiation_alternatives=tuple(
+                tuple(group) for group in initiation_alternatives
+            ),
             invariants=tuple(invariants),
             success_conditions=tuple(success_conditions),
             failure_conditions=tuple(failure_conditions),
@@ -81,6 +85,7 @@ class SkillLifecycleManager:
         description: str | None = None,
         policy_ref: str | None = None,
         preconditions: Sequence[SkillCondition] | None = None,
+        initiation_alternatives: Sequence[Sequence[SkillCondition]] | None = None,
         invariants: Sequence[SkillCondition] | None = None,
         success_conditions: Sequence[SkillCondition] | None = None,
         failure_conditions: Sequence[SkillCondition] | None = None,
@@ -96,6 +101,11 @@ class SkillLifecycleManager:
                 "policy_ref": current.policy_ref if policy_ref is None else policy_ref,
                 "preconditions": (
                     current.preconditions if preconditions is None else tuple(preconditions)
+                ),
+                "initiation_alternatives": (
+                    current.initiation_alternatives
+                    if initiation_alternatives is None
+                    else tuple(tuple(group) for group in initiation_alternatives)
                 ),
                 "invariants": (
                     current.invariants if invariants is None else tuple(invariants)
@@ -185,6 +195,7 @@ class SkillLifecycleManager:
             policy_ref=parent.policy_ref,
             parameters=parent.parameters,
             preconditions=parent.preconditions,
+            initiation_alternatives=parent.initiation_alternatives,
             invariants=parent.invariants,
             success_conditions=parent.success_conditions,
             failure_conditions=new_failures,

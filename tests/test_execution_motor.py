@@ -110,6 +110,31 @@ def test_skill_contract_becomes_learned_policy_instruction() -> None:
     )
 
 
+def test_skill_can_initiate_from_verified_alternative_evidence() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = SkillSpec(
+        skill_id="approach_grounded",
+        name="Approach grounded target",
+        policy_ref="approach",
+        preconditions=(SkillCondition(key="target.visible", operator="truthy"),),
+        initiation_alternatives=(
+            (SkillCondition(key="target.reference_available", operator="truthy"),),
+        ),
+    )
+    executor.start(spec, run_id="grounded", now_ns=100)
+
+    tick = executor.tick(
+        _board(_fact("target.reference_available", True)),
+        sequence=1,
+        now_ns=200,
+    )
+
+    assert tick.run.outcome == SkillOutcome.RUNNING
+    assert policy.intent is not None
+    assert policy.intent.mode == "approach"
+
+
 def test_skill_action_permissions_bound_learned_policy_without_replacing_it() -> None:
     policy = _IntentCapturePolicy()
     executor = SkillExecutor(policy)

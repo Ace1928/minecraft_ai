@@ -29,6 +29,9 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             stage=SkillStage.TRUSTED,
             parameters=("target", "sprint"),
             preconditions=(SkillCondition(key="target.visible", operator="truthy"),),
+            initiation_alternatives=(
+                (SkillCondition(key="target.reference_available", operator="truthy"),),
+            ),
             success_conditions=(SkillCondition(key="target.near", operator="truthy"),),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("near_target",),
