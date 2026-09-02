@@ -510,6 +510,23 @@ def _wine_content_rect(
         )
         geometry = client.get_geometry()
         translated = target.translate_coords(client, 0, 0)
+        horizontal_shift = _content_axis_reposition_delta(
+            parent_size=width,
+            start=int(translated.x),
+            content_size=int(geometry.width),
+        )
+        if horizontal_shift:
+            # Wine maximizes its decorated child at x=-8 while the actual game
+            # drawable begins four pixels outside the desktop. Moving only the
+            # decorated Minecraft window by that measured delta exposes the
+            # complete game surface; it does not synthesize input or guess a
+            # title-bar size. Once the drawable is contained, the normal
+            # ConfigureNotify path below can fit it to the remaining viewport.
+            minecraft_position = target.translate_coords(minecraft_window, 0, 0)
+            minecraft_window.configure(x=int(minecraft_position.x) + horizontal_shift)
+            display.sync()
+            geometry = client.get_geometry()
+            translated = target.translate_coords(client, 0, 0)
         available_width, available_height = _client_fit_dimensions(
             parent_width=width,
             parent_height=height,
@@ -536,6 +553,23 @@ def _wine_content_rect(
         content_width=int(geometry.width),
         content_height=int(geometry.height),
     )
+
+
+def _content_axis_reposition_delta(
+    *,
+    parent_size: int,
+    start: int,
+    content_size: int,
+) -> int:
+    """Return the minimal translation needed to expose one complete axis."""
+    if parent_size <= 0 or content_size <= 0:
+        raise IsolationError("Minecraft window has invalid geometry")
+    if content_size > parent_size:
+        return 0
+    if start < 0:
+        return -start
+    overflow = start + content_size - parent_size
+    return -overflow if overflow > 0 else 0
 
 
 def _client_fit_dimensions(

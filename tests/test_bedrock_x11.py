@@ -7,6 +7,7 @@ import pytest
 from minecraft_ai.platforms.bedrock_x11 import (
     IsolationError,
     _client_fit_dimensions,
+    _content_axis_reposition_delta,
     _contained_content_rect,
     _resolve_minecraft_input_window,
     _window_is_descendant_or_same,
@@ -108,6 +109,28 @@ def test_wine_drawable_fit_preserves_the_complete_hud_area() -> None:
         x=0,
         y=26,
     ) == (1842, 992)
+
+
+@pytest.mark.parametrize(
+    ("start", "content_size", "expected"),
+    [
+        (-4, 1920, 4),
+        (4, 1920, -4),
+        (0, 1920, 0),
+        (22, 1058, 0),
+        (-4, 1924, 0),
+    ],
+)
+def test_wine_drawable_reposition_exposes_complete_axis(
+    start: int,
+    content_size: int,
+    expected: int,
+) -> None:
+    assert _content_axis_reposition_delta(
+        parent_size=1920,
+        start=start,
+        content_size=content_size,
+    ) == expected
 
 
 def test_wine_drawable_fit_rejects_an_origin_outside_the_parent() -> None:
