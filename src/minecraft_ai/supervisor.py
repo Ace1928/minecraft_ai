@@ -14,7 +14,13 @@ from typing import Any
 
 from platformdirs import user_runtime_dir
 
-from .safety import FakeInputBackend, MotorGate, SupervisorState, allowed_targets, validate_transition
+from .safety import (
+    FakeInputBackend,
+    MotorGate,
+    SupervisorState,
+    allowed_targets,
+    validate_transition,
+)
 
 APP_NAME = "minecraft-ai"
 RUNTIME_DIR = Path(user_runtime_dir(APP_NAME))
@@ -127,9 +133,11 @@ class Supervisor:
                 return
             self.last_fault = reason
             self.motor.revoke(reason)
-            if self.state != SupervisorState.FAILSAFE:
-                if SupervisorState.FAILSAFE in allowed_targets(self.state):
-                    self.state = SupervisorState.FAILSAFE
+            if (
+                self.state != SupervisorState.FAILSAFE
+                and SupervisorState.FAILSAFE in allowed_targets(self.state)
+            ):
+                self.state = SupervisorState.FAILSAFE
             self._persist_status()
 
     def stop(self) -> None:
@@ -197,7 +205,7 @@ class Supervisor:
                     self.fail("motor-lease-watchdog-expired")
                 try:
                     conn, _ = server.accept()
-                except socket.timeout:
+                except TimeoutError:
                     continue
                 with conn:
                     conn.settimeout(1.0)
@@ -273,7 +281,7 @@ def send_command(command: str, **payload: Any) -> dict[str, Any]:
         raise RuntimeError(str(response.get("error", "supervisor command failed")))
     result = response.get("result")
     if not isinstance(result, dict):
-        raise RuntimeError("invalid supervisor response")
+        raise TypeError("invalid supervisor response")
     return result
 
 
@@ -338,7 +346,7 @@ def _recv_json_line(sock: socket.socket, *, limit: int = 64 * 1024) -> dict[str,
     line = bytes(data).split(b"\n", 1)[0]
     parsed = json.loads(line.decode("utf-8"))
     if not isinstance(parsed, dict):
-        raise RuntimeError("control message must be a JSON object")
+        raise TypeError("control message must be a JSON object")
     return parsed
 
 
