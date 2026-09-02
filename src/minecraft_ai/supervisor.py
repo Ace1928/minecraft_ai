@@ -17,6 +17,8 @@ from platformdirs import user_runtime_dir
 from .emergency import emergency_reason, emergency_stop_latched
 from .safety import (
     FakeInputBackend,
+    InputBackend,
+    MotorAction,
     MotorGate,
     SupervisorState,
     allowed_targets,
@@ -56,7 +58,7 @@ class Supervisor:
         self.role = role
         self.session_id = secrets.token_hex(16)
         self.state = SupervisorState.STOPPED
-        self.backend = FakeInputBackend()
+        self.backend: InputBackend = FakeInputBackend()
         self.motor = MotorGate(self.backend)
         self.watchdog_interval_s = watchdog_interval_s
         self.started_monotonic_ns = time.monotonic_ns()
@@ -107,6 +109,37 @@ class Supervisor:
             self.state = SupervisorState.SAFE_IDLE
             self._persist_status()
 
+    def replace_backend(self, backend: InputBackend) -> None:
+        """Replace the motor backend only while completely unarmed."""
+        with self._lock:
+            if self.state != SupervisorState.SAFE_IDLE:
+                raise RuntimeError(f"cannot replace backend from {self.state}")
+            self.motor.revoke("backend-replacement")
+            old_backend = self.backend
+            try:
+                old_backend.release_all()
+            finally:
+                close = getattr(old_backend, "close", None)
+                if callable(close):
+                    close()
+            self.backend = backend
+            self.motor = MotorGate(backend)
+            self._persist_status()
+
+    def attach_bedrock_x11(self, display: str, window_id: int) -> dict[str, Any]:
+        """Attach the live backend to one isolated Bedrock X window."""
+        if emergency_stop_latched():
+            raise RuntimeError("emergency stop is latched")
+        from .platforms.bedrock_x11 import IsolatedX11InputBackend
+
+        backend = IsolatedX11InputBackend(display, target_window_id=window_id)
+        try:
+            self.replace_backend(backend)
+        except Exception:
+            backend.close()
+            raise
+        return self.status()
+
     def arm(self, target_instance: str) -> dict[str, Any]:
         """Create a motor lease, then atomically expose the ARMED state."""
         with self._lock:
@@ -126,6 +159,31 @@ class Supervisor:
                 "backend": lease.backend_id,
                 "target_instance": lease.target_instance,
                 "live_capable": self.backend.live_capable,
+                "expires_monotonic_ns": lease.expires_monotonic_ns,
+            }
+
+    def renew(self, lease_id: str, *, ttl_ms: int = 750) -> dict[str, Any]:
+        with self._lock:
+            if self.state not in {SupervisorState.ARMED, SupervisorState.RUNNING}:
+                raise RuntimeError(f"cannot renew motor lease from {self.state}")
+            lease = self.motor.renew(lease_id, ttl_ms=ttl_ms)
+            return {
+                "lease_id": lease.lease_id,
+                "expires_monotonic_ns": lease.expires_monotonic_ns,
+            }
+
+    def apply_motor_action(self, lease_id: str, raw_action: object) -> dict[str, Any]:
+        with self._lock:
+            if emergency_stop_latched():
+                self.fail("emergency-stop-latched")
+                raise RuntimeError("emergency stop is latched")
+            if self.state != SupervisorState.RUNNING:
+                raise RuntimeError(f"motor actions require RUNNING, got {self.state}")
+            action = MotorAction.model_validate(raw_action)
+            self.motor.apply(lease_id, action)
+            return {
+                "accepted_sequence": action.sequence,
+                "lease_active": self.motor.lease is not None,
             }
 
     def activate(self) -> None:
@@ -188,6 +246,9 @@ class Supervisor:
     def status(self) -> dict[str, Any]:
         with self._lock:
             lease = self.motor.lease
+            held_keys = sorted(getattr(self.backend, "held_keys", ()))
+            held_buttons = sorted(getattr(self.backend, "held_buttons", ()))
+            release_count = getattr(self.backend, "release_count", None)
             return {
                 "state": self.state.value,
                 "role": self.role,
@@ -196,10 +257,11 @@ class Supervisor:
                 "backend": self.backend.backend_id,
                 "live_capable": self.backend.live_capable,
                 "motor_lease_active": lease is not None and not lease.expired(),
+                "motor_target_instance": lease.target_instance if lease is not None else None,
                 "motor_revocation_reason": self.motor.revocation_reason,
-                "held_keys": sorted(self.backend.held_keys),
-                "held_buttons": sorted(self.backend.held_buttons),
-                "release_count": self.backend.release_count,
+                "held_keys": held_keys,
+                "held_buttons": held_buttons,
+                "release_count": release_count,
                 "last_fault": self.last_fault,
                 "emergency_stop_latched": emergency_stop_latched(),
                 "uptime_s": round(
@@ -249,6 +311,9 @@ class Supervisor:
             try:
                 server.close()
             finally:
+                close = getattr(self.backend, "close", None)
+                if callable(close):
+                    close()
                 self._remove_control_file_if_owned()
                 if self.state != SupervisorState.STOPPED:
                     self.state = SupervisorState.STOPPED
@@ -273,12 +338,23 @@ class Supervisor:
             elif command == "stop":
                 self.stop()
                 result = self.status()
-            elif command == "arm-fake":
+            elif command == "attach-bedrock-x11":
+                display = str(payload.get("display", ""))
+                window_id = int(payload.get("window_id", 0))
+                result = self.attach_bedrock_x11(display, window_id)
+            elif command in {"arm-fake", "arm"}:
                 target_instance = str(payload.get("target_instance", "fake-instance"))
                 result = {"lease": self.arm(target_instance), "status": self.status()}
-            elif command == "activate-fake":
+            elif command in {"activate-fake", "activate"}:
                 self.activate()
                 result = self.status()
+            elif command == "renew":
+                lease_id = str(payload.get("lease_id", ""))
+                ttl_ms = int(payload.get("ttl_ms", 750))
+                result = self.renew(lease_id, ttl_ms=ttl_ms)
+            elif command == "motor-action":
+                lease_id = str(payload.get("lease_id", ""))
+                result = self.apply_motor_action(lease_id, payload.get("action"))
             elif command == "disarm":
                 self.disarm()
                 result = self.status()
