@@ -1,0 +1,318 @@
+# Implementation Roadmap
+
+The roadmap is ordered by dependency and release gates. Later phases must not bypass earlier safety and observability requirements.
+
+## Phase 0 — Public extraction and safety foundation
+
+**Goal:** a clean standalone project that cannot accidentally expose private/proprietary dependencies.
+
+Deliverables:
+
+- standalone package namespace and CLI;
+- Apache-2.0 licensing and third-party notice process;
+- public-boundary audit for private URLs, personal paths, credentials, internal names and proprietary adapters;
+- supervisor state machine;
+- `run/status/pause/resume/stop/logs` control protocol;
+- capability-leased motor interface;
+- zero live-input default;
+- platform/architecture capability detection;
+- deterministic test harness and fake Minecraft backend.
+
+Exit gate:
+
+- repository contains no private Neuroforge/ERAIS integration;
+- safety fault tests pass against fake backend;
+- stop is independent of cognition.
+
+## Phase 1 — Instance-scoped capture and input
+
+**Goal:** control one Minecraft instance without taking over the operator's desktop.
+
+### Java
+
+- detect installed/running versions and launcher profiles;
+- create minimal client-side bridge for bounded key/mouse semantics;
+- local authenticated IPC;
+- instance-scoped frame capture where available, otherwise window capture;
+- chat event bridge that does not expose privileged world state in strict mode;
+- CI builds for supported Java/loader versions.
+
+### Bedrock
+
+- process/window discovery;
+- platform capture adapters;
+- isolated-session backend where possible;
+- focused compatibility backend with explicit opt-in when isolation is unavailable.
+
+Exit gate:
+
+- operator can use another application while Java agent moves continuously;
+- stop/pause releases all held controls;
+- target-instance swap fails closed.
+
+## Phase 2 — Versioned game knowledge compiler
+
+**Goal:** remove hard-coded progression knowledge.
+
+Implement `GameVersion` and provenance graph.
+
+Importers:
+
+- exact-version Java recipes/tags/loot/advancement data extracted from version artifacts/data packs;
+- normalized versioned open data adapter (e.g. minecraft-data) as secondary coverage/cross-check;
+- Bedrock vanilla behavior/resource data adapters where redistribution/access permits;
+- wiki retriever with revision/source/version metadata;
+- manual override/errata layer.
+
+Graph domains:
+
+- crafting/cooking/smithing/brewing;
+- drops/loot;
+- tool/harvest requirements;
+- dimensions/structures/biomes;
+- trades/bartering;
+- portals;
+- advancements/achievements;
+- equipment/enchantment constraints.
+
+Build graph query operations:
+
+- `requirements(target)`;
+- `ways_to_obtain(target)`;
+- `prerequisite_closure(goal)`;
+- `progression_paths(goal, state)`;
+- `explain_fact(fact)` with provenance.
+
+Exit gate:
+
+- generated dependency plans for representative early/mid/endgame items match exact target version;
+- version mismatch tests fail loudly.
+
+## Phase 3 — Perception blackboard
+
+**Goal:** stable real-time state estimates instead of frame-by-frame VLM narration.
+
+- 20-30 Hz capture pipeline;
+- frame ring buffer;
+- visual encoder and temporal tracker;
+- HUD/hotbar/GUI/chat region parsers;
+- crosshair target estimator;
+- terrain affordance/drop-edge estimator;
+- asynchronous task-conditioned VLM queries;
+- confidence decay and semantic reconciliation;
+- event detection: damage, death, inventory change, block break, GUI transition, target loss.
+
+Exit gate:
+
+- blackboard state stays useful during VLM latency/outage;
+- p95 visual-to-blackboard fast-path latency meets hardware profile target.
+
+## Phase 4 — Skill runtime and verifier
+
+**Goal:** replace macros and static recipe actions with closed-loop options.
+
+- typed `SkillSpec` schema;
+- precondition/effect predicates over blackboard + knowledge graph;
+- parameter binding;
+- skill executor;
+- local recovery graph;
+- success/failure verifier;
+- contextual outcome database;
+- candidate/trusted/deprecated lifecycle;
+- skill composition and dependency resolution.
+
+Seed robust hand-engineered/behavioral skills only as bootstrap:
+
+- look/scan;
+- approach target;
+- unstuck;
+- mine visible block;
+- collect drop;
+- select hotbar item;
+- eat;
+- place block;
+- basic GUI/crafting interaction;
+- retreat/shelter.
+
+Exit gate:
+
+- high-level planner requests semantic skills only;
+- no strategic code emits individual key presses.
+
+## Phase 5 — Human motor policy v1
+
+**Goal:** replace heuristic movement/aim with a learned behavioral prior.
+
+Data pipeline:
+
+- ingest legally usable human gameplay/action datasets;
+- support user-recorded demonstrations;
+- align frames/actions/goals;
+- action tokenizer for keys, buttons and mouse movement;
+- trajectory quality filters;
+- automatic goal relabeling where reliable.
+
+Model:
+
+- compact visual encoder;
+- recurrent/temporal action-history trunk;
+- goal/skill conditioning;
+- multi-head action output;
+- termination/anomaly heads.
+
+Training:
+
+- behavior cloning;
+- held-out human trajectory evaluation;
+- task fine-tuning;
+- DAgger-style correction collection.
+
+Exit gate:
+
+- learned policy exceeds heuristic baseline on movement/mining/basic survival;
+- 20-30 Hz deadline sustained on minimum supported local profile.
+
+## Phase 6 — Hybrid hierarchical planner
+
+**Goal:** human-like long-horizon planning grounded in actual game dependencies.
+
+- goal/state formalization;
+- prerequisite DAG/AND-OR expansion;
+- HTN/partial-order plan representation;
+- skill binding;
+- resource/time/risk cost estimator;
+- opportunity insertion;
+- local recovery vs global replan policy;
+- plan validation against exact game version;
+- high-level multimodal model used for intent, ambiguity and novel decomposition, never as sole feasibility authority.
+
+Exit gate:
+
+- complete progression from new world through representative tech milestones without static goal recipes;
+- materially fewer full replans than reactive baseline.
+
+## Phase 7 — Memory and lifelong skill learning
+
+**Goal:** improve across sessions rather than repeatedly rediscovering behavior.
+
+- working memory;
+- episodic what/where/when store;
+- spatial landmark/route graph;
+- procedural skill store;
+- social/promises store;
+- failure/remedy memory;
+- relevance retrieval combining causal, spatial, semantic, temporal and goal signals;
+- skill proposal/refinement loop;
+- held-out promotion evaluation;
+- regression tests by game and motor-policy version;
+- trajectory distillation into tactical/motor policy.
+
+Exit gate:
+
+- repeated tasks become faster/more reliable without unbounded prompt/context growth;
+- skill regressions are detected after version updates.
+
+## Phase 8 — Advancement/achievement curriculum and roles
+
+**Goal:** general progression plus player-selectable specialization.
+
+- versioned official advancement/achievement model;
+- derived technology capability graph;
+- curriculum scheduler;
+- archetype schema and built-ins;
+- custom role loader;
+- role-weighted standing goals and knowledge domains;
+- role-specific evaluation suites.
+
+Built-ins:
+
+- generalist;
+- farmer;
+- trader;
+- builder;
+- redstone engineer;
+- fighter;
+- mob farmer;
+- explorer;
+- speedrunner;
+- boss hunter;
+- Nether specialist;
+- shopkeeper example.
+
+Exit gate:
+
+- same base agent exhibits measurably different priorities and competent behavior under different role profiles.
+
+## Phase 9 — Social agent and in-game wiki
+
+**Goal:** useful teammate rather than silent automation.
+
+- chat OCR/event ingestion per edition;
+- player identity and dialogue state;
+- promises/shared projects;
+- proactive progress reports;
+- task negotiation/delegation;
+- version-aware knowledge Q&A;
+- source/provenance display;
+- interrupt policy so conversation does not freeze motor control.
+
+Exit gate:
+
+- agent can answer exact-version questions, accept a collaborative project, continue playing while inference occurs, and report completion/failure.
+
+## Phase 10 — Motor experts and world model
+
+**Goal:** scale competence without destructive interference.
+
+- task-conditioned expert routing;
+- shared trunk + navigation/mining/combat/building/GUI/etc experts;
+- contextual expert selection metrics;
+- short-horizon learned dynamics predictor;
+- prediction-error anomaly signal;
+- constrained offline/online RL and self-play improvements.
+
+Exit gate:
+
+- expert system improves heterogeneous task score without degrading established competencies.
+
+## Phase 11 — Cross-platform one-command release
+
+**Goal:** installable by ordinary users.
+
+- `pipx`, standalone binary/installer or equivalent bootstrap path;
+- automatic OS/arch/GPU detection;
+- model profile selection (`tiny`, `balanced`, `quality`);
+- checksum/license-aware downloads;
+- Java bridge installer;
+- update/migration system;
+- diagnostic bundle;
+- Windows/Linux/macOS CI;
+- x86-64/ARM64 matrix where dependencies allow;
+- packaged role/knowledge updates.
+
+Exit gate:
+
+```text
+install -> doctor -> run -> pause/resume -> stop
+```
+
+works from a clean supported machine without manual source edits.
+
+## Metrics dashboard
+
+Every release tracks:
+
+- frame-to-action latency p50/p95/p99;
+- motor Hz deadline miss rate;
+- VLM semantic refresh latency;
+- task success by capability;
+- advancement/achievement coverage;
+- tech progression time;
+- skill success/context calibration;
+- recovery success vs global replans;
+- deaths/resources lost;
+- wiki version accuracy;
+- social task completion;
+- memory benefit ablations;
+- operator focus-isolation violations (target: zero);
+- stop latency and held-input violations (target: zero).
