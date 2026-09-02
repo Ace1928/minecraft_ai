@@ -40,6 +40,29 @@ def test_operator_http_message_roundtrip(tmp_path: Path, monkeypatch) -> None:
             messages = database.load_operator_messages()
         assert messages[0].text == "Inspect the workshop."
 
+        target_request = urllib.request.Request(
+            f"http://{host}:{port}/api/target",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(
+                {
+                    "label": "oak_log",
+                    "x": 0.4,
+                    "y": 0.2,
+                    "width": 0.15,
+                    "height": 0.5,
+                }
+            ).encode(),
+        )
+        with urllib.request.urlopen(target_request, timeout=2) as response:
+            target = json.load(response)
+            assert response.status == 201
+        assert target["label"] == "oak_log"
+        with StateDatabase(paths.state_db) as database:
+            stored_target = database.load_operator_target()
+        assert stored_target is not None
+        assert stored_target.region.height == 0.5
+
         with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=2) as response:
             assert json.load(response) == {"status": "ok"}
     finally:

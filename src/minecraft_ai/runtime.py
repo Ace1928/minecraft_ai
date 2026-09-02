@@ -106,6 +106,7 @@ class AgentRuntime:
     _pool: concurrent.futures.ThreadPoolExecutor = field(init=False)
     _last_decision: CognitionDecision | None = field(default=None, init=False)
     _pending_operator_message_ids: tuple[str, ...] = field(default=(), init=False)
+    _last_operator_target_id: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz <= 0:
@@ -170,6 +171,7 @@ class AgentRuntime:
         frame = self.perception.capture_once()
         self.metrics.frames += 1
         self.metrics.last_capture_ms = (time.perf_counter() - capture_started) * 1000.0
+        self._merge_operator_target()
         self.telemetry.publish(self._telemetry_payload(state="running"))
         if self.perception.stale():
             raise RuntimeError("capture stream is stale")
@@ -272,6 +274,22 @@ class AgentRuntime:
         if self.perception.request_semantics(query):
             self.metrics.semantic_requests += 1
             self._last_semantic_ns = now
+
+    def _merge_operator_target(self) -> None:
+        """Publish a newly selected operator region as ROCKET's reference target."""
+        if self.state_db is None:
+            return
+        target = self.state_db.load_operator_target()
+        if target is None or target.track_id == self._last_operator_target_id:
+            return
+        latest = self.blackboard.raw_latest()
+        if latest is None:
+            return
+        if self.blackboard.merge_semantics(
+            instance_id=latest.instance_id,
+            tracks=(target,),
+        ):
+            self._last_operator_target_id = target.track_id
 
     def _semantic_question(self, skill_id: str | None) -> str:
         if skill_id is None:

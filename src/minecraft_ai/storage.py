@@ -7,6 +7,7 @@ from pathlib import Path
 from .datasets.schema import TrajectoryManifest
 from .memory import MemoryKind, MemoryRecord, MemoryStore
 from .planning import Goal
+from .perception import Track
 from .skills import SkillLibrary, SkillSpec, SkillStats
 from .social import (
     OperatorMessage,
@@ -18,7 +19,7 @@ from .social import (
 from .spatial import PlaceRecord, SpatialPlaceMemory
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class StateDatabase:
@@ -102,6 +103,14 @@ class StateDatabase:
             );
             CREATE INDEX IF NOT EXISTS idx_operator_messages_status_created
                 ON operator_messages(status, created_ns DESC);
+            CREATE TABLE IF NOT EXISTS operator_targets (
+                target_id TEXT PRIMARY KEY,
+                created_ns INTEGER NOT NULL,
+                active INTEGER NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_operator_targets_active_created
+                ON operator_targets(active, created_ns DESC);
             CREATE TABLE IF NOT EXISTS trajectories (
                 trajectory_id TEXT PRIMARY KEY,
                 started_ns INTEGER NOT NULL,
@@ -178,6 +187,9 @@ class StateDatabase:
             if version == 3:
                 self._migrate_v3_to_v4()
                 version = 4
+            if version == 4:
+                self._migrate_v4_to_v5()
+                version = 5
             self.connection.execute(
                 "UPDATE meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
@@ -252,6 +264,20 @@ class StateDatabase:
                 kind TEXT NOT NULL,
                 payload TEXT NOT NULL
             );
+            """
+        )
+
+    def _migrate_v4_to_v5(self) -> None:
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS operator_targets (
+                target_id TEXT PRIMARY KEY,
+                created_ns INTEGER NOT NULL,
+                active INTEGER NOT NULL,
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_operator_targets_active_created
+                ON operator_targets(active, created_ns DESC);
             """
         )
 
@@ -467,6 +493,37 @@ class StateDatabase:
                 message.model_dump_json(),
             ),
         )
+        self.connection.commit()
+
+    def save_operator_target(self, target: Track) -> None:
+        """Persist one explicit operator grounding target and supersede older ones."""
+        self.connection.execute("UPDATE operator_targets SET active=0 WHERE active=1")
+        self.connection.execute(
+            """
+            INSERT INTO operator_targets(target_id, created_ns, active, payload)
+            VALUES(?, ?, 1, ?)
+            ON CONFLICT(target_id) DO UPDATE SET
+                created_ns=excluded.created_ns,
+                active=1,
+                payload=excluded.payload
+            """,
+            (target.track_id, target.last_seen_ns, target.model_dump_json()),
+        )
+        self.connection.commit()
+
+    def load_operator_target(self) -> Track | None:
+        row = self.connection.execute(
+            """
+            SELECT payload FROM operator_targets
+            WHERE active=1
+            ORDER BY created_ns DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return None if row is None else Track.model_validate_json(row[0])
+
+    def clear_operator_target(self) -> None:
+        self.connection.execute("UPDATE operator_targets SET active=0 WHERE active=1")
         self.connection.commit()
 
     def load_operator_messages(

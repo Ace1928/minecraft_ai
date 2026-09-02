@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 
 from minecraft_ai.memory import MemoryKind, MemoryRecord
+from minecraft_ai.perception import ScreenRegion, Track
 from minecraft_ai.planning import Goal
 from minecraft_ai.skills import SkillSpec, SkillStats
 from minecraft_ai.social import (
@@ -48,6 +49,17 @@ def test_state_database_roundtrip(tmp_path: Path) -> None:
                 text="Return to the workshop and finish the west wall.",
             )
         )
+        db.save_operator_target(
+            Track(
+                track_id="operator:log-1",
+                label="oak_log",
+                confidence=1.0,
+                region=ScreenRegion(x=0.4, y=0.3, width=0.2, height=0.4),
+                first_seen_ns=10,
+                last_seen_ns=10,
+                attributes={"source": "operator"},
+            )
+        )
 
     with StateDatabase(path) as db:
         memories = db.load_memories()
@@ -70,6 +82,12 @@ def test_state_database_roundtrip(tmp_path: Path) -> None:
             response_text="I will finish the west wall.",
         )
         assert updated.response_text == "I will finish the west wall."
+        target = db.load_operator_target()
+        assert target is not None
+        assert target.label == "oak_log"
+        assert target.region.width == 0.2
+        db.clear_operator_target()
+        assert db.load_operator_target() is None
 
 
 def test_memory_kind_filter(tmp_path: Path) -> None:

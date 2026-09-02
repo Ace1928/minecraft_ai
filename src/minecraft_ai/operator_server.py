@@ -7,14 +7,19 @@ import time
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
 
+from PIL import Image
+
 from .agent_lifecycle import AgentProcess, agent_alive, stop_agent_process
 from .config import app_paths
 from .emergency import emergency_reason, emergency_stop_latched
+from .perception import ScreenRegion, Track
 from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
+from .platforms.bedrock_x11 import IsolatedX11Capture
 from .social import OperatorMessage, OperatorMessageKind
 from .storage import StateDatabase
 from .supervisor import STATUS_FILE, send_command, supervisor_alive
@@ -92,6 +97,15 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {"messages": [message.model_dump(mode="json") for message in messages]},
             )
+        elif path == "/api/frame.png":
+            self._get_frame()
+        elif path == "/api/target":
+            with StateDatabase(app_paths().state_db) as database:
+                target = database.load_operator_target()
+            self._send_json(
+                HTTPStatus.OK,
+                {"target": None if target is None else target.model_dump(mode="json")},
+            )
         elif path == "/healthz":
             self._send_json(HTTPStatus.OK, {"status": "ok"})
         else:
@@ -103,6 +117,10 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_body()
             if path == "/api/messages":
                 self._post_message(payload)
+            elif path == "/api/target":
+                self._post_target(payload)
+            elif path == "/api/target/clear":
+                self._clear_target()
             elif path == "/api/control/pause":
                 self._pause_agent()
             elif path == "/api/control/resume":
@@ -145,6 +163,62 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
         with StateDatabase(app_paths().state_db) as database:
             database.save_operator_message(message)
         self._send_json(HTTPStatus.CREATED, message.model_dump(mode="json"))
+
+    def _get_frame(self) -> None:
+        process = AgentProcess.load()
+        if not agent_alive(process):
+            raise ValueError("agent capture process is not running")
+        capture = IsolatedX11Capture(
+            process.display,
+            process.window_id,
+            allow_host=False,
+        )
+        try:
+            frame = capture.capture()
+        finally:
+            capture.close()
+        image = Image.frombytes(
+            "RGBA",
+            (frame.width, frame.height),
+            frame.bgra,
+            "raw",
+            "BGRA",
+        ).convert("RGB")
+        output = BytesIO()
+        image.save(output, format="JPEG", quality=86, optimize=True)
+        self._send_bytes(HTTPStatus.OK, output.getvalue(), "image/jpeg")
+
+    def _post_target(self, payload: dict[str, Any]) -> None:
+        allowed = {"label", "x", "y", "width", "height"}
+        unexpected = sorted(set(payload) - allowed)
+        if unexpected:
+            raise ValueError(f"unsupported fields: {', '.join(unexpected)}")
+        label = str(payload.get("label", "target")).strip()[:80]
+        if not label:
+            raise ValueError("target label is required")
+        now_ns = time.monotonic_ns()
+        target = Track(
+            track_id=f"operator:{uuid.uuid4().hex}",
+            label=label,
+            confidence=1.0,
+            region=ScreenRegion(
+                x=float(payload["x"]),
+                y=float(payload["y"]),
+                width=float(payload["width"]),
+                height=float(payload["height"]),
+            ),
+            first_seen_ns=now_ns,
+            last_seen_ns=now_ns,
+            attributes={"source": "operator", "grounding": "explicit-region"},
+        )
+        with StateDatabase(app_paths().state_db) as database:
+            database.save_operator_target(target)
+        self._send_json(HTTPStatus.CREATED, target.model_dump(mode="json"))
+
+    def _clear_target(self) -> None:
+        with StateDatabase(app_paths().state_db) as database:
+            database.clear_operator_target()
+        self._send_json(HTTPStatus.OK, {"target": None})
 
     def _pause_agent(self) -> None:
         stop_agent_process()
@@ -232,6 +306,8 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 .reason{font-size:16px;margin-top:9px}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:13px}
 .facts{margin:9px 0 0;max-height:220px;overflow:auto;white-space:pre-wrap;color:#b8d8ca;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}
 .metric{background:#09130f;border:1px solid #1d3028;border-radius:8px;padding:9px}.metric b{display:block;font-size:17px;margin-top:3px}
+.viewer{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:#030705;line-height:0;user-select:none;touch-action:none}
+.viewer img{display:block;width:100%;height:auto;min-height:220px;object-fit:contain}.selection{position:absolute;border:2px solid var(--cyan);background:#70d7e829;box-shadow:0 0 0 1px #001a;display:none;pointer-events:none}
 .ok{color:var(--green)}.bad{color:var(--red)}.amber{color:var(--amber)}#notice{min-height:20px;margin-top:9px;color:var(--muted)}
 @media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}.wide{grid-column:span 2}}
 @media(max-width:540px){main{padding:16px}.grid{grid-template-columns:1fr}.wide,.full{grid-column:1}.row{flex-direction:column}.live{display:none}}
@@ -247,6 +323,8 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 <div class="card"><div class="label">Motor policy</div><div class="value" id="policy">—</div><div id="policyMetrics" class="label"></div></div>
 <div class="card"><div class="label">Camera state</div><div class="value" id="camera">—</div><div id="cameraMode" class="label"></div></div>
 <div class="card wide"><div class="label">Latest cognition</div><div class="reason" id="reason">Waiting for agent telemetry.</div></div></section>
+<section class="card"><h2>Ground ROCKET-2 on the live Bedrock frame</h2><div class="viewer" id="viewer"><img id="worldFrame" alt="Live Bedrock frame" draggable="false"><div class="selection" id="selection"></div></div>
+<div class="row"><input id="targetLabel" maxlength="80" value="log" aria-label="Target label"><button id="setTarget">Run ROCKET-2 on selection</button><button class="secondary" id="clearTarget">Clear target</button></div><div id="targetNotice" class="label">Drag a tight box around the object, then submit it as ROCKET-2's cross-view reference.</div></section>
 <section class="card"><h2>Fresh learned perception</h2><pre class="facts" id="facts">Waiting for perception facts.</pre></section>
 <section class="two"><div class="card"><h2>Talk to the high-level agent</h2><textarea id="text" maxlength="2000" placeholder="Give an instruction, ask a question, provide feedback, or correct its current approach…"></textarea>
 <div class="row"><select id="kind"><option value="instruction">Instruction</option><option value="question">Question</option><option value="feedback">Feedback</option><option value="correction">Correction</option></select>
@@ -258,6 +336,13 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 const $=id=>document.getElementById(id);const esc=v=>v??'—';
 async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);return d}
 function cls(el,good){el.className='value '+(good?'ok':'bad')}
+let dragging=false,startX=0,startY=0,targetBox=null;const viewer=$('viewer'),selection=$('selection'),worldFrame=$('worldFrame');
+function point(e){const r=worldFrame.getBoundingClientRect();return{x:Math.max(0,Math.min(r.width,e.clientX-r.left)),y:Math.max(0,Math.min(r.height,e.clientY-r.top)),w:r.width,h:r.height}}
+function drawBox(box){selection.style.display='block';selection.style.left=(box.x*100)+'%';selection.style.top=(box.y*100)+'%';selection.style.width=(box.width*100)+'%';selection.style.height=(box.height*100)+'%'}
+viewer.onpointerdown=e=>{if(!worldFrame.complete)return;const p=point(e);dragging=true;startX=p.x;startY=p.y;viewer.setPointerCapture(e.pointerId);targetBox={x:p.x/p.w,y:p.y/p.h,width:.001,height:.001};drawBox(targetBox)};
+viewer.onpointermove=e=>{if(!dragging)return;const p=point(e),x=Math.min(startX,p.x),y=Math.min(startY,p.y);targetBox={x:x/p.w,y:y/p.h,width:Math.max(1,Math.abs(p.x-startX))/p.w,height:Math.max(1,Math.abs(p.y-startY))/p.h};drawBox(targetBox)};
+viewer.onpointerup=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId)};
+function refreshFrame(){if(!dragging)worldFrame.src='/api/frame.png?t='+Date.now()}
 async function refresh(){try{const s=await api('/api/status');$('dot').style.background='var(--green)';$('connection').textContent='Live telemetry';
 const bi=s.bedrock.instances.length>0; $('bedrock').textContent=bi?'RUNNING':'STOPPED';cls($('bedrock'),bi);$('version').textContent=esc(s.bedrock.version);
 const sup=esc(s.supervisor.state);$('supervisor').textContent=sup;cls($('supervisor'),s.supervisor_reachable&&sup!=='FAILSAFE');
@@ -271,7 +356,9 @@ $('frames').textContent=esc(t.frames||0);$('actions').textContent=esc(t.motor_ac
 async function messages(){try{const d=await api('/api/messages');const feed=$('feed');feed.replaceChildren();if(!d.messages.length){const x=document.createElement('div');x.className='label';x.textContent='No messages yet';feed.append(x);return}
 d.messages.forEach(m=>{const box=document.createElement('div');box.className='msg';const meta=document.createElement('div');meta.className='meta';const k=document.createElement('span');k.className='kind';k.textContent=m.kind;const when=document.createElement('span');when.textContent=new Date(m.created_ns/1e6).toLocaleTimeString();const status=document.createElement('span');status.textContent=m.status;meta.append(k,when,status);const text=document.createElement('div');text.className='text';text.textContent=m.text;box.append(meta,text);if(m.response_text){const reply=document.createElement('div');reply.className='text ok';reply.textContent='Agent: '+m.response_text;box.append(reply)}feed.append(box)})}catch(e){}}
 $('send').onclick=async()=>{const text=$('text').value.trim();if(!text)return;try{await api('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,kind:$('kind').value,priority:Number($('priority').value)})});$('text').value='';$('notice').textContent='Delivered to the durable cognition inbox.';messages()}catch(e){$('notice').textContent=e.message}};
+$('setTarget').onclick=async()=>{if(!targetBox||targetBox.width<.005||targetBox.height<.005){$('targetNotice').textContent='Drag a non-empty target region first.';return}try{const t=await api('/api/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...targetBox,label:$('targetLabel').value.trim()||'target'})});$('targetNotice').textContent='ROCKET-2 target armed: '+t.label+' · '+t.track_id}catch(e){$('targetNotice').textContent=e.message}};
+$('clearTarget').onclick=async()=>{try{await api('/api/target/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});targetBox=null;selection.style.display='none';$('targetNotice').textContent='Grounded target cleared.'}catch(e){$('targetNotice').textContent=e.message}};
 $('pause').onclick=async()=>{try{await api('/api/control/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('notice').textContent='Agent paused; motor capability revoked.';refresh()}catch(e){$('notice').textContent=e.message}};
 $('resume').onclick=async()=>{try{await api('/api/control/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('notice').textContent='Supervisor returned to safe idle. Live control was not armed.';refresh()}catch(e){$('notice').textContent=e.message}};
-refresh();messages();setInterval(refresh,500);setInterval(messages,2000);
+refresh();messages();refreshFrame();setInterval(refresh,500);setInterval(messages,2000);setInterval(refreshFrame,1000);
 </script></body></html>"""
