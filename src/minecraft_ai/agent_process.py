@@ -17,7 +17,7 @@ from .motor import BootstrapMotorPolicy, MotorPolicy
 from .perception import PerceptionBlackboard
 from .perception_service import ActiveVLMWorker, RealtimePerceptionService
 from .platforms.bedrock_x11 import IsolatedX11Capture
-from .policy_service import TemporalPolicyClient
+from .policy_service import GroundedPolicyRouter, TemporalPolicyClient
 from .roles import get_role
 from .runtime import AgentRuntime
 from .storage import StateDatabase
@@ -95,10 +95,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         policy: MotorPolicy
         if config.policy.enabled:
-            policy = TemporalPolicyClient(
+            primary_policy = TemporalPolicyClient(
                 config.policy,
                 frame_provider=lambda: perception.last_capture,
             )
+            if config.grounded_policy is not None and config.grounded_policy.enabled:
+                grounded_policy = TemporalPolicyClient(
+                    config.grounded_policy,
+                    frame_provider=lambda: perception.last_capture,
+                )
+                policy = GroundedPolicyRouter(primary_policy, grounded_policy)
+            else:
+                policy = primary_policy
         else:
             policy = BootstrapMotorPolicy()
         executor = SkillExecutor(policy)

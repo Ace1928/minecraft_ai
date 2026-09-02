@@ -40,6 +40,7 @@ class SkillSpec(BaseModel):
     recovery_skills: tuple[str, ...] = ()
     max_duration_ms: int = Field(default=30_000, ge=50, le=3_600_000)
     policy_ref: str | None = None
+    policy_instruction: str | None = Field(default=None, min_length=1, max_length=256)
     compatible_editions: tuple[str, ...] = ("bedrock", "java")
     compatible_versions: tuple[str, ...] = ()
 

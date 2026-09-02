@@ -5,10 +5,17 @@ import pytest
 
 from minecraft_ai.config import PolicyConfig
 from minecraft_ai.motor import MotorIntent
-from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
+from minecraft_ai.perception import (
+    FrameState,
+    PerceptionBlackboard,
+    PerceptionFact,
+    ScreenRegion,
+    Track,
+)
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.policy_service import (
     LearnedPolicyOutput,
+    GroundedPolicyRouter,
     TemporalPolicyClient,
     _decoded_policy_output,
     _intent_instruction,
@@ -17,6 +24,79 @@ from minecraft_ai.policy_service import (
     _track_mask,
     _validate_policy_config,
 )
+from minecraft_ai.safety import MotorAction
+
+
+class _RoutingPolicy:
+    def __init__(self, policy_id: str, *, key: str) -> None:
+        self.policy_id = policy_id
+        self.key = key
+        self.calls = 0
+        self.resets = 0
+
+    def act(
+        self,
+        blackboard: PerceptionBlackboard,
+        intent: MotorIntent,
+        *,
+        sequence: int,
+    ) -> MotorAction:
+        self.calls += 1
+        return MotorAction(sequence=sequence, keys_down=(self.key,))
+
+    def reset(self) -> MotorAction:
+        self.resets += 1
+        return MotorAction(sequence=self.calls, keys_up=(self.key,))
+
+
+def _tracked_board(*, age_ms: int = 0) -> PerceptionBlackboard:
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:test",
+            width=1280,
+            height=720,
+            tracks=(
+                Track(
+                    track_id="log-1",
+                    label="oak log",
+                    confidence=0.9,
+                    region=ScreenRegion(x=0.4, y=0.25, width=0.2, height=0.5),
+                    first_seen_ns=now - age_ms * 1_000_000,
+                    last_seen_ns=now - age_ms * 1_000_000,
+                ),
+            ),
+        )
+    )
+    return board
+
+
+def test_grounded_router_requires_fresh_track_and_supported_interaction() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _RoutingPolicy("rocket", key="a")
+    router = GroundedPolicyRouter(primary, grounded, max_track_age_ms=100)
+    mine = MotorIntent(skill_id="mine", mode="mine")
+
+    first = router.act(PerceptionBlackboard(), mine, sequence=1)
+    assert first.keys_down == ("w",)
+    assert grounded.calls == 0
+
+    second = router.act(_tracked_board(), mine, sequence=2)
+    assert second.keys_down == ("a",)
+    assert second.keys_up == ("w",)
+    assert router.status()["active_route"] == "grounded"
+
+    third = router.act(_tracked_board(age_ms=500), mine, sequence=3)
+    assert third.keys_down == ("w",)
+    assert third.keys_up == ("a",)
+    assert router.status()["switches"] == 2
+
+    explore = MotorIntent(skill_id="explore", mode="explore")
+    router.act(_tracked_board(), explore, sequence=4)
+    assert grounded.calls == 1
 
 
 def _policy_config(tmp_path: Path, *, deadline_ms: int = 48) -> PolicyConfig:
@@ -209,6 +289,23 @@ def test_async_policy_preserves_held_state_only_inside_action_duration(
     assert action.keys_up == ()
     assert client._held_keys == {"w"}
     assert client.metrics.deadline_misses == 0
+
+
+def test_slow_policy_uses_bounded_sample_and_hold_window(tmp_path: Path) -> None:
+    config = _policy_config(tmp_path).model_copy(update={"action_hold_ms": 250})
+    client = TemporalPolicyClient(config=config, frame_provider=lambda: None)
+    output = LearnedPolicyOutput(
+        keys=("w",),
+        inference_ns=1,
+        model_version="official-v1",
+    )
+
+    before = time.monotonic_ns()
+    action = client._output_action(output, sequence=1)
+
+    assert action.duration_ms == 50
+    assert client._held_until_ns >= before + 249_000_000
+    assert client._held_until_ns <= before + 260_000_000
 
 
 def test_async_policy_releases_expired_action_while_inference_is_pending(

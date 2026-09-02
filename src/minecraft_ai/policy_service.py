@@ -21,7 +21,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from .config import PolicyConfig
-from .motor import MotorIntent
+from .motor import MotorIntent, MotorPolicy
 from .perception import PerceptionBlackboard
 from .perception_service import perceptual_hash_distance
 from .platforms.bedrock_x11 import CapturedFrame
@@ -131,6 +131,13 @@ class TemporalPolicyClient:
         sequence = self._last_sequence + 1
         if self._pending_request_id is not None:
             self._discard_pending_response = True
+        process = self._process
+        if process is not None and process.poll() is None and process.stdin is not None:
+            try:
+                process.stdin.write('{"type":"reset"}\n')
+                process.stdin.flush()
+            except OSError:
+                self.close()
         self._last_sequence = sequence
         return self._release(sequence)
 
@@ -155,6 +162,7 @@ class TemporalPolicyClient:
             "camera_scale": self.config.camera_scale,
             "camera_max_step": self.config.camera_max_step,
             "camera_pitch_limit": self.config.camera_pitch_limit,
+            "action_hold_ms": self.config.action_hold_ms,
             "estimated_pitch_units": self._estimated_pitch_units,
             "camera_recovery_active": self._camera_recovery_active,
             "process_alive": bool(process is not None and process.poll() is None),
@@ -341,7 +349,7 @@ class TemporalPolicyClient:
         )
         self._held_keys = desired_keys
         self._held_buttons = desired_buttons
-        self._held_until_ns = time.monotonic_ns() + action.duration_ms * 1_000_000
+        self._held_until_ns = time.monotonic_ns() + self.config.action_hold_ms * 1_000_000
         return action
 
     def _conditioned_intent(
@@ -401,6 +409,129 @@ class TemporalPolicyClient:
         self._held_buttons.clear()
         self._held_until_ns = 0
         return action
+
+
+@dataclass
+class GroundedPolicyRouter:
+    """Route grounded interactions to ROCKET while STEVE handles open-ended goals.
+
+    ROCKET is only eligible when the current blackboard contains a recent,
+    confident localized target and the requested interaction belongs to its
+    published interaction taxonomy. This keeps target masks evidence-backed and
+    prevents an empty or stale VLM box from silently becoming motor ground truth.
+    """
+
+    primary: MotorPolicy
+    grounded: MotorPolicy
+    min_track_confidence: float = 0.65
+    max_track_age_ms: int = 15_000
+    policy_id: str = field(init=False)
+    _active: MotorPolicy = field(init=False)
+    _active_route: str = field(default="primary", init=False)
+    _last_sequence: int = field(default=-1, init=False)
+    _switches: int = field(default=0, init=False)
+
+    def __post_init__(self) -> None:
+        if self.max_track_age_ms <= 0:
+            raise ValueError("max_track_age_ms must be positive")
+        if not 0.0 <= self.min_track_confidence <= 1.0:
+            raise ValueError("min_track_confidence must be in 0..1")
+        self._active = self.primary
+        self.policy_id = f"router:{self.primary.policy_id}+{self.grounded.policy_id}"
+
+    def act(
+        self,
+        blackboard: PerceptionBlackboard,
+        intent: MotorIntent,
+        *,
+        sequence: int,
+    ) -> MotorAction:
+        if sequence <= self._last_sequence:
+            raise ValueError("motor policy sequence must increase monotonically")
+        self._last_sequence = sequence
+        route = "grounded" if self._has_grounded_target(blackboard, intent) else "primary"
+        selected = self.grounded if route == "grounded" else self.primary
+        release: MotorAction | None = None
+        if selected is not self._active:
+            release = self._active.reset()
+            self._active = selected
+            self._active_route = route
+            self._switches += 1
+        action = selected.act(blackboard, intent, sequence=sequence)
+        return action if release is None else _merge_policy_release(action, release)
+
+    def reset(self) -> MotorAction:
+        sequence = self._last_sequence + 1
+        primary_release = self.primary.reset()
+        grounded_release = self.grounded.reset()
+        self._last_sequence = sequence
+        self._active = self.primary
+        self._active_route = "primary"
+        return _merge_policy_release(
+            MotorAction(sequence=sequence),
+            _merge_policy_release(primary_release, grounded_release),
+        )
+
+    def close(self) -> None:
+        for policy in (self.primary, self.grounded):
+            close = getattr(policy, "close", None)
+            if callable(close):
+                close()
+
+    def status(self) -> dict[str, object]:
+        return {
+            "policy_id": self.policy_id,
+            "provider": "grounded-router",
+            "active_route": self._active_route,
+            "switches": self._switches,
+            "min_track_confidence": self.min_track_confidence,
+            "max_track_age_ms": self.max_track_age_ms,
+            "primary": _policy_status(self.primary),
+            "grounded": _policy_status(self.grounded),
+        }
+
+    def _has_grounded_target(
+        self,
+        blackboard: PerceptionBlackboard,
+        intent: MotorIntent,
+    ) -> bool:
+        if _rocket_interaction_id(intent.mode) < 0:
+            return False
+        latest = blackboard.latest()
+        if latest is None:
+            return False
+        cutoff = time.monotonic_ns() - self.max_track_age_ms * 1_000_000
+        return any(
+            track.confidence >= self.min_track_confidence
+            and track.last_seen_ns >= cutoff
+            and (
+                intent.target_label is None
+                or track.label.casefold() == intent.target_label.casefold()
+            )
+            for track in latest.tracks
+        )
+
+
+def _policy_status(policy: MotorPolicy) -> dict[str, object]:
+    status = getattr(policy, "status", None)
+    if callable(status):
+        reported = status()
+        if isinstance(reported, dict):
+            return reported
+    return {"policy_id": policy.policy_id}
+
+
+def _merge_policy_release(action: MotorAction, release: MotorAction) -> MotorAction:
+    return MotorAction(
+        sequence=action.sequence,
+        keys_down=action.keys_down,
+        keys_up=tuple(sorted(set(action.keys_up) | set(release.keys_up))),
+        buttons_down=action.buttons_down,
+        buttons_up=tuple(sorted(set(action.buttons_up) | set(release.buttons_up))),
+        mouse_dx=action.mouse_dx,
+        mouse_dy=action.mouse_dy,
+        duration_ms=action.duration_ms,
+    )
 
 
 def _validate_policy_config(config: PolicyConfig) -> None:

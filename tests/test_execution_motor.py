@@ -88,15 +88,15 @@ def test_skill_contract_becomes_learned_policy_instruction() -> None:
         name="Mine log",
         description="Approach and mine a visible tree log",
         policy_ref="mine",
+        policy_instruction="mine log",
     )
     executor.start(spec, run_id="r1", parameters={"wood": "oak"}, now_ns=100)
 
     executor.tick(_board(), sequence=1, now_ns=200)
 
     assert policy.intent is not None
-    assert policy.intent.instruction == (
-        "Approach and mine a visible tree log. Parameters: wood=oak"
-    )
+    assert policy.intent.instruction == "mine log"
+    assert executor.instruction == "Approach and mine a visible tree log. Parameters: wood=oak"
 
 
 def test_skill_success_releases_held_input() -> None:

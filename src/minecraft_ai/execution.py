@@ -102,7 +102,7 @@ class SkillExecutor:
         intent = MotorIntent(
             skill_id=self._spec.skill_id,
             mode=self._spec.policy_ref or self._spec.skill_id,
-            instruction=_skill_instruction(self._spec, self._parameters),
+            instruction=_policy_instruction(self._spec),
             parameters=self._parameters,
         )
         action = self.policy.act(blackboard, intent, sequence=sequence)
@@ -147,6 +147,17 @@ def _skill_instruction(
         return instruction
     rendered = ", ".join(f"{key}={parameters[key]}" for key in sorted(parameters))
     return f"{instruction}. Parameters: {rendered}"
+
+
+def _policy_instruction(spec: SkillSpec) -> str:
+    """Return the concise command used to condition a learned motor policy.
+
+    Planner-facing descriptions deliberately retain the complete option contract.
+    Visuomotor policies are conditioned with the short command distribution used
+    by their published training/evaluation interface instead of receiving prose
+    intended for an LLM or an operator.
+    """
+    return spec.policy_instruction or spec.description.strip() or spec.name.strip()
 
 
 def conditions_satisfied(

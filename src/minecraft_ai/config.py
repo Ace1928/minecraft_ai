@@ -48,7 +48,8 @@ class PolicyConfig(BaseModel):
     research_only: bool = False
     device: str = "cpu"
     threads: int = Field(default=4, ge=1, le=64)
-    deadline_ms: int = Field(default=48, ge=10, le=500)
+    deadline_ms: int = Field(default=48, ge=10, le=5000)
+    action_hold_ms: int = Field(default=50, ge=50, le=250)
     stochastic: bool = True
     condition_scale: float = Field(default=4.0, ge=0.0, le=12.0)
     deterministic_condition: bool = True
@@ -71,6 +72,7 @@ class RuntimeConfig(BaseModel):
     high_level: ModelConfig = Field(default_factory=ModelConfig)
     vision_language: ModelConfig = Field(default_factory=ModelConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    grounded_policy: PolicyConfig | None = None
     trajectory: TrajectoryConfig = Field(default_factory=TrajectoryConfig)
     online_wiki: bool = True
 

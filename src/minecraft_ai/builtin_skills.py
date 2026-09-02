@@ -14,7 +14,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
     specs = (
         SkillSpec(
             skill_id="approach_visible_target",
-            version=2,
+            version=3,
             name="Approach visible target",
             description=(
                 "Approach the visually localized target across safe terrain, keep it near the "
@@ -29,10 +29,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=("retreat_from_danger", "reacquire_target"),
             max_duration_ms=15_000,
             policy_ref="approach",
+            policy_instruction="approach the visible target",
         ),
         SkillSpec(
             skill_id="reacquire_target",
-            version=2,
+            version=3,
             name="Reacquire target",
             description=(
                 "Look around deliberately to find the requested target again, stabilize it near "
@@ -44,10 +45,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             expected_effects=("target_visible",),
             max_duration_ms=8_000,
             policy_ref="explore",
+            policy_instruction="find the target",
         ),
         SkillSpec(
             skill_id="mine_visible_block",
-            version=2,
+            version=3,
             name="Mine visible block",
             description=(
                 "Approach the visible mineable block, aim at its center, hold attack until it "
@@ -65,10 +67,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=("reacquire_target", "retreat_from_danger"),
             max_duration_ms=20_000,
             policy_ref="mine",
+            policy_instruction="mine the target block",
         ),
         SkillSpec(
             skill_id="attack_visible_hostile",
-            version=2,
+            version=3,
             name="Attack visible hostile",
             description=(
                 "Defend against the visible hostile while tracking it, maintaining safe combat "
@@ -83,10 +86,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=("retreat_from_danger",),
             max_duration_ms=30_000,
             policy_ref="attack",
+            policy_instruction="fight the target",
         ),
         SkillSpec(
             skill_id="retreat_from_danger",
-            version=2,
+            version=3,
             name="Retreat from danger",
             description=(
                 "Move away from the immediate hazard toward visible safe ground while keeping "
@@ -97,10 +101,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             expected_effects=("safe_distance",),
             max_duration_ms=10_000,
             policy_ref="retreat",
+            policy_instruction="escape danger",
         ),
         SkillSpec(
             skill_id="explore_forward",
-            version=2,
+            version=3,
             name="Explore forward",
             description=(
                 "Traverse visible open terrain to discover a genuinely new area, keep the view "
@@ -112,10 +117,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=("retreat_from_danger",),
             max_duration_ms=12_000,
             policy_ref="explore",
+            policy_instruction="explore",
         ),
         SkillSpec(
             skill_id="use_target",
-            version=2,
+            version=3,
             name="Use target",
             description=(
                 "Approach and interact once with the visible target, then wait for and verify the "
@@ -128,10 +134,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             expected_effects=("target_used",),
             max_duration_ms=5_000,
             policy_ref="use",
+            policy_instruction="use the target",
         ),
         SkillSpec(
             skill_id="place_block",
-            version=2,
+            version=3,
             name="Place block",
             description=(
                 "Select the requested block, aim at a stable adjacent face, place it once, and "
@@ -143,9 +150,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             expected_effects=("block_placed",),
             max_duration_ms=5_000,
             policy_ref="place",
+            policy_instruction="place a block",
         ),
         SkillSpec(
             skill_id="gather_nearby_wood",
+            version=2,
             name="Gather nearby wood",
             description=(
                 "Find a nearby tree, approach a visible trunk rather than leaves, mine connected "
@@ -160,9 +169,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=("retreat_from_danger", "reacquire_target"),
             max_duration_ms=90_000,
             policy_ref="gather_wood",
+            policy_instruction="mine log",
         ),
         SkillSpec(
             skill_id="craft_wood_planks",
+            version=2,
             name="Craft wood planks",
             description=(
                 "Open the Bedrock inventory crafting interface, convert one available log into "
@@ -175,9 +186,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             expected_effects=("inventory.logs-=1", "inventory.planks>=4"),
             max_duration_ms=45_000,
             policy_ref="craft_planks",
+            policy_instruction="craft planks",
         ),
         SkillSpec(
             skill_id="craft_crafting_table",
+            version=2,
             name="Craft a crafting table",
             description=(
                 "Use the Bedrock crafting interface to arrange four wood planks into a crafting "
@@ -192,9 +205,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             expected_effects=("inventory.planks-=4", "inventory.crafting_table>=1"),
             max_duration_ms=60_000,
             policy_ref="craft_crafting_table",
+            policy_instruction="craft a crafting table",
         ),
         SkillSpec(
             skill_id="establish_basic_shelter",
+            version=2,
             name="Establish a basic shelter",
             description=(
                 "Choose nearby level ground and build a small enclosed, enterable survival "
@@ -212,6 +227,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=("retreat_from_danger",),
             max_duration_ms=180_000,
             policy_ref="build_shelter",
+            policy_instruction="build a shelter",
         ),
     )
     for spec in specs:
