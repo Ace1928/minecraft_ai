@@ -216,19 +216,19 @@ class IsolatedX11InputBackend:
             self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
             self._held_buttons.discard(button.lower())
         if action.mouse_dx or action.mouse_dy:
-            root = self._display.screen().root
-            pointer = root.query_pointer()
-            target_x, target_y = _wine_relative_motion_target(
-                int(pointer.root_x),
-                int(pointer.root_y),
+            relative_x, relative_y = _wine_relative_motion_delta(
                 action.mouse_dx,
                 action.mouse_dy,
             )
+            # XTEST interprets x/y as relative deltas when root is X.NONE,
+            # which is python-xlib's default here.  Passing pointer position +
+            # delta therefore amplified every learned camera action by hundreds
+            # of pixels and repeatedly drove Bedrock to a pitch pole.
             self._xtest.fake_input(
                 self._display,
                 self._x.MotionNotify,
-                x=target_x,
-                y=target_y,
+                x=relative_x,
+                y=relative_y,
             )
         for key in action.keys_down:
             self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))
@@ -340,21 +340,18 @@ class IsolatedX11InputBackend:
                 pass
 
 
-def _wine_relative_motion_target(
-    root_x: int,
-    root_y: int,
+def _wine_relative_motion_delta(
     mouse_dx: int,
     mouse_dy: int,
 ) -> tuple[int, int]:
-    """Map MineRL/VPT camera deltas onto the managed Wine pointer.
+    """Map MineRL/VPT camera deltas onto Bedrock's relative pointer input.
 
     MineRL camera actions are ordered as positive pitch-down and positive
-    yaw-right.  Live Bedrock-on-Linux calibration shows Wine preserves the X
-    direction but exposes the vertical pointer axis with the opposite sign:
-    negative physical Y looks down.  Apply that inversion once at this adapter
-    boundary so learned Java/MineRL policies retain their trained semantics.
+    yaw-right. Bedrock uses the same signs for relative XTEST motion. Keep these
+    as deltas: absolute root coordinates passed with X.NONE are interpreted as
+    large relative movements by the XTEST protocol.
     """
-    return root_x + mouse_dx, root_y - mouse_dy
+    return mouse_dx, mouse_dy
 
 
 def _wine_content_rect(

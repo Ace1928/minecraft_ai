@@ -11,7 +11,7 @@ from minecraft_ai.platforms.bedrock_x11 import (
     IsolationError,
     _crop_bgra,
     _x11_keysym_name,
-    _wine_relative_motion_target,
+    _wine_relative_motion_delta,
     require_isolated_display,
 )
 
@@ -56,11 +56,12 @@ def test_wine_client_crop_removes_window_decoration_without_reordering_pixels() 
     assert cropped == pixels[20:28] + pixels[36:44]
 
 
-def test_wine_grab_bridge_preserves_yaw_and_inverts_bedrock_pitch() -> None:
-    # VPT positive pitch means look down. The managed Wine client requires a
-    # negative physical Y delta to produce that same camera motion.
-    assert _wine_relative_motion_target(640, 317, 20, 10) == (660, 307)
-    assert _wine_relative_motion_target(640, 317, -20, -10) == (620, 327)
+def test_wine_grab_bridge_preserves_relative_vpt_camera_deltas() -> None:
+    # XTEST uses relative motion when root is X.NONE. VPT and Bedrock both use
+    # positive pitch-down and positive yaw-right, so no absolute pointer
+    # coordinates or sign inversion belongs in the adapter.
+    assert _wine_relative_motion_delta(20, 10) == (20, 10)
+    assert _wine_relative_motion_delta(-20, -10) == (-20, -10)
 
 
 def test_bedrock_menu_navigation_uses_x11_arrow_keysyms() -> None:
