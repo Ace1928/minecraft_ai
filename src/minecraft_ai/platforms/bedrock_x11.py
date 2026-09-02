@@ -147,6 +147,50 @@ def _x11_keysym_name(key: str) -> str:
     return _KEYSYM_NAMES.get(normalized, normalized)
 
 
+def _resolve_minecraft_input_window(display: Any, target_window_id: int) -> Any:
+    """Find Wine's interactive Minecraft child beneath the capture desktop.
+
+    BedrockOnLinux exposes the composited Wine desktop as the stable capture
+    drawable, while keyboard focus belongs to the nested ``Minecraft`` window.
+    Treating those as the same X window makes relative camera events appear to
+    work but causes keyboard/menu actions to disappear after focus changes.
+    """
+
+    target = display.create_resource_object("window", target_window_id)
+    stack = [target]
+    while stack:
+        window = stack.pop()
+        try:
+            name = str(window.get_wm_name() or "")
+            wm_class = window.get_wm_class() or ()
+            identity = " ".join((name, *(str(value) for value in wm_class))).casefold()
+            if "minecraft" in identity:
+                return window
+            stack.extend(reversed(window.query_tree().children))
+        except Exception:
+            continue
+    return target
+
+
+def _window_is_descendant_or_same(window: Any, ancestor_window_id: int) -> bool:
+    """Return whether an X focus window belongs to the Minecraft subtree."""
+
+    current = window
+    visited: set[int] = set()
+    for _ in range(32):
+        current_id = int(getattr(current, "id", 0))
+        if current_id == ancestor_window_id:
+            return True
+        if current_id <= 0 or current_id in visited:
+            return False
+        visited.add(current_id)
+        try:
+            current = current.query_tree().parent
+        except Exception:
+            return False
+    return False
+
+
 def require_isolated_display(
     display_name: str,
     host_display: str | None = None,
@@ -194,6 +238,7 @@ class IsolatedX11InputBackend:
             raise IsolationError("python-xlib is required for isolated Bedrock X11 input") from exc
         self.display_name = display_name
         self.target_window_id = target_window_id
+        self._input_window_id = target_window_id
         try:
             self._display: Any = display_module.Display(display_name)
         except Exception as exc:
@@ -206,6 +251,10 @@ class IsolatedX11InputBackend:
         if target_window_id is not None and not self.probe_target():
             self.close()
             raise IsolationError(f"target X window {target_window_id} is unavailable")
+        if target_window_id is not None:
+            input_window = _resolve_minecraft_input_window(self._display, target_window_id)
+            self._input_window_id = int(input_window.id)
+            self._ensure_input_focus()
         self._relative_mouse = _NativeRelativeMouse(display_name)
 
     @property
@@ -215,6 +264,10 @@ class IsolatedX11InputBackend:
     @property
     def held_buttons(self) -> frozenset[str]:
         return frozenset(self._held_buttons)
+
+    @property
+    def input_window_id(self) -> int | None:
+        return self._input_window_id
 
     def bind_lease(self, lease: MotorLease) -> None:
         if lease.backend_id != self.backend_id:
@@ -253,11 +306,30 @@ class IsolatedX11InputBackend:
             return False
         return True
 
+    def _ensure_input_focus(self) -> None:
+        input_window_id = self._input_window_id
+        if input_window_id is None:
+            return
+        try:
+            current = self._display.get_input_focus().focus
+            if _window_is_descendant_or_same(current, input_window_id):
+                return
+            input_window = self._display.create_resource_object(
+                "window",
+                input_window_id,
+            )
+            input_window.get_attributes()
+            input_window.set_input_focus(self._x.RevertToParent, self._x.CurrentTime)
+            self._display.sync()
+        except Exception as exc:
+            raise IsolationError("cannot focus the isolated Minecraft input window") from exc
+
     def apply(self, action: MotorAction) -> None:
         self._require_live_lease()
         if not self.probe_target():
             self.release_all()
             raise IsolationError("Bedrock target window disappeared")
+        self._ensure_input_focus()
         for key in action.keys_up:
             self._xtest.fake_input(self._display, self._x.KeyRelease, self._keycode(key))
             self._held_keys.discard(key.lower())
@@ -290,6 +362,7 @@ class IsolatedX11InputBackend:
         if not self.probe_target():
             self.release_all()
             raise IsolationError("Bedrock target window disappeared")
+        self._ensure_input_focus()
         if not text or len(text) > 256:
             raise IsolationError("chat text must contain 1..256 characters")
         if any(ord(char) < 32 or ord(char) > 126 for char in text):

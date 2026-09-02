@@ -301,6 +301,7 @@ class Supervisor:
             held_keys = sorted(getattr(self.backend, "held_keys", ()))
             held_buttons = sorted(getattr(self.backend, "held_buttons", ()))
             release_count = getattr(self.backend, "release_count", None)
+            input_window_id = getattr(self.backend, "input_window_id", None)
             return {
                 "state": self.state.value,
                 "role": self.role,
@@ -314,6 +315,7 @@ class Supervisor:
                 "held_keys": held_keys,
                 "held_buttons": held_buttons,
                 "release_count": release_count,
+                "input_window_id": input_window_id,
                 "last_fault": self.last_fault,
                 "emergency_stop_latched": emergency_stop_latched(),
                 "uptime_s": round(
