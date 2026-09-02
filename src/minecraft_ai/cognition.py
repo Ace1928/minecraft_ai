@@ -53,6 +53,19 @@ class HighLevelMetrics:
     last_model: str | None = None
 
 
+def _operator_prompt_payload(message: OperatorMessage) -> dict[str, object]:
+    """Expose operator-authored content without feeding model replies back as commands."""
+    return {
+        "message_id": message.message_id,
+        "created_ns": message.created_ns,
+        "author": message.author,
+        "text": message.text,
+        "kind": message.kind.value,
+        "priority": message.priority,
+        "status": message.status.value,
+    }
+
+
 class BootstrapCognitionPolicy:
     """Small deterministic fallback for smoke tests and model outages.
 
@@ -167,11 +180,11 @@ class HighLevelController:
                 "memories": [memory.model_dump(mode="json") for memory in context.memories],
                 "promises": [promise.model_dump(mode="json") for promise in context.promises],
                 "operator_messages": [
-                    message.model_dump(mode="json") for message in context.operator_messages
+                    _operator_prompt_payload(message) for message in context.operator_messages
                 ],
                 "active_operator_message": None
                 if not context.operator_messages
-                else context.operator_messages[0].model_dump(mode="json"),
+                else _operator_prompt_payload(context.operator_messages[0]),
                 "wiki_evidence": [item.model_dump(mode="json") for item in context.wiki],
                 "frame": None if latest is None else latest.model_dump(mode="json"),
                 "fresh_facts": facts,
@@ -239,7 +252,10 @@ class HighLevelController:
                             content=(
                                 "ACTIVE OPERATOR DIRECTIVE (highest authority; follow this "
                                 "literal current request and do not substitute an older task): "
-                                + context.operator_messages[0].model_dump_json()
+                                + json.dumps(
+                                    _operator_prompt_payload(context.operator_messages[0]),
+                                    separators=(",", ":"),
+                                )
                             ),
                         ),
                     )

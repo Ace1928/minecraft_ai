@@ -8,7 +8,7 @@ from minecraft_ai.cognition import CognitionContext, HighLevelController
 from minecraft_ai.models import ModelMessage, ModelResponse
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.roles import get_role
-from minecraft_ai.social import OperatorMessage
+from minecraft_ai.social import OperatorMessage, OperatorMessageStatus
 
 
 class _ShelterSelectingModel:
@@ -238,3 +238,24 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
     )
     assert decision.chosen_goal_id == "operator:correction"
     assert decision.say == "I am climbing the hill now."
+
+
+def test_prior_agent_response_is_not_replayed_as_operator_instruction() -> None:
+    message = OperatorMessage(
+        message_id="current",
+        created_ns=2,
+        text="Leave the pit and traverse open ground",
+        status=OperatorMessageStatus.ACKNOWLEDGED,
+        response_text="Restart the old gather_nearby_wood task",
+    )
+    context = _context()
+    context.operator_messages = (message,)
+    model = _CapturingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    controller.decide(_board(), context)
+
+    payload = json.loads(model.initial_messages[1].content)
+    assert payload["active_operator_message"]["text"] == message.text
+    assert "response_text" not in payload["active_operator_message"]
+    assert "Restart the old" not in model.initial_messages[-1].content
