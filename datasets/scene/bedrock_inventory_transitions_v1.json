@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "dataset_id": "bedrock-inventory-transitions-v1",
+  "game_version": "1.26.45.1",
+  "labels": ["world", "inventory"],
+  "provenance": {
+    "owner": "local-operator",
+    "license": "operator-owned-gameplay",
+    "training_allowed": true,
+    "annotation_method": "human-reviewed Bedrock E-toggle transitions",
+    "leakage_control": "splits are disjoint by trajectory_id"
+  },
+  "sampling": {
+    "before_offsets": [-8, -7, -6, -5, -4, -3],
+    "after_offsets": [16, 17, 18, 19, 20, 21]
+  },
+  "transitions": [
+    {
+      "trajectory_id": "bedrock-agent-20260902T173628Z-97442d97fc08",
+      "step_index": 264,
+      "transition": "open",
+      "split": "train"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T173628Z-97442d97fc08",
+      "step_index": 298,
+      "transition": "close",
+      "split": "train"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T173628Z-97442d97fc08",
+      "step_index": 312,
+      "transition": "open",
+      "split": "train"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T173628Z-97442d97fc08",
+      "step_index": 509,
+      "transition": "close",
+      "split": "train"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T173628Z-97442d97fc08",
+      "step_index": 524,
+      "transition": "open",
+      "split": "train"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T173045Z-5bebe8589bb2",
+      "step_index": 347,
+      "transition": "open",
+      "split": "train"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T171901Z-f9f92eaabdd5",
+      "step_index": 53,
+      "transition": "open",
+      "split": "train"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T171448Z-161193c52464",
+      "step_index": 154,
+      "transition": "open",
+      "split": "train"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T103752Z-4ee2445126f3",
+      "step_index": 189,
+      "transition": "open",
+      "split": "train"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T103116Z-d0fe1bbbb631",
+      "step_index": 500,
+      "transition": "open",
+      "split": "train"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T165120Z-c803a27841bb",
+      "step_index": 367,
+      "transition": "open",
+      "split": "validation"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T100732Z-828f0dec717a",
+      "step_index": 172,
+      "transition": "open",
+      "split": "validation"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T090032Z-04cd37053f37",
+      "step_index": 198,
+      "transition": "open",
+      "split": "test"
+    },
+    {
+      "trajectory_id": "bedrock-agent-20260902T133211Z-19065936126a",
+      "step_index": 79,
+      "transition": "close",
+      "split": "test"
+    }
+  ]
+}

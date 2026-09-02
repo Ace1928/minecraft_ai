@@ -16,16 +16,19 @@ from minecraft_ai.perception import (
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.policy_service import (
     GroundedTargetObservation,
+    LearnedSceneObservation,
     LearnedPolicyOutput,
     GroundedPolicyRouter,
     TemporalPolicyClient,
     _apply_action_constraints,
     _crop_bbox_to_full,
     _decoded_policy_output,
+    _fast_scene_belief,
     _intent_camera_scale,
     _intent_camera_semantics,
     _intent_instruction,
     _learned_scene_blocked,
+    _mineclip_scene_belief,
     _rocket_action_contract,
     _rocket_interaction_id,
     _track_mask,
@@ -164,6 +167,26 @@ def test_grounded_router_prewarms_both_learned_controllers() -> None:
     assert grounded.warmups == 1
 
 
+def test_grounded_router_routes_blocking_gui_to_dedicated_learned_expert() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _RoutingPolicy("rocket", key="a")
+    gui = _RoutingPolicy("vpt-gui", key="e")
+    router = GroundedPolicyRouter(primary, grounded, gui=gui)
+
+    action = router.act(
+        PerceptionBlackboard(),
+        MotorIntent(skill_id="respawn_after_death", mode="death_gui"),
+        sequence=1,
+    )
+
+    assert action.keys_down == ("e",)
+    assert action.keys_up == ("w",)
+    assert router.status()["active_route"] == "gui"
+    assert router.status()["gui"] == {"policy_id": "vpt-gui"}
+    router.warmup()
+    assert (primary.warmups, grounded.warmups, gui.warmups) == (1, 1, 1)
+
+
 def test_grounded_router_shares_one_physical_pitch_state(tmp_path: Path) -> None:
     config = _policy_config(tmp_path).model_copy(
         update={
@@ -261,6 +284,102 @@ def test_grounded_router_merges_temporally_filtered_target_feedback() -> None:
     assert router.merge_perception(board)
     after_two_misses = board.fact("target.visible", now_ns=observed_ns + 2)
     assert after_two_misses is not None and after_two_misses.value is False
+
+
+@pytest.mark.parametrize(
+    ("probabilities", "mode", "playable"),
+    (
+        (
+            {"world": 0.02, "inventory": 0.91, "chat": 0.04, "wall": 0.03},
+            "inventory",
+            False,
+        ),
+        (
+            {"world": 0.14, "inventory": 0.27, "chat": 0.50, "wall": 0.09},
+            "chat",
+            False,
+        ),
+        (
+            {"world": 0.21, "inventory": 0.14, "chat": 0.10, "wall": 0.55},
+            "world",
+            True,
+        ),
+        (
+            {"world": 0.33, "inventory": 0.22, "chat": 0.25, "wall": 0.20},
+            "world",
+            True,
+        ),
+        (
+            {"world": 0.24, "inventory": 0.26, "chat": 0.25, "wall": 0.25},
+            "unknown",
+            None,
+        ),
+    ),
+)
+def test_mineclip_scene_belief_is_conservative(
+    probabilities: dict[str, float],
+    mode: str,
+    playable: bool | None,
+) -> None:
+    observed_mode, observed_playable, confidence, returned = _mineclip_scene_belief(
+        probabilities
+    )
+
+    assert observed_mode == mode
+    assert observed_playable is playable
+    assert 0.0 <= confidence <= 1.0
+    assert returned == probabilities
+
+
+@pytest.mark.parametrize(
+    ("probabilities", "mode", "playable"),
+    (
+        ({"world": 0.97, "inventory": 0.03}, "world", True),
+        ({"world": 0.18, "inventory": 0.82}, "inventory", False),
+        ({"world": 0.51, "inventory": 0.49}, "unknown", None),
+    ),
+)
+def test_fast_scene_belief_respects_evidence_gate(
+    probabilities: dict[str, float],
+    mode: str,
+    playable: bool | None,
+) -> None:
+    observed_mode, observed_playable, confidence, returned = _fast_scene_belief(
+        probabilities,
+        min_confidence=0.80,
+    )
+
+    assert observed_mode == mode
+    assert observed_playable is playable
+    assert 0.0 <= confidence <= 1.0
+    assert returned == probabilities
+
+
+def test_temporal_policy_merges_learned_scene_belief_once(tmp_path: Path) -> None:
+    client = TemporalPolicyClient(config=_policy_config(tmp_path), frame_provider=lambda: None)
+    board = _tracked_board()
+    observed_ns = time.monotonic_ns()
+    client._last_scene_observation = LearnedSceneObservation(
+        observed_ns=observed_ns,
+        mode="inventory",
+        playable=False,
+        confidence=0.91,
+        class_probabilities={
+            "world": 0.02,
+            "inventory": 0.91,
+            "chat": 0.04,
+            "wall": 0.03,
+        },
+        model_version="steve-test/mineclip",
+    )
+
+    assert client.merge_perception(board)
+    playable = board.fact("scene.playable", now_ns=observed_ns)
+    assert playable is not None
+    assert playable.value is False
+    assert playable.confidence == pytest.approx(0.91)
+    assert playable.source.endswith(":scene:steve-test/mineclip")
+    assert not client.merge_perception(board)
 
 
 def test_policy_crop_box_maps_back_to_wide_full_frame() -> None:
@@ -371,6 +490,23 @@ def test_policy_config_requires_hashes_provenance_and_paths(tmp_path: Path) -> N
             config.model_copy(update={"camera_pitch_limit": 20, "camera_recovery_release": 20})
         )
 
+    scene_model = tmp_path / "fast-scene.pt"
+    scene_model.touch()
+    with pytest.raises(ValueError, match="scene model configuration is incomplete"):
+        _validate_policy_config(
+            config.model_copy(update={"scene_model_path": str(scene_model)})
+        )
+    _validate_policy_config(
+        config.model_copy(
+            update={
+                "provider": "minestudio-steve1",
+                "scene_model_path": str(scene_model),
+                "scene_model_sha256": "d" * 64,
+                "scene_model_version": "bedrock-fast-scene-v1",
+            }
+        )
+    )
+
 
 def test_temporal_policy_warmup_requires_and_uses_current_frame(
     tmp_path: Path,
@@ -439,6 +575,8 @@ def test_default_camera_adapter_matches_minecraft_half_sensitivity() -> None:
     assert config.gui_camera_scale == pytest.approx(1.0)
     assert config.camera_max_step == 12
     assert config.camera_pitch_limit == 300
+    assert config.scene_probe_interval == 0
+    assert config.scene_min_confidence == pytest.approx(0.80)
 
 
 def test_bedrock_camera_adapter_accepts_empirical_low_sensitivity_scale() -> None:
@@ -456,6 +594,7 @@ def test_gui_cursor_uses_pixel_scale_instead_of_world_camera_calibration() -> No
     assert _intent_camera_semantics(gui) == "cursor"
     assert _intent_camera_semantics(craft) == "cursor"
     assert _intent_camera_semantics(close_inventory) == "cursor"
+    assert _intent_camera_semantics({"mode": "death_gui"}) == "cursor"
     assert _intent_camera_semantics(world) == "world"
     assert _intent_camera_scale(gui, world_scale=47.96, gui_scale=1.0) == 1.0
     assert _intent_camera_scale(close_inventory, world_scale=47.96, gui_scale=1.0) == 1.0
@@ -715,6 +854,11 @@ def test_policy_status_exposes_predicted_and_emitted_camera(tmp_path: Path) -> N
         "target_exists_probability": None,
         "target_point_yx": None,
         "target_bbox_xyxy": None,
+        "scene_mode": None,
+        "scene_playable": None,
+        "scene_confidence": None,
+        "scene_class_probabilities": {},
+        "scene_model_version": None,
         "suppressed_actions": (),
     }
     assert status["last_emitted_camera"] == {"mouse_dx": 1, "mouse_dy": -1}

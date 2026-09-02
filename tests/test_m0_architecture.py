@@ -166,7 +166,7 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     respawn = skills.get("respawn_after_death")
     assert respawn.preconditions[0].key == "scene.death"
     assert respawn.success_conditions[0].key == "scene.playable"
-    assert respawn.policy_ref == "gui"
+    assert respawn.policy_ref == "death_gui"
     assert respawn.policy_instruction == "respawn"
     assert retreat.preconditions[0].operator == "truthy"
     assert escape.preconditions[0].key == "environment.underwater"

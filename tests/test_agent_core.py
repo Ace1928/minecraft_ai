@@ -134,8 +134,37 @@ def test_verified_death_scene_routes_to_learned_respawn_option() -> None:
 
     assert recovery is not None
     assert recovery.skill_id == "respawn_after_death"
-    assert recovery.policy_ref == "gui"
+    assert recovery.policy_ref == "death_gui"
     assert recovery.policy_instruction == "respawn"
+
+
+def test_learned_inventory_scene_routes_to_learned_inventory_toggle() -> None:
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:inventory",
+            width=1280,
+            height=720,
+            facts=(
+                PerceptionFact(
+                    key="scene.mode",
+                    value="inventory",
+                    confidence=0.9,
+                    observed_ns=now,
+                    source="learned:steve1:mineclip-scene:not-training-label",
+                ),
+            ),
+        )
+    )
+
+    recovery = _observed_scene_recovery(build_bootstrap_skill_library(), board)
+
+    assert recovery is not None
+    assert recovery.skill_id == "close_open_inventory"
+    assert recovery.policy_ref == "close_inventory"
 
 
 def test_skill_library_uses_smoothed_context_score_and_lifecycle() -> None:

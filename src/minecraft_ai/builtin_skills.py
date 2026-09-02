@@ -201,7 +201,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             max_duration_ms=15_000,
             # This remains a learned UI option: the contract supplies no screen
             # coordinate, click macro, or privileged game-state action.
-            policy_ref="gui",
+            policy_ref="death_gui",
             policy_instruction="respawn",
         ),
         SkillSpec(

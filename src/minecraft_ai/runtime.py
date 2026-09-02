@@ -130,9 +130,13 @@ def _observed_scene_recovery(
     policy must still perceive, act, and satisfy the option's visual outcome.
     """
     death = blackboard.fact("scene.death", min_confidence=0.9)
-    if death is None or not bool(death.value):
-        return None
-    skill_id = "respawn_after_death"
+    if death is not None and bool(death.value):
+        skill_id = "respawn_after_death"
+    else:
+        mode = blackboard.fact("scene.mode", min_confidence=0.65)
+        if mode is None or mode.value != "inventory":
+            return None
+        skill_id = "close_open_inventory"
     if skill_id not in skills.specs:
         return None
     candidate = skills.get(skill_id)

@@ -104,7 +104,19 @@ def main(argv: list[str] | None = None) -> int:
                     config.grounded_policy,
                     frame_provider=lambda: perception.last_capture,
                 )
-                policy = GroundedPolicyRouter(primary_policy, grounded_policy)
+                gui_policy = (
+                    None
+                    if config.gui_policy is None or not config.gui_policy.enabled
+                    else TemporalPolicyClient(
+                        config.gui_policy,
+                        frame_provider=lambda: perception.last_capture,
+                    )
+                )
+                policy = GroundedPolicyRouter(
+                    primary_policy,
+                    grounded_policy,
+                    gui=gui_policy,
+                )
             else:
                 policy = primary_policy
         else:

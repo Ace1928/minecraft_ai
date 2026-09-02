@@ -54,6 +54,18 @@ class PolicyConfig(BaseModel):
     stochastic: bool = True
     condition_scale: float = Field(default=4.0, ge=0.0, le=12.0)
     deterministic_condition: bool = True
+    # STEVE-1 already carries a trained MineCLIP encoder. Reuse it at a low
+    # event-driven cadence for scene-mode belief instead of adding a second
+    # heavyweight VLM to the realtime loop. Zero disables periodic probes;
+    # inventory/crafting intents still request an event-time verification.
+    scene_probe_interval: int = Field(default=0, ge=0, le=10_000)
+    # Optional evidence-gated Bedrock scene head. It runs on the exact frame
+    # already consumed by STEVE, replacing brittle zero-shot scene prompts
+    # while retaining MineCLIP as the compatibility fallback.
+    scene_model_path: str = ""
+    scene_model_sha256: str = ""
+    scene_model_version: str = ""
+    scene_min_confidence: float = Field(default=0.80, ge=0.5, le=1.0)
     # MineRL/VPT camera actions are degrees. At Minecraft Java's default 0.5
     # mouse sensitivity one relative count is 0.15 degrees. Bedrock has a
     # different sensitivity curve, so live deployments must replace this
@@ -83,6 +95,7 @@ class RuntimeConfig(BaseModel):
     vision_language: ModelConfig = Field(default_factory=ModelConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     grounded_policy: PolicyConfig | None = None
+    gui_policy: PolicyConfig | None = None
     trajectory: TrajectoryConfig = Field(default_factory=TrajectoryConfig)
     online_wiki: bool = True
 
