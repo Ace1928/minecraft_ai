@@ -1,6 +1,12 @@
 """Per-instance Minecraft capture/input bridge contracts."""
 
 from .client import BridgeEndpoint, ScopedBridgeBackend
+from .discovery import (
+    BridgeDiscoveryError,
+    DiscoveredBridge,
+    discover_bridge_descriptors,
+    select_bridge,
+)
 from .protocol import (
     PROTOCOL_VERSION,
     Authenticate,
@@ -23,10 +29,12 @@ __all__ = [
     "Authenticate",
     "BridgeAck",
     "BridgeCapability",
+    "BridgeDiscoveryError",
     "BridgeEndpoint",
     "BridgeError",
     "BridgeHello",
     "ChatEvent",
+    "DiscoveredBridge",
     "FrameDescriptor",
     "Heartbeat",
     "InputCommand",
@@ -35,4 +43,6 @@ __all__ = [
     "LeaseClear",
     "ReleaseAll",
     "ScopedBridgeBackend",
+    "discover_bridge_descriptors",
+    "select_bridge",
 ]
