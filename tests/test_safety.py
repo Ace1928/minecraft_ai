@@ -27,7 +27,7 @@ def test_valid_lifecycle_transitions() -> None:
         SupervisorState.STOPPING,
         SupervisorState.STOPPED,
     ]
-    for current, target in zip(path, path[1:], strict=True):
+    for current, target in zip(path[:-1], path[1:], strict=True):
         validate_transition(current, target)
 
 
