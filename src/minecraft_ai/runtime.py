@@ -322,7 +322,9 @@ class AgentRuntime:
             running = self.executor.run
             if running is not None and running.outcome == SkillOutcome.RUNNING:
                 if running.skill_id != decision.skill_id:
-                    self.executor.cancel()
+                    cancelled = self.executor.cancel()
+                    if cancelled.action is not None:
+                        self._send_motor(cancelled.action)
                     spec = self.skills.get(decision.skill_id)
                     self.executor.start(
                         spec,

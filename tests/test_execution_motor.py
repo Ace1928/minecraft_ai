@@ -94,3 +94,29 @@ def test_failure_requests_recovery_and_releases() -> None:
     assert tick.run.outcome == SkillOutcome.FAILED
     assert tick.recovery_skills == ("retreat",)
     assert tick.action is not None
+
+
+def test_cancel_release_advances_sequence_before_next_skill() -> None:
+    board = _board(_fact("done", False))
+    policy = BootstrapMotorPolicy()
+    executor = SkillExecutor(policy)
+    first = SkillSpec(skill_id="first", name="First", policy_ref="explore")
+    second = SkillSpec(skill_id="second", name="Second", policy_ref="navigate")
+
+    executor.start(first, run_id="run-first", now_ns=100)
+    action = executor.tick(board, sequence=0, now_ns=200).action
+    assert action is not None
+    assert action.sequence == 0
+
+    release = executor.cancel(now_ns=300).action
+    assert release is not None
+    assert release.sequence == 1
+
+    executor.start(second, run_id="run-second", now_ns=400)
+    next_action = executor.tick(
+        board,
+        sequence=release.sequence + 1,
+        now_ns=500,
+    ).action
+    assert next_action is not None
+    assert next_action.sequence == 2
