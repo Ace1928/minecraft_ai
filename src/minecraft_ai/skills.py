@@ -34,6 +34,7 @@ class SkillSpec(BaseModel):
     stage: SkillStage = SkillStage.CANDIDATE
     parameters: tuple[str, ...] = ()
     preconditions: tuple[SkillCondition, ...] = ()
+    invariants: tuple[SkillCondition, ...] = ()
     success_conditions: tuple[SkillCondition, ...] = ()
     failure_conditions: tuple[SkillCondition, ...] = ()
     expected_effects: tuple[str, ...] = ()

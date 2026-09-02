@@ -408,6 +408,10 @@ class HighLevelController:
                         condition.model_dump(mode="json")
                         for condition in skill.preconditions
                     ],
+                    "invariants": [
+                        condition.model_dump(mode="json")
+                        for condition in skill.invariants
+                    ],
                     "success_conditions": [
                         condition.model_dump(mode="json")
                         for condition in skill.success_conditions

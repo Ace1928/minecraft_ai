@@ -153,6 +153,73 @@ def test_failure_requests_recovery_and_releases() -> None:
     assert tick.action is not None
 
 
+def test_precondition_is_checked_at_initiation_but_not_rechecked_as_invariant() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = SkillSpec(
+        skill_id="track_target",
+        name="Track target",
+        preconditions=(SkillCondition(key="target.visible", operator="truthy"),),
+        policy_ref="approach",
+    )
+
+    executor.start(spec, run_id="r1", now_ns=100)
+    first = executor.tick(
+        _board(_fact("target.visible", True)),
+        sequence=1,
+        now_ns=200,
+    )
+    continued = executor.tick(_board(), sequence=2, now_ns=300)
+
+    assert first.run.outcome == SkillOutcome.RUNNING
+    assert continued.run.outcome == SkillOutcome.RUNNING
+    assert continued.action is not None
+
+
+def test_missing_initiation_precondition_fails_closed() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = SkillSpec(
+        skill_id="track_target",
+        name="Track target",
+        preconditions=(SkillCondition(key="target.visible", operator="truthy"),),
+        policy_ref="approach",
+    )
+
+    executor.start(spec, run_id="r1", now_ns=100)
+    tick = executor.tick(_board(), sequence=1, now_ns=200)
+
+    assert tick.run.outcome == SkillOutcome.FAILED
+    assert tick.run.failure_reason == "initiation-precondition-unsatisfied"
+
+
+def test_invariant_loss_terminates_running_option() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = SkillSpec(
+        skill_id="stay_safe",
+        name="Stay safe",
+        invariants=(SkillCondition(key="scene.playable", operator="truthy"),),
+        policy_ref="explore",
+    )
+
+    executor.start(spec, run_id="r1", now_ns=100)
+    running = executor.tick(
+        _board(_fact("scene.playable", True)),
+        sequence=1,
+        now_ns=200,
+    )
+    stopped = executor.tick(
+        _board(_fact("scene.playable", False)),
+        sequence=2,
+        now_ns=300,
+    )
+
+    assert running.run.outcome == SkillOutcome.RUNNING
+    assert stopped.run.outcome == SkillOutcome.FAILED
+    assert stopped.run.failure_reason == "invariant-lost"
+
+
 def test_cancel_release_advances_sequence_before_next_skill() -> None:
     board = _board(_fact("done", False))
     policy = BootstrapMotorPolicy()

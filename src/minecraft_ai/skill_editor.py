@@ -44,6 +44,7 @@ class SkillLifecycleManager:
         policy_ref: str | None = None,
         parameters: Sequence[str] = (),
         preconditions: Sequence[SkillCondition] = (),
+        invariants: Sequence[SkillCondition] = (),
         success_conditions: Sequence[SkillCondition] = (),
         failure_conditions: Sequence[SkillCondition] = (),
         recovery_skills: Sequence[str] = (),
@@ -60,6 +61,7 @@ class SkillLifecycleManager:
             stage=stage,
             parameters=tuple(parameters),
             preconditions=tuple(preconditions),
+            invariants=tuple(invariants),
             success_conditions=tuple(success_conditions),
             failure_conditions=tuple(failure_conditions),
             recovery_skills=tuple(recovery_skills),
@@ -79,6 +81,7 @@ class SkillLifecycleManager:
         description: str | None = None,
         policy_ref: str | None = None,
         preconditions: Sequence[SkillCondition] | None = None,
+        invariants: Sequence[SkillCondition] | None = None,
         success_conditions: Sequence[SkillCondition] | None = None,
         failure_conditions: Sequence[SkillCondition] | None = None,
         recovery_skills: Sequence[str] | None = None,
@@ -93,6 +96,9 @@ class SkillLifecycleManager:
                 "policy_ref": current.policy_ref if policy_ref is None else policy_ref,
                 "preconditions": (
                     current.preconditions if preconditions is None else tuple(preconditions)
+                ),
+                "invariants": (
+                    current.invariants if invariants is None else tuple(invariants)
                 ),
                 "success_conditions": (
                     current.success_conditions
@@ -179,6 +185,7 @@ class SkillLifecycleManager:
             policy_ref=parent.policy_ref,
             parameters=parent.parameters,
             preconditions=parent.preconditions,
+            invariants=parent.invariants,
             success_conditions=parent.success_conditions,
             failure_conditions=new_failures,
             recovery_skills=recovery,

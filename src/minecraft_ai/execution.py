@@ -24,6 +24,7 @@ class SkillExecutor:
         self._spec: SkillSpec | None = None
         self._run: SkillRun | None = None
         self._parameters: dict[str, str | int | float | bool] = {}
+        self._initiated = False
 
     @property
     def run(self) -> SkillRun | None:
@@ -59,6 +60,7 @@ class SkillExecutor:
         started = time.monotonic_ns() if now_ns is None else now_ns
         self._spec = spec
         self._parameters = dict(parameters or {})
+        self._initiated = False
         self._run = SkillRun(
             run_id=run_id,
             skill_id=spec.skill_id,
@@ -95,13 +97,24 @@ class SkillExecutor:
             self._spec.success_conditions, blackboard, now_ns=now
         ):
             return self._finish(SkillOutcome.SUCCEEDED, now, None)
-        if self._spec.preconditions and not conditions_satisfied(
-            self._spec.preconditions, blackboard, now_ns=now
+        if not self._initiated:
+            if self._spec.preconditions and not conditions_satisfied(
+                self._spec.preconditions, blackboard, now_ns=now
+            ):
+                return self._finish(
+                    SkillOutcome.FAILED,
+                    now,
+                    "initiation-precondition-unsatisfied",
+                    recover=True,
+                )
+            self._initiated = True
+        if self._spec.invariants and not conditions_satisfied(
+            self._spec.invariants, blackboard, now_ns=now
         ):
             return self._finish(
                 SkillOutcome.FAILED,
                 now,
-                "precondition-lost",
+                "invariant-lost",
                 recover=True,
             )
 
