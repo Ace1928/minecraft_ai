@@ -58,35 +58,49 @@ def _semantic_refresh_allowed(
 def _active_operator_messages(
     messages: tuple[OperatorMessage, ...],
 ) -> tuple[OperatorMessage, ...]:
-    """Retain acknowledged directives as commitments until explicitly archived."""
-    active = tuple(
+    """Resolve operator-message authority without replaying stale commands.
+
+    Fresh queued/delivered directives are the complete active command set for
+    the next decision. Once those are handled, the newest acknowledged
+    instruction or correction remains the current directive. Older messages
+    stay visible in conversation history but cannot silently regain control.
+    Persistent multi-project commitments belong in the goal portfolio rather
+    than an ever-growing motor prompt.
+    """
+    pending = tuple(
         message
         for message in messages
-        if message.status in {
+        if message.status
+        in {
             OperatorMessageStatus.QUEUED,
             OperatorMessageStatus.DELIVERED,
         }
-        or (
-            message.status == OperatorMessageStatus.ACKNOWLEDGED
-            and message.kind
-            in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+    )
+    if pending:
+        return tuple(
+            sorted(
+                pending,
+                key=lambda message: (
+                    message.priority,
+                    message.kind == OperatorMessageKind.CORRECTION,
+                    message.created_ns,
+                ),
+                reverse=True,
+            )
         )
+    acknowledged = tuple(
+        message
+        for message in messages
+        if message.status == OperatorMessageStatus.ACKNOWLEDGED
+        and message.kind
+        in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
     )
     return tuple(
         sorted(
-            active,
-            key=lambda message: (
-                message.status
-                in {
-                    OperatorMessageStatus.QUEUED,
-                    OperatorMessageStatus.DELIVERED,
-                },
-                message.priority,
-                message.kind == OperatorMessageKind.CORRECTION,
-                message.created_ns,
-            ),
+            acknowledged,
+            key=lambda message: message.created_ns,
             reverse=True,
-        )
+        )[:1]
     )
 
 

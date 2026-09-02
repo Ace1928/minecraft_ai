@@ -156,7 +156,7 @@ def test_optional_semantics_yield_to_cognition_and_operator_work() -> None:
         assert not _semantic_refresh_allowed(**inputs)
 
 
-def test_acknowledged_operator_directive_remains_active_until_archived() -> None:
+def test_newest_acknowledged_operator_directive_remains_active() -> None:
     messages = (
         OperatorMessage(
             message_id="instruction",
@@ -184,7 +184,7 @@ def test_acknowledged_operator_directive_remains_active_until_archived() -> None
     assert tuple(message.message_id for message in active) == ("instruction",)
 
 
-def test_urgent_correction_precedes_older_acknowledged_instruction() -> None:
+def test_fresh_correction_supersedes_older_acknowledged_instruction() -> None:
     messages = (
         OperatorMessage(
             message_id="old",
@@ -205,7 +205,7 @@ def test_urgent_correction_precedes_older_acknowledged_instruction() -> None:
 
     active = _active_operator_messages(messages)
 
-    assert tuple(message.message_id for message in active) == ("correction", "old")
+    assert tuple(message.message_id for message in active) == ("correction",)
 
 
 def test_fresh_directive_precedes_an_older_acknowledged_correction() -> None:
@@ -229,10 +229,31 @@ def test_fresh_directive_precedes_an_older_acknowledged_correction() -> None:
 
     active = _active_operator_messages(messages)
 
-    assert tuple(message.message_id for message in active) == (
-        "new-instruction",
-        "old-correction",
+    assert tuple(message.message_id for message in active) == ("new-instruction",)
+
+
+def test_newer_acknowledged_instruction_supersedes_old_high_priority_correction() -> None:
+    messages = (
+        OperatorMessage(
+            message_id="old-correction",
+            created_ns=1,
+            text="Keep gathering the selected log",
+            kind=OperatorMessageKind.CORRECTION,
+            priority=1.0,
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),
+        OperatorMessage(
+            message_id="new-instruction",
+            created_ns=2,
+            text="Leave the pit and traverse open ground",
+            priority=0.8,
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),
     )
+
+    active = _active_operator_messages(messages)
+
+    assert tuple(message.message_id for message in active) == ("new-instruction",)
 
 
 def test_only_selected_operator_goal_is_acknowledgeable() -> None:
