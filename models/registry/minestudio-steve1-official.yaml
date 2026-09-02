@@ -34,7 +34,9 @@ runtime:
   measured_steady_step_ms: 156-210
   measured_service_step_ms: 204.07
   measured_date: 2026-09-02
-  camera_scale: 0.5
+  camera_scale: 6.6666666667
+  camera_calibration: MineRL degrees converted to relative mouse counts at sensitivity 0.5
+  camera_actuator_step_limit: 12 relative counts at 20 Hz with lossless queued remainder
 evidence:
   - Prompt "mine a visible tree log" selected attack on a visible Bedrock tree.
   - Prompt "open the inventory" selected the inventory action with classifier-free guidance.

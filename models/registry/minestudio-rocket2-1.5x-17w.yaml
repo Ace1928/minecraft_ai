@@ -1,0 +1,43 @@
+schema_version: 1
+model_version: minestudio-rocket2-1.5x-17w
+provider: CraftJarvis ROCKET-2
+architecture: cross-view grounded VPT 1.5x temporal policy
+purpose: larger-capacity visually grounded interaction controller candidate
+promotion_status: rejected-live-latency-candidate
+goal_conditioned: true
+temporal_memory: true
+research_only: false
+source:
+  repository: https://github.com/CraftJarvis/ROCKET-2
+  commit: 5ea1b3b2e4a4b43af8f00a75f232bb490ec8fb6a
+  license: MIT
+artifacts:
+  repository: https://huggingface.co/phython96/ROCKET-2-1.5x-17w
+  repository_commit: d3177f39036574d676ae0f34724238f0d06e667c
+  license: MIT
+  config:
+    filename: config.json
+    sha256: a2ad8a0378fa6337d826a55a6fb885fcab8b957bf1425a577217cb576e1e09ce
+  weights:
+    filename: model.safetensors
+    sha256: 21d64d544e61595ed210e5baed22631fa69957c97e75437f384eee8c50185f6a
+runtime:
+  parameters_file_bytes: 1198890268
+  controller_width: 1536
+  attention_heads: 16
+  temporal_memory_steps: 128
+  edition_trained: Java
+  target_edition: Bedrock
+  target_status: unadapted-domain-transfer
+  measured_device: AMD Ryzen 5 5500 CPU, 6 inference threads
+  measured_cold_step_ms: 4884
+  measured_steady_step_ms: 953-1128
+  measured_date: 2026-09-03
+evidence:
+  - The current-view target head localized the same operator-selected Bedrock tree with greater than 0.999 existence probability.
+  - The checkpoint, hashes and MIT provenance are locally verified.
+limitations:
+  - It was 1.6 to 1.9 times slower than the 1x controller in the same live-system CPU benchmark.
+  - The larger checkpoint made the same unsupported deterministic drop selection as 1x on the probe frame.
+  - Larger capacity alone is not evidence of better Bedrock task success.
+  - It is retained for offline evaluation and must not replace 1x without frozen-suite evidence.

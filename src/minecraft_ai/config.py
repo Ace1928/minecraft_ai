@@ -54,10 +54,13 @@ class PolicyConfig(BaseModel):
     stochastic: bool = True
     condition_scale: float = Field(default=4.0, ge=0.0, le=12.0)
     deterministic_condition: bool = True
-    camera_scale: float = Field(default=0.2, ge=0.0, le=4.0)
-    camera_max_step: int = Field(default=1, ge=0, le=100)
-    camera_pitch_limit: int = Field(default=12, ge=0, le=2000)
-    camera_recovery_release: int = Field(default=4, ge=0, le=2000)
+    # MineRL/VPT camera actions are degrees. At Minecraft's default 0.5 mouse
+    # sensitivity one relative mouse count is 0.15 degrees, so the native
+    # actuator conversion is 1 / 0.15 counts per degree.
+    camera_scale: float = Field(default=20.0 / 3.0, ge=0.0, le=20.0)
+    camera_max_step: int = Field(default=12, ge=0, le=100)
+    camera_pitch_limit: int = Field(default=300, ge=0, le=2000)
+    camera_recovery_release: int = Field(default=100, ge=0, le=2000)
     seed: int = 1928
 
 

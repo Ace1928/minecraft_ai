@@ -1,0 +1,45 @@
+schema_version: 1
+model_version: minestudio-rocket2-1x-22w
+provider: CraftJarvis ROCKET-2
+architecture: cross-view grounded VPT 1x temporal policy
+purpose: visually grounded approach, mine, interact, craft, switch and combat control
+promotion_status: candidate-live-domain-transfer
+goal_conditioned: true
+temporal_memory: true
+research_only: false
+source:
+  repository: https://github.com/CraftJarvis/ROCKET-2
+  commit: 5ea1b3b2e4a4b43af8f00a75f232bb490ec8fb6a
+  license: MIT
+artifacts:
+  repository: https://huggingface.co/phython96/ROCKET-2-1x-22w
+  repository_commit: a9ec41ed60736de310f45c4b8b14063d5d31c7d9
+  license: MIT
+  config:
+    filename: config.json
+    sha256: 2a620a48308f8ecd7682de4a806d25be078f910aa5d00f7eb37f3d0f52507775
+  weights:
+    filename: model.safetensors
+    sha256: 6b351bba2303c093f58946bc67bbf4f116b0ef70770a47facade4873d0ec4060
+runtime:
+  parameters_file_bytes: 749813620
+  controller_width: 1024
+  attention_heads: 8
+  temporal_memory_steps: 128
+  edition_trained: Java
+  target_edition: Bedrock
+  target_status: unadapted-domain-transfer
+  measured_device: AMD Ryzen 5 5500 CPU, 6 inference threads
+  measured_live_step_ms: 299-585
+  camera_scale: 6.6666666667
+  camera_actuator_step_limit: 12 relative counts at 20 Hz with lossless queued remainder
+  measured_date: 2026-09-03
+evidence:
+  - The current-view target head localized an operator-selected Bedrock tree with greater than 0.999 existence probability.
+  - The predicted bounding box overlapped the explicit operator target region on the live Bedrock frame.
+  - The isolated process preserves the released 128-step recurrent state and previous-action input.
+limitations:
+  - Target localization does not prove successful interaction or task completion.
+  - A deterministic Bedrock probe selected the generic drop bit, which is outside the released ROCKET-2 recurrent action contract and is now masked.
+  - Java-to-Bedrock visual, GUI and input domain adaptation is not yet trained.
+  - It is not eligible for preferred-policy claims until it beats the frozen Bedrock suite.

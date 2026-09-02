@@ -60,6 +60,11 @@ def _active_operator_messages(
         sorted(
             active,
             key=lambda message: (
+                message.status
+                in {
+                    OperatorMessageStatus.QUEUED,
+                    OperatorMessageStatus.DELIVERED,
+                },
                 message.priority,
                 message.kind == OperatorMessageKind.CORRECTION,
                 message.created_ns,

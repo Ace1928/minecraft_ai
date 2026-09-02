@@ -20,6 +20,7 @@ from minecraft_ai.policy_service import (
     _decoded_policy_output,
     _intent_instruction,
     _learned_scene_blocked,
+    _rocket_action_contract,
     _rocket_interaction_id,
     _track_mask,
     _validate_policy_config,
@@ -255,6 +256,14 @@ def test_decoded_policy_camera_scale_is_bounded_adapter_calibration() -> None:
     assert output.mouse_dy == 5
 
 
+def test_default_camera_adapter_matches_minecraft_half_sensitivity() -> None:
+    config = PolicyConfig()
+
+    assert config.camera_scale == pytest.approx(1.0 / 0.15)
+    assert config.camera_max_step == 12
+    assert config.camera_pitch_limit == 300
+
+
 def test_camera_envelope_saturates_without_replacing_learned_task(
     tmp_path: Path,
 ) -> None:
@@ -288,6 +297,39 @@ def test_camera_envelope_saturates_without_replacing_learned_task(
     client._output_action(upward, sequence=4)
     assert client._estimated_pitch_units == -1
     assert client._camera_recovery_active is False
+
+
+def test_camera_accumulator_preserves_motion_across_motor_ticks(tmp_path: Path) -> None:
+    config = _policy_config(tmp_path).model_copy(
+        update={
+            "camera_max_step": 3,
+            "camera_pitch_limit": 100,
+            "camera_recovery_release": 50,
+        }
+    )
+    client = TemporalPolicyClient(config=config, frame_provider=lambda: None)
+    output = LearnedPolicyOutput(
+        mouse_dx=9,
+        mouse_dy=-8,
+        inference_ns=1,
+        model_version="official-v1",
+    )
+
+    first = client._output_action(output, sequence=1)
+    second = client._hold(sequence=2)
+    third = client._hold(sequence=3)
+    fourth = client._hold(sequence=4)
+
+    assert [(item.mouse_dx, item.mouse_dy) for item in (first, second, third, fourth)] == [
+        (3, -3),
+        (3, -3),
+        (3, -2),
+        (0, 0),
+    ]
+    status = client.status()
+    assert status["pending_camera"] == {"mouse_dx": 0, "mouse_dy": 0}
+    assert status["predicted_camera_total"] == {"mouse_dx": 9, "mouse_dy": -8}
+    assert status["emitted_camera_total"] == {"mouse_dx": 9, "mouse_dy": -8}
 
 
 def test_async_policy_does_not_double_count_an_already_recorded_deadline_miss(
@@ -422,7 +464,8 @@ def test_async_policy_releases_continuous_button_at_request_deadline(
 
 
 def test_policy_status_exposes_predicted_and_emitted_camera(tmp_path: Path) -> None:
-    client = TemporalPolicyClient(config=_policy_config(tmp_path), frame_provider=lambda: None)
+    config = _policy_config(tmp_path).model_copy(update={"camera_max_step": 1})
+    client = TemporalPolicyClient(config=config, frame_provider=lambda: None)
     output = LearnedPolicyOutput(
         keys=("w",),
         buttons=("left",),
@@ -446,6 +489,7 @@ def test_policy_status_exposes_predicted_and_emitted_camera(tmp_path: Path) -> N
         "target_bbox_xyxy": None,
     }
     assert status["last_emitted_camera"] == {"mouse_dx": 1, "mouse_dy": -1}
+    assert status["pending_camera"] == {"mouse_dx": 8, "mouse_dy": -8}
     assert status["predicted_camera_total"] == {"mouse_dx": 9, "mouse_dy": -9}
     assert status["emitted_camera_total"] == {"mouse_dx": 1, "mouse_dy": -1}
     assert status["accepted_predictions"] == 1
@@ -530,6 +574,17 @@ def test_rocket_interaction_taxonomy_matches_published_control_contract() -> Non
     assert _rocket_interaction_id("hotbar") == 5
     assert _rocket_interaction_id("approach") == 6
     assert _rocket_interaction_id("explore") == -1
+
+
+def test_rocket_action_contract_masks_unsupported_drop_bit() -> None:
+    numpy = pytest.importorskip("numpy")
+    decoded = {"drop": numpy.asarray([1]), "jump": numpy.asarray([1])}
+
+    safe = _rocket_action_contract(decoded)
+
+    assert int(safe["drop"][0]) == 0
+    assert int(safe["jump"][0]) == 1
+    assert int(decoded["drop"][0]) == 1
 
 
 def test_rocket_grounding_mask_uses_observed_track_region() -> None:

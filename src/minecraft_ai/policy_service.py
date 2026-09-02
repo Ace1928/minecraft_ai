@@ -75,6 +75,7 @@ class TemporalPolicyClient:
     _discard_pending_response: bool = field(default=False, init=False)
     _estimated_pitch_units: int = field(default=0, init=False)
     _camera_recovery_active: bool = field(default=False, init=False)
+    _pending_camera: tuple[int, int] = field(default=(0, 0), init=False)
     _last_prediction: LearnedPolicyOutput | None = field(default=None, init=False)
     _last_emitted_camera: tuple[int, int] = field(default=(0, 0), init=False)
     _predicted_camera_total: tuple[int, int] = field(default=(0, 0), init=False)
@@ -194,6 +195,10 @@ class TemporalPolicyClient:
                 "mouse_dx": self._last_emitted_camera[0],
                 "mouse_dy": self._last_emitted_camera[1],
             },
+            "pending_camera": {
+                "mouse_dx": self._pending_camera[0],
+                "mouse_dy": self._pending_camera[1],
+            },
             "predicted_camera_total": {
                 "mouse_dx": self._predicted_camera_total[0],
                 "mouse_dy": self._predicted_camera_total[1],
@@ -245,6 +250,7 @@ class TemporalPolicyClient:
         self._pending_miss_recorded = False
         self._consumed_miss_recorded = False
         self._discard_pending_response = False
+        self._pending_camera = (0, 0)
 
     def warmup(self) -> None:
         """Load and verify the configured checkpoint before its first live action."""
@@ -381,17 +387,16 @@ class TemporalPolicyClient:
 
     def _output_action(self, output: LearnedPolicyOutput, sequence: int) -> MotorAction:
         self._record_learned_action(output)
-        mouse_dx, mouse_dy = self._filter_camera(output.mouse_dx, output.mouse_dy)
         self._last_prediction = output
-        self._last_emitted_camera = (mouse_dx, mouse_dy)
         self._predicted_camera_total = (
             self._predicted_camera_total[0] + output.mouse_dx,
             self._predicted_camera_total[1] + output.mouse_dy,
         )
-        self._emitted_camera_total = (
-            self._emitted_camera_total[0] + mouse_dx,
-            self._emitted_camera_total[1] + mouse_dy,
+        self._pending_camera = (
+            self._pending_camera[0] + output.mouse_dx,
+            self._pending_camera[1] + output.mouse_dy,
         )
+        mouse_dx, mouse_dy = self._drain_camera()
         desired_keys = set(output.keys)
         desired_buttons = set(output.buttons)
         action = MotorAction(
@@ -454,16 +459,35 @@ class TemporalPolicyClient:
         payload["interaction_id"] = _rocket_interaction_id(intent.mode)
         return payload
 
-    def _filter_camera(self, mouse_dx: int, mouse_dy: int) -> tuple[int, int]:
+    def _drain_camera(self) -> tuple[int, int]:
+        """Emit one smooth actuator slice without discarding learned motion.
+
+        Policy camera outputs represent an angular delta for one source step.
+        CPU inference is slower than the 20 Hz actuator, so clipping that delta
+        once permanently loses part of the learned action. Queue the converted
+        relative motion and drain it over live motor ticks instead.
+        """
+
+        pending_dx, pending_dy = self._pending_camera
         max_step = self.config.camera_max_step
         if max_step > 0:
-            mouse_dx = max(-max_step, min(max_step, mouse_dx))
-            mouse_dy = max(-max_step, min(max_step, mouse_dy))
+            mouse_dx = max(-max_step, min(max_step, pending_dx))
+            mouse_dy = max(-max_step, min(max_step, pending_dy))
+        else:
+            mouse_dx, mouse_dy = pending_dx, pending_dy
+        remaining_dx = pending_dx - mouse_dx
+        remaining_dy = pending_dy - mouse_dy
         pitch_limit = self.config.camera_pitch_limit
         if pitch_limit > 0:
             proposed = self._estimated_pitch_units + mouse_dy
             bounded = max(-pitch_limit, min(pitch_limit, proposed))
-            mouse_dy = bounded - self._estimated_pitch_units
+            bounded_dy = bounded - self._estimated_pitch_units
+            if bounded_dy != mouse_dy:
+                # The envelope rejected motion farther toward a pitch pole.
+                # Discard queued motion in that same direction so it cannot
+                # reappear after a later, valid correction moves away.
+                remaining_dy = 0
+            mouse_dy = bounded_dy
             self._estimated_pitch_units = bounded
             # Saturation is sufficient: it preserves the learned controller's
             # task conditioning while preventing cumulative pitch runaway.
@@ -471,6 +495,12 @@ class TemporalPolicyClient:
             # deadlock because the policy could keep choosing the saturated
             # direction while all locomotion/interaction was suppressed.
             self._camera_recovery_active = False
+        self._pending_camera = (remaining_dx, remaining_dy)
+        self._last_emitted_camera = (mouse_dx, mouse_dy)
+        self._emitted_camera_total = (
+            self._emitted_camera_total[0] + mouse_dx,
+            self._emitted_camera_total[1] + mouse_dy,
+        )
         return mouse_dx, mouse_dy
 
     def _hold(self, sequence: int) -> MotorAction:
@@ -482,12 +512,19 @@ class TemporalPolicyClient:
         Keep buttons latched until the next prediction (or the request deadline)
         while releasing movement keys at the bounded sample-and-hold boundary.
         """
+        keys_up: tuple[str, ...] = ()
         if self._held_keys and time.monotonic_ns() >= self._held_until_ns:
             keys_up = tuple(sorted(self._held_keys))
             self._held_keys.clear()
             self._held_until_ns = 0
-            return MotorAction(sequence=sequence, keys_up=keys_up)
-        return MotorAction(sequence=sequence, duration_ms=50)
+        mouse_dx, mouse_dy = self._drain_camera()
+        return MotorAction(
+            sequence=sequence,
+            keys_up=keys_up,
+            mouse_dx=mouse_dx,
+            mouse_dy=mouse_dy,
+            duration_ms=50,
+        )
 
     def _release(self, sequence: int) -> MotorAction:
         action = MotorAction(
@@ -498,6 +535,8 @@ class TemporalPolicyClient:
         self._held_keys.clear()
         self._held_buttons.clear()
         self._held_until_ns = 0
+        self._pending_camera = (0, 0)
+        self._last_emitted_camera = (0, 0)
         return action
 
 
@@ -1006,6 +1045,7 @@ class _RocketTwoBackend:
             "camera": action["camera"].cpu().numpy().reshape(1, 1),
         }
         decoded = self.transformer.policy2env(self.mapper.to_factored(raw))
+        decoded = _rocket_action_contract(decoded)
         self.previous_action = self._decoded_previous_action(decoded)
         exists_probability, point_yx, bbox_xyxy = _rocket_target_estimate(self.policy)
         return _decoded_policy_output(
@@ -1061,6 +1101,23 @@ _ROCKET_BINARY_KEYS = (
     "hotbar_8",
     "hotbar_9",
 )
+
+
+def _rocket_action_contract(decoded: dict[str, Any]) -> dict[str, Any]:
+    """Mask actions outside ROCKET-2's published interaction controller.
+
+    The released ROCKET-2 recurrent previous-action contract omits ``drop``.
+    Some generic MineStudio action mappers still decode that bit from the
+    shared VPT button vocabulary. Never let an unsupported bit discard the
+    operator's inventory during a grounded interaction.
+    """
+
+    drop = decoded.get("drop")
+    if drop is None:
+        return decoded
+    safe_drop = drop.copy()
+    safe_drop[...] = 0
+    return {**decoded, "drop": safe_drop}
 
 
 def _rocket_interaction_id(mode: str) -> int:

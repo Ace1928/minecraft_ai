@@ -184,6 +184,33 @@ def test_urgent_correction_precedes_older_acknowledged_instruction() -> None:
     assert tuple(message.message_id for message in active) == ("correction", "old")
 
 
+def test_fresh_directive_precedes_an_older_acknowledged_correction() -> None:
+    messages = (
+        OperatorMessage(
+            message_id="old-correction",
+            created_ns=1,
+            text="Leave the canopy and explore",
+            kind=OperatorMessageKind.CORRECTION,
+            priority=1.0,
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),
+        OperatorMessage(
+            message_id="new-instruction",
+            created_ns=2,
+            text="Mine the selected tree",
+            priority=1.0,
+            status=OperatorMessageStatus.DELIVERED,
+        ),
+    )
+
+    active = _active_operator_messages(messages)
+
+    assert tuple(message.message_id for message in active) == (
+        "new-instruction",
+        "old-correction",
+    )
+
+
 def test_only_selected_operator_goal_is_acknowledgeable() -> None:
     pending = ("new-correction", "old-instruction")
 
