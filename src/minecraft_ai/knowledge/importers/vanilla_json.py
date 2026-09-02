@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..model import (
     EdgeKind,
@@ -137,7 +138,12 @@ def _import_advancements(data_dir: Path, graph: KnowledgeGraph) -> None:
 
 def _recipe_output_kind(recipe_type: str) -> EdgeKind:
     lowered = recipe_type.lower()
-    if "smelting" in lowered or "blasting" in lowered or "smoking" in lowered or "campfire" in lowered:
+    if (
+        "smelting" in lowered
+        or "blasting" in lowered
+        or "smoking" in lowered
+        or "campfire" in lowered
+    ):
         return EdgeKind.COOKS
     if "smithing" in lowered:
         return EdgeKind.SMITHS
