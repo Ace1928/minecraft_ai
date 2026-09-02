@@ -105,7 +105,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="explore_forward",
-            version=3,
+            version=4,
             name="Explore forward",
             description=(
                 "Traverse visible open terrain to discover a genuinely new area, keep the view "
@@ -117,7 +117,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=("retreat_from_danger",),
             max_duration_ms=12_000,
             policy_ref="explore",
-            policy_instruction="explore",
+            # Keep the motor command within STEVE-1's short-horizon text
+            # distribution while matching MineStudio's published exploration
+            # benchmark wording. The checkpoint still chooses every key,
+            # camera delta, and jump; this is goal conditioning, not a macro.
+            policy_instruction="Run around and explore the Minecraft world.",
         ),
         SkillSpec(
             skill_id="use_target",

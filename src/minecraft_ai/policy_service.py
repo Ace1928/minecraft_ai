@@ -79,6 +79,8 @@ class TemporalPolicyClient:
     _last_emitted_camera: tuple[int, int] = field(default=(0, 0), init=False)
     _predicted_camera_total: tuple[int, int] = field(default=(0, 0), init=False)
     _emitted_camera_total: tuple[int, int] = field(default=(0, 0), init=False)
+    _accepted_predictions: int = field(default=0, init=False)
+    _learned_action_counts: dict[str, int] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         _validate_policy_config(self.config)
@@ -200,6 +202,8 @@ class TemporalPolicyClient:
                 "mouse_dx": self._emitted_camera_total[0],
                 "mouse_dy": self._emitted_camera_total[1],
             },
+            "accepted_predictions": self._accepted_predictions,
+            "learned_action_counts": dict(sorted(self._learned_action_counts.items())),
             "process_alive": bool(process is not None and process.poll() is None),
             "requests": self.metrics.requests,
             "responses": self.metrics.responses,
@@ -376,6 +380,7 @@ class TemporalPolicyClient:
         return payload
 
     def _output_action(self, output: LearnedPolicyOutput, sequence: int) -> MotorAction:
+        self._record_learned_action(output)
         mouse_dx, mouse_dy = self._filter_camera(output.mouse_dx, output.mouse_dy)
         self._last_prediction = output
         self._last_emitted_camera = (mouse_dx, mouse_dy)
@@ -403,6 +408,30 @@ class TemporalPolicyClient:
         self._held_buttons = desired_buttons
         self._held_until_ns = time.monotonic_ns() + self.config.action_hold_ms * 1_000_000
         return action
+
+    def _record_learned_action(self, output: LearnedPolicyOutput) -> None:
+        """Expose what the checkpoint selected before actuator filtering.
+
+        These counters distinguish learned decisions from 20 Hz state-hold and
+        release actions. They make live camera/jump evaluation evidence-based
+        without altering, boosting, or replacing the checkpoint's outputs.
+        """
+        self._accepted_predictions += 1
+        keys = set(output.keys)
+        buttons = set(output.buttons)
+        labels = {
+            "camera": bool(output.mouse_dx or output.mouse_dy),
+            "jump": "space" in keys,
+            "sprint_jump": {"ctrl", "space", "w"}.issubset(keys),
+            "forward": "w" in keys,
+            "attack": "left" in buttons,
+            "use": "right" in buttons,
+        }
+        for label, selected in labels.items():
+            if selected:
+                self._learned_action_counts[label] = (
+                    self._learned_action_counts.get(label, 0) + 1
+                )
 
     def _conditioned_intent(
         self,

@@ -448,6 +448,32 @@ def test_policy_status_exposes_predicted_and_emitted_camera(tmp_path: Path) -> N
     assert status["last_emitted_camera"] == {"mouse_dx": 1, "mouse_dy": -1}
     assert status["predicted_camera_total"] == {"mouse_dx": 9, "mouse_dy": -9}
     assert status["emitted_camera_total"] == {"mouse_dx": 1, "mouse_dy": -1}
+    assert status["accepted_predictions"] == 1
+    assert status["learned_action_counts"] == {
+        "attack": 1,
+        "camera": 1,
+        "forward": 1,
+    }
+
+
+def test_policy_status_counts_learned_jump_before_state_hold_actions(tmp_path: Path) -> None:
+    client = TemporalPolicyClient(config=_policy_config(tmp_path), frame_provider=lambda: None)
+    output = LearnedPolicyOutput(
+        keys=("ctrl", "space", "w"),
+        inference_ns=1,
+        model_version="official-v1",
+    )
+
+    client._output_action(output, sequence=1)
+    client._output_action(output, sequence=2)
+    status = client.status()
+
+    assert status["accepted_predictions"] == 2
+    assert status["learned_action_counts"] == {
+        "forward": 2,
+        "jump": 2,
+        "sprint_jump": 2,
+    }
 
 
 def test_learned_static_gui_scene_blocks_world_policy_actions() -> None:
