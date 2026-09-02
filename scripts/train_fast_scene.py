@@ -124,7 +124,12 @@ class TrajectoryReader:
     ) -> list[dict[str, int | str]]:
         """Recover ranges for v1 manifests that only persisted shard IDs."""
         indexed: list[dict[str, int | str]] = []
-        for shard_id in manifest.get("shard_ids", ()):
+        shard_ids = tuple(manifest.get("shard_ids", ()))
+        if not shard_ids:
+            shard_ids = tuple(
+                path.stem for path in sorted(directory.glob("*-shard-*.tar"))
+            )
+        for shard_id in shard_ids:
             path = directory / f"{shard_id}.tar"
             archive = self._archives.get(path)
             if archive is None:
@@ -176,16 +181,41 @@ def _load_samples(annotation_path: Path, trajectory_root: Path) -> list[Sample]:
     split_trajectories: dict[str, set[str]] = {}
     samples: list[Sample] = []
     reader = TrajectoryReader(trajectory_root)
+
+    def add_sample(
+        trajectory_id: str,
+        step_index: int,
+        label: str,
+        split: str,
+    ) -> None:
+        if split not in {"train", "validation", "test"}:
+            raise ValueError(f"invalid split {split!r}")
+        if label not in LABELS:
+            raise ValueError(f"invalid label {label!r}")
+        split_trajectories.setdefault(split, set()).add(trajectory_id)
+        bgra = reader.frame(trajectory_id, step_index)
+        rgb = cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGB)
+        resized = cv2.resize(rgb, IMAGE_SIZE, interpolation=cv2.INTER_AREA)
+        image = torch.from_numpy(
+            resized.transpose(2, 0, 1).copy()
+        ).float().div_(255.0)
+        samples.append(
+            Sample(
+                image=image,
+                label=LABELS.index(label),
+                trajectory_id=trajectory_id,
+                step_index=step_index,
+                split=split,
+            )
+        )
+
     try:
         for transition in annotation["transitions"]:
             trajectory_id = str(transition["trajectory_id"])
             split = str(transition["split"])
             direction = str(transition["transition"])
-            if split not in {"train", "validation", "test"}:
-                raise ValueError(f"invalid split {split!r}")
             if direction not in {"open", "close"}:
                 raise ValueError(f"invalid transition {direction!r}")
-            split_trajectories.setdefault(split, set()).add(trajectory_id)
             center = int(transition["step_index"])
             label_pairs = (
                 ((before_offsets, "world"), (after_offsets, "inventory"))
@@ -194,22 +224,18 @@ def _load_samples(annotation_path: Path, trajectory_root: Path) -> list[Sample]:
             )
             for selected_offsets, label in label_pairs:
                 for offset in selected_offsets:
-                    step_index = center + offset
-                    bgra = reader.frame(trajectory_id, step_index)
-                    rgb = cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGB)
-                    resized = cv2.resize(rgb, IMAGE_SIZE, interpolation=cv2.INTER_AREA)
-                    image = torch.from_numpy(
-                        resized.transpose(2, 0, 1).copy()
-                    ).float().div_(255.0)
-                    samples.append(
-                        Sample(
-                            image=image,
-                            label=LABELS.index(label),
-                            trajectory_id=trajectory_id,
-                            step_index=step_index,
-                            split=split,
-                        )
+                    add_sample(
+                        trajectory_id,
+                        center + offset,
+                        label,
+                        split,
                     )
+        for example in annotation.get("examples", ()):
+            trajectory_id = str(example["trajectory_id"])
+            label = str(example["label"])
+            split = str(example["split"])
+            for step_index in example["step_indices"]:
+                add_sample(trajectory_id, int(step_index), label, split)
     finally:
         reader.close()
     split_names = tuple(split_trajectories)

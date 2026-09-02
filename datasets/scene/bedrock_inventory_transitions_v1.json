@@ -14,6 +14,15 @@
     "before_offsets": [-8, -7, -6, -5, -4, -3],
     "after_offsets": [16, 17, 18, 19, 20, 21]
   },
+  "examples": [
+    {
+      "trajectory_id": "bedrock-agent-20260902T183004Z-a4d11dd3e01c",
+      "step_indices": [8192, 8320, 8447, 8576, 8703, 8832, 8959, 9088, 9215, 9344, 9471, 9600, 9727, 9856, 9983, 10112, 10239],
+      "label": "world",
+      "split": "train",
+      "annotation_method": "human-reviewed live hard negatives: close dirt, grass, log, wall, and ground views"
+    }
+  ],
   "transitions": [
     {
       "trajectory_id": "bedrock-agent-20260902T173628Z-97442d97fc08",
