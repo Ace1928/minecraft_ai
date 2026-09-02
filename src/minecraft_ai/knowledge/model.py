@@ -226,7 +226,11 @@ class KnowledgeGraph:
         version_raw = payload.get("version")
         nodes_raw = payload.get("nodes")
         edges_raw = payload.get("edges")
-        if not isinstance(version_raw, dict) or not isinstance(nodes_raw, list) or not isinstance(edges_raw, list):
+        if (
+            not isinstance(version_raw, dict)
+            or not isinstance(nodes_raw, list)
+            or not isinstance(edges_raw, list)
+        ):
             raise TypeError("invalid graph payload")
         graph = cls(GameVersion.model_validate(version_raw))
         for raw in nodes_raw:
