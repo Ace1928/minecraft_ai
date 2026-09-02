@@ -3,11 +3,11 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
-from dataclasses import replace
+from pathlib import Path
 
 from .builtin_skills import build_bootstrap_skill_library
 from .cognition import HighLevelController
-from .config import load_config
+from .config import app_paths, load_config
 from .execution import SkillExecutor
 from .models import OpenAICompatibleLocalModel
 from .motor import HeuristicMotorPolicy
@@ -30,18 +30,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _merge_skills(persisted: object) -> object:
-    return persisted
-
-
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    config = load_config(None if args.config is None else __import__("pathlib").Path(args.config))
+    config_path = None if args.config is None else Path(args.config)
+    config = load_config(config_path)
     if args.role is not None:
         config = config.model_copy(update={"role": args.role})
     role = get_role(config.role)
-
-    from .config import app_paths
 
     paths = app_paths()
     database = StateDatabase(paths.state_db)
@@ -60,7 +55,6 @@ def main(argv: list[str] | None = None) -> int:
         blackboard = PerceptionBlackboard()
         capture = IsolatedX11Capture(args.display, args.window_id)
 
-        high_model: OpenAICompatibleLocalModel | None = None
         high_level: HighLevelController | None = None
         if config.high_level.enabled:
             if not config.high_level.model_id:
@@ -93,8 +87,7 @@ def main(argv: list[str] | None = None) -> int:
             stale_frame_ms=config.stale_frame_ms,
             active_vlm=active_vlm,
         )
-        motor = HeuristicMotorPolicy()
-        executor = SkillExecutor(motor)
+        executor = SkillExecutor(HeuristicMotorPolicy())
         runtime = AgentRuntime(
             perception=perception,
             blackboard=blackboard,
