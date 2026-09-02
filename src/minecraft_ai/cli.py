@@ -43,6 +43,8 @@ from .operator_server import serve_operator_dashboard
 from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
 from .platforms.bedrock_session import (
     BEDROCK_SESSION_FILE,
+    DEFAULT_BEDROCK_HEIGHT,
+    DEFAULT_BEDROCK_WIDTH,
     BedrockSession,
     bedrock_session_alive,
     launch_isolated_bedrock_session,
@@ -750,8 +752,8 @@ def bedrock_status() -> None:
 
 @bedrock_app.command("launch")
 def bedrock_launch(
-    width: int = typer.Option(1280, min=320, max=7680),
-    height: int = typer.Option(720, min=240, max=4320),
+    width: int = typer.Option(DEFAULT_BEDROCK_WIDTH, min=320, max=7680),
+    height: int = typer.Option(DEFAULT_BEDROCK_HEIGHT, min=240, max=4320),
     direct: bool = typer.Option(
         False,
         "--direct-debug",

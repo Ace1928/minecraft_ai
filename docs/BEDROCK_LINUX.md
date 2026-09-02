@@ -56,11 +56,17 @@ Launch Bedrock in an isolated namespace:
 minecraft-ai bedrock launch
 ```
 
-The default nested resolution is 1280x720. It can be changed:
+The default nested resolution is 1920x1080. This leaves enough drawable height
+for Wine's window chrome while preserving the complete Bedrock HUD on common
+scaled Wayland desktops. It can be changed explicitly:
 
 ```bash
 minecraft-ai bedrock launch --width 1920 --height 1080
 ```
+
+Before arming live control, confirm that the dashboard frame includes all
+hearts, hunger icons, and all nine hotbar slots. A partially clipped HUD is not
+a valid perception or trajectory-recording surface.
 
 Sign in/select a world through the nested Bedrock window normally. Then start the agent:
 

@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
 import pytest
 
 from minecraft_ai.platforms.bedrock_linux import _read_install_record
-from minecraft_ai.platforms.bedrock_session import BedrockSession, bedrock_session_alive
+from minecraft_ai.platforms.bedrock_session import (
+    DEFAULT_BEDROCK_HEIGHT,
+    DEFAULT_BEDROCK_WIDTH,
+    BedrockSession,
+    bedrock_session_alive,
+    launch_isolated_bedrock_session,
+)
 from minecraft_ai.platforms.bedrock_x11 import (
     IsolationError,
     _crop_bgra,
@@ -39,6 +46,15 @@ def test_managed_directory_is_safe_version_fallback(tmp_path: Path) -> None:
     assert build is not None
     assert build.edition_id == "preview"
     assert build.version == "1.22.0.20"
+
+
+def test_managed_session_defaults_preserve_full_hd_hud_surface() -> None:
+    signature = inspect.signature(launch_isolated_bedrock_session)
+
+    assert DEFAULT_BEDROCK_WIDTH == 1920
+    assert DEFAULT_BEDROCK_HEIGHT == 1080
+    assert signature.parameters["width"].default == DEFAULT_BEDROCK_WIDTH
+    assert signature.parameters["height"].default == DEFAULT_BEDROCK_HEIGHT
 
 
 def test_isolated_backend_refuses_host_x_server() -> None:

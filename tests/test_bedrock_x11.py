@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pytest
+
 from minecraft_ai.platforms.bedrock_x11 import (
+    IsolationError,
+    _contained_content_rect,
     _resolve_minecraft_input_window,
     _window_is_descendant_or_same,
 )
@@ -83,3 +87,28 @@ def test_focus_descendant_is_accepted_as_part_of_minecraft_subtree() -> None:
     assert _window_is_descendant_or_same(minecraft, minecraft.id)
     assert _window_is_descendant_or_same(drawable, minecraft.id)
     assert not _window_is_descendant_or_same(minecraft, 999)
+
+
+def test_complete_wine_drawable_is_accepted_for_capture() -> None:
+    rect = _contained_content_rect(
+        parent_width=1908,
+        parent_height=1047,
+        x=0,
+        y=26,
+        content_width=1908,
+        content_height=1021,
+    )
+
+    assert rect == (0, 26, 1908, 1021)
+
+
+def test_clipped_wine_drawable_is_rejected_before_capture() -> None:
+    with pytest.raises(IsolationError, match="client drawable is clipped"):
+        _contained_content_rect(
+            parent_width=1279,
+            parent_height=661,
+            x=0,
+            y=26,
+            content_width=1280,
+            content_height=694,
+        )

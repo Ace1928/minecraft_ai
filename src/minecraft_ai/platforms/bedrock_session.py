@@ -24,6 +24,8 @@ from .bedrock_x11 import (
 
 RUNTIME_DIR = Path(user_runtime_dir("minecraft-ai"))
 BEDROCK_SESSION_FILE = RUNTIME_DIR / "bedrock-session.json"
+DEFAULT_BEDROCK_WIDTH = 1920
+DEFAULT_BEDROCK_HEIGHT = 1080
 
 
 @dataclass(frozen=True)
@@ -135,8 +137,8 @@ def choose_free_display(*, start: int = 70, stop: int = 199) -> str:
 
 def launch_xephyr_bedrock_session(
     *,
-    width: int = 1280,
-    height: int = 720,
+    width: int = DEFAULT_BEDROCK_WIDTH,
+    height: int = DEFAULT_BEDROCK_HEIGHT,
     display: str | None = None,
     launcher_command: tuple[str, ...] | None = None,
 ) -> BedrockSession:
@@ -230,8 +232,8 @@ def launch_xephyr_bedrock_session(
 
 def launch_weston_bedrock_session(
     *,
-    width: int = 1280,
-    height: int = 720,
+    width: int = DEFAULT_BEDROCK_WIDTH,
+    height: int = DEFAULT_BEDROCK_HEIGHT,
     launcher_command: tuple[str, ...] | None = None,
 ) -> BedrockSession:
     """Launch Bedrock in a GPU-accelerated nested Weston/Xwayland compositor."""
@@ -342,8 +344,8 @@ def _wait_for_weston_xwayland(
 
 def launch_isolated_bedrock_session(
     *,
-    width: int = 1280,
-    height: int = 720,
+    width: int = DEFAULT_BEDROCK_WIDTH,
+    height: int = DEFAULT_BEDROCK_HEIGHT,
     launcher_command: tuple[str, ...] | None = None,
 ) -> BedrockSession:
     """Prefer the accelerated compositor, retaining Xephyr as a compatibility fallback."""
@@ -362,8 +364,8 @@ def launch_isolated_bedrock_session(
 
 def launch_direct_bedrock_session(
     *,
-    width: int = 1280,
-    height: int = 720,
+    width: int = DEFAULT_BEDROCK_WIDTH,
+    height: int = DEFAULT_BEDROCK_HEIGHT,
     launcher_command: tuple[str, ...] | None = None,
 ) -> BedrockSession:
     """Launch a manual debug session on the host display.

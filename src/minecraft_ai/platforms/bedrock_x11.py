@@ -510,15 +510,42 @@ def _wine_content_rect(
         )
         geometry = client.get_geometry()
         translated = target.translate_coords(client, 0, 0)
-        x = max(0, int(translated.x))
-        y = max(0, int(translated.y))
-        client_width = min(int(geometry.width), width - x)
-        client_height = min(int(geometry.height), height - y)
-        if client_width <= 0 or client_height <= 0:
-            return None
-        return x, y, client_width, client_height
     except Exception:
         return None
+    return _contained_content_rect(
+        parent_width=width,
+        parent_height=height,
+        x=int(translated.x),
+        y=int(translated.y),
+        content_width=int(geometry.width),
+        content_height=int(geometry.height),
+    )
+
+
+def _contained_content_rect(
+    *,
+    parent_width: int,
+    parent_height: int,
+    x: int,
+    y: int,
+    content_width: int,
+    content_height: int,
+) -> tuple[int, int, int, int]:
+    """Require the complete game drawable before admitting a capture stream."""
+    if content_width <= 0 or content_height <= 0:
+        raise IsolationError("Minecraft client drawable has invalid geometry")
+    if (
+        x < 0
+        or y < 0
+        or x + content_width > parent_width
+        or y + content_height > parent_height
+    ):
+        raise IsolationError(
+            "Minecraft client drawable is clipped by the isolated compositor "
+            f"({content_width}x{content_height}+{x}+{y} inside "
+            f"{parent_width}x{parent_height}); relaunch Bedrock at 1920x1080 or larger"
+        )
+    return x, y, content_width, content_height
 
 
 class IsolatedX11Capture:
