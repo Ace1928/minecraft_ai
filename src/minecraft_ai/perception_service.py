@@ -254,10 +254,11 @@ class RealtimePerceptionService:
                 elif g > r + 15 and g > b + 15:
                     green_count += 1
 
-        # Sample upper vs lower screen for sky/horizon pitch detection
+        # Sample upper vs lower screen for sky/horizon pitch detection and day/night cycle
         sky_samples = 0
         upper_sky = 0
         lower_sky = 0
+        total_sky_brightness = 0.0
 
         # Sample top 15% and bottom 15%
         for dx in range(w // 4, 3 * w // 4, w // 10):
@@ -269,12 +270,47 @@ class RealtimePerceptionService:
             b_b, g_b, r_b = frame.bgra[off_bot], frame.bgra[off_bot + 1], frame.bgra[off_bot + 2]
             
             sky_samples += 1
+            lum_t = 0.299 * r_t + 0.587 * g_t + 0.114 * b_t
+            total_sky_brightness += lum_t
+
             if b_t > 150 and g_t > 130 and r_t > 110: # Sky/cloud brightness
                 upper_sky += 1
             if b_b > 150 and g_b > 130 and r_b > 110:
                 lower_sky += 1
 
         looking_at_sky = bool(sky_samples > 0 and upper_sky >= (sky_samples * 0.7) and lower_sky >= (sky_samples * 0.5))
+        avg_brightness = total_sky_brightness / max(1, sky_samples)
+        
+        # Day / Dusk / Night cycle estimation
+        if avg_brightness > 135:
+            time_of_day = "day"
+        elif avg_brightness > 75:
+            time_of_day = "dusk"
+        else:
+            time_of_day = "night"
+
+        # Check for underwater immersion (cyan/blue high, red very low across screen)
+        is_underwater = bool(b_t > 120 and g_t > 100 and r_t < 40 and b_b > 120 and r_b < 40)
+
+        # Obstacle proximity check directly below crosshair (foot/block barrier)
+        obstacle_samples = 0
+        solid_count = 0
+        for dy in range(20, 50, 5):
+            sy = cy + dy
+            if sy >= h:
+                continue
+            row_off = sy * row_bytes
+            for dx in range(-10, 10, 5):
+                sx = cx + dx
+                if sx < 0 or sx >= w:
+                    continue
+                off = row_off + sx * 4
+                b_o, g_o, r_o = frame.bgra[off], frame.bgra[off + 1], frame.bgra[off + 2]
+                obstacle_samples += 1
+                if (r_o + g_o + b_o) > 60: # Solid non-black block
+                    solid_count += 1
+
+        obstacle_ahead = bool(obstacle_samples > 0 and solid_count >= (obstacle_samples * 0.75))
 
         if center_samples > 0:
             target_visible = (brown_count + gray_count + green_count) > (center_samples * 0.25)
@@ -302,6 +338,30 @@ class RealtimePerceptionService:
                     PerceptionFact(
                         key="pitch.looking_up",
                         value=looking_at_sky,
+                        confidence=0.80,
+                        observed_ns=now,
+                        source="heuristic-vision-20hz",
+                        expires_after_ms=300,
+                    ),
+                    PerceptionFact(
+                        key="environment.time_of_day",
+                        value=time_of_day,
+                        confidence=0.75,
+                        observed_ns=now,
+                        source="heuristic-vision-20hz",
+                        expires_after_ms=5000,
+                    ),
+                    PerceptionFact(
+                        key="environment.underwater",
+                        value=is_underwater,
+                        confidence=0.90,
+                        observed_ns=now,
+                        source="heuristic-vision-20hz",
+                        expires_after_ms=500,
+                    ),
+                    PerceptionFact(
+                        key="obstacle.ahead",
+                        value=obstacle_ahead,
                         confidence=0.80,
                         observed_ns=now,
                         source="heuristic-vision-20hz",

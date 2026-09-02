@@ -41,6 +41,9 @@ class CognitionContext:
     wiki: tuple[WikiEvidence, ...]
 
 
+from .tech_tree import Milestone, TechAge, TechTreeTracker
+
+
 class AutonomousCognitionEngine:
     """SOTA autonomous cognitive decision engine implementing hierarchical long-horizon planning,
     dynamic tech-tree progression, spatial goal navigation, and conversational player interaction.
@@ -48,7 +51,7 @@ class AutonomousCognitionEngine:
 
     def __init__(self, skills: SkillLibrary) -> None:
         self.skills = skills
-        self._tech_tier = "wood_age"
+        self.tech_tree = TechTreeTracker()
         self._last_speech_time = 0.0
 
     def decide(
@@ -62,6 +65,19 @@ class AutonomousCognitionEngine:
         target_mineable = blackboard.fact("target.mineable")
         crosshair = blackboard.fact("crosshair")
         now_s = time.time()
+
+        # Update tech tree state with any observed inventory facts
+        inv_fact = blackboard.fact("inventory")
+        if inv_fact and isinstance(inv_fact.value, dict):
+            newly_unlocked = self.tech_tree.update_with_inventory(inv_fact.value)
+            for m in newly_unlocked:
+                self._last_speech_time = now_s
+                return CognitionDecision(
+                    reasoning_summary=f"Milestone achieved: {m.name}! Unlocked {m.description}",
+                    chosen_goal_id=m.milestone_id,
+                    skill_id="explore_forward",
+                    say=f"Milestone unlocked: {m.name}!",
+                )
 
         # 1. Critical Survival & Hazard Interruption
         if danger and bool(danger.value):
@@ -96,29 +112,31 @@ class AutonomousCognitionEngine:
                     say=f"On it: {promise.description}" if now_s - self._last_speech_time > 20 else None,
                 )
 
-        # 3. Dynamic Resource Acquisition & Tech-Tree Progression
+        # 3. Dynamic Tech-Tree Milestone Planning
+        milestone = self.tech_tree.next_priority_milestone()
         if target_vis and bool(target_vis.value):
             if target_mineable and bool(target_mineable.value):
-                say = "Harvesting resource." if now_s - self._last_speech_time > 30 else None
+                say = f"Gathering resources for {milestone.name if milestone else 'progression'}." if now_s - self._last_speech_time > 30 else None
                 if say:
                     self._last_speech_time = now_s
                 return CognitionDecision(
                     reasoning_summary="Mineable resource target locked; mining block.",
-                    chosen_goal_id="obtain_wood",
+                    chosen_goal_id=milestone.milestone_id if milestone else "obtain_wood",
                     skill_id="mine_visible_block",
                     say=say,
                 )
             return CognitionDecision(
                 reasoning_summary="Resource target visible; approaching target location.",
-                chosen_goal_id="obtain_wood",
+                chosen_goal_id=milestone.milestone_id if milestone else "obtain_wood",
                 skill_id="approach_visible_target",
             )
 
-        # 4. Long-Horizon Exploration & Spatial Scanning
+        # 4. Long-Horizon Exploration & Tech Milestone Search
+        goal_name = milestone.name if milestone else "exploration"
         return CognitionDecision(
-            reasoning_summary="Surveying area with 360° sweeps to locate wood, stone, and landmarks.",
-            chosen_goal_id="explore",
-            skill_id="explore_forward",
+            reasoning_summary=f"Surveying area for {goal_name} (Age: {self.tech_tree.current_age.value}).",
+            chosen_goal_id=milestone.milestone_id if milestone else "explore",
+            skill_id=milestone.skill_hint if (milestone and milestone.skill_hint in self.skills.specs) else "explore_forward",
             ask_perception=("target.visible", "danger.immediate"),
         )
 

@@ -127,3 +127,46 @@ def test_state_database_spatial_persistence() -> None:
             loaded = db.load_places()
             assert len(loaded.places) == 1
             assert loaded.get("p1") == place
+
+
+def test_topological_waypoint_graph_pathfinding() -> None:
+    from minecraft_ai.spatial import TopologicalWaypointGraph
+
+    memory = SpatialPlaceMemory()
+    now = time.time_ns()
+    p_base = PlaceRecord(place_id="base", name="Base", kind=PlaceKind.BASE, x=0.0, y=64.0, z=0.0, discovered_ns=now, last_visited_ns=now)
+    p_mid = PlaceRecord(place_id="mid_waypoint", name="Midpoint", kind=PlaceKind.WAYPOINT, x=50.0, y=64.0, z=0.0, discovered_ns=now, last_visited_ns=now)
+    p_mine = PlaceRecord(place_id="deep_mine", name="Deep Mine", kind=PlaceKind.MINE, x=100.0, y=20.0, z=0.0, discovered_ns=now, last_visited_ns=now)
+    
+    memory.upsert(p_base)
+    memory.upsert(p_mid)
+    memory.upsert(p_mine)
+
+    graph = TopologicalWaypointGraph()
+    graph.add_edge("base", "mid_waypoint", 50.0)
+    graph.add_edge("mid_waypoint", "deep_mine", 60.0)
+
+    path = graph.find_path("base", "deep_mine", memory)
+    assert path == ["base", "mid_waypoint", "deep_mine"]
+
+
+def test_dynamic_region_clustering() -> None:
+    from minecraft_ai.spatial import cluster_places_into_regions
+
+    memory = SpatialPlaceMemory()
+    now = time.time_ns()
+    p1 = PlaceRecord(place_id="base_camp", name="Base Camp", kind=PlaceKind.BASE, x=10.0, y=64.0, z=10.0, resource_types=("wood",), discovered_ns=now, last_visited_ns=now)
+    p2 = PlaceRecord(place_id="crafting_hut", name="Crafting Hut", kind=PlaceKind.CRAFTING_SITE, x=15.0, y=64.0, z=12.0, resource_types=("crafting_table",), discovered_ns=now, last_visited_ns=now)
+    p3 = PlaceRecord(place_id="far_village", name="Far Village", kind=PlaceKind.VILLAGE, x=500.0, y=70.0, z=500.0, resource_types=("wheat",), discovered_ns=now, last_visited_ns=now)
+
+    memory.upsert(p1)
+    memory.upsert(p2)
+    memory.upsert(p3)
+
+    regions = cluster_places_into_regions(memory, cluster_radius=50.0)
+    assert len(regions) == 2
+    # First cluster should combine base_camp and crafting_hut
+    cluster_base = next(r for r in regions if "base_camp" in r.place_ids)
+    assert "crafting_hut" in cluster_base.place_ids
+    assert cluster_base.resource_density.get("wood") == 1
+    assert cluster_base.resource_density.get("crafting_table") == 1

@@ -202,3 +202,165 @@ class SpatialPlaceMemory:
 
         scored.sort(key=lambda item: item[0], reverse=True)
         return scored[:limit]
+
+
+@dataclass(frozen=True)
+class WaypointEdge:
+    source_id: str
+    target_id: str
+    distance: float
+    safety: float = 1.0
+    traversable: bool = True
+    metadata: dict[str, str | int | float | bool] = field(default_factory=dict)
+
+
+@dataclass
+class TopologicalWaypointGraph:
+    """A* graph pathfinding network connecting discovered places across the Minecraft world."""
+
+    edges: dict[str, list[WaypointEdge]] = field(default_factory=dict)
+
+    def add_edge(
+        self,
+        source_id: str,
+        target_id: str,
+        distance: float,
+        *,
+        safety: float = 1.0,
+        bidirectional: bool = True,
+    ) -> None:
+        if source_id not in self.edges:
+            self.edges[source_id] = []
+        self.edges[source_id].append(
+            WaypointEdge(source_id=source_id, target_id=target_id, distance=distance, safety=safety)
+        )
+        if bidirectional:
+            if target_id not in self.edges:
+                self.edges[target_id] = []
+            self.edges[target_id].append(
+                WaypointEdge(source_id=target_id, target_id=source_id, distance=distance, safety=safety)
+            )
+
+    def find_path(
+        self,
+        start_id: str,
+        goal_id: str,
+        memory: SpatialPlaceMemory,
+    ) -> list[str]:
+        """A* shortest path between two waypoints/places using spatial coordinates."""
+        if start_id == goal_id:
+            return [start_id]
+        if start_id not in self.edges or goal_id not in memory.places:
+            return []
+
+        goal_place = memory.get(goal_id)
+        if goal_place is None:
+            return []
+
+        import heapq
+
+        # Priority queue entries: (f_score, current_id, path)
+        open_set: list[tuple[float, str, list[str]]] = [(0.0, start_id, [start_id])]
+        visited: set[str] = set()
+
+        while open_set:
+            f_score, current_id, path = heapq.heappop(open_set)
+            if current_id in visited:
+                continue
+            visited.add(current_id)
+
+            if current_id == goal_id:
+                return path
+
+            for edge in self.edges.get(current_id, []):
+                if not edge.traversable or edge.target_id in visited:
+                    continue
+                target_place = memory.get(edge.target_id)
+                if target_place is None:
+                    continue
+                # Heuristic: remaining Euclidean distance to goal place
+                h = target_place.distance_to(goal_place.x, goal_place.y, goal_place.z)
+                cost = edge.distance / max(0.1, edge.safety)
+                g_score = f_score - (0 if len(path) == 1 else memory.get(current_id).distance_to(goal_place.x, goal_place.y, goal_place.z)) + cost
+                new_f = g_score + h
+                heapq.heappush(open_set, (new_f, edge.target_id, path + [edge.target_id]))
+
+        return []
+
+
+@dataclass
+class DynamicRegionCluster:
+    cluster_id: str
+    name: str
+    primary_kind: PlaceKind
+    min_x: float
+    max_x: float
+    min_z: float
+    max_z: float
+    center_x: float
+    center_y: float
+    center_z: float
+    place_ids: tuple[str, ...]
+    resource_density: dict[str, int]
+    safety_average: float
+
+
+def cluster_places_into_regions(
+    memory: SpatialPlaceMemory,
+    *,
+    cluster_radius: float = 64.0,
+    dimension: str = "overworld",
+) -> list[DynamicRegionCluster]:
+    """Clusters nearby spatial records into named macro-regions (e.g. Base District, Pine Forest Grove, Mining Camp)."""
+    places = [p for p in memory.places.values() if p.dimension == dimension]
+    if not places:
+        return []
+
+    clusters: list[list[PlaceRecord]] = []
+    for place in places:
+        assigned = False
+        for group in clusters:
+            # Check distance to group center
+            cx = sum(p.x for p in group) / len(group)
+            cz = sum(p.z for p in group) / len(group)
+            if math.sqrt((place.x - cx) ** 2 + (place.z - cz) ** 2) <= cluster_radius:
+                group.append(place)
+                assigned = True
+                break
+        if not assigned:
+            clusters.append([place])
+
+    result: list[DynamicRegionCluster] = []
+    for idx, group in enumerate(clusters):
+        xs = [p.x for p in group]
+        ys = [p.y for p in group]
+        zs = [p.z for p in group]
+        resources: dict[str, int] = {}
+        for p in group:
+            for r in p.resource_types:
+                resources[r] = resources.get(r, 0) + 1
+        
+        # Primary kind by frequency
+        kind_counts: dict[PlaceKind, int] = {}
+        for p in group:
+            kind_counts[p.kind] = kind_counts.get(p.kind, 0) + 1
+        primary_kind = max(kind_counts, key=kind_counts.get) if kind_counts else PlaceKind.LANDMARK
+
+        cluster = DynamicRegionCluster(
+            cluster_id=f"region_{dimension}_{idx:03d}",
+            name=f"{primary_kind.value.replace('_', ' ').title()} Zone #{idx+1}",
+            primary_kind=primary_kind,
+            min_x=min(xs),
+            max_x=max(xs),
+            min_z=min(zs),
+            max_z=max(zs),
+            center_x=sum(xs) / len(xs),
+            center_y=sum(ys) / len(ys),
+            center_z=sum(zs) / len(zs),
+            place_ids=tuple(p.place_id for p in group),
+            resource_density=resources,
+            safety_average=sum(p.safety_rating for p in group) / len(group),
+        )
+        result.append(cluster)
+
+    return result

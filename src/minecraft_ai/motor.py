@@ -100,19 +100,29 @@ class DynamicSotaMotorPolicy:
             # Pitch correction: if looking up at sky, pitch down toward horizon
             mouse_dy = 35
 
-        # 2. Movement & obstacle auto-climbing
-        if mode in {"approach", "navigate", "explore", "mine", "attack", "use"}:
+        underwater = blackboard.fact("environment.underwater")
+
+        # 2. Movement, swimming & obstacle auto-climbing
+        if underwater and bool(underwater.value):
+            # Swim to surface: hold space and look upward
+            desired_keys.add("space")
+            desired_keys.add("w")
+            mouse_dy = -25
+        elif mode in {"approach", "navigate", "explore", "mine", "attack", "use"}:
             desired_keys.add("w")
             # Auto-jump over 1-block steps / terrain obstacles every N ticks or when obstacle detected
             if (obstacle_ahead and bool(obstacle_ahead.value)) or (self._tick_count % self.jump_interval_ticks == 0):
                 desired_keys.add("space")
+                if obstacle_ahead and bool(obstacle_ahead.value) and (self._tick_count % 6 == 0):
+                    # Lateral strafe to navigate around tree trunks / rock pillars
+                    desired_keys.add("d" if self._tick_count % 12 < 6 else "a")
         elif mode in {"retreat", "backoff"}:
             desired_keys.add("s")
             if danger and bool(danger.value):
                 desired_keys.add("space")
 
         # 3. Sprinting & Sneaking parameters
-        if bool(intent.parameters.get("sprint", False)) or mode == "explore":
+        if bool(intent.parameters.get("sprint", False)) or (mode == "explore" and not (underwater and bool(underwater.value))):
             desired_keys.add("ctrl")
         if bool(intent.parameters.get("sneak", False)):
             desired_keys.add("shift")
