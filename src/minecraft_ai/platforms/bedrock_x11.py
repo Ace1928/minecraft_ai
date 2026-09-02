@@ -148,17 +148,6 @@ class IsolatedX11InputBackend:
         self._lease: MotorLease | None = None
         self.release_count = 0
         self.live_capable = True
-        screen = self._display.screen()
-        # The managed Wine client exposes camera control through an absolute
-        # X pointer, not a self-recentering raw-relative device.  Leaving that
-        # pointer one pixel away from neutral makes Bedrock keep rotating even
-        # after the policy stops issuing camera actions.  Anchor every policy
-        # offset at the isolated display centre so actions express velocity
-        # for one control interval rather than accumulating pointer position.
-        self._pointer_center = (
-            int(round(screen.width_in_pixels / 2.0)),
-            int(round(screen.height_in_pixels / 2.0)),
-        )
         if target_window_id is not None and not self.probe_target():
             self.close()
             raise IsolationError(f"target X window {target_window_id} is unavailable")
@@ -222,16 +211,15 @@ class IsolatedX11InputBackend:
                 raise IsolationError(f"unsupported mouse button: {button!r}")
             self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
             self._held_buttons.discard(button.lower())
-        root = self._display.screen().root
-        pointer = root.query_pointer()
-        for target_x, target_y in _wine_pointer_targets(
-            int(pointer.root_x),
-            int(pointer.root_y),
-            self._pointer_center[0],
-            self._pointer_center[1],
-            action.mouse_dx,
-            action.mouse_dy,
-        ):
+        if action.mouse_dx or action.mouse_dy:
+            root = self._display.screen().root
+            pointer = root.query_pointer()
+            target_x, target_y = _wine_relative_motion_target(
+                int(pointer.root_x),
+                int(pointer.root_y),
+                action.mouse_dx,
+                action.mouse_dy,
+            )
             self._xtest.fake_input(
                 self._display,
                 self._x.MotionNotify,
@@ -331,15 +319,6 @@ class IsolatedX11InputBackend:
                     self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
                 except Exception:
                     continue
-            try:
-                self._xtest.fake_input(
-                    self._display,
-                    self._x.MotionNotify,
-                    x=self._pointer_center[0],
-                    y=self._pointer_center[1],
-                )
-            except Exception:
-                pass
             self._display.sync()
         finally:
             self._held_keys.clear()
@@ -358,46 +337,57 @@ class IsolatedX11InputBackend:
 
 
 def _wine_relative_motion_target(
-    center_x: int,
-    center_y: int,
+    root_x: int,
+    root_y: int,
     mouse_dx: int,
     mouse_dy: int,
 ) -> tuple[int, int]:
-    """Map a conventional relative delta onto Wine's absolute camera pointer.
+    """Map MineRL/VPT camera deltas onto the managed Wine pointer.
 
-    A positive X delta must turn the camera right and a positive Y delta must
-    turn it down, matching both desktop mouse convention and the VPT action
-    labels.  The offset is anchored at the isolated display centre: adding it
-    to the current pointer would leave a persistent off-centre velocity and
-    make successive policy actions accelerate into a camera pole.
+    MineRL camera actions are ordered as positive pitch-down and positive
+    yaw-right.  Live Bedrock-on-Linux calibration shows Wine preserves the X
+    direction but exposes the vertical pointer axis with the opposite sign:
+    negative physical Y looks down.  Apply that inversion once at this adapter
+    boundary so learned Java/MineRL policies retain their trained semantics.
     """
-    return center_x + mouse_dx, center_y + mouse_dy
+    return root_x + mouse_dx, root_y - mouse_dy
 
 
-def _wine_pointer_targets(
-    root_x: int,
-    root_y: int,
-    center_x: int,
-    center_y: int,
-    mouse_dx: int,
-    mouse_dy: int,
-) -> tuple[tuple[int, int], ...]:
-    """Return neutralization and one-interval camera targets for Wine.
-
-    Bedrock-on-Linux keeps consuming the absolute pointer's displacement from
-    screen centre.  A zero camera action must therefore actively neutralize a
-    previous offset, while a non-zero action is always expressed relative to
-    the same stable centre.
-    """
-    targets: list[tuple[int, int]] = []
-    center = (center_x, center_y)
-    if (root_x, root_y) != center:
-        targets.append(center)
-    if mouse_dx or mouse_dy:
-        targets.append(
-            _wine_relative_motion_target(center_x, center_y, mouse_dx, mouse_dy)
+def _wine_content_rect(
+    display: Any,
+    target_window_id: int,
+    width: int,
+    height: int,
+) -> tuple[int, int, int, int] | None:
+    """Resolve Wine's real Minecraft drawable relative to its desktop window."""
+    try:
+        target = display.create_resource_object("window", target_window_id)
+        minecraft_window: Any | None = None
+        for child in target.query_tree().children:
+            name = str(child.get_wm_name() or "").lower()
+            if "minecraft" in name:
+                minecraft_window = child
+                break
+        if minecraft_window is None:
+            return None
+        candidates = list(minecraft_window.query_tree().children)
+        if not candidates:
+            return None
+        client = max(
+            candidates,
+            key=lambda item: int(item.get_geometry().width) * int(item.get_geometry().height),
         )
-    return tuple(targets)
+        geometry = client.get_geometry()
+        translated = target.translate_coords(client, 0, 0)
+        x = max(0, int(translated.x))
+        y = max(0, int(translated.y))
+        client_width = min(int(geometry.width), width - x)
+        client_height = min(int(geometry.height), height - y)
+        if client_width <= 0 or client_height <= 0:
+            return None
+        return x, y, client_width, client_height
+    except Exception:
+        return None
 
 
 class IsolatedX11Capture:
@@ -447,34 +437,7 @@ class IsolatedX11Capture:
 
     def _content_rect(self, width: int, height: int) -> tuple[int, int, int, int] | None:
         """Resolve Wine's real Minecraft client drawable inside its desktop window."""
-        try:
-            target = self._display.create_resource_object("window", self.target_window_id)
-            minecraft_window: Any | None = None
-            for child in target.query_tree().children:
-                name = str(child.get_wm_name() or "").lower()
-                if "minecraft" in name:
-                    minecraft_window = child
-                    break
-            if minecraft_window is None:
-                return None
-            candidates = list(minecraft_window.query_tree().children)
-            if not candidates:
-                return None
-            client = max(
-                candidates,
-                key=lambda item: int(item.get_geometry().width) * int(item.get_geometry().height),
-            )
-            geometry = client.get_geometry()
-            translated = target.translate_coords(client, 0, 0)
-            x = max(0, int(translated.x))
-            y = max(0, int(translated.y))
-            client_width = min(int(geometry.width), width - x)
-            client_height = min(int(geometry.height), height - y)
-            if client_width <= 0 or client_height <= 0:
-                return None
-            return x, y, client_width, client_height
-        except Exception:
-            return None
+        return _wine_content_rect(self._display, self.target_window_id, width, height)
 
     def capture(self) -> CapturedFrame:
         bounds = self._bounds()

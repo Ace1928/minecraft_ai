@@ -10,7 +10,6 @@ from minecraft_ai.platforms.bedrock_session import BedrockSession, bedrock_sessi
 from minecraft_ai.platforms.bedrock_x11 import (
     IsolationError,
     _crop_bgra,
-    _wine_pointer_targets,
     _wine_relative_motion_target,
     require_isolated_display,
 )
@@ -56,17 +55,11 @@ def test_wine_client_crop_removes_window_decoration_without_reordering_pixels() 
     assert cropped == pixels[20:28] + pixels[36:44]
 
 
-def test_wine_grab_bridge_anchors_relative_mouse_at_neutral_center() -> None:
-    assert _wine_relative_motion_target(640, 317, 20, -10) == (660, 307)
-
-
-def test_wine_grab_bridge_neutralizes_absolute_pointer_drift() -> None:
-    assert _wine_pointer_targets(660, 307, 640, 317, 0, 0) == ((640, 317),)
-    assert _wine_pointer_targets(660, 307, 640, 317, 4, -2) == (
-        (640, 317),
-        (644, 315),
-    )
-    assert _wine_pointer_targets(640, 317, 640, 317, 4, -2) == ((644, 315),)
+def test_wine_grab_bridge_preserves_yaw_and_inverts_bedrock_pitch() -> None:
+    # VPT positive pitch means look down. The managed Wine client requires a
+    # negative physical Y delta to produce that same camera motion.
+    assert _wine_relative_motion_target(640, 317, 20, 10) == (660, 307)
+    assert _wine_relative_motion_target(640, 317, -20, -10) == (620, 327)
 
 
 def test_nested_session_is_not_alive_when_launcher_exited(tmp_path: Path, monkeypatch) -> None:
