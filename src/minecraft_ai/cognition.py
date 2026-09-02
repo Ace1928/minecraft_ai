@@ -43,6 +43,16 @@ class CognitionContext:
     operator_messages: tuple[OperatorMessage, ...] = ()
 
 
+@dataclass
+class HighLevelMetrics:
+    calls: int = 0
+    repairs: int = 0
+    failures: int = 0
+    last_latency_ms: float = 0.0
+    last_error: str | None = None
+    last_model: str | None = None
+
+
 class BootstrapCognitionPolicy:
     """Small deterministic fallback for smoke tests and model outages.
 
@@ -135,6 +145,7 @@ class HighLevelController:
     model: LanguageModel
     skills: SkillLibrary
     _bootstrap: BootstrapCognitionPolicy = field(init=False)
+    metrics: HighLevelMetrics = field(default_factory=HighLevelMetrics, init=False)
 
     def __post_init__(self) -> None:
         self._bootstrap = BootstrapCognitionPolicy(self.skills)
@@ -209,44 +220,122 @@ class HighLevelController:
                 ),
                 ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
             )
-            structured = getattr(self.model, "complete_structured", None)
-            if callable(structured):
-                response = structured(
-                    messages,
-                    name="cognition_decision",
-                    schema=CognitionDecision.model_json_schema(),
-                )
-            else:
-                response = self.model.complete(messages)
-            decision = _parse_decision(response.text)
+            decision = self._complete(messages)
             operator_goal_ids = {
                 f"operator:{message.message_id}" for message in context.operator_messages
             }
             if decision.say is not None and decision.chosen_goal_id not in operator_goal_ids:
                 decision = decision.model_copy(update={"say": None})
             if decision.skill_id is not None and decision.skill_id not in self.skills.specs:
-                return self._bootstrap.decide(blackboard, context)
+                return self._repair_infeasible(
+                    messages,
+                    decision,
+                    blackboard,
+                    reason=f"unknown skill id {decision.skill_id!r}",
+                )
             if decision.skill_id is not None:
                 selected = self.skills.get(decision.skill_id)
                 if not conditions_satisfied(selected.preconditions, blackboard):
-                    missing = tuple(condition.key for condition in selected.preconditions)
-                    return decision.model_copy(
-                        update={
-                            "reasoning_summary": (
-                                f"Blocked infeasible option {selected.skill_id}; missing fresh "
-                                f"preconditions: {', '.join(missing)}"
-                            ),
-                            "skill_id": None,
-                            "skill_parameters": {},
-                            "request_replan": True,
-                            "ask_perception": tuple(
-                                dict.fromkeys((*decision.ask_perception, *missing))
-                            ),
-                        }
+                    missing = tuple(
+                        condition.key for condition in selected.preconditions
                     )
+                    return self._repair_infeasible(
+                        messages,
+                        decision,
+                        blackboard,
+                        reason=(
+                            f"option {selected.skill_id!r} is infeasible because these fresh "
+                            f"preconditions are missing: {', '.join(missing)}"
+                        ),
+                        missing=missing,
+                    )
+            self.metrics.last_error = None
             return decision
-        except Exception:
-            return self._bootstrap.decide(blackboard, context)
+        except Exception as exc:
+            self.metrics.failures += 1
+            self.metrics.last_error = f"{type(exc).__name__}: {exc}"
+            return CognitionDecision(
+                reasoning_summary=(
+                    "Strategic model unavailable; remaining safely idle until a valid "
+                    "structured decision is available."
+                ),
+                request_replan=True,
+            )
+
+    def status(self) -> dict[str, object]:
+        return {
+            "model_id": self.model.model_id,
+            "calls": self.metrics.calls,
+            "repairs": self.metrics.repairs,
+            "failures": self.metrics.failures,
+            "last_latency_ms": round(self.metrics.last_latency_ms, 3),
+            "last_error": self.metrics.last_error,
+            "last_model": self.metrics.last_model,
+        }
+
+    def _complete(self, messages: tuple[ModelMessage, ...]) -> CognitionDecision:
+        structured = getattr(self.model, "complete_structured", None)
+        if callable(structured):
+            response = structured(
+                messages,
+                name="cognition_decision",
+                schema=CognitionDecision.model_json_schema(),
+            )
+        else:
+            response = self.model.complete(messages)
+        self.metrics.calls += 1
+        self.metrics.last_latency_ms = response.latency_ms
+        self.metrics.last_model = response.model
+        return _parse_decision(response.text)
+
+    def _repair_infeasible(
+        self,
+        messages: tuple[ModelMessage, ...],
+        decision: CognitionDecision,
+        blackboard: PerceptionBlackboard,
+        *,
+        reason: str,
+        missing: tuple[str, ...] = (),
+    ) -> CognitionDecision:
+        feasible = sorted(
+            skill.skill_id
+            for skill in self.skills.specs.values()
+            if conditions_satisfied(skill.preconditions, blackboard)
+        )
+        self.metrics.repairs += 1
+        repair_messages = (
+            *messages,
+            ModelMessage(role="assistant", content=decision.model_dump_json()),
+            ModelMessage(
+                role="user",
+                content=(
+                    f"That decision is rejected: {reason}. Select one concrete skill_id from "
+                    f"this currently feasible set: {json.dumps(feasible)}. Preserve the goal "
+                    "when possible, do not invent observations, and return the same strict "
+                    "decision schema."
+                ),
+            ),
+        )
+        repaired = self._complete(repair_messages)
+        if (
+            repaired.skill_id is not None
+            and repaired.skill_id in feasible
+            and repaired.skill_id in self.skills.specs
+        ):
+            self.metrics.last_error = None
+            return repaired
+        self.metrics.last_error = f"infeasible-decision: {reason}"
+        return decision.model_copy(
+            update={
+                "reasoning_summary": f"Blocked infeasible decision; {reason}",
+                "skill_id": None,
+                "skill_parameters": {},
+                "request_replan": True,
+                "ask_perception": tuple(
+                    dict.fromkeys((*decision.ask_perception, *missing))
+                ),
+            }
+        )
 
 
 def _parse_decision(text: str) -> CognitionDecision:

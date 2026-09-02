@@ -47,6 +47,39 @@ class _ShelterSelectingModel:
         )
 
 
+class _RepairingModel(_ShelterSelectingModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    def complete_structured(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return super().complete_structured(messages, name=name, schema=schema)
+        return ModelResponse(
+            text=json.dumps(
+                {
+                    "reasoning_summary": "Use the feasible learned exploration option",
+                    "chosen_goal_id": "survive",
+                    "skill_id": "explore_forward",
+                    "skill_parameters": {},
+                    "say": None,
+                    "request_replan": False,
+                    "ask_perception": [],
+                    "research_query": None,
+                }
+            ),
+            model=self.model_id,
+            latency_ms=1.0,
+        )
+
+
 def _context() -> CognitionContext:
     return CognitionContext(
         role=get_role("generalist"),
@@ -98,6 +131,18 @@ def test_high_level_can_execute_observably_feasible_skill() -> None:
 
     assert decision.skill_id == "establish_basic_shelter"
     assert decision.request_replan is False
+
+
+def test_high_level_repairs_infeasible_choice_with_model_selected_feasible_option() -> None:
+    model = _RepairingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    decision = controller.decide(_board(), _context())
+
+    assert decision.skill_id == "explore_forward"
+    assert model.calls == 2
+    assert controller.metrics.repairs == 1
+    assert controller.metrics.last_error is None
 
 
 def test_private_cognition_cannot_leak_into_game_chat() -> None:

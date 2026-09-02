@@ -13,6 +13,8 @@ from minecraft_ai.policy_service import (
     _decoded_policy_output,
     _intent_instruction,
     _learned_scene_blocked,
+    _rocket_interaction_id,
+    _track_mask,
     _validate_policy_config,
 )
 
@@ -168,7 +170,7 @@ def test_async_policy_does_not_double_count_an_already_recorded_deadline_miss(
         }
 
     monkeypatch.setattr(client, "_consume_pending_response", consume)
-    monkeypatch.setattr(client, "_submit", lambda _frame, _intent: None)
+    monkeypatch.setattr(client, "_submit", lambda _frame, _intent, _board: None)
 
     action = client.act(
         PerceptionBlackboard(),
@@ -247,3 +249,27 @@ def test_learned_static_gui_scene_blocks_world_policy_actions() -> None:
     )
 
     assert _learned_scene_blocked(board)
+
+
+def test_rocket_interaction_taxonomy_matches_published_control_contract() -> None:
+    assert _rocket_interaction_id("attack") == 0
+    assert _rocket_interaction_id("gather_wood") == 2
+    assert _rocket_interaction_id("interact") == 3
+    assert _rocket_interaction_id("craft_planks") == 4
+    assert _rocket_interaction_id("hotbar") == 5
+    assert _rocket_interaction_id("approach") == 6
+    assert _rocket_interaction_id("explore") == -1
+
+
+def test_rocket_grounding_mask_uses_observed_track_region() -> None:
+    numpy = pytest.importorskip("numpy")
+    track = {
+        "region": {"x": 0.25, "y": 0.20, "width": 0.50, "height": 0.40},
+    }
+
+    mask = _track_mask(100, 200, track, numpy)
+
+    assert mask.shape == (100, 200)
+    assert int(mask.sum()) == 40 * 100
+    assert mask[20, 50] == 1
+    assert mask[59, 149] == 1

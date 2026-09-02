@@ -106,7 +106,7 @@ class TemporalPolicyClient:
                 response = None
                 self._discard_pending_response = False
             if response is None:
-                self._submit(frame, intent)
+                self._submit(frame, intent, blackboard)
                 return self._hold(sequence)
             output = LearnedPolicyOutput.model_validate(response["output"])
             self.metrics.responses += 1
@@ -115,10 +115,10 @@ class TemporalPolicyClient:
             if output.inference_ns > self.config.deadline_ms * 1_000_000:
                 if not self._consumed_miss_recorded:
                     self.metrics.deadline_misses += 1
-                self._submit(frame, intent)
+                self._submit(frame, intent, blackboard)
                 return self._release(sequence)
             action = self._output_action(output, sequence)
-            self._submit(frame, intent)
+            self._submit(frame, intent, blackboard)
             return action
         except Exception as exc:
             self.metrics.failures += 1
@@ -141,7 +141,13 @@ class TemporalPolicyClient:
             "model_version": self.config.model_version,
             "source_commit": self.config.source_commit,
             "license": self.config.license,
-            "goal_conditioned": self.config.provider == "minestudio-steve1",
+            "goal_conditioned": self.config.provider in {
+                "minestudio-steve1",
+                "minestudio-rocket2",
+            },
+            "grounding_mode": (
+                "cross-view-object" if self.config.provider == "minestudio-rocket2" else "text"
+            ),
             "temporal_memory": True,
             "research_only": self.config.research_only,
             "condition_scale": self.config.condition_scale,
@@ -270,7 +276,12 @@ class TemporalPolicyClient:
             raise RuntimeError(f"unexpected policy response: {response.get('type')}")
         return response
 
-    def _submit(self, frame: CapturedFrame, intent: MotorIntent) -> None:
+    def _submit(
+        self,
+        frame: CapturedFrame,
+        intent: MotorIntent,
+        blackboard: PerceptionBlackboard,
+    ) -> None:
         assert self._memory is not None
         assert self._process is not None
         assert self._process.stdin is not None
@@ -286,7 +297,7 @@ class TemporalPolicyClient:
                 "length": len(frame.bgra),
                 "captured_ns": frame.captured_ns,
             },
-            "intent": self._conditioned_intent(intent),
+            "intent": self._conditioned_intent(intent, blackboard),
             "deadline_ns": deadline_ns,
         }
         self._process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
@@ -331,8 +342,25 @@ class TemporalPolicyClient:
         self._held_buttons = desired_buttons
         return action
 
-    def _conditioned_intent(self, intent: MotorIntent) -> dict[str, object]:
+    def _conditioned_intent(
+        self,
+        intent: MotorIntent,
+        blackboard: PerceptionBlackboard | None = None,
+    ) -> dict[str, object]:
         payload = intent.model_dump(mode="json")
+        if blackboard is not None:
+            latest = blackboard.latest()
+            tracks = () if latest is None else latest.tracks
+            candidates = [
+                track
+                for track in tracks
+                if intent.target_label is None
+                or track.label.casefold() == intent.target_label.casefold()
+            ]
+            if candidates:
+                target = max(candidates, key=lambda track: track.confidence)
+                payload["target_track"] = target.model_dump(mode="json")
+        payload["interaction_id"] = _rocket_interaction_id(intent.mode)
         if not self._camera_recovery_active:
             return payload
         direction = "up" if self._estimated_pitch_units > 0 else "down"
@@ -404,7 +432,11 @@ def _validate_policy_config(config: PolicyConfig) -> None:
 
 def _learned_scene_blocked(blackboard: PerceptionBlackboard) -> bool:
     playable = blackboard.fact("scene.playable", min_confidence=0.7)
-    if playable is None or bool(playable.value) or not playable.source.startswith("vlm:"):
+    if playable is None or bool(playable.value):
+        return False
+    if playable.source.startswith(("safety:", "bootstrap:")):
+        return True
+    if not playable.source.startswith("vlm:"):
         return False
     observed = blackboard.fact("scene.observation_dhash", min_confidence=1.0)
     current = blackboard.fact("frame.dhash", min_confidence=1.0)
@@ -620,6 +652,213 @@ class _SteveOneBackend:
         )
 
 
+@dataclass
+class _RocketTwoBackend:
+    """Official ROCKET-2 cross-view grounded temporal policy backend."""
+
+    source_path: Path
+    model_path: Path
+    weights_path: Path
+    model_sha256: str
+    weights_sha256: str
+    model_version: str
+    device: str
+    threads: int
+    stochastic: bool
+    condition_scale: float
+    camera_scale: float
+    seed: int
+    policy: Any = field(init=False)
+    mapper: Any = field(init=False)
+    transformer: Any = field(init=False)
+    torch: Any = field(init=False)
+    numpy: Any = field(init=False)
+    cv2: Any = field(init=False)
+    hidden_state: Any = field(init=False, default=None)
+    reference_image: Any = field(init=False, default=None)
+    reference_mask: Any = field(init=False, default=None)
+    grounding_signature: str | None = field(init=False, default=None)
+    previous_action: dict[str, Any] = field(init=False, default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _verify_sha256(self.model_path, self.model_sha256)
+        _verify_sha256(self.weights_path, self.weights_sha256)
+        if self.model_path.parent != self.weights_path.parent:
+            raise ValueError("ROCKET-2 config and weights must share a checkpoint directory")
+        sys.path.insert(0, str(self.source_path))
+        self.torch = importlib.import_module("torch")
+        self.numpy = importlib.import_module("numpy")
+        self.cv2 = importlib.import_module("cv2")
+        self.torch.set_num_threads(self.threads)
+        self.torch.set_num_interop_threads(1)
+        self.torch.manual_seed(self.seed)
+        rocket = importlib.import_module("model")
+        cfg_wrapper = importlib.import_module("cfg_wrapper")
+        action_mapping = importlib.import_module("minestudio.utils.vpt_lib.action_mapping")
+        actions = importlib.import_module("minestudio.utils.vpt_lib.actions")
+        # Published ROCKET-2 configs predate timm's source-prefix parser. The
+        # registered architecture names are unchanged after removing "timm/".
+        base = rocket.CrossViewRocket.from_pretrained(
+            self.model_path.parent,
+            view_backbone="vit_base_patch16_224.dino",
+            mask_backbone="vit_tiny_patch16_224.augreg_in21k_ft_in1k",
+        )
+        base = base.to(self.device).eval()
+        self.policy = (
+            base
+            if self.condition_scale == 0.0
+            else cfg_wrapper.CFGWrapper(base, k=self.condition_scale)
+        )
+        self.mapper = action_mapping.CameraHierarchicalMapping(n_camera_bins=11)
+        self.transformer = actions.ActionTransformer(
+            camera_binsize=2,
+            camera_maxval=10,
+            camera_mu=10,
+            camera_quantization_scheme="mu_law",
+        )
+        self.reset()
+
+    def reset(self) -> None:
+        self.hidden_state = None
+        self.reference_image = None
+        self.reference_mask = None
+        self.grounding_signature = None
+        self.previous_action = self._empty_previous_action()
+
+    def infer(self, frame: Any, intent: dict[str, Any]) -> LearnedPolicyOutput:
+        started = time.perf_counter_ns()
+        rgb = _center_crop_16_9(frame[:, :, [2, 1, 0]], self.numpy)
+        current = self.cv2.resize(rgb, (224, 224), interpolation=self.cv2.INTER_LINEAR)
+        track = intent.get("target_track")
+        interaction_id = int(intent.get("interaction_id", -1))
+        signature = _rocket_grounding_signature(track, interaction_id)
+        if signature != self.grounding_signature:
+            self.hidden_state = None
+            self.grounding_signature = signature
+            if isinstance(track, dict):
+                mask = _track_mask(frame.shape[0], frame.shape[1], track, self.numpy)
+                mask = _center_crop_16_9(mask, self.numpy)
+                self.reference_mask = self.cv2.resize(
+                    mask,
+                    (224, 224),
+                    interpolation=self.cv2.INTER_NEAREST,
+                ).astype(self.numpy.uint8)
+                self.reference_image = current.copy()
+            else:
+                self.reference_mask = self.numpy.zeros((224, 224), dtype=self.numpy.uint8)
+                self.reference_image = self.numpy.zeros((224, 224, 3), dtype=self.numpy.uint8)
+        assert self.reference_image is not None
+        assert self.reference_mask is not None
+        observation = {
+            "image": current,
+            "env_prev_action": self.previous_action,
+            "cross_view": {
+                "cross_view_image": self.reference_image,
+                "cross_view_obj_id": self.torch.tensor(interaction_id, dtype=self.torch.long),
+                "cross_view_obj_mask": self.torch.from_numpy(self.reference_mask),
+            },
+        }
+        with self.torch.inference_mode():
+            action, self.hidden_state = self.policy.get_action(
+                observation,
+                self.hidden_state,
+                input_shape="*",
+                deterministic=not self.stochastic,
+            )
+        raw = {
+            "buttons": action["buttons"].cpu().numpy().reshape(1, 1),
+            "camera": action["camera"].cpu().numpy().reshape(1, 1),
+        }
+        decoded = self.transformer.policy2env(self.mapper.to_factored(raw))
+        self.previous_action = self._decoded_previous_action(decoded)
+        return _decoded_policy_output(
+            decoded,
+            inference_ns=time.perf_counter_ns() - started,
+            model_version=self.model_version,
+            camera_scale=self.camera_scale,
+        )
+
+    def _empty_previous_action(self) -> dict[str, Any]:
+        return {
+            "camera": self.numpy.zeros(2, dtype=self.numpy.float32),
+            **{
+                key.replace("_", "."): self.numpy.asarray(0, dtype=self.numpy.int64)
+                for key in _ROCKET_BINARY_KEYS
+            },
+        }
+
+    def _decoded_previous_action(self, decoded: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "camera": self.numpy.asarray(decoded["camera"][0], dtype=self.numpy.float32),
+            **{
+                key.replace("_", "."): self.numpy.asarray(
+                    int(bool(decoded[key.replace("_", ".")][0])),
+                    dtype=self.numpy.int64,
+                )
+                for key in _ROCKET_BINARY_KEYS
+            },
+        }
+
+
+_ROCKET_BINARY_KEYS = (
+    "forward",
+    "back",
+    "left",
+    "right",
+    "inventory",
+    "sprint",
+    "sneak",
+    "jump",
+    "attack",
+    "use",
+    "hotbar_1",
+    "hotbar_2",
+    "hotbar_3",
+    "hotbar_4",
+    "hotbar_5",
+    "hotbar_6",
+    "hotbar_7",
+    "hotbar_8",
+    "hotbar_9",
+)
+
+
+def _rocket_interaction_id(mode: str) -> int:
+    normalized = mode.casefold()
+    if normalized in {"attack", "hunt", "combat"}:
+        return 0
+    if normalized in {"mine", "gather_wood", "gather", "break"}:
+        return 2
+    if normalized in {"use", "interact"}:
+        return 3
+    if normalized.startswith("craft") or normalized == "gui":
+        return 4
+    if normalized in {"switch", "hotbar"}:
+        return 5
+    if normalized in {"approach", "navigate"}:
+        return 6
+    return -1
+
+
+def _rocket_grounding_signature(track: object, interaction_id: int) -> str:
+    if not isinstance(track, dict):
+        return f"ungrounded:{interaction_id}"
+    return f"{track.get('track_id', 'unknown')}:{interaction_id}"
+
+
+def _track_mask(height: int, width: int, track: dict[str, Any], numpy_module: Any) -> Any:
+    region = track.get("region")
+    if not isinstance(region, dict):
+        raise ValueError("ROCKET-2 target track is missing a screen region")
+    x0 = max(0, min(width - 1, int(float(region["x"]) * width)))
+    y0 = max(0, min(height - 1, int(float(region["y"]) * height)))
+    x1 = max(x0 + 1, min(width, int(float(region["x"] + region["width"]) * width)))
+    y1 = max(y0 + 1, min(height, int(float(region["y"] + region["height"]) * height)))
+    mask = numpy_module.zeros((height, width), dtype=numpy_module.uint8)
+    mask[y0:y1, x0:x1] = 1
+    return mask
+
+
 def _intent_instruction(intent: dict[str, Any]) -> str:
     instruction = intent.get("instruction")
     if isinstance(instruction, str) and instruction.strip():
@@ -716,7 +955,7 @@ def _serve(args: argparse.Namespace) -> int:
             "seed": args.seed,
         }
         if args.provider == "openai-vpt":
-            backend: _VPTBackend | _SteveOneBackend = _VPTBackend(**common)
+            backend: _VPTBackend | _SteveOneBackend | _RocketTwoBackend = _VPTBackend(**common)
         elif args.provider == "minestudio-steve1":
             # Third-party model loaders may print status text. Keep stdout a
             # strict line-delimited JSON protocol for the realtime parent.
@@ -724,6 +963,12 @@ def _serve(args: argparse.Namespace) -> int:
                 backend = _SteveOneBackend(
                     **common,
                     deterministic_condition=args.deterministic_condition,
+                    condition_scale=args.condition_scale,
+                )
+        elif args.provider == "minestudio-rocket2":
+            with contextlib.redirect_stdout(sys.stderr):
+                backend = _RocketTwoBackend(
+                    **common,
                     condition_scale=args.condition_scale,
                 )
         else:
@@ -752,7 +997,7 @@ def _serve(args: argparse.Namespace) -> int:
                     dtype=backend.numpy.uint8,
                     buffer=memory.buf,
                 )
-                if isinstance(backend, _SteveOneBackend):
+                if isinstance(backend, (_SteveOneBackend, _RocketTwoBackend)):
                     output = backend.infer(frame, request["intent"])
                 else:
                     output = backend.infer(frame)
@@ -784,7 +1029,7 @@ def _parser() -> argparse.ArgumentParser:
     serve = subparsers.add_parser("serve")
     serve.add_argument(
         "--provider",
-        choices=("openai-vpt", "minestudio-steve1"),
+        choices=("openai-vpt", "minestudio-steve1", "minestudio-rocket2"),
         required=True,
     )
     serve.add_argument("--shared-memory", required=True)

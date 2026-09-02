@@ -11,8 +11,10 @@ from minecraft_ai.perception import (
 )
 from minecraft_ai.perception_service import (
     ActiveVLMWorker,
+    BootstrapFastPerception,
     SemanticJob,
     SemanticObservation,
+    bedrock_ui_chrome_present,
     frame_dhash,
     perceptual_hash_distance,
 )
@@ -77,9 +79,9 @@ def _frame(pixels: bytes, *, width: int = 9, height: int = 8) -> CapturedFrame:
     )
 
 
-def _hash_fact(value: str) -> PerceptionFact:
+def _hash_fact(value: str, *, key: str = "frame.dhash") -> PerceptionFact:
     return PerceptionFact(
-        key="frame.dhash",
+        key=key,
         value=value,
         confidence=1.0,
         observed_ns=time.monotonic_ns(),
@@ -100,6 +102,21 @@ def test_frame_dhash_is_deterministic_and_tracks_visual_change() -> None:
 
     assert first == second
     assert perceptual_hash_distance(first, changed) == 64
+
+
+def test_bedrock_ui_chrome_is_a_negative_only_motor_interlock() -> None:
+    width, height = 64, 40
+    pixels = bytearray(bytes((40, 40, 40, 255)) * width * height)
+    for y in range(2):
+        for x in range(width):
+            offset = (y * width + x) * 4
+            pixels[offset : offset + 4] = bytes((220, 220, 220, 255))
+    frame = _frame(bytes(pixels), width=width, height=height)
+
+    assert bedrock_ui_chrome_present(frame)
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["scene.playable"].value is False
+    assert facts["scene.playable"].source.startswith("bootstrap:")
 
 
 def test_active_vlm_prefers_strict_structured_vision_contract() -> None:
@@ -190,6 +207,46 @@ def test_slow_vlm_result_is_rejected_after_material_scene_change() -> None:
             scene_summary="Menu",
             facts={"scene.mode": "menu", "scene.playable": False},
             confidences={"scene.mode": 0.99, "scene.playable": 0.99},
+        ),
+    )
+
+    assert board.fact("scene.mode") is None
+    assert worker.metrics.stale_rejections == 1
+
+
+def test_slow_vlm_result_is_rejected_after_ui_band_changes() -> None:
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=500,
+            captured_ns=500,
+            instance_id="bedrock:test",
+            width=9,
+            height=8,
+            facts=(
+                _hash_fact("0123456789abcdef"),
+                _hash_fact("ffffffffffffffff", key="frame.ui_dhash"),
+            ),
+        )
+    )
+    worker = ActiveVLMWorker(_UnusedVisionModel(), board, "bedrock:test")
+    job = SemanticJob(
+        query=ActivePerceptionQuery(query_id="q-ui", question="scene", frame_id=1),
+        frame=_frame(b"\0" * (9 * 8 * 4)),
+        frame_dhash="0123456789abcdef",
+        ui_dhash="0000000000000000",
+    )
+
+    worker._publish(
+        job,
+        SemanticObservation(
+            scene_mode="world",
+            scene_playable=True,
+            uncertainty=0.1,
+            danger_immediate=False,
+            obstacle_ahead=False,
+            target_visible=False,
+            scene_summary="Old world view",
         ),
     )
 

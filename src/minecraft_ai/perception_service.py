@@ -118,6 +118,7 @@ class SemanticJob:
     query: ActivePerceptionQuery
     frame: CapturedFrame
     frame_dhash: str
+    ui_dhash: str = ""
 
 
 @dataclass
@@ -247,6 +248,7 @@ class ActiveVLMWorker:
             return
         frame_age = latest.frame_id - job.query.frame_id
         current_hash_fact = self.blackboard.fact("frame.dhash", min_confidence=1.0)
+        current_ui_hash_fact = self.blackboard.fact("frame.ui_dhash", min_confidence=1.0)
         current_hash = (
             current_hash_fact.value
             if current_hash_fact is not None and isinstance(current_hash_fact.value, str)
@@ -257,11 +259,26 @@ class ActiveVLMWorker:
             if current_hash is not None
             else None
         )
+        current_ui_hash = (
+            current_ui_hash_fact.value
+            if current_ui_hash_fact is not None
+            and isinstance(current_ui_hash_fact.value, str)
+            else None
+        )
+        ui_hash_distance = (
+            perceptual_hash_distance(job.ui_dhash, current_ui_hash)
+            if job.ui_dhash and current_ui_hash is not None
+            else None
+        )
         self.metrics.last_frame_age = frame_age
         self.metrics.last_hash_distance = hash_distance
         # Slow semantics remain valid for an unchanged static GUI or view. A
         # numerically old result from a changed scene must not control tactics.
-        if frame_age > 120 and (hash_distance is None or hash_distance > 6):
+        if frame_age > 120 and (
+            hash_distance is None
+            or hash_distance > 6
+            or (ui_hash_distance is not None and ui_hash_distance > 3)
+        ):
             self.metrics.stale_rejections += 1
             return
         now = time.monotonic_ns()
@@ -348,7 +365,17 @@ class BootstrapFastPerception:
         values: tuple[tuple[str, str | bool, float, int], ...] = (
             ("perception.bootstrap_active", True, 1.0, 500),
             ("frame.dhash", frame_dhash(frame), 1.0, 500),
+            ("frame.ui_dhash", frame_region_dhash(frame, y_start=0.0, y_end=0.18), 1.0, 500),
         )
+        if bedrock_ui_chrome_present(frame):
+            # A deterministic negative-only interlock is appropriate here: it
+            # never labels world semantics or training data, but it prevents a
+            # world policy from typing/moving inside Bedrock's full-screen UI.
+            values = (
+                *values,
+                ("scene.playable", False, 0.99, 250),
+                ("scene.ui_overlay", True, 0.99, 250),
+            )
         return tuple(
             PerceptionFact(
                 key=key,
@@ -416,6 +443,7 @@ class RealtimePerceptionService:
                 query=query,
                 frame=selected,
                 frame_dhash=frame_dhash(selected),
+                ui_dhash=frame_region_dhash(selected, y_start=0.0, y_end=0.18),
             )
         )
 
@@ -463,13 +491,26 @@ def _strip_code_fence(text: str) -> str:
 
 def frame_dhash(frame: CapturedFrame) -> str:
     """Return a compact image-similarity signal without assigning semantics."""
+    return frame_region_dhash(frame, y_start=0.0, y_end=1.0)
+
+
+def frame_region_dhash(
+    frame: CapturedFrame,
+    *,
+    y_start: float,
+    y_end: float,
+) -> str:
+    """Return a dHash for one normalized horizontal band of a captured frame."""
     if not frame.bgra or frame.width < 2 or frame.height < 1:
         return "0" * 16
+    if not 0.0 <= y_start < y_end <= 1.0:
+        raise ValueError("normalized dHash band must satisfy 0 <= start < end <= 1")
     source = memoryview(frame.bgra)
     comparisons = 0
     bit = 1
     for row in range(8):
-        y = min(frame.height - 1, int((row + 0.5) * frame.height / 8))
+        normalized_y = y_start + (row + 0.5) * (y_end - y_start) / 8
+        y = min(frame.height - 1, int(normalized_y * frame.height))
         previous: int | None = None
         for column in range(9):
             x = min(frame.width - 1, int((column + 0.5) * frame.width / 9))
@@ -482,6 +523,29 @@ def frame_dhash(frame: CapturedFrame) -> str:
                 bit <<= 1
             previous = luma
     return f"{comparisons:016x}"
+
+
+def bedrock_ui_chrome_present(frame: CapturedFrame) -> bool:
+    """Detect Bedrock's bright full-width top UI chrome as a motor interlock.
+
+    This intentionally has no positive world classification and is never an
+    eligible training label. It only blocks input during an obvious overlay.
+    """
+    if not frame.bgra or frame.width < 32 or frame.height < 32:
+        return False
+    source = memoryview(frame.bgra)
+    band_height = max(1, int(frame.height * 0.05))
+    bright = 0
+    sampled = 0
+    step = max(1, frame.width // 256)
+    for y in range(0, band_height, 2):
+        for x in range(0, frame.width, step):
+            offset = (y * frame.width + x) * 4
+            blue, green, red = source[offset : offset + 3]
+            luma = 29 * int(blue) + 150 * int(green) + 77 * int(red)
+            bright += int(luma > 180 * 256)
+            sampled += 1
+    return sampled > 0 and bright / sampled >= 0.90
 
 
 def perceptual_hash_distance(first: str, second: str) -> int:

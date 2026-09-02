@@ -392,6 +392,9 @@ class AgentRuntime:
         }
         if self.perception.active_vlm is not None:
             perception_status["active_vlm"] = self.perception.active_vlm.status()
+        cognition_status: dict[str, object] | None = None
+        if self.high_level is not None:
+            cognition_status = self.high_level.status()
         fresh_facts = self.blackboard.fresh_facts(min_confidence=0.35)
         perception_status["fresh_facts"] = {
             key: {
@@ -424,6 +427,7 @@ class AgentRuntime:
             "skill_outcome": None if running is None else running.outcome.value,
             "chosen_goal_id": None if decision is None else decision.chosen_goal_id,
             "reasoning_summary": None if decision is None else decision.reasoning_summary,
+            "cognition": cognition_status,
             "policy": policy_status,
             "perception": perception_status,
             "lease_heartbeat_error": self._lease_fault,
