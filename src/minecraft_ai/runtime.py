@@ -17,6 +17,7 @@ from .roles import RoleProfile
 from .safety import MotorAction
 from .skills import SkillLibrary, SkillOutcome
 from .social import SocialState
+from .storage import StateDatabase
 from .supervisor import send_command
 
 
@@ -45,6 +46,7 @@ class AgentRuntime:
     memories: MemoryStore = field(default_factory=MemoryStore)
     social: SocialState = field(default_factory=SocialState)
     custom_goals: list[Goal] = field(default_factory=list)
+    state_db: StateDatabase | None = None
     motor_hz: float = 20.0
     cognition_hz: float = 0.5
     semantic_hz: float = 2.0
@@ -128,7 +130,13 @@ class AgentRuntime:
             self._send_motor(result.action)
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
         if result.run.outcome != SkillOutcome.RUNNING:
-            self.skills.record(result.run)
+            stats = self.skills.record(result.run)
+            if self.state_db is not None:
+                self.state_db.save_skill_stats(
+                    result.run.skill_id,
+                    result.run.context_key,
+                    stats,
+                )
             if result.run.outcome == SkillOutcome.SUCCEEDED:
                 self.metrics.skill_successes += 1
             elif result.run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
