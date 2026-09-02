@@ -214,11 +214,17 @@ class IsolatedX11InputBackend:
         if action.mouse_dx or action.mouse_dy:
             root = self._display.screen().root
             pointer = root.query_pointer()
+            target_x, target_y = _wine_relative_motion_target(
+                int(pointer.root_x),
+                int(pointer.root_y),
+                action.mouse_dx,
+                action.mouse_dy,
+            )
             self._xtest.fake_input(
                 self._display,
                 self._x.MotionNotify,
-                x=int(pointer.root_x) + action.mouse_dx,
-                y=int(pointer.root_y) + action.mouse_dy,
+                x=target_x,
+                y=target_y,
             )
         for key in action.keys_down:
             self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))
@@ -320,6 +326,22 @@ class IsolatedX11InputBackend:
                 self._display.close()
             except Exception:
                 pass
+
+
+def _wine_relative_motion_target(
+    root_x: int,
+    root_y: int,
+    mouse_dx: int,
+    mouse_dy: int,
+) -> tuple[int, int]:
+    """Map physical mouse deltas through Wine's grabbed-pointer XTEST bridge.
+
+    Bedrock's Wine raw-input path derives its relative event from the requested
+    XTEST position back toward the grab centre. Empirical client-frame tests on
+    the isolated Xwayland display therefore show the opposite sign from the
+    requested absolute pointer displacement on both axes.
+    """
+    return root_x - mouse_dx, root_y - mouse_dy
 
 
 class IsolatedX11Capture:

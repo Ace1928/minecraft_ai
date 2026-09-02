@@ -10,6 +10,7 @@ from minecraft_ai.platforms.bedrock_session import BedrockSession, bedrock_sessi
 from minecraft_ai.platforms.bedrock_x11 import (
     IsolationError,
     _crop_bgra,
+    _wine_relative_motion_target,
     require_isolated_display,
 )
 
@@ -52,6 +53,10 @@ def test_wine_client_crop_removes_window_decoration_without_reordering_pixels() 
     pixels = bytes(range(4 * 4 * 3))
     cropped = _crop_bgra(pixels, source_width=4, rect=(1, 1, 2, 2))
     assert cropped == pixels[20:28] + pixels[36:44]
+
+
+def test_wine_grab_bridge_inverts_absolute_xtest_displacement() -> None:
+    assert _wine_relative_motion_target(640, 317, 20, -10) == (620, 327)
 
 
 def test_nested_session_is_not_alive_when_launcher_exited(tmp_path: Path, monkeypatch) -> None:
