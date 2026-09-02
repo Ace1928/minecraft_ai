@@ -51,11 +51,14 @@ class _StructuredVisionModel:
         self.schema = schema
         return ModelResponse(
             text=(
-                '{"facts":{"scene.mode":"world","scene.playable":true,'
-                '"target.visible":true,"target.kind":"oak_log","target.mineable":true,'
-                '"target.near":false,"perception.uncertainty":0.1,'
-                '"danger.immediate":false,"obstacle.ahead":false,'
-                '"scene.summary":"Tree ahead"},"confidences":{},'
+                '{"scene_mode":"world","scene_playable":true,"uncertainty":0.1,'
+                '"danger_immediate":false,"obstacle_ahead":false,"target_visible":true,'
+                '"scene_summary":"Tree ahead","target_dx":0.0,"target_dy":0.0,'
+                '"target_kind":"oak_log","target_mineable":true,"target_near":false,'
+                '"inventory_logs":null,"inventory_planks":null,'
+                '"inventory_crafting_table":null,"inventory_build_blocks":null,'
+                '"player_submerged":null,"player_air_visible":null,"facts":{},'
+                '"confidences":{},'
                 '"tracks":[{"label":"oak_log","confidence":0.9,"x":0.5,"y":0.5,'
                 '"width":0.2,"height":0.4}],"chat":[]}'
             ),
@@ -112,7 +115,7 @@ def test_active_vlm_prefers_strict_structured_vision_contract() -> None:
     )
 
     assert model.schema is not None
-    assert observation.facts["target.kind"] == "oak_log"
+    assert observation.canonical_facts()["target.kind"] == "oak_log"
     assert observation.tracks[0].label == "oak_log"
     assert latency_ms == 12.0
 
@@ -139,6 +142,13 @@ def test_slow_vlm_result_survives_frame_age_when_scene_is_visually_unchanged() -
     worker._publish(
         job,
         SemanticObservation(
+            scene_mode="menu",
+            scene_playable=False,
+            uncertainty=0.1,
+            danger_immediate=False,
+            obstacle_ahead=False,
+            target_visible=False,
+            scene_summary="Menu",
             facts={"scene.mode": "menu", "scene.playable": False},
             confidences={"scene.mode": 0.99, "scene.playable": 0.99},
         ),
@@ -171,6 +181,13 @@ def test_slow_vlm_result_is_rejected_after_material_scene_change() -> None:
     worker._publish(
         job,
         SemanticObservation(
+            scene_mode="menu",
+            scene_playable=False,
+            uncertainty=0.1,
+            danger_immediate=False,
+            obstacle_ahead=False,
+            target_visible=False,
+            scene_summary="Menu",
             facts={"scene.mode": "menu", "scene.playable": False},
             confidences={"scene.mode": 0.99, "scene.playable": 0.99},
         ),

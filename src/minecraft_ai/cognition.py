@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .execution import conditions_satisfied
 from .memory import MemoryRecord
 from .models import LanguageModel, ModelMessage
 from .perception import PerceptionBlackboard
@@ -176,6 +177,10 @@ class HighLevelController:
                             for condition in skill.success_conditions
                         ],
                         "expected_effects": list(skill.expected_effects),
+                        "currently_feasible": conditions_satisfied(
+                            skill.preconditions,
+                            blackboard,
+                        ),
                         "measured_competence": self.skills.contextual_score(skill.skill_id),
                     }
                     for skill in self.skills.specs.values()
@@ -216,6 +221,24 @@ class HighLevelController:
             decision = _parse_decision(response.text)
             if decision.skill_id is not None and decision.skill_id not in self.skills.specs:
                 return self._bootstrap.decide(blackboard, context)
+            if decision.skill_id is not None:
+                selected = self.skills.get(decision.skill_id)
+                if not conditions_satisfied(selected.preconditions, blackboard):
+                    missing = tuple(condition.key for condition in selected.preconditions)
+                    return decision.model_copy(
+                        update={
+                            "reasoning_summary": (
+                                f"Blocked infeasible option {selected.skill_id}; missing fresh "
+                                f"preconditions: {', '.join(missing)}"
+                            ),
+                            "skill_id": None,
+                            "skill_parameters": {},
+                            "request_replan": True,
+                            "ask_perception": tuple(
+                                dict.fromkeys((*decision.ask_perception, *missing))
+                            ),
+                        }
+                    )
             return decision
         except Exception:
             return self._bootstrap.decide(blackboard, context)

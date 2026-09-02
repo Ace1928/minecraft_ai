@@ -85,11 +85,11 @@ class SkillExecutor:
                 f"failure-condition:{failed.key}",
                 recover=True,
             )
-        if self._spec.success_conditions and _all_matching(
+        if self._spec.success_conditions and conditions_satisfied(
             self._spec.success_conditions, blackboard, now_ns=now
         ):
             return self._finish(SkillOutcome.SUCCEEDED, now, None)
-        if self._spec.preconditions and not _all_matching(
+        if self._spec.preconditions and not conditions_satisfied(
             self._spec.preconditions, blackboard, now_ns=now
         ):
             return self._finish(
@@ -149,11 +149,12 @@ def _skill_instruction(
     return f"{instruction}. Parameters: {rendered}"
 
 
-def _all_matching(
+def conditions_satisfied(
     conditions: tuple[SkillCondition, ...],
     blackboard: PerceptionBlackboard,
     now_ns: int | None = None,
 ) -> bool:
+    """Evaluate a complete semantic option condition set against fresh observations."""
     return all(_matches(condition, blackboard, now_ns=now_ns) for condition in conditions)
 
 

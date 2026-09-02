@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -60,10 +60,57 @@ class SemanticTrack(BaseModel):
 class SemanticObservation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    scene_mode: Literal["world", "gui", "loading", "menu", "death", "unknown"]
+    scene_playable: bool
+    uncertainty: float = Field(ge=0.0, le=1.0)
+    danger_immediate: bool
+    obstacle_ahead: bool
+    target_visible: bool
+    scene_summary: str = Field(min_length=1, max_length=512)
+    target_dx: float | None = Field(default=None, ge=-1.0, le=1.0)
+    target_dy: float | None = Field(default=None, ge=-1.0, le=1.0)
+    target_kind: str | None = Field(default=None, max_length=128)
+    target_mineable: bool | None = None
+    target_near: bool | None = None
+    inventory_logs: int | None = Field(default=None, ge=0)
+    inventory_planks: int | None = Field(default=None, ge=0)
+    inventory_crafting_table: int | None = Field(default=None, ge=0)
+    inventory_build_blocks: int | None = Field(default=None, ge=0)
+    player_submerged: bool | None = None
+    player_air_visible: bool | None = None
     facts: dict[str, str | int | float | bool] = Field(default_factory=dict)
     confidences: dict[str, float] = Field(default_factory=dict)
     tracks: tuple[SemanticTrack, ...] = ()
     chat: tuple[str, ...] = ()
+
+    def canonical_facts(self) -> dict[str, str | int | float | bool]:
+        values = dict(self.facts)
+        values.update(
+            {
+                "scene.mode": self.scene_mode,
+                "scene.playable": self.scene_playable,
+                "perception.uncertainty": self.uncertainty,
+                "danger.immediate": self.danger_immediate,
+                "obstacle.ahead": self.obstacle_ahead,
+                "target.visible": self.target_visible,
+                "scene.summary": self.scene_summary,
+            }
+        )
+        optional = {
+            "target.dx": self.target_dx,
+            "target.dy": self.target_dy,
+            "target.kind": self.target_kind,
+            "target.mineable": self.target_mineable,
+            "target.near": self.target_near,
+            "inventory.logs": self.inventory_logs,
+            "inventory.planks": self.inventory_planks,
+            "inventory.crafting_table": self.inventory_crafting_table,
+            "inventory.build_blocks": self.inventory_build_blocks,
+            "player.submerged": self.player_submerged,
+            "player.air_visible": self.player_air_visible,
+        }
+        values.update({key: value for key, value in optional.items() if value is not None})
+        return values
 
 
 @dataclass(frozen=True)
@@ -84,6 +131,7 @@ class ActiveVLMMetrics:
     last_frame_age: int = 0
     last_hash_distance: int | None = None
     last_error: str | None = None
+    last_fact_keys: tuple[str, ...] = ()
 
 
 @dataclass
@@ -149,6 +197,7 @@ class ActiveVLMWorker:
                 self.metrics.completed += 1
                 self.metrics.last_latency_ms = latency_ms
                 self.metrics.last_error = None
+                self.metrics.last_fact_keys = tuple(sorted(observation.canonical_facts()))
                 self._publish(job, observation)
             except Exception as exc:
                 # Semantic VLM failure must never terminate capture or motor control.
@@ -159,22 +208,18 @@ class ActiveVLMWorker:
     def _inspect(self, job: SemanticJob) -> tuple[SemanticObservation, float]:
         png = _bgra_to_png(job.frame)
         prompt = (
-            "Inspect this Minecraft Bedrock screenshot. Answer only JSON matching "
-            "{facts:object, confidences:object, tracks:array, chat:string[]}. Every facts "
-            "value must be one scalar string, number, or boolean; never an array or object. "
-            "Every confidence value must be a number from 0 to 1. Always include scene.mode "
-            "as exactly one of world, gui, loading, menu, death, unknown; scene.playable as a "
-            "boolean; perception.uncertainty from 0 to 1; danger.immediate as a boolean; "
-            "obstacle.ahead as a boolean; target.visible as a boolean; and scene.summary as a "
-            "short string. In world mode report only visible HUD state, immediate hazards, "
+            "Inspect this Minecraft Bedrock screenshot. Answer only the supplied strict JSON "
+            "schema. Always populate scene_mode, scene_playable, uncertainty, "
+            "danger_immediate, obstacle_ahead, target_visible, and scene_summary from visible "
+            "evidence. In world mode report only visible HUD state, immediate hazards, "
             "terrain affordances, and task-relevant targets. Only report target.visible=true "
-            "with target.dx and target.dy in -1..1 when a target is visibly localized. Never "
+            "with target_dx and target_dy in -1..1 when a target is visibly localized. Never "
             "infer hidden inventory, coordinates, seed, biome, identity, or time of day. "
-            "For a visible actionable resource include target.kind, target.mineable, and "
-            "target.near. Report only visibly readable counts using inventory.logs, "
-            "inventory.planks, inventory.crafting_table, and inventory.build_blocks when those "
+            "For a visible actionable resource include target_kind, target_mineable, and "
+            "target_near. Report only visibly readable counts using inventory_logs, "
+            "inventory_planks, inventory_crafting_table, and inventory_build_blocks when those "
             "items are visible in the hotbar or an open inventory; omit unknown counts. Report "
-            "player.submerged and player.air_visible when visually supported. Every tracks "
+            "player_submerged and player_air_visible when visually supported. Every tracks "
             "entry must be an object with exactly label:string, "
             "confidence:number, x:number, y:number, width:number, height:number; coordinates "
             "and sizes are normalized 0..1. Use tracks:[] when nothing should be tracked. "
@@ -227,7 +272,7 @@ class ActiveVLMWorker:
                 source=f"vlm:{self.model.model_id}:{job.query.query_id}",
                 expires_after_ms=max(15_000, job.query.deadline_ms * 3),
             )
-            for key, value in observation.facts.items()
+            for key, value in observation.canonical_facts().items()
         ) + (
             PerceptionFact(
                 key="scene.observation_dhash",
@@ -278,6 +323,7 @@ class ActiveVLMWorker:
             "last_frame_age": self.metrics.last_frame_age,
             "last_hash_distance": self.metrics.last_hash_distance,
             "last_error": self.metrics.last_error,
+            "last_fact_keys": list(self.metrics.last_fact_keys),
         }
 
 
