@@ -338,26 +338,48 @@ def _scene_claim_is_fresh(blackboard: PerceptionBlackboard) -> bool:
         return False
 
 
-def _standing_goal_skill(goal: Goal) -> str | None:
+def _standing_goal_skill(goal: Goal, blackboard: PerceptionBlackboard) -> str | None:
     """Map a standing-goal description to the bootstrap skill that realizes it.
 
     Deterministic routing keeps the industrial loop persistent even when the
-    high-level cognition is cold: gathers when materials are missing, stores
-    surplus, builds storage when the reserve is met, and always moves forward
-    through the terrain afterwards. Falls back to explore when unmapped.
+    high-level cognition is cold, using live inventory evidence so the loop
+    actually progresses: gather while reserves are low, deposit when surplus
+    exists, build once construction blocks are ready, explore otherwise.
     """
     text = goal.description.casefold()
+    logs = _int_fact(blackboard, "inventory.logs", "inventory.oak_log", "inventory.wood")
+    planks = _int_fact(blackboard, "inventory.planks", "inventory.oak_planks")
+    chest = _int_fact(blackboard, "inventory.chest")
     if "gather" in text or "material" in text:
+        if logs >= 16 and planks >= 8:
+            return "deposit_in_storage"
         return "gather_nearby_wood"
     if "store" in text or "storage" in text:
-        return "deposit_in_storage"
-    if "build" in text or "workshop" in text:
-        return "build_workshop_shell"
-    if "expand" in text:
-        return "build_workshop_shell"
+        if chest >= 1:
+            return "deposit_in_storage"
+        if planks >= 8:
+            return "craft_storage_units"
+        if logs >= 3:
+            return "gather_nearby_wood"
+        return "craft_storage_units"
+    if "build" in text or "workshop" in text or "expand" in text:
+        if logs >= 8 and planks >= 8:
+            return "build_workshop_shell"
+        return "gather_nearby_wood"
     if "explore" in text:
         return "explore_forward"
     return None
+
+
+def _int_fact(blackboard: PerceptionBlackboard, *keys: str) -> int:
+    for key in keys:
+        fact = blackboard.fact(key, min_confidence=0.3)
+        if fact is not None:
+            try:
+                return int(fact.value)
+            except (TypeError, ValueError):
+                continue
+    return 0
 
 
 def _active_operator_messages(
@@ -1211,7 +1233,7 @@ class AgentRuntime:
         )
         skill_id = None
         if chosen is not None:
-            skill_id = _standing_goal_skill(chosen.goal)
+            skill_id = _standing_goal_skill(chosen.goal, self.blackboard)
         if skill_id is None or skill_id not in self.skills.specs:
             skill_id = "explore_forward"
         self.executor.start(
