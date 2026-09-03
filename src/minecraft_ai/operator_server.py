@@ -136,24 +136,30 @@ def operator_status() -> dict[str, object]:
 
 def _capture_live_bedrock_frame() -> CapturedFrame | None:
     """Capture Bedrock even while the agent process is safely disarmed."""
-    targets: list[tuple[str, int]] = []
+    targets: list[tuple[str, int, bool]] = []
     try:
         process = AgentProcess.load()
     except (OSError, ValueError, TypeError, KeyError):
         process = None
     if process is not None:
-        targets.append((process.display, process.window_id))
+        targets.append((process.display, process.window_id, process.allow_host_capture))
     try:
         session = BedrockSession.load()
     except (OSError, ValueError, TypeError, KeyError):
         session = None
     if session is not None and bedrock_session_alive(session):
         window_id = session.find_window()
-        if window_id is not None and (session.display, window_id) not in targets:
-            targets.append((session.display, window_id))
-    for display, window_id in targets:
+        if window_id is not None:
+            candidate = (
+                session.display,
+                window_id,
+                session.mode in {"direct", "host-monitor"},
+            )
+            if candidate not in targets:
+                targets.append(candidate)
+    for display, window_id, allow_host in targets:
         try:
-            capture = IsolatedX11Capture(display, window_id, allow_host=False)
+            capture = IsolatedX11Capture(display, window_id, allow_host=allow_host)
         except (OSError, RuntimeError, ValueError):
             continue
         try:

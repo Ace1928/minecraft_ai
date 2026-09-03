@@ -16,10 +16,14 @@ from minecraft_ai.platforms.bedrock_session import (
     launch_isolated_bedrock_session,
 )
 from minecraft_ai.platforms.bedrock_x11 import (
+    HostMonitorBinding,
     IsolationError,
+    ScreenRect,
     _crop_bgra,
+    _require_exact_monitor_occupancy,
     _x11_keysym_name,
     _wine_relative_motion_delta,
+    parse_connected_outputs,
     require_isolated_display,
 )
 
@@ -98,6 +102,51 @@ def test_different_x_server_is_accepted() -> None:
     require_isolated_display(":71", host_display=":0")
 
 
+def test_connected_outputs_parse_exact_primary_and_offset_geometry() -> None:
+    outputs = parse_connected_outputs(
+        "\n".join(
+            (
+                "Screen 0: minimum 16 x 16, current 3840 x 1080, maximum 32767 x 32767",
+                "DP-1 connected primary 1920x1080+0+0 (normal left inverted right x axis y axis)",
+                "DP-2 connected 1920x1080+1920+0 (normal left inverted right x axis y axis)",
+                "HDMI-1 disconnected (normal left inverted right x axis y axis)",
+            )
+        )
+    )
+
+    assert outputs == {
+        "DP-1": ScreenRect(x=0, y=0, width=1920, height=1080),
+        "DP-2": ScreenRect(x=1920, y=0, width=1920, height=1080),
+    }
+
+
+def test_host_monitor_binding_payload_is_strict_and_round_trips() -> None:
+    binding = HostMonitorBinding(
+        display=":0",
+        output_name="DP-2",
+        monitor=ScreenRect(x=1920, y=0, width=1920, height=1080),
+        window_id=1234,
+        bound_ns=42,
+    )
+
+    assert HostMonitorBinding.from_payload(binding.payload()) == binding
+    malformed = binding.payload()
+    malformed["window_id"] = True
+    with pytest.raises(IsolationError, match="integer"):
+        HostMonitorBinding.from_payload(malformed)
+
+
+def test_host_monitor_guard_requires_exact_exclusive_monitor_occupancy() -> None:
+    monitor = ScreenRect(x=1920, y=0, width=1920, height=1080)
+    _require_exact_monitor_occupancy(monitor, monitor)
+
+    with pytest.raises(IsolationError, match="exactly one bound monitor"):
+        _require_exact_monitor_occupancy(
+            ScreenRect(x=1919, y=0, width=1920, height=1080),
+            monitor,
+        )
+
+
 def test_wine_client_crop_removes_window_decoration_without_reordering_pixels() -> None:
     pixels = bytes(range(4 * 4 * 3))
     cropped = _crop_bgra(pixels, source_width=4, rect=(1, 1, 2, 2))
@@ -143,3 +192,34 @@ def test_nested_session_is_not_alive_when_launcher_exited(tmp_path: Path, monkey
     )
 
     assert not bedrock_session_alive(session)
+
+
+def test_host_monitor_session_descriptor_round_trips_binding(tmp_path: Path) -> None:
+    path = tmp_path / "bedrock-session.json"
+    session = BedrockSession(
+        display=":0",
+        host_display=":0",
+        xserver_pid=0,
+        launcher_pid=200,
+        width=1920,
+        height=1080,
+        created_ns=1,
+        launcher_command=("bedrock-on-linux", "play"),
+        mode="host-monitor",
+        host_monitor_name="DP-2",
+        host_monitor_x=1920,
+        host_monitor_y=0,
+        host_monitor_width=1920,
+        host_monitor_height=1080,
+        host_monitor_window_id=1234,
+        host_monitor_bound_ns=42,
+    )
+
+    session.persist(path)
+    loaded = BedrockSession.load(path)
+
+    assert loaded == session
+    binding = loaded.host_monitor_binding()
+    assert binding is not None
+    assert binding.output_name == "DP-2"
+    assert binding.monitor == ScreenRect(x=1920, y=0, width=1920, height=1080)

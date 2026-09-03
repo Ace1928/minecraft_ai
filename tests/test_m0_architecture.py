@@ -138,11 +138,11 @@ def test_state_schema_migrates_v1_and_preserves_failure_streak(tmp_path: Path) -
     assert "consecutive_failures" in columns
 
 
-def test_supervisor_rejects_host_display_input_even_when_requested() -> None:
+def test_supervisor_rejects_unbound_host_display_input_even_when_requested() -> None:
     supervisor = Supervisor()
     supervisor.start()
 
-    with pytest.raises(RuntimeError, match="debug-only"):
+    with pytest.raises(RuntimeError, match="dedicated-monitor binding"):
         supervisor.attach_bedrock_x11(":0", 1, allow_host=True)
 
 

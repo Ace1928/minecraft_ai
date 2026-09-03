@@ -7,7 +7,7 @@ import signal
 import subprocess
 import time
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,10 @@ from platformdirs import user_runtime_dir
 
 from .bedrock_linux import discover_bedrock_linux_install
 from .bedrock_x11 import (
+    HostMonitorBinding,
     IsolationError,
+    ScreenRect,
+    bind_host_monitor,
     find_minecraft_window,
     request_window_close,
     require_isolated_display,
@@ -43,6 +46,13 @@ class BedrockSession:
     wayland_socket: str | None = None
     compositor_log: str | None = None
     launcher_log: str | None = None
+    host_monitor_name: str | None = None
+    host_monitor_x: int | None = None
+    host_monitor_y: int | None = None
+    host_monitor_width: int | None = None
+    host_monitor_height: int | None = None
+    host_monitor_window_id: int | None = None
+    host_monitor_bound_ns: int | None = None
 
     @classmethod
     def load(cls, path: Path = BEDROCK_SESSION_FILE) -> BedrockSession:
@@ -70,6 +80,27 @@ class BedrockSession:
             if raw.get("compositor_log") is None
             else str(raw["compositor_log"]),
             launcher_log=None if raw.get("launcher_log") is None else str(raw["launcher_log"]),
+            host_monitor_name=None
+            if raw.get("host_monitor_name") is None
+            else str(raw["host_monitor_name"]),
+            host_monitor_x=None
+            if raw.get("host_monitor_x") is None
+            else int(raw["host_monitor_x"]),
+            host_monitor_y=None
+            if raw.get("host_monitor_y") is None
+            else int(raw["host_monitor_y"]),
+            host_monitor_width=None
+            if raw.get("host_monitor_width") is None
+            else int(raw["host_monitor_width"]),
+            host_monitor_height=None
+            if raw.get("host_monitor_height") is None
+            else int(raw["host_monitor_height"]),
+            host_monitor_window_id=None
+            if raw.get("host_monitor_window_id") is None
+            else int(raw["host_monitor_window_id"]),
+            host_monitor_bound_ns=None
+            if raw.get("host_monitor_bound_ns") is None
+            else int(raw["host_monitor_bound_ns"]),
         )
 
     def persist(self, path: Path = BEDROCK_SESSION_FILE) -> None:
@@ -88,7 +119,40 @@ class BedrockSession:
         return find_minecraft_window(
             self.display,
             host_display=self.host_display,
-            allow_host=(self.mode == "direct"),
+            allow_host=(self.mode in {"direct", "host-monitor"}),
+        )
+
+    def host_monitor_binding(self) -> HostMonitorBinding | None:
+        name = self.host_monitor_name
+        x = self.host_monitor_x
+        y = self.host_monitor_y
+        width = self.host_monitor_width
+        height = self.host_monitor_height
+        window_id = self.host_monitor_window_id
+        bound_ns = self.host_monitor_bound_ns
+        values = (name, x, y, width, height, window_id, bound_ns)
+        if all(value is None for value in values):
+            return None
+        if any(value is None for value in values):
+            raise IsolationError("incomplete host-monitor binding in session descriptor")
+        assert name is not None
+        assert x is not None
+        assert y is not None
+        assert width is not None
+        assert height is not None
+        assert window_id is not None
+        assert bound_ns is not None
+        return HostMonitorBinding(
+            display=self.display,
+            output_name=name,
+            monitor=ScreenRect(
+                x=x,
+                y=y,
+                width=width,
+                height=height,
+            ),
+            window_id=window_id,
+            bound_ns=bound_ns,
         )
 
 
@@ -109,7 +173,7 @@ def bedrock_session_alive(session: BedrockSession | None = None) -> bool:
             current = BedrockSession.load()
         except (OSError, ValueError, TypeError, KeyError):
             return False
-    if current.mode == "direct":
+    if current.mode in {"direct", "host-monitor"}:
         return _pid_alive(current.launcher_pid)
     return (
         _pid_alive(current.xserver_pid)
@@ -444,6 +508,35 @@ def launch_direct_bedrock_session(
     return session
 
 
+def bind_direct_session_to_monitor(
+    session: BedrockSession,
+    *,
+    output_name: str,
+    path: Path = BEDROCK_SESSION_FILE,
+) -> BedrockSession:
+    """Promote a debug session only after proving exclusive monitor occupancy."""
+
+    if session.mode not in {"direct", "host-monitor"}:
+        raise IsolationError("only a direct host-display session can bind to a monitor")
+    if not bedrock_session_alive(session):
+        raise IsolationError("cannot bind a stopped Bedrock session")
+    window_id = wait_for_minecraft_window(session, timeout_s=30.0)
+    binding = bind_host_monitor(session.display, window_id, output_name)
+    bound = replace(
+        session,
+        mode="host-monitor",
+        host_monitor_name=binding.output_name,
+        host_monitor_x=binding.monitor.x,
+        host_monitor_y=binding.monitor.y,
+        host_monitor_width=binding.monitor.width,
+        host_monitor_height=binding.monitor.height,
+        host_monitor_window_id=binding.window_id,
+        host_monitor_bound_ns=binding.bound_ns,
+    )
+    bound.persist(path)
+    return bound
+
+
 def wait_for_minecraft_window(
     session: BedrockSession,
     *,
@@ -452,7 +545,7 @@ def wait_for_minecraft_window(
     require_isolated_display(
         session.display,
         session.host_display,
-        allow_host=(session.mode == "direct"),
+        allow_host=(session.mode in {"direct", "host-monitor"}),
     )
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -474,7 +567,7 @@ def stop_bedrock_session(session: BedrockSession | None = None) -> None:
             current = BedrockSession.load()
         except (OSError, ValueError, TypeError, KeyError):
             return
-    if current.mode not in {"xephyr", "weston", "direct"}:
+    if current.mode not in {"xephyr", "weston", "direct", "host-monitor"}:
         raise IsolationError(f"unsupported Bedrock session mode: {current.mode!r}")
     if current.mode in {"xephyr", "weston"}:
         require_isolated_display(current.display, current.host_display)
@@ -484,7 +577,7 @@ def stop_bedrock_session(session: BedrockSession | None = None) -> None:
             current.display,
             window_id,
             host_display=current.host_display,
-            allow_host=(current.mode == "direct"),
+            allow_host=(current.mode in {"direct", "host-monitor"}),
         )
         deadline = time.monotonic() + 12.0
         while time.monotonic() < deadline and _pid_alive(current.launcher_pid):

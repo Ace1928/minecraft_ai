@@ -56,6 +56,7 @@ from .platforms.bedrock_session import (
     DEFAULT_BEDROCK_WIDTH,
     BedrockSession,
     bedrock_session_alive,
+    bind_direct_session_to_monitor,
     launch_isolated_bedrock_session,
     stop_bedrock_session,
     wait_for_minecraft_window,
@@ -147,6 +148,7 @@ def _bedrock_version_or_error(explicit: str | None) -> str:
 
 def _session_payload(session: BedrockSession) -> dict[str, object]:
     alive = bedrock_session_alive(session)
+    host_monitor = session.host_monitor_binding()
     return {
         "display": session.display,
         "host_display": session.host_display,
@@ -159,6 +161,7 @@ def _session_payload(session: BedrockSession) -> dict[str, object]:
         "wayland_socket": session.wayland_socket,
         "compositor_log": session.compositor_log,
         "launcher_log": session.launcher_log,
+        "host_monitor": None if host_monitor is None else host_monitor.payload(),
         "alive": alive,
         "minecraft_window": session.find_window() if alive else None,
     }
@@ -314,12 +317,22 @@ def run(
         ) from exc
     if not bedrock_session_alive(session):
         raise typer.BadParameter("The managed Bedrock session is not alive.")
-    if session.mode not in {"xephyr", "weston"}:
+    if session.mode == "direct":
         raise typer.BadParameter(
             "Direct host-display sessions are observation/debug only and cannot be armed. "
-            "Stop it and launch the default isolated session first."
+            "Bind its exact dedicated output with `minecraft-ai bedrock bind-monitor OUTPUT`, "
+            "or stop it and launch the default isolated session."
         )
+    if session.mode not in {"xephyr", "weston", "host-monitor"}:
+        raise typer.BadParameter(f"Unsupported managed Bedrock mode: {session.mode!r}")
     window_id = wait_for_minecraft_window(session, timeout_s=30.0)
+    host_binding = session.host_monitor_binding()
+    if session.mode == "host-monitor":
+        if host_binding is None or host_binding.window_id != window_id:
+            raise typer.BadParameter(
+                "Host-monitor session lost its exact Minecraft window binding; rebind it."
+            )
+    allow_host = host_binding is not None
     install = discover_bedrock_linux_install()
     build = install.selected_build if install is not None else None
     if install is None or build is None:
@@ -329,7 +342,7 @@ def run(
         )
     version = build.version
 
-    capture = IsolatedX11Capture(session.display, window_id, allow_host=False)
+    capture = IsolatedX11Capture(session.display, window_id, allow_host=allow_host)
     try:
         launch_frame = capture.capture()
     finally:
@@ -350,7 +363,8 @@ def run(
         "attach-bedrock-x11",
         display=session.display,
         window_id=window_id,
-        allow_host=False,
+        allow_host=allow_host,
+        host_monitor_binding=None if host_binding is None else host_binding.payload(),
     )
     config = load_config()
     try:
@@ -366,9 +380,7 @@ def run(
                 config.policy.camera_scale if config.policy.enabled else None
             ),
             configured_pitch_counts_per_degree=(
-                config.policy.effective_camera_pitch_scale
-                if config.policy.enabled
-                else None
+                config.policy.effective_camera_pitch_scale if config.policy.enabled else None
             ),
         )
     except (OSError, TypeError, ValueError) as exc:
@@ -378,9 +390,7 @@ def run(
         ) from exc
     camera_state = attached.get("world_camera")
     reported_pitch_scale = (
-        camera_state.get("pitch_counts_per_degree")
-        if isinstance(camera_state, dict)
-        else None
+        camera_state.get("pitch_counts_per_degree") if isinstance(camera_state, dict) else None
     )
     camera_calibrated = (
         isinstance(camera_state, dict)
@@ -419,6 +429,7 @@ def run(
             window_id=window_id,
             instance_id=target,
             role=role,
+            allow_host_capture=allow_host,
         )
     except Exception as exc:
         _command("disarm")
@@ -427,7 +438,15 @@ def run(
         "[bold green]LIVE BEDROCK AGENT STARTED[/bold green] "
         f"pid={process.pid} display={session.display} window={window_id}"
     )
-    print("Host-global input is not enabled; emergency stop remains independent.")
+    if host_binding is None:
+        print("Host-global input is not enabled; emergency stop remains independent.")
+    else:
+        print(
+            "Dedicated host-monitor guard active: "
+            f"{host_binding.output_name} {host_binding.monitor.width}x"
+            f"{host_binding.monitor.height}+{host_binding.monitor.x}+"
+            f"{host_binding.monitor.y}. Focus loss or geometry drift releases input."
+        )
 
 
 def _start_supervisor(role: str) -> None:
@@ -886,6 +905,37 @@ def bedrock_launch(
         )
     print("[green]Bedrock session launched.[/green]")
     print(json.dumps(_session_payload(session), indent=2, sort_keys=True))
+
+
+@bedrock_app.command("bind-monitor")
+def bedrock_bind_monitor(
+    output: str = typer.Argument(
+        ...,
+        help="Exact active RandR output exclusively occupied by Minecraft (for example DP-2).",
+    ),
+) -> None:
+    """Bind a direct Bedrock window to one dedicated monitor without moving it."""
+
+    try:
+        session = BedrockSession.load()
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise typer.BadParameter("No managed Bedrock session exists.") from exc
+    try:
+        bound = bind_direct_session_to_monitor(session, output_name=output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    binding = bound.host_monitor_binding()
+    if binding is None:
+        raise typer.BadParameter("Host-monitor binding was not persisted.")
+    print(
+        "[bold green]DEDICATED MINECRAFT MONITOR VERIFIED[/bold green] "
+        f"{binding.output_name}={binding.monitor.width}x{binding.monitor.height}+"
+        f"{binding.monitor.x}+{binding.monitor.y} window={binding.window_id}"
+    )
+    print(
+        "Autonomous input may now be armed only while this exact window remains "
+        "fullscreen on this output and Minecraft retains input focus."
+    )
 
 
 @bedrock_app.command("stop")

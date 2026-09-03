@@ -4,15 +4,259 @@ import ctypes
 import ctypes.util
 import importlib
 import os
+import re
+import shutil
+import subprocess
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from ..safety import MotorAction, MotorLease, MotorRejected
 
 
 class IsolationError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ScreenRect:
+    """One immutable rectangle in X root-window coordinates."""
+
+    x: int
+    y: int
+    width: int
+    height: int
+
+    def __post_init__(self) -> None:
+        if self.width <= 0 or self.height <= 0:
+            raise IsolationError("screen rectangle dimensions must be positive")
+
+
+@dataclass(frozen=True)
+class HostMonitorBinding:
+    """Proof that one Minecraft window exclusively occupies one host monitor.
+
+    Host-display motor control is intentionally unavailable without this
+    binding.  It records an exact RandR output and exact root-window geometry;
+    every accepted action rechecks the window against these immutable bounds.
+    """
+
+    display: str
+    output_name: str
+    monitor: ScreenRect
+    window_id: int
+    bound_ns: int
+
+    def __post_init__(self) -> None:
+        if not self.display.strip():
+            raise IsolationError("host-monitor display is required")
+        if not self.output_name.strip():
+            raise IsolationError("host-monitor output name is required")
+        if self.window_id <= 0:
+            raise IsolationError("host-monitor Minecraft window id must be positive")
+        if self.bound_ns <= 0:
+            raise IsolationError("host-monitor binding timestamp must be positive")
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "display": self.display,
+            "output_name": self.output_name,
+            "monitor": {
+                "x": self.monitor.x,
+                "y": self.monitor.y,
+                "width": self.monitor.width,
+                "height": self.monitor.height,
+            },
+            "window_id": self.window_id,
+            "bound_ns": self.bound_ns,
+        }
+
+    @classmethod
+    def from_payload(cls, raw: object) -> HostMonitorBinding:
+        if not isinstance(raw, Mapping):
+            raise IsolationError("host-monitor binding payload must be an object")
+        monitor_raw = raw.get("monitor")
+        if not isinstance(monitor_raw, Mapping):
+            raise IsolationError("host-monitor binding monitor must be an object")
+
+        def integer(mapping: Mapping[object, object], key: str) -> int:
+            value = mapping.get(key)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise IsolationError(f"host-monitor binding {key!r} must be an integer")
+            return value
+
+        display = raw.get("display")
+        output_name = raw.get("output_name")
+        if not isinstance(display, str) or not isinstance(output_name, str):
+            raise IsolationError("host-monitor binding display/output must be strings")
+        return cls(
+            display=display,
+            output_name=output_name,
+            monitor=ScreenRect(
+                x=integer(monitor_raw, "x"),
+                y=integer(monitor_raw, "y"),
+                width=integer(monitor_raw, "width"),
+                height=integer(monitor_raw, "height"),
+            ),
+            window_id=integer(raw, "window_id"),
+            bound_ns=integer(raw, "bound_ns"),
+        )
+
+
+_CONNECTED_OUTPUT = re.compile(
+    r"^(?P<name>\S+)\s+connected(?:\s+primary)?\s+"
+    r"(?P<width>\d+)x(?P<height>\d+)"
+    r"(?P<x>[+-]\d+)(?P<y>[+-]\d+)(?:\s|$)"
+)
+
+
+def parse_connected_outputs(text: str) -> dict[str, ScreenRect]:
+    """Parse active RandR output geometry without accepting disconnected modes."""
+
+    outputs: dict[str, ScreenRect] = {}
+    for line in text.splitlines():
+        match = _CONNECTED_OUTPUT.match(line)
+        if match is None:
+            continue
+        name = match.group("name")
+        if name in outputs:
+            raise IsolationError(f"duplicate connected RandR output {name!r}")
+        outputs[name] = ScreenRect(
+            x=int(match.group("x")),
+            y=int(match.group("y")),
+            width=int(match.group("width")),
+            height=int(match.group("height")),
+        )
+    return outputs
+
+
+def connected_outputs(display_name: str) -> dict[str, ScreenRect]:
+    """Return current active XRandR outputs for one explicit display."""
+
+    executable = shutil.which("xrandr")
+    if executable is None:
+        raise IsolationError("xrandr is required to bind a host-monitor session")
+    try:
+        result = subprocess.run(
+            [executable, "--display", display_name, "--query"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise IsolationError(f"cannot query host monitor topology: {exc}") from exc
+    outputs = parse_connected_outputs(result.stdout)
+    if not outputs:
+        raise IsolationError("xrandr reported no active connected outputs")
+    return outputs
+
+
+def _window_root_rect(display: Any, window_id: int) -> ScreenRect:
+    try:
+        root = display.screen().root
+        window = display.create_resource_object("window", window_id)
+        attributes = window.get_attributes()
+        geometry = window.get_geometry()
+        # python-xlib's source window is the coordinate space being translated
+        # *from*.  Translate root origin into the target window to obtain the
+        # target's absolute root position (the reverse order negates offsets).
+        translated = root.translate_coords(window, 0, 0)
+    except Exception as exc:
+        raise IsolationError("cannot resolve host-monitor Minecraft window geometry") from exc
+    if int(attributes.map_state) == 0:
+        raise IsolationError("host-monitor Minecraft window is not viewable")
+    return ScreenRect(
+        x=int(translated.x),
+        y=int(translated.y),
+        width=int(geometry.width),
+        height=int(geometry.height),
+    )
+
+
+def _require_exact_monitor_occupancy(window: ScreenRect, monitor: ScreenRect) -> None:
+    if window != monitor:
+        raise IsolationError(
+            "host-display motor control requires Minecraft to occupy exactly one "
+            f"bound monitor; window={window.width}x{window.height}+{window.x}+{window.y} "
+            f"monitor={monitor.width}x{monitor.height}+{monitor.x}+{monitor.y}"
+        )
+
+
+def bind_host_monitor(
+    display_name: str,
+    target_window_id: int,
+    output_name: str,
+) -> HostMonitorBinding:
+    """Create a fail-closed binding for an already-positioned Minecraft window."""
+
+    outputs = connected_outputs(display_name)
+    monitor = outputs.get(output_name)
+    if monitor is None:
+        raise IsolationError(
+            f"RandR output {output_name!r} is not active; available={sorted(outputs)}"
+        )
+    try:
+        display_module = importlib.import_module("Xlib.display")
+        display: Any = display_module.Display(display_name)
+    except Exception as exc:
+        raise IsolationError(f"cannot open host display {display_name}: {exc}") from exc
+    try:
+        window = display.create_resource_object("window", target_window_id)
+        input_window = _resolve_minecraft_input_window(display, target_window_id)
+        if int(input_window.id) == int(window.id):
+            identity = " ".join(
+                (
+                    str(window.get_wm_name() or ""),
+                    *(str(value) for value in (window.get_wm_class() or ())),
+                )
+            ).casefold()
+            if not any(token in identity for token in ("minecraft", "bedrock", "wine")):
+                raise IsolationError("bound host window is not recognizably Minecraft/Wine")
+        _require_exact_monitor_occupancy(
+            _window_root_rect(display, target_window_id),
+            monitor,
+        )
+    finally:
+        display.close()
+    return HostMonitorBinding(
+        display=display_name,
+        output_name=output_name,
+        monitor=monitor,
+        window_id=target_window_id,
+        bound_ns=time.monotonic_ns(),
+    )
+
+
+def validate_host_monitor_window(
+    display: Any,
+    binding: HostMonitorBinding,
+    *,
+    target_window_id: int,
+    input_window_id: int | None = None,
+    require_focus: bool = False,
+) -> None:
+    """Recheck the immutable monitor boundary immediately before host input."""
+
+    if target_window_id != binding.window_id:
+        raise IsolationError("host-monitor target no longer matches its binding")
+    _require_exact_monitor_occupancy(
+        _window_root_rect(display, target_window_id),
+        binding.monitor,
+    )
+    if not require_focus:
+        return
+    if input_window_id is None:
+        raise IsolationError("host-monitor input window is unavailable")
+    try:
+        focus = display.get_input_focus().focus
+    except Exception as exc:
+        raise IsolationError("cannot inspect host-display input focus") from exc
+    if not _window_is_descendant_or_same(focus, input_window_id):
+        raise IsolationError(
+            "host-display focus left Minecraft; motor input was released instead of "
+            "stealing focus from the operator display"
+        )
 
 
 class _NativeRelativeMouse:
@@ -241,8 +485,18 @@ class IsolatedX11InputBackend:
         host_display: str | None = None,
         target_window_id: int | None = None,
         allow_host: bool = False,
+        host_monitor_binding: HostMonitorBinding | None = None,
     ) -> None:
         require_isolated_display(display_name, host_display, allow_host=allow_host)
+        if host_monitor_binding is not None:
+            if not allow_host:
+                raise IsolationError("host-monitor binding requires explicit host-display access")
+            if target_window_id is None:
+                raise IsolationError("host-monitor binding requires an exact target window")
+            if host_monitor_binding.display != display_name:
+                raise IsolationError("host-monitor binding display does not match backend display")
+            if host_monitor_binding.window_id != target_window_id:
+                raise IsolationError("host-monitor binding window does not match backend target")
         try:
             display_module = importlib.import_module("Xlib.display")
             self._x = importlib.import_module("Xlib.X")
@@ -253,6 +507,7 @@ class IsolatedX11InputBackend:
         self.display_name = display_name
         self.target_window_id = target_window_id
         self._input_window_id = target_window_id
+        self._host_monitor_binding = host_monitor_binding
         try:
             self._display: Any = display_module.Display(display_name)
         except Exception as exc:
@@ -268,7 +523,15 @@ class IsolatedX11InputBackend:
         if target_window_id is not None:
             input_window = _resolve_minecraft_input_window(self._display, target_window_id)
             self._input_window_id = int(input_window.id)
-            self._ensure_input_focus()
+            if host_monitor_binding is None:
+                self._ensure_input_focus()
+            else:
+                validate_host_monitor_window(
+                    self._display,
+                    host_monitor_binding,
+                    target_window_id=target_window_id,
+                    input_window_id=self._input_window_id,
+                )
         self._relative_mouse = _NativeRelativeMouse(display_name)
 
     @property
@@ -328,6 +591,10 @@ class IsolatedX11InputBackend:
             current = self._display.get_input_focus().focus
             if _window_is_descendant_or_same(current, input_window_id):
                 return
+            if self._host_monitor_binding is not None:
+                raise IsolationError(
+                    "host-display focus left Minecraft; refusing to steal operator focus"
+                )
             input_window = self._display.create_resource_object(
                 "window",
                 input_window_id,
@@ -343,6 +610,18 @@ class IsolatedX11InputBackend:
         if not self.probe_target():
             self.release_all()
             raise IsolationError("Bedrock target window disappeared")
+        if self._host_monitor_binding is not None and self.target_window_id is not None:
+            try:
+                validate_host_monitor_window(
+                    self._display,
+                    self._host_monitor_binding,
+                    target_window_id=self.target_window_id,
+                    input_window_id=self._input_window_id,
+                    require_focus=True,
+                )
+            except Exception:
+                self.release_all()
+                raise
         self._ensure_input_focus()
         for key in action.keys_up:
             self._xtest.fake_input(self._display, self._x.KeyRelease, self._keycode(key))
@@ -376,6 +655,18 @@ class IsolatedX11InputBackend:
         if not self.probe_target():
             self.release_all()
             raise IsolationError("Bedrock target window disappeared")
+        if self._host_monitor_binding is not None and self.target_window_id is not None:
+            try:
+                validate_host_monitor_window(
+                    self._display,
+                    self._host_monitor_binding,
+                    target_window_id=self.target_window_id,
+                    input_window_id=self._input_window_id,
+                    require_focus=True,
+                )
+            except Exception:
+                self.release_all()
+                raise
         self._ensure_input_focus()
         if not text or len(text) > 256:
             raise IsolationError("chat text must contain 1..256 characters")
@@ -639,7 +930,7 @@ class IsolatedX11Capture:
             root = self._display.screen().root
             window = self._display.create_resource_object("window", self.target_window_id)
             geometry = window.get_geometry()
-            translated = window.translate_coords(root, 0, 0)
+            translated = root.translate_coords(window, 0, 0)
         except Exception as exc:
             raise IsolationError("cannot resolve Bedrock window geometry") from exc
         width = int(geometry.width)

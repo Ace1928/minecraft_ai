@@ -26,6 +26,7 @@ class AgentProcess:
     window_id: int
     instance_id: str
     role: str
+    allow_host_capture: bool = False
 
     @classmethod
     def load(cls, path: Path = AGENT_FILE) -> AgentProcess:
@@ -39,6 +40,7 @@ class AgentProcess:
             window_id=int(raw["window_id"]),
             instance_id=str(raw["instance_id"]),
             role=str(raw["role"]),
+            allow_host_capture=bool(raw.get("allow_host_capture", False)),
         )
 
     def persist(self, path: Path = AGENT_FILE) -> None:
@@ -70,6 +72,7 @@ def launch_agent_process(
     instance_id: str,
     role: str,
     config_file: Path | None = None,
+    allow_host_capture: bool = False,
 ) -> AgentProcess:
     if agent_alive():
         raise RuntimeError("agent process is already running")
@@ -92,6 +95,8 @@ def launch_agent_process(
     ]
     if config_file is not None:
         command.extend(("--config", str(config_file)))
+    if allow_host_capture:
+        command.append("--allow-host-capture")
     with AGENT_LOG.open("ab", buffering=0) as log:
         child = subprocess.Popen(
             command,
@@ -108,6 +113,7 @@ def launch_agent_process(
         window_id=window_id,
         instance_id=instance_id,
         role=role,
+        allow_host_capture=allow_host_capture,
     )
     process.persist()
     time.sleep(0.05)

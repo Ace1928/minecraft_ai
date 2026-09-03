@@ -177,19 +177,40 @@ class Supervisor:
             self._persist_status()
 
     def attach_bedrock_x11(
-        self, display: str, window_id: int, *, allow_host: bool = False
+        self,
+        display: str,
+        window_id: int,
+        *,
+        allow_host: bool = False,
+        host_monitor_binding: object = None,
     ) -> dict[str, Any]:
         if emergency_stop_latched():
             raise RuntimeError("emergency stop is latched")
-        if allow_host:
-            raise RuntimeError("host-display input is debug-only and cannot be armed")
-        from .platforms.bedrock_x11 import IsolatedX11InputBackend
+        from .platforms.bedrock_x11 import (
+            HostMonitorBinding,
+            IsolatedX11InputBackend,
+        )
+
+        binding = (
+            None
+            if host_monitor_binding is None
+            else HostMonitorBinding.from_payload(host_monitor_binding)
+        )
+        if allow_host and binding is None:
+            raise RuntimeError("host-display input requires an exact dedicated-monitor binding")
+        if binding is not None and not allow_host:
+            raise RuntimeError("dedicated-monitor binding requires explicit host access")
 
         same_physical_target = (
             getattr(self.backend, "display_name", None) == display
             and getattr(self.backend, "target_window_id", None) == window_id
         )
-        backend = IsolatedX11InputBackend(display, target_window_id=window_id, allow_host=False)
+        backend = IsolatedX11InputBackend(
+            display,
+            target_window_id=window_id,
+            allow_host=allow_host,
+            host_monitor_binding=binding,
+        )
         try:
             self.replace_backend(
                 backend,
@@ -440,9 +461,7 @@ class Supervisor:
                     "estimated_pitch_units": self.world_camera_pitch_units,
                     "accepted_updates": self.world_camera_updates,
                     "origin_calibrated": self.world_camera_origin_calibrated,
-                    "pitch_counts_per_degree": (
-                        self.world_camera_pitch_counts_per_degree
-                    ),
+                    "pitch_counts_per_degree": (self.world_camera_pitch_counts_per_degree),
                     "calibration_id": self.world_camera_calibration_id,
                 },
                 "last_fault": self.last_fault,
@@ -529,11 +548,14 @@ class Supervisor:
                 display = str(payload.get("display", ""))
                 window_id = int(payload.get("window_id", 0))
                 allow_host = bool(payload.get("allow_host", False))
-                result = self.attach_bedrock_x11(display, window_id, allow_host=allow_host)
-            elif command == "calibrate-world-camera":
-                pitch_counts_per_degree = float(
-                    payload.get("pitch_counts_per_degree", 0.0)
+                result = self.attach_bedrock_x11(
+                    display,
+                    window_id,
+                    allow_host=allow_host,
+                    host_monitor_binding=payload.get("host_monitor_binding"),
                 )
+            elif command == "calibrate-world-camera":
+                pitch_counts_per_degree = float(payload.get("pitch_counts_per_degree", 0.0))
                 calibration_id = str(payload.get("calibration_id", ""))
                 result = self.calibrate_world_camera(
                     pitch_counts_per_degree=pitch_counts_per_degree,

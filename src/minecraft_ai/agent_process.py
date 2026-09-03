@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--instance-id", required=True)
     parser.add_argument("--role", default=None)
     parser.add_argument("--config", default=None)
+    parser.add_argument("--allow-host-capture", action="store_true")
     return parser
 
 
@@ -59,7 +60,11 @@ def main(argv: list[str] | None = None) -> int:
         social = database.load_social()
 
         blackboard = PerceptionBlackboard()
-        capture = IsolatedX11Capture(args.display, args.window_id, allow_host=False)
+        capture = IsolatedX11Capture(
+            args.display,
+            args.window_id,
+            allow_host=bool(args.allow_host_capture),
+        )
         capture_probe = capture.capture()
 
         high_level: HighLevelController | None = None
