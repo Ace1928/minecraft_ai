@@ -294,6 +294,31 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             policy_instruction="respawn",
         ),
         SkillSpec(
+            skill_id="open_inventory",
+            version=1,
+            name="Open inventory",
+            description=(
+                "Open the Bedrock inventory through the learned GUI expert and verify the "
+                "inventory scene before any inventory task is allowed to continue"
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            success_conditions=(
+                SkillCondition(key="scene.mode", operator="eq", value="inventory"),
+            ),
+            expected_effects=("inventory_opened", "inventory_scene_verified"),
+            max_duration_ms=10_000,
+            action_level=ActionLevel.GUI,
+            policy_ref="open_inventory",
+            policy_instruction="open inventory",
+            action_permissions=SkillActionPermissions(
+                allow_attack=False,
+                allow_use=False,
+                allow_jump=False,
+                allow_drop=False,
+                allow_hotbar=False,
+            ),
+        ),
+        SkillSpec(
             skill_id="close_open_inventory",
             version=3,
             name="Close open inventory",

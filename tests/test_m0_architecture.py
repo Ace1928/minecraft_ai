@@ -154,6 +154,7 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     crafting = skills.get("craft_crafting_table")
     retreat = skills.get("retreat_from_danger")
     escape = skills.get("escape_submersion")
+    open_inventory = skills.get("open_inventory")
     close_inventory = skills.get("close_open_inventory")
     exploration = skills.get("explore_forward")
     obstacle = skills.get("traverse_visible_obstacle")
@@ -177,6 +178,13 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert obstacle.action_permissions.allow_jump is True
     assert obstacle.action_permissions.allow_attack is False
     assert obstacle.action_permissions.allow_use is False
+    assert open_inventory.policy_ref == "open_inventory"
+    assert open_inventory.action_level == ActionLevel.GUI
+    assert open_inventory.policy_instruction == "open inventory"
+    assert open_inventory.success_conditions[0].key == "scene.mode"
+    assert open_inventory.success_conditions[0].value == "inventory"
+    assert open_inventory.action_permissions.allow_inventory is True
+    assert open_inventory.action_permissions.allow_attack is False
     assert close_inventory.policy_ref == "close_inventory"
     assert close_inventory.action_level == ActionLevel.GUI
     assert close_inventory.policy_instruction == "close inventory"
