@@ -591,11 +591,11 @@ class IsolatedX11InputBackend:
         self.target_window_id = target_window_id
         self._input_window_id = target_window_id
         self._host_monitor_binding = host_monitor_binding
-        # Host-display play uses the same real XTEST input as isolated displays;
-        # Bedrock only consumes input while its client window has focus, so
-        # focus is asserted before every action burst. The operator's focus is
-        # free between bursts (we release all input afterwards).
-        self._targeted = False
+        # Host-display play never steals the operator's focus. Keyboard goes to
+        # the Minecraft window directly (XSendEvent); clicks/motion are XTEST
+        # events under a pointer parked inside the game client, so they arrive
+        # regardless of operator focus. Isolated displays keep focus-based XTEST.
+        self._targeted = allow_host
         self._targeted_pointer: _TargetedPointer | None = None
         try:
             self._display: Any = display_module.Display(display_name)
@@ -667,6 +667,24 @@ class IsolatedX11InputBackend:
     def _input_window(self) -> Any:
         return self._display.create_resource_object("window", self._input_window_id)
 
+    def _park_pointer_in_game(self) -> None:
+        """Warp the real server pointer into the game client.
+
+        XTEST click/motion events are delivered to the window under the pointer,
+        not the focused window. Parking the pointer inside the game client (in
+        absolute root coordinates) routes those events to the game regardless of
+        which window owns the operator's focus.
+        """
+        try:
+            window = self._display.create_resource_object("window", self._input_window_id)
+            geometry = window.get_geometry()
+            root = self._display.screen().root
+            coords = root.translate_coords(window, geometry.width // 2, geometry.height // 2)
+            root.warp_pointer(int(coords.x), int(coords.y))
+            self._display.sync()
+        except Exception:
+            pass
+
     def _targeted_key(self, keycode: int, down: bool) -> None:
         """Deliver a key event directly to the Minecraft window (no focus needed)."""
         window = self._input_window()
@@ -704,45 +722,15 @@ class IsolatedX11InputBackend:
             return False
         return True
 
-    def _steal_focus_for_burst(self) -> int | None:
-        """Temporarily give the Minecraft client X focus, returning the prior
-        focus window id (or None) so the operator's window can be restored."""
-        input_window_id = self._input_window_id
-        if input_window_id is None:
-            return None
-        try:
-            prior = self._display.get_input_focus().focus
-            prior_id = int(prior.id) if prior.id else None
-            if _window_is_descendant_or_same(prior, input_window_id):
-                return None
-            input_window = self._display.create_resource_object("window", input_window_id)
-            input_window.get_attributes()
-            input_window.set_input_focus(self._x.RevertToParent, self._x.CurrentTime)
-            self._display.sync()
-            return prior_id
-        except Exception:
-            return None
-
-    def _restore_focus(self, prior_id: int | None) -> None:
-        """Restore the operator's focus window after a burst."""
-        if prior_id is None:
-            return
-        try:
-            window = self._display.create_resource_object("window", prior_id)
-            window.set_input_focus(self._x.RevertToParent, self._x.CurrentTime)
-            self._display.sync()
-        except Exception:
-            pass
-
     def _ensure_input_focus(self) -> None:
         """Bedrock only consumes input while its client window has X focus.
 
-        Host-monitor sessions must re-assert this focus before every action
-        burst: the operator's other windows normally hold X input focus, and
-        without it the game ignores all keyboard/camera input (the client does
-        not serve injected events on an unfocused window). Input is released
-        after each burst, so the operator keeps usable focus between actions.
+        Isolated (non-host) displays assert focus before bursts. Host-display
+        play is target-oriented (window-directed keys, parked-pointer XTEST) and
+        never touches the operator's focus, so this stays a no-op there.
         """
+        if self._targeted:
+            return
         input_window_id = self._input_window_id
         if input_window_id is None:
             return
@@ -779,21 +767,21 @@ class IsolatedX11InputBackend:
             except Exception:
                 self.release_all()
                 raise
-        # Bedrock consumes input only while its client window has focus. Steal
-        # focus for the duration of this burst, then restore the operator's
-        # window, so the agent keeps controlling the game while the operator
-        # types/works on their own windows between bursts.
-        prior_focus = None
-        if not self._targeted:
-            prior_focus = self._steal_focus_for_burst()
+        # Focus-free play: keyboard events are delivered directly into the
+        # Minecraft window (window-directed XSendEvent), so they never leak
+        # into whatever the operator is typing in, and the game keeps them even
+        # while another window holds focus. Clicks+motion are real XTEST events
+        # whose target is the window under the pointer; the pointer is first
+        # parked inside the game client so those bursts land there too.
         try:
             for key in action.keys_up:
-                self._xtest.fake_input(self._display, self._x.KeyRelease, self._keycode(key))
+                self._targeted_key(self._keycode(key), down=False)
                 self._held_keys.discard(key.lower())
             for button in action.buttons_up:
                 button_id = _BUTTONS.get(button.lower())
                 if button_id is None:
                     raise IsolationError(f"unsupported mouse button: {button!r}")
+                self._park_pointer_in_game()
                 self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
                 self._held_buttons.discard(button.lower())
             if action.mouse_dx or action.mouse_dy:
@@ -801,19 +789,21 @@ class IsolatedX11InputBackend:
                     action.mouse_dx,
                     action.mouse_dy,
                 )
+                self._park_pointer_in_game()
                 self._relative_mouse.move(relative_x, relative_y)
             for key in action.keys_down:
-                self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))
+                self._targeted_key(self._keycode(key), down=True)
                 self._held_keys.add(key.lower())
             for button in action.buttons_down:
                 button_id = _BUTTONS.get(button.lower())
                 if button_id is None:
                     raise IsolationError(f"unsupported mouse button: {button!r}")
+                self._park_pointer_in_game()
                 self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
                 self._held_buttons.add(button.lower())
             self._display.sync()
         finally:
-            self._restore_focus(prior_focus)
+            pass
 
     def type_chat(self, text: str) -> None:
         """Type one bounded ASCII chat message through the isolated input server."""
@@ -882,31 +872,28 @@ class IsolatedX11InputBackend:
         base = _SHIFT_MAP.get(char, char.lower() if char.isalpha() else char)
         if shifted:
             shift = self._keycode("shift")
-            self._xtest.fake_input(self._display, self._x.KeyPress, shift)
+            self._targeted_key(shift, down=True)
         try:
             self._tap_key(base)
         finally:
             if shifted:
-                self._xtest.fake_input(self._display, self._x.KeyRelease, shift)
+                self._targeted_key(shift, down=False)
 
     def _tap_key(self, key: str) -> None:
         keycode = self._keycode(key)
-        self._xtest.fake_input(self._display, self._x.KeyPress, keycode)
-        self._xtest.fake_input(self._display, self._x.KeyRelease, keycode)
+        self._targeted_key(keycode, down=True)
+        self._targeted_key(keycode, down=False)
 
     def release_all(self) -> None:
         try:
             for key in sorted(set(_KEYSYM_NAMES) | self._held_keys):
                 try:
-                    self._xtest.fake_input(
-                        self._display,
-                        self._x.KeyRelease,
-                        self._keycode(key),
-                    )
+                    self._targeted_key(self._keycode(key), down=False)
                 except Exception:
                     continue
             for button_id in sorted(set(_BUTTONS.values())):
                 try:
+                    self._park_pointer_in_game()
                     self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
                 except Exception:
                     continue
