@@ -317,6 +317,21 @@ def test_learned_inventory_scene_routes_to_learned_inventory_toggle() -> None:
                     observed_ns=now,
                     source="learned:steve1:mineclip-scene:not-training-label",
                 ),
+                # The claim must be currently observed on the live frame hash.
+                PerceptionFact(
+                    key="scene.observation_dhash",
+                    value="0000000000000000",
+                    confidence=1.0,
+                    observed_ns=now,
+                    source="bootstrap:safety",
+                ),
+                PerceptionFact(
+                    key="frame.dhash",
+                    value="0000000000000000",
+                    confidence=1.0,
+                    observed_ns=now,
+                    source="bootstrap:safety",
+                ),
             ),
         )
     )
@@ -326,6 +341,48 @@ def test_learned_inventory_scene_routes_to_learned_inventory_toggle() -> None:
     assert recovery is not None
     assert recovery.skill_id == "close_open_inventory"
     assert recovery.policy_ref == "close_inventory"
+
+
+def test_stale_inventory_scene_does_not_preempt_world_play() -> None:
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:inventory",
+            width=1280,
+            height=720,
+            facts=(
+                PerceptionFact(
+                    key="scene.mode",
+                    value="inventory",
+                    confidence=0.9,
+                    observed_ns=now,
+                    source="learned:steve1:mineclip-scene:not-training-label",
+                ),
+                # Stale: mode was observed on an old frame, current frame differs.
+                PerceptionFact(
+                    key="scene.observation_dhash",
+                    value="1111111111111111",
+                    confidence=1.0,
+                    observed_ns=now,
+                    source="bootstrap:safety",
+                ),
+                PerceptionFact(
+                    key="frame.dhash",
+                    value="0000000000000000",
+                    confidence=1.0,
+                    observed_ns=now,
+                    source="bootstrap:safety",
+                ),
+            ),
+        )
+    )
+
+    recovery = _observed_scene_recovery(build_bootstrap_skill_library(), board)
+
+    assert recovery is None
 
 
 def test_skill_library_uses_smoothed_context_score_and_lifecycle() -> None:

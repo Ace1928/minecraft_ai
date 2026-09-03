@@ -147,6 +147,34 @@ class _RepairingStructuredVisionModel:
         )
 
 
+class _EmptyStructuredVisionModel:
+    model_id = "empty-structured-test-vlm"
+
+    def __init__(self) -> None:
+        self.schema: dict[str, object] | None = None
+        self.prompt = ""
+
+    def inspect(self, prompt: str, *, image_bytes: bytes, mime_type: str) -> ModelResponse:
+        raise AssertionError((prompt, image_bytes, mime_type))
+
+    def inspect_structured(
+        self,
+        prompt: str,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        self.prompt = prompt
+        self.schema = schema
+        return ModelResponse(
+            text=('{"uncertainty":1.0,"prose_summary":"","claims":[],"tracks":[],"chat":[]}'),
+            model=self.model_id,
+            latency_ms=4.0,
+        )
+
+
 def _frame(pixels: bytes, *, width: int = 9, height: int = 8) -> CapturedFrame:
     return CapturedFrame(
         frame_id=1,
@@ -293,9 +321,67 @@ def test_active_vlm_prefers_strict_structured_vision_contract() -> None:
         "chat",
         "gui",
     }
+    schema_properties = model.schema["properties"]
+    assert isinstance(schema_properties, dict)
+    claims_schema = schema_properties["claims"]
+    assert isinstance(claims_schema, dict)
+    claim_items = claims_schema["items"]
+    assert isinstance(claim_items, dict)
+    claim_properties = claim_items["properties"]
+    assert isinstance(claim_properties, dict)
+    key_schema = claim_properties["key"]
+    assert isinstance(key_schema, dict)
+    assert "inventory.logs" in key_schema["enum"]
     assert observation.rejection_count == 0
     assert not observation.prose_rejected
     assert latency_ms == 12.0
+
+
+def test_active_vlm_encodes_only_regions_capable_of_proving_typed_request() -> None:
+    model = _EmptyStructuredVisionModel()
+    worker = ActiveVLMWorker(model, PerceptionBlackboard(), "bedrock:test")
+    frame = _frame(b"\0" * (9 * 8 * 4))
+
+    observation, _ = worker._inspect(
+        SemanticJob(
+            query=ActivePerceptionQuery(
+                query_id="q-inventory",
+                question="inventory.logs",
+                frame_id=1,
+                output_keys=("inventory.logs",),
+            ),
+            frame=frame,
+            frame_dhash=frame_dhash(frame),
+        )
+    )
+
+    assert {item.region_kind.value for item in observation.evidence} == {"hotbar", "gui"}
+    assert model.schema is not None
+    properties = model.schema["properties"]
+    assert isinstance(properties, dict)
+    claims = properties["claims"]
+    assert isinstance(claims, dict)
+    items = claims["items"]
+    assert isinstance(items, dict)
+    claim_properties = items["properties"]
+    assert isinstance(claim_properties, dict)
+    key = claim_properties["key"]
+    assert isinstance(key, dict)
+    assert "inventory.logs" in key["enum"]
+    assert "target.visible" not in key["enum"]
+    assert claims["maxItems"] < 96
+    assert "reason" in items["required"]
+    chat = properties["chat"]
+    assert isinstance(chat, dict)
+    assert chat["maxItems"] == 0
+    chat_items = chat["items"]
+    assert isinstance(chat_items, dict)
+    assert "speaker" in chat_items["required"]
+    assert (
+        '{"uncertainty":1.0,"prose_summary":"","claims":[],"tracks":[],"chat":[]}' in model.prompt
+    )
+    assert "untrusted question text" in model.prompt
+    assert '"inventory.logs"' in model.prompt
 
 
 def test_active_vlm_repairs_schema_once_and_still_rejects_unsupported_claims() -> None:

@@ -434,7 +434,7 @@ def test_high_level_uses_lossless_compact_structured_wire_schema() -> None:
 
     decision = controller.decide(_board(), _context())
 
-    assert set(model.schema["properties"]) == {"r", "g", "s", "p", "o", "c", "x", "q", "w"}
+    assert set(model.schema["properties"]) == {"r", "g", "s", "p", "o", "c", "x", "q", "w", "d", "n"}
     assert "required" not in model.schema
     assert decision.skill_id == "explore_forward"
     assert decision.reasoning_summary == "Explore while gathering evidence"

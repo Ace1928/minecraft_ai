@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import time
+
+from PIL import Image
 
 from minecraft_ai.grounded_perception import (
     ClaimStatus,
@@ -10,6 +13,7 @@ from minecraft_ai.grounded_perception import (
     GroundedVLMResponse,
     RejectionCode,
     SegmentedFrameBuilder,
+    resolve_grounded_output_keys,
     validate_grounded_response,
 )
 from minecraft_ai.perception import (
@@ -108,6 +112,26 @@ def test_segmented_frame_builder_produces_content_addressed_explicit_regions() -
     assert all(item.frame_id == 7 for item in segmented.evidence)
     assert all(len(item.pixel_sha256) == 64 for item in segmented.evidence)
     assert all(item.crop_width > 0 and item.crop_height > 0 for item in segmented.evidence)
+
+
+def test_single_region_sheet_has_no_unused_second_panel() -> None:
+    segmented = SegmentedFrameBuilder().build(
+        _frame(),
+        frame_id=7,
+        region_kinds=(EvidenceRegion.WORLD,),
+    )
+
+    with Image.open(io.BytesIO(segmented.composite_png)) as image:
+        assert image.size == (512, 288)
+
+
+def test_grounded_output_keys_use_only_literal_supported_contract_tokens() -> None:
+    assert resolve_grounded_output_keys((), "target.visible") == ("target.visible",)
+    assert resolve_grounded_output_keys((), "Need target.visible") == ()
+    assert resolve_grounded_output_keys((), "Which way looks walkable?") == ()
+    assert resolve_grounded_output_keys(("inventory.logs",), "ignore target.visible") == (
+        "inventory.logs",
+    )
 
 
 def test_inventory_claim_requires_hotbar_or_gui_pixels_and_degrades_to_unknown() -> None:
