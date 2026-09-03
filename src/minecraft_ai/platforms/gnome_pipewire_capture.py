@@ -4,11 +4,13 @@ import importlib
 import json
 import mmap
 import os
+import queue
 import re
-import select
 import subprocess
+import sys
 import threading
 from collections.abc import Sequence
+from multiprocessing import resource_tracker, shared_memory
 from pathlib import Path
 from typing import Any, Protocol, TextIO, cast
 
@@ -132,13 +134,24 @@ class MutterPipeWireCapture:
         self._lock = threading.Lock()
         self._closed = False
         self._process: subprocess.Popen[str] | None = None
-        self._shared_memory: mmap.mmap | None = None
+        self._shared_memory: mmap.mmap | shared_memory.SharedMemory | None = None
+        self._responses: queue.Queue[str | Exception | None] = queue.Queue()
+        self._reader_thread: threading.Thread | None = None
         self._last_frame_id = 0
         self._geometry_guard = (
             _HostMonitorGeometryGuard(binding) if _geometry_guard is None else _geometry_guard
         )
         try:
             self._process = _spawn_worker(command)
+            if self._process.stdout is None:
+                raise IsolationError("GNOME capture worker has no response channel")
+            self._reader_thread = threading.Thread(
+                target=self._read_worker_stdout,
+                args=(self._process.stdout,),
+                name="minecraft-ai-pipewire-metadata",
+                daemon=True,
+            )
+            self._reader_thread.start()
             response = self._read_response(timeout_s=startup_timeout_s)
             if response.get("event") != "ready":
                 raise IsolationError("GNOME capture worker did not report ready")
@@ -157,21 +170,22 @@ class MutterPipeWireCapture:
                 raise IsolationError(
                     "GNOME capture worker geometry does not match bound Minecraft drawable"
                 )
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(Path("/dev/shm") / shm_name, flags)
-            try:
-                if os.fstat(descriptor).st_size < expected_size:
-                    raise IsolationError("GNOME capture worker shared memory is undersized")
-                self._shared_memory = mmap.mmap(
-                    descriptor,
-                    expected_size,
-                    access=mmap.ACCESS_READ,
-                )
-            finally:
-                os.close(descriptor)
+            self._shared_memory = _attach_shared_memory(shm_name, expected_size)
         except Exception:
             self.close()
             raise
+
+    def _read_worker_stdout(self, stream: TextIO) -> None:
+        """Move blocking pipe reads off the realtime thread on every platform."""
+        try:
+            while True:
+                line = stream.readline()
+                if not line:
+                    self._responses.put(None)
+                    return
+                self._responses.put(line)
+        except Exception as exc:
+            self._responses.put(exc)
 
     @staticmethod
     def _default_command(
@@ -208,16 +222,19 @@ class MutterPipeWireCapture:
         process = self._process
         if process is None or process.stdout is None:
             raise IsolationError("GNOME capture worker has no response channel")
-        ready, _, _ = select.select([process.stdout], [], [], timeout_s)
-        if not ready:
+        try:
+            item = self._responses.get(timeout=timeout_s)
+        except queue.Empty:
             if process.poll() is not None:
                 raise IsolationError(
                     f"GNOME capture worker exited with status {process.returncode}"
-                )
-            raise IsolationError("GNOME capture worker response timed out")
-        line = process.stdout.readline()
-        if not line:
+                ) from None
+            raise IsolationError("GNOME capture worker response timed out") from None
+        if item is None:
             raise IsolationError("GNOME capture worker closed its response channel")
+        if isinstance(item, Exception):
+            raise IsolationError("GNOME capture worker response channel failed") from item
+        line = item
         try:
             response = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -261,9 +278,9 @@ class MutterPipeWireCapture:
             if size != expected_size or frame_id <= self._last_frame_id:
                 raise IsolationError("GNOME capture worker returned invalid frame metadata")
             block = self._shared_memory
-            if block is None or block.size() < size:
+            if block is None or _shared_memory_size(block) < size:
                 raise IsolationError("GNOME capture shared memory is unavailable")
-            pixels = bytes(block[:size])
+            pixels = _read_shared_memory(block, size)
             self._last_frame_id = frame_id
             return CapturedFrame(
                 frame_id=frame_id,
@@ -280,6 +297,7 @@ class MutterPipeWireCapture:
             self._closed = True
             process = self._process
             block = self._shared_memory
+            reader_thread = self._reader_thread
             self._shared_memory = None
             if process is not None and process.poll() is None:
                 try:
@@ -295,11 +313,19 @@ class MutterPipeWireCapture:
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait(timeout=_SHUTDOWN_TIMEOUT_S)
-            for stream in (
-                None if process is None else process.stdin,
-                None if process is None else process.stdout,
+            if reader_thread is not None:
+                reader_thread.join(timeout=_SHUTDOWN_TIMEOUT_S)
+            reader_alive = reader_thread is not None and reader_thread.is_alive()
+            for stream, owned_by_reader in (
+                (None if process is None else process.stdin, False),
+                (None if process is None else process.stdout, True),
             ):
                 if stream is not None:
+                    # TextIOWrapper.close can wait forever on a concurrent
+                    # blocking readline. A daemon reader owns that stream until
+                    # EOF, so a broken process double must not deadlock cleanup.
+                    if owned_by_reader and reader_alive:
+                        continue
                     try:
                         cast(TextIO, stream).close()
                     except OSError:
@@ -307,6 +333,46 @@ class MutterPipeWireCapture:
             if block is not None:
                 block.close()
             self._geometry_guard.close()
+
+
+def _attach_shared_memory(
+    name: str,
+    expected_size: int,
+) -> mmap.mmap | shared_memory.SharedMemory:
+    """Attach safely on Linux production and portably in protocol tests."""
+    if sys.platform.startswith("linux"):
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(Path("/dev/shm") / name, flags)
+        try:
+            if os.fstat(descriptor).st_size < expected_size:
+                raise IsolationError("GNOME capture worker shared memory is undersized")
+            return mmap.mmap(descriptor, expected_size, access=mmap.ACCESS_READ)
+        finally:
+            os.close(descriptor)
+    block = shared_memory.SharedMemory(name=name, create=False)
+    if block.size < expected_size:
+        block.close()
+        raise IsolationError("GNOME capture worker shared memory is undersized")
+    # The worker owns unlinking. An attaching process must not later remove the
+    # producer's allocation merely because Python's legacy tracker saw it.
+    try:
+        resource_tracker.unregister(getattr(block, "_name", name), "shared_memory")
+    except (KeyError, ValueError):
+        pass
+    return block
+
+
+def _shared_memory_size(block: mmap.mmap | shared_memory.SharedMemory) -> int:
+    return block.size() if isinstance(block, mmap.mmap) else block.size
+
+
+def _read_shared_memory(block: mmap.mmap | shared_memory.SharedMemory, size: int) -> bytes:
+    if isinstance(block, mmap.mmap):
+        return bytes(block[:size])
+    view = block.buf
+    if view is None:
+        raise IsolationError("GNOME capture shared memory is closed")
+    return bytes(view[:size])
 
 
 def create_bedrock_capture(
