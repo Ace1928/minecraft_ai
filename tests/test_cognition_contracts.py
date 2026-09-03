@@ -382,11 +382,15 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
     assert "explore_forward" in {skill["skill_id"] for skill in payload["skills"]}
     explore = next(skill for skill in payload["skills"] if skill["skill_id"] == "explore_forward")
     assert {"allow_attack", "allow_use", "allow_jump"}.issubset(explore["parameters"])
+    assert "preconditions" not in explore
+    assert "invariants" not in explore
+    assert "success_evidence" in explore
     assert "establish_basic_shelter" not in {skill["skill_id"] for skill in payload["skills"]}
     assert (
         "must be addressed before any conflicting standing goal"
         in model.initial_messages[0].content
     )
+    assert sum(len(message.content) for message in model.initial_messages) < 8_000
     assert decision.chosen_goal_id == "operator:correction"
     assert decision.say == "I am climbing the hill now."
 

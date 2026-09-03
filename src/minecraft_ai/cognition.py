@@ -238,14 +238,55 @@ class HighLevelController:
         try:
             latest = blackboard.latest()
             facts = {
-                key: fact.model_dump(mode="json")
+                key: {
+                    "value": fact.value,
+                    "confidence": round(fact.confidence, 3),
+                    "source": fact.source,
+                }
                 for key, fact in blackboard.fresh_facts(min_confidence=0.35).items()
             }
             payload: dict[str, Any] = {
-                "role": context.role.model_dump(mode="json"),
-                "goals": [goal.model_dump(mode="json") for goal in context.goals],
-                "memories": [memory.model_dump(mode="json") for memory in context.memories],
-                "promises": [promise.model_dump(mode="json") for promise in context.promises],
+                "role": {
+                    "id": context.role.role_id,
+                    "goals": context.role.standing_goals,
+                    "weights": context.role.utility_weights,
+                    "risk": context.role.risk_tolerance,
+                },
+                "goals": [
+                    {
+                        "id": goal.goal_id,
+                        "description": goal.description,
+                        "target": goal.target_node,
+                        "source": goal.source.value,
+                        "priority": goal.priority,
+                        "domain": goal.domain,
+                    }
+                    for goal in context.goals
+                ],
+                "memories": [
+                    {
+                        "id": memory.memory_id,
+                        "kind": memory.kind.value,
+                        "text": memory.text,
+                        "confidence": memory.confidence,
+                        "importance": memory.importance,
+                        "goals": memory.goal_tags,
+                        "entities": memory.entity_tags,
+                        "place": memory.location_key,
+                    }
+                    for memory in context.memories
+                ],
+                "promises": [
+                    {
+                        "id": promise.promise_id,
+                        "player": promise.player,
+                        "summary": promise.summary,
+                        "status": promise.status.value,
+                        "goal": promise.goal_id,
+                        "project": promise.project_id,
+                    }
+                    for promise in context.promises
+                ],
                 "operator_messages": [
                     _operator_prompt_payload(message) for message in context.operator_messages
                 ],
@@ -254,9 +295,31 @@ class HighLevelController:
                 else _operator_prompt_payload(context.operator_messages[0]),
                 "wiki_evidence": [item.model_dump(mode="json") for item in context.wiki],
                 "recent_skill_runs": [
-                    run.model_dump(mode="json") for run in context.recent_skill_runs
+                    {
+                        "skill": run.skill_id,
+                        "outcome": run.outcome.value,
+                        "context": run.context_key,
+                        "failure": run.failure_reason,
+                    }
+                    for run in context.recent_skill_runs
                 ],
-                "frame": None if latest is None else latest.model_dump(mode="json"),
+                "frame": None
+                if latest is None
+                else {
+                    "id": latest.frame_id,
+                    "instance": latest.instance_id,
+                    "size": (latest.width, latest.height),
+                    "tracks": [
+                        {
+                            "id": track.track_id,
+                            "label": track.label,
+                            "confidence": round(track.confidence, 3),
+                            "region": track.region.model_dump(mode="json"),
+                            "attributes": track.attributes,
+                        }
+                        for track in latest.tracks
+                    ],
+                },
                 "fresh_facts": facts,
                 "skills": self._feasible_skill_payloads(blackboard),
             }
@@ -264,45 +327,27 @@ class HighLevelController:
                 ModelMessage(
                     role="system",
                     content=(
-                        "You are the high-level controller of a Minecraft agent. Decide goals, "
-                        "social responses, research/perception requests, and which available "
-                        "closed-loop skill to execute. Return one compact JSON object using the "
-                        "strict wire keys: r=reasoning summary under 12 words, g=chosen goal id, "
-                        "s=skill id or null, p=skill parameters object, o=operator-console reply "
-                        "or null, c=authorized Bedrock chat or null, x=request replan boolean, "
-                        "q=perception questions array, w=research query. Omit keys whose value "
-                        "would be null, empty, or false. "
-                        "The skills list contains only options executable from current fresh "
-                        "observations. Use only listed skill ids. The say field is an operator-"
-                        "console response: set it only when directly replying to a fresh "
-                        "operator message. It never types into Bedrock. Set game_chat only when "
-                        "fresh_facts contains an authoritative fresh player-message or explicit "
-                        "game-chat authorization fact; otherwise it must be null. Ordinary "
-                        "private reasoning belongs only in reasoning_summary and must never "
-                        "appear in either communication channel. Treat "
-                        "fresh_facts as the only authoritative observed game state. Prefer the "
-                        "most concrete feasible option that advances the chosen goal and has a "
-                        "verifiable success condition; do not select generic exploration when a "
-                        "visible resource or feasible progression option is available. Never "
-                        "claim an item, outcome, or completion that has not been observed. "
-                        "operator_messages are ordered by authority: highest priority first, "
-                        "then corrections before instructions, then newest first. If "
-                        "active_operator_message is present, it is the current directive and "
-                        "must be addressed before any conflicting standing goal. Its status "
-                        "'acknowledged' means received, not completed or superseded. For a "
-                        "current instruction or correction, set chosen_goal_id exactly to "
-                        "'operator:' plus its message_id until a newer directive supersedes it. "
-                        "When that directive explicitly prohibits attack, use, or jump, encode "
-                        "the prohibition in skill_parameters as allow_attack:false, "
-                        "allow_use:false, or allow_jump:false so the policy contract can enforce "
-                        "it without replacing learned movement. "
-                        "recent_skill_runs and each skill's evaluation counters are empirical "
-                        "execution evidence. Do not select any option that recently failed or "
-                        "timed out and still has at least two consecutive failures; select a "
-                        "different feasible learned option, request missing perception, or "
-                        "return no skill with request_replan true. A fresh operator correction "
-                        "may authorize one new evidence-producing retry. "
-                        "Never imply a message was handled while choosing a different goal."
+                        "You control a Minecraft agent through verified closed-loop skills. "
+                        "Return one compact JSON object with wire keys: r=summary under 12 words, "
+                        "g=goal id, s=skill id or null, p=parameters, o=operator reply, "
+                        "c=authorized in-game chat, x=replan, q=at most two perception questions, "
+                        "w=research query. Omit null, empty, and false keys; p is required. "
+                        "fresh_facts is the only authoritative observed game state. skills "
+                        "contains only currently executable options: use only a listed skill_id, "
+                        "prefer concrete progression with verifiable success evidence, and never "
+                        "claim unobserved inventory, outcomes, or completion. Do not explore when "
+                        "a more concrete feasible resource/progression skill exists. "
+                        "active_operator_message has highest authority and must be addressed "
+                        "before any conflicting standing goal. For an instruction or correction, "
+                        "use g='operator:'+message_id until superseded. Set o only to "
+                        "reply to that operator; it never types in game. Set c only with an "
+                        "authoritative fresh player-message or game-chat authorization fact. "
+                        "Keep private reasoning in r. Encode explicit operator prohibitions as "
+                        "allow_attack:false, allow_use:false, or allow_jump:false in p. "
+                        "Treat recent_skill_runs and evaluation as empirical evidence. Avoid a "
+                        "skill after two consecutive failures; choose another listed skill or "
+                        "return s null with x true and request needed perception. A fresh "
+                        "operator correction permits one evidence-producing retry."
                     ),
                 ),
                 ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
@@ -453,22 +498,17 @@ class HighLevelController:
                     "description": skill.description,
                     "stage": skill.stage.value,
                     "parameters": list(skill.parameters),
-                    "preconditions": [
-                        condition.model_dump(mode="json") for condition in skill.preconditions
+                    "success_evidence": [
+                        {
+                            "fact": condition.key,
+                            "op": condition.operator,
+                            "value": condition.value,
+                            "confidence": condition.min_confidence,
+                        }
+                        for condition in skill.success_conditions
                     ],
-                    "initiation_alternatives": [
-                        [condition.model_dump(mode="json") for condition in group]
-                        for group in skill.initiation_alternatives
-                    ],
-                    "invariants": [
-                        condition.model_dump(mode="json") for condition in skill.invariants
-                    ],
-                    "success_conditions": [
-                        condition.model_dump(mode="json") for condition in skill.success_conditions
-                    ],
-                    "expected_effects": list(skill.expected_effects),
-                    "currently_feasible": True,
-                    "measured_competence": self.skills.contextual_score(skill.skill_id),
+                    "effects": list(skill.expected_effects),
+                    "competence": round(self.skills.contextual_score(skill.skill_id), 3),
                     "evaluation": {
                         "attempts": 0 if stats is None else stats.attempts,
                         "successes": 0 if stats is None else stats.successes,
