@@ -444,19 +444,31 @@ def _selected_operator_message_id(
 def _authorized_game_chat(
     decision: CognitionDecision,
     blackboard: PerceptionBlackboard,
+    *,
+    already_replied_ns: int | None = None,
+    fact_source: str = "",
 ) -> str | None:
     """Return game chat only when perception carries explicit channel authority.
 
     Typing chat changes Bedrock focus and can interrupt/drown the embodied agent,
-    so an LLM field alone is intentionally insufficient authority. Future player
-    chat OCR and the operator UI can publish either exact fact after verification.
+    so an LLM field alone is intentionally insufficient authority. A fresh
+    grounded player-chat line (or an explicit operator authorization) grants the
+    authority. ``already_replied_ns`` prevents re-answering the same line.
     """
     if decision.game_chat is None:
         return None
     for key in ("social.player_message", "operator.game_chat_authorized"):
         fact = blackboard.fact(key, min_confidence=0.7)
-        if fact is not None and bool(fact.value):
-            return decision.game_chat
+        if fact is None or not bool(fact.value):
+            continue
+        if not fact.fresh():
+            continue
+        if (
+            already_replied_ns is not None
+            and fact.observed_ns <= already_replied_ns
+        ):
+            continue
+        return decision.game_chat
     return None
 
 
@@ -504,6 +516,8 @@ class AgentRuntime:
     _sequence: int = field(default=0, init=False)
     _last_renew_ns: int = field(default=0, init=False)
     _last_cognition_ns: int = field(default=0, init=False)
+    _last_player_chat_replied_ns: int | None = field(default=None, init=False)
+    _last_player_chat_signature: str | None = field(default=None, init=False)
     _last_semantic_ns: int = field(default=0, init=False)
     _lease_thread: threading.Thread | None = field(default=None, init=False)
     _lease_fault: str | None = field(default=None, init=False)
@@ -643,6 +657,7 @@ class AgentRuntime:
         self.metrics.consecutive_stale_frames = 0
         self._flush_pending_operator_status_updates()
         self.telemetry.publish(self._telemetry_payload(state="running"))
+        self._publish_player_chat_facts()
         self._consume_cognition()
         self._start_cognition_if_due()
         self._request_semantics_if_due(frame.frame_id)
@@ -988,11 +1003,18 @@ class AgentRuntime:
                 output_keys=resolve_grounded_output_keys((), question),
             )
             self.perception.request_semantics(query)
-        game_chat = _authorized_game_chat(decision, self.blackboard)
+        game_chat = _authorized_game_chat(
+            decision,
+            self.blackboard,
+            already_replied_ns=self._last_player_chat_replied_ns,
+        )
         if game_chat:
             try:
                 send_command("chat", lease_id=self.lease_id, text=game_chat)
                 self.metrics.game_chat_messages += 1
+                # Answer a player message once. The social fact stays merged
+                # (expires in 30s) but the signature gate blocks re-replies.
+                self._last_player_chat_replied_ns = time.monotonic_ns()
             except Exception:
                 pass
         if decision.skill_id is not None:
@@ -1022,6 +1044,54 @@ class AgentRuntime:
                     parameters=decision.skill_parameters,
                     instruction=decision.instruction,
                 )
+
+    def _publish_player_chat_facts(self) -> None:
+        """Turn freshly observed player chat lines into an authorizing fact.
+
+        The grounded VLM extracts world-chat lines into the blackboard. Those
+        lines are what give the high-level cognition authority to reply through
+        Bedrock world chat (`game_chat`); otherwise the agent can never answer
+        a player's question in game. One new line (different speaker/text from
+        the last replied line) publishes a fresh `social.player_message`.
+        """
+        latest = self.blackboard.latest()
+        if latest is None:
+            return
+        now_ns = time.monotonic_ns()
+        latest_line = None
+        for line in latest.chat:
+            if line.speaker is None or line.speaker.casefold() in {
+                self.cfg_role().casefold(), "eidos", "you", "console",
+            }:
+                continue
+            if now_ns - line.observed_ns > 60_000_000_000:
+                continue
+            if latest_line is None or line.observed_ns > latest_line.observed_ns:
+                latest_line = line
+        if latest_line is None:
+            return
+        signature = f"{latest_line.speaker}:{latest_line.text}"
+        if self._last_player_chat_signature == signature:
+            return
+        if (
+            self._last_player_chat_replied_ns is not None
+            and latest_line.observed_ns <= self._last_player_chat_replied_ns
+        ):
+            return
+        self._last_player_chat_signature = signature
+        self.blackboard.merge_semantics(
+            instance_id=self.perception.instance_id,
+            facts=(
+                PerceptionFact(
+                    key="social.player_message",
+                    value=signature,
+                    confidence=0.95,
+                    observed_ns=now_ns,
+                    source="grounded:player-chat",
+                    expires_after_ms=30_000,
+                ),
+            ),
+        )
 
     def _flush_pending_skill_stats(self, *, force: bool = False) -> None:
         if self.state_db is None or not self._pending_skill_stats:

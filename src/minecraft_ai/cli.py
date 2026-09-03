@@ -44,7 +44,7 @@ from .eval import (
     load_evidence,
 )
 from .operator_server import serve_operator_dashboard
-from .perception_service import bedrock_survival_hud_present
+from .perception_service import bedrock_in_world_hud_present
 from .platforms import (
     create_bedrock_capture,
     discover_bedrock_linux_install,
@@ -367,7 +367,7 @@ def run(
             )
             for _ in range(2):
                 launch_frame = capture.capture()
-                if bedrock_survival_hud_present(launch_frame):
+                if bedrock_in_world_hud_present(launch_frame):
                     hud_verified = True
                     break
         except Exception as exc:

@@ -83,6 +83,42 @@ BUILTIN_ROLES: dict[str, RoleProfile] = {
         knowledge_domains=("crafting", "storage", "structures", "mining"),
         reserve_targets={"oak_log": 16, "cobblestone": 32, "coal": 8, "oak_planks": 16},
     ),
+    "creative_builder": RoleProfile(
+        role_id="creative_builder",
+        description=(
+            "Creative-mode architect: place blocks into deliberate structures "
+            "(houses, walls, landscapes, monuments), fly to reach build sites, "
+            "and answer player questions in world chat like an in-game wiki. "
+            "No survival constraints; never gather, craft, or mine repeatedly."
+        ),
+        standing_goals=(
+            "build_creative_structures",
+            "assist_player_builds",
+            "answer_world_questions",
+            "fly_to_build_site",
+            "showcase_architecture",
+        ),
+        utility_weights={
+            "construction": 1.0,
+            "social": 0.9,
+            "exploration": 0.5,
+            "gathering": 0.0,
+            "progression": 0.0,
+        },
+        risk_tolerance=0.1,
+        preferred_skills=(
+            "place_block",
+            "use_target",
+            "build_workshop_shell",
+            "establish_basic_shelter",
+            "traverse_level_ground",
+            "explore_forward",
+            "craft_crafting_table",
+            "activate_visible_gui_control",
+        ),
+        knowledge_domains=("architecture", "chat", "commands", "structures"),
+        reserve_targets={},
+    ),
     "redstone_engineer": RoleProfile(
         role_id="redstone_engineer",
         standing_goals=("maintain_redstone_stock", "automate_repetitive_work", "prototype_systems"),

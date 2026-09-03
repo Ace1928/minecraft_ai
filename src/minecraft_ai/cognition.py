@@ -389,6 +389,14 @@ class HighLevelController:
                     ],
                 },
                 "fresh_facts": facts,
+                "chat_lines": [
+                    {
+                        "speaker": line.speaker,
+                        "text": line.text,
+                        "age_ms": max(0, int((time.monotonic_ns() - line.observed_ns) // 1_000_000)),
+                    }
+                    for line in (latest.chat if latest is not None else ())[-12:]
+                ],
                 "skills": feasible_skill_payloads,
             }
             messages = (
@@ -412,6 +420,11 @@ class HighLevelController:
                         "use g='operator:'+message_id until superseded. Set o only to "
                         "reply to that operator; it never types in game. Set c only with an "
                         "authoritative fresh player-message or game-chat authorization fact. "
+                        "When a fresh player chat line asks a question, answer it: put a short "
+                        "friendly factual reply in c (world chat answers questions like an "
+                        "in-game wiki: crafting recipes, block IDs, biome facts, command "
+                        "syntax, game mechanics). Keep c under 160 chars. Continue the current "
+                        "world plan in s/p unless the question demands an action."
                         "Keep private reasoning in r. Encode explicit operator prohibitions as "
                         "allow_attack:false, allow_use:false, or allow_jump:false in p. "
                         "Treat recent_skill_runs and evaluation as empirical evidence. Avoid a "

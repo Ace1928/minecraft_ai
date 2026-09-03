@@ -692,18 +692,19 @@ def bedrock_survival_hud_present(frame: CapturedFrame) -> bool:
     training label. Requiring both the red heart bank and neutral hotbar frame
     prevents calibration motion from being emitted over menus or loading UI.
     """
+    return _bedrock_hud_present(frame, require_hearts=True)
+
+
+def bedrock_creative_hud_present(frame: CapturedFrame) -> bool:
+    """Verify an in-world creative-mode HUD (hotbar present, no heart bank).
+
+    Creative mode omits the heart bank entirely, so the survival interlock
+    would wrongly reject it. The neutral hotbar frame plus a matching HUD band
+    is sufficient to arm in-world creative play.
+    """
     if not frame.bgra or frame.width < 320 or frame.height < 180:
         return False
     pixels = _numpy_bgra(frame)
-    heart_ratio = _hud_palette_ratio(
-        frame,
-        x_start=0.29,
-        x_end=0.49,
-        y_start=0.82,
-        y_end=0.91,
-        palette="heart",
-        pixels=pixels,
-    )
     hotbar_ratio = _hud_palette_ratio(
         frame,
         x_start=0.28,
@@ -711,6 +712,42 @@ def bedrock_survival_hud_present(frame: CapturedFrame) -> bool:
         y_start=0.89,
         y_end=1.0,
         palette="hotbar",
+        pixels=pixels,
+    )
+    # Info-lines and the crosshair are shown; the hotbar row must be present.
+    return hotbar_ratio >= 0.03
+
+
+def bedrock_in_world_hud_present(frame: CapturedFrame) -> bool:
+    """Accept an in-world HUD in either survival or creative mode.
+
+    Survival shows the heart bank; creative omits it. Either is playable.
+    """
+    return bedrock_survival_hud_present(frame) or bedrock_creative_hud_present(frame)
+
+
+def _bedrock_hud_present(frame: CapturedFrame, *, require_hearts: bool) -> bool:
+    if not frame.bgra or frame.width < 320 or frame.height < 180:
+        return False
+    pixels = _numpy_bgra(frame)
+    hotbar_ratio = _hud_palette_ratio(
+        frame,
+        x_start=0.28,
+        x_end=0.72,
+        y_start=0.89,
+        y_end=1.0,
+        palette="hotbar",
+        pixels=pixels,
+    )
+    if not require_hearts:
+        return hotbar_ratio >= 0.03
+    heart_ratio = _hud_palette_ratio(
+        frame,
+        x_start=0.29,
+        x_end=0.49,
+        y_start=0.82,
+        y_end=0.91,
+        palette="heart",
         pixels=pixels,
     )
     return heart_ratio >= 0.02 and hotbar_ratio >= 0.03

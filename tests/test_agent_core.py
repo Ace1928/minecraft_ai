@@ -823,3 +823,72 @@ def test_only_selected_operator_goal_is_acknowledgeable() -> None:
         )
         is None
     )
+
+
+def test_player_chat_authorizes_world_chat_reply() -> None:
+    from minecraft_ai.cognition import CognitionDecision
+    from minecraft_ai.perception import ChatLine, FrameState, PerceptionBlackboard
+    from minecraft_ai.runtime import _authorized_game_chat
+
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:world",
+            width=1280,
+            height=720,
+            chat=(ChatLine(speaker="Steve", text="how do I craft a chest?", observed_ns=now, confidence=0.95),),
+        )
+    )
+    board.merge_semantics(
+        instance_id="bedrock:world",
+        facts=(
+            PerceptionFact(
+                key="social.player_message",
+                value="Steve:how do I craft a chest?",
+                confidence=0.95,
+                observed_ns=now,
+                source="grounded:player-chat",
+                expires_after_ms=30_000,
+            ),
+        ),
+    )
+
+    decision = CognitionDecision(skill_id="explore_forward", game_chat="Planks x8 gives a chest.")
+    assert _authorized_game_chat(decision, board) == "Planks x8 gives a chest."
+    # Re-answer is blocked after the reply timestamp advances.
+    assert (
+        _authorized_game_chat(decision, board, already_replied_ns=now + 1)
+        is None
+    )
+    # A new player line (newer observation) authorizes again.
+    board.merge_semantics(
+        instance_id="bedrock:world",
+        facts=(
+            PerceptionFact(
+                key="social.player_message",
+                value="Steve:wiki cheats?",
+                confidence=0.95,
+                observed_ns=now + 100,
+                source="grounded:player-chat",
+                expires_after_ms=30_000,
+            ),
+        ),
+    )
+    assert _authorized_game_chat(decision, board, already_replied_ns=now + 1) == "Planks x8 gives a chest."
+
+
+def test_no_game_chat_without_authority() -> None:
+    from minecraft_ai.cognition import CognitionDecision
+    from minecraft_ai.perception import FrameState, PerceptionBlackboard
+    from minecraft_ai.runtime import _authorized_game_chat
+
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(frame_id=1, captured_ns=now, instance_id="bedrock:world", width=1280, height=720)
+    )
+    decision = CognitionDecision(skill_id="explore_forward", game_chat="answer")
+    assert _authorized_game_chat(decision, board) is None
