@@ -28,6 +28,7 @@ class SkillExecutor:
         self._spec: SkillSpec | None = None
         self._run: SkillRun | None = None
         self._parameters: dict[str, str | int | float | bool] = {}
+        self._instruction_override: str | None = None
         self._initiated = False
         self._last_intent: MotorIntent | None = None
 
@@ -39,6 +40,8 @@ class SkillExecutor:
     def instruction(self) -> str | None:
         if self._spec is None or self._run is None:
             return None
+        if self._instruction_override:
+            return self._instruction_override
         return _skill_instruction(self._spec, self._parameters)
 
     @property
@@ -66,12 +69,14 @@ class SkillExecutor:
         context_key: str = "default",
         parameters: dict[str, str | int | float | bool] | None = None,
         now_ns: int | None = None,
+        instruction: str | None = None,
     ) -> SkillRun:
         if self._run is not None and self._run.outcome == SkillOutcome.RUNNING:
             raise RuntimeError("a skill is already running")
         started = time.monotonic_ns() if now_ns is None else now_ns
         self._spec = spec
         self._parameters = dict(parameters or {})
+        self._instruction_override = instruction
         self._initiated = False
         self._last_intent = None
         self._run = SkillRun(
@@ -134,7 +139,10 @@ class SkillExecutor:
             mode=self._spec.policy_ref or self._spec.skill_id,
             episode_id=self._run.run_id,
             action_level=self._spec.action_level,
-            instruction=_policy_instruction(self._spec),
+            instruction=(
+                self._instruction_override
+                or _policy_instruction(self._spec)
+            ),
             condition_scale=self._spec.policy_condition_scale,
             target_label=_target_label(self._parameters),
             parameters=self.policy_parameters,

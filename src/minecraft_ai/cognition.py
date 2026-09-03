@@ -44,6 +44,14 @@ class CognitionDecision(BaseModel):
     request_replan: bool = False
     ask_perception: tuple[str, ...] = ()
     research_query: str | None = None
+    instruction: str | None = Field(
+        default=None, max_length=280,
+        description="Concrete direction handed to the visuomotor policy as its goal condition.",
+    )
+    plan_steps: tuple[str, ...] = Field(
+        default=(), max_length=5,
+        description="Short sequential next-actions the agent intends to pursue.",
+    )
 
 
 class _CognitionWireDecision(BaseModel):
@@ -60,6 +68,14 @@ class _CognitionWireDecision(BaseModel):
     x: bool = False
     q: tuple[str, ...] = Field(default=(), max_length=2)
     w: str | None = Field(default=None, max_length=160)
+    d: str | None = Field(
+        default=None, max_length=280,
+        description="Specific one-line direction for the current skill (goal condition).",
+    )
+    n: tuple[str, ...] = Field(
+        default=(), max_length=5,
+        description="Sequential plan: up to 5 short next-steps.",
+    )
 
     def expand(self) -> CognitionDecision:
         return CognitionDecision(
@@ -72,6 +88,8 @@ class _CognitionWireDecision(BaseModel):
             request_replan=self.x,
             ask_perception=self.q,
             research_query=self.w,
+            instruction=self.d,
+            plan_steps=self.n,
         )
 
 
@@ -381,7 +399,9 @@ class HighLevelController:
                         "Return one compact JSON object with wire keys: r=summary under 12 words, "
                         "g=goal id, s=skill id or null, p=parameters, o=operator reply, "
                         "c=authorized in-game chat, x=replan, q=at most two perception questions, "
-                        "w=research query. Omit null, empty, and false keys; p is required. "
+                        "w=research query, d=one practical direction (goal condition) for the "
+                        "current skill under 280 chars, n=up to 5 short sequential plan steps. "
+                        "Omit null, empty, and false keys; p is required. "
                         "fresh_facts is the only authoritative observed game state. skills "
                         "contains only currently executable options: use only a listed skill_id, "
                         "prefer concrete progression with verifiable success evidence, and never "

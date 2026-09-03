@@ -990,6 +990,7 @@ class AgentRuntime:
                         spec,
                         run_id=uuid.uuid4().hex,
                         parameters=decision.skill_parameters,
+                        instruction=decision.instruction,
                     )
             else:
                 spec = self.skills.get(decision.skill_id)
@@ -997,6 +998,7 @@ class AgentRuntime:
                     spec,
                     run_id=uuid.uuid4().hex,
                     parameters=decision.skill_parameters,
+                    instruction=decision.instruction,
                 )
 
     def _flush_pending_skill_stats(self, *, force: bool = False) -> None:
@@ -1183,6 +1185,7 @@ class AgentRuntime:
             "active_skill": None if running is None else running.skill_id,
             "active_skill_parameters": ({} if running is None else self.executor.policy_parameters),
             "active_instruction": None if running is None else self.executor.instruction,
+            "plan_steps": [] if decision is None else list(decision.plan_steps),
             "skill_outcome": None if running is None else running.outcome.value,
             "recent_skill_runs": [run.model_dump(mode="json") for run in self._recent_skill_runs],
             "chosen_goal_id": None if decision is None else decision.chosen_goal_id,
