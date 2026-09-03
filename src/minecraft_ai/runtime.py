@@ -303,14 +303,61 @@ def _observed_scene_recovery(
     if death is not None and bool(death.value):
         skill_id = "respawn_after_death"
     else:
-        mode = blackboard.fact("scene.mode", min_confidence=0.65)
+        mode = blackboard.fact("scene.mode", min_confidence=0.9)
         if mode is None or mode.value != "inventory":
+            return None
+        if not _scene_claim_is_fresh(blackboard):
+            # The mode belief may be a stale VLM hint. Without a matching
+            # current frame hash we must not preempt world play over it;
+            # an inventory recovery would otherwise freeze the agent in
+            # close/open loops while the world sits fully playable.
             return None
         skill_id = "close_open_inventory"
     if skill_id not in skills.specs:
         return None
     candidate = skills.get(skill_id)
     return candidate if initiation_satisfied(candidate, blackboard) else None
+
+
+def _scene_claim_is_fresh(blackboard: PerceptionBlackboard) -> bool:
+    """True when the current mode claim was observed on the live frame hash.
+
+    The VLM mode hint may be stale (frames change every 50ms). If the claim's
+    observation dhash does not match the current frame dhash, it must not gate
+    motor recovery; otherwise the agent freezes closing a phantom inventory.
+    """
+    observed = blackboard.fact("scene.observation_dhash", min_confidence=1.0)
+    current = blackboard.fact("frame.dhash", min_confidence=1.0)
+    if observed is None or current is None:
+        return False
+    if not isinstance(observed.value, str) or not isinstance(current.value, str):
+        return False
+    try:
+        return perceptual_hash_distance(observed.value, current.value) <= 6
+    except ValueError:
+        return False
+
+
+def _standing_goal_skill(goal: Goal) -> str | None:
+    """Map a standing-goal description to the bootstrap skill that realizes it.
+
+    Deterministic routing keeps the industrial loop persistent even when the
+    high-level cognition is cold: gathers when materials are missing, stores
+    surplus, builds storage when the reserve is met, and always moves forward
+    through the terrain afterwards. Falls back to explore when unmapped.
+    """
+    text = goal.description.casefold()
+    if "gather" in text or "material" in text:
+        return "gather_nearby_wood"
+    if "store" in text or "storage" in text:
+        return "deposit_in_storage"
+    if "build" in text or "workshop" in text:
+        return "build_workshop_shell"
+    if "expand" in text:
+        return "build_workshop_shell"
+    if "explore" in text:
+        return "explore_forward"
+    return None
 
 
 def _active_operator_messages(
@@ -1156,15 +1203,19 @@ class AgentRuntime:
             return
         goals = role_standing_goals(self.role)
         scheduler = CurriculumScheduler(self.role)
-        scheduler.choose(
+        chosen = scheduler.choose(
             [CurriculumCandidate(goal=goal, progression_novelty=0.4) for goal in goals]
         )
-        if "explore_forward" in self.skills.specs:
-            self.executor.start(
-                self.skills.get("explore_forward"),
-                run_id=uuid.uuid4().hex,
-                context_key=f"role:{self.role.role_id}",
-            )
+        skill_id = None
+        if chosen is not None:
+            skill_id = _standing_goal_skill(chosen.goal)
+        if skill_id is None or skill_id not in self.skills.specs:
+            skill_id = "explore_forward"
+        self.executor.start(
+            self.skills.get(skill_id),
+            run_id=uuid.uuid4().hex,
+            context_key=f"role:{self.role.role_id}",
+        )
 
     def _failsafe(self, reason: str) -> None:
         try:

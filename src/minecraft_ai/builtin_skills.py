@@ -207,7 +207,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="traverse_level_ground",
-            version=1,
+            version=2,
             name="Traverse level ground",
             description=(
                 "Use the fast learned motion expert to cross a short visible lane while "
@@ -217,7 +217,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("locomotion_progress", "destination_reached"),
             recovery_skills=("escape_submersion", "retreat_from_danger"),
-            max_duration_ms=8_000,
+            max_duration_ms=30_000,
             action_level=ActionLevel.MOTION,
             policy_ref="traverse_level_ground",
             policy_instruction="move forward",
@@ -466,6 +466,67 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             max_duration_ms=180_000,
             policy_ref="build_shelter",
             policy_instruction="build a shelter",
+        ),
+        SkillSpec(
+            skill_id="craft_storage_units",
+            version=1,
+            name="Craft storage units",
+            description=(
+                "Use the crafting interface to convert planks into chests, take the chests "
+                "into inventory, and close the interface safely"
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            preconditions=(SkillCondition(key="inventory.planks", operator="gte", value=8),),
+            success_conditions=(
+                SkillCondition(key="inventory.chest", operator="gte", value=1),
+            ),
+            failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
+            expected_effects=("inventory.planks-=8", "inventory.chest>=1"),
+            max_duration_ms=90_000,
+            action_level=ActionLevel.GUI,
+            policy_ref="craft_storage_units",
+            policy_instruction="craft chests for storage",
+        ),
+        SkillSpec(
+            skill_id="deposit_in_storage",
+            version=1,
+            name="Deposit materials in storage",
+            description=(
+                "Place a nearby storage chest if none is placed, then deposit surplus "
+                "gathered materials from inventory into the chest and close the interface"
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            preconditions=(SkillCondition(key="inventory.chest", operator="gte", value=1),),
+            success_conditions=(
+                SkillCondition(key="inventory.surplus_deposited", operator="truthy"),
+            ),
+            failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
+            expected_effects=("materials_stored", "inventory.surplus_deposited"),
+            recovery_skills=("escape_submersion", "retreat_from_danger"),
+            max_duration_ms=120_000,
+            action_level=ActionLevel.GROUNDED,
+            policy_ref="deposit_in_storage",
+            policy_instruction="store surplus materials in a chest",
+        ),
+        SkillSpec(
+            skill_id="build_workshop_shell",
+            version=1,
+            name="Build a workshop shell",
+            description=(
+                "Choose level ground near storage and build a sturdy enclosed workshop: "
+                "solid walls, a roof, a doorway, and a chest room for stored materials"
+            ),
+            stage=SkillStage.CANDIDATE,
+            preconditions=(SkillCondition(key="inventory.build_blocks", operator="gte", value=32),),
+            success_conditions=(
+                SkillCondition(key="environment.workshop_enclosed", operator="truthy"),
+            ),
+            failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
+            expected_effects=("workshop_structure", "environment.workshop_enclosed"),
+            recovery_skills=("escape_submersion", "retreat_from_danger"),
+            max_duration_ms=300_000,
+            policy_ref="build_workshop_shell",
+            policy_instruction="build a workshop",
         ),
     )
     for spec in specs:

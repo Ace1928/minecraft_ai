@@ -704,6 +704,36 @@ class IsolatedX11InputBackend:
             return False
         return True
 
+    def _steal_focus_for_burst(self) -> int | None:
+        """Temporarily give the Minecraft client X focus, returning the prior
+        focus window id (or None) so the operator's window can be restored."""
+        input_window_id = self._input_window_id
+        if input_window_id is None:
+            return None
+        try:
+            prior = self._display.get_input_focus().focus
+            prior_id = int(prior.id) if prior.id else None
+            if _window_is_descendant_or_same(prior, input_window_id):
+                return None
+            input_window = self._display.create_resource_object("window", input_window_id)
+            input_window.get_attributes()
+            input_window.set_input_focus(self._x.RevertToParent, self._x.CurrentTime)
+            self._display.sync()
+            return prior_id
+        except Exception:
+            return None
+
+    def _restore_focus(self, prior_id: int | None) -> None:
+        """Restore the operator's focus window after a burst."""
+        if prior_id is None:
+            return
+        try:
+            window = self._display.create_resource_object("window", prior_id)
+            window.set_input_focus(self._x.RevertToParent, self._x.CurrentTime)
+            self._display.sync()
+        except Exception:
+            pass
+
     def _ensure_input_focus(self) -> None:
         """Bedrock only consumes input while its client window has X focus.
 
@@ -749,35 +779,41 @@ class IsolatedX11InputBackend:
             except Exception:
                 self.release_all()
                 raise
-        # Bedrock consumes input only while its client window has focus. Re-assert
-        # that before each burst (operator desktop use steals focus between
-        # bursts); we then release all input at the end of the burst.
-        self._ensure_input_focus()
-        for key in action.keys_up:
-            self._xtest.fake_input(self._display, self._x.KeyRelease, self._keycode(key))
-            self._held_keys.discard(key.lower())
-        for button in action.buttons_up:
-            button_id = _BUTTONS.get(button.lower())
-            if button_id is None:
-                raise IsolationError(f"unsupported mouse button: {button!r}")
-            self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
-            self._held_buttons.discard(button.lower())
-        if action.mouse_dx or action.mouse_dy:
-            relative_x, relative_y = _wine_relative_motion_delta(
-                action.mouse_dx,
-                action.mouse_dy,
-            )
-            self._relative_mouse.move(relative_x, relative_y)
-        for key in action.keys_down:
-            self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))
-            self._held_keys.add(key.lower())
-        for button in action.buttons_down:
-            button_id = _BUTTONS.get(button.lower())
-            if button_id is None:
-                raise IsolationError(f"unsupported mouse button: {button!r}")
-            self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
-            self._held_buttons.add(button.lower())
-        self._display.sync()
+        # Bedrock consumes input only while its client window has focus. Steal
+        # focus for the duration of this burst, then restore the operator's
+        # window, so the agent keeps controlling the game while the operator
+        # types/works on their own windows between bursts.
+        prior_focus = None
+        if not self._targeted:
+            prior_focus = self._steal_focus_for_burst()
+        try:
+            for key in action.keys_up:
+                self._xtest.fake_input(self._display, self._x.KeyRelease, self._keycode(key))
+                self._held_keys.discard(key.lower())
+            for button in action.buttons_up:
+                button_id = _BUTTONS.get(button.lower())
+                if button_id is None:
+                    raise IsolationError(f"unsupported mouse button: {button!r}")
+                self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
+                self._held_buttons.discard(button.lower())
+            if action.mouse_dx or action.mouse_dy:
+                relative_x, relative_y = _wine_relative_motion_delta(
+                    action.mouse_dx,
+                    action.mouse_dy,
+                )
+                self._relative_mouse.move(relative_x, relative_y)
+            for key in action.keys_down:
+                self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))
+                self._held_keys.add(key.lower())
+            for button in action.buttons_down:
+                button_id = _BUTTONS.get(button.lower())
+                if button_id is None:
+                    raise IsolationError(f"unsupported mouse button: {button!r}")
+                self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
+                self._held_buttons.add(button.lower())
+            self._display.sync()
+        finally:
+            self._restore_focus(prior_focus)
 
     def type_chat(self, text: str) -> None:
         """Type one bounded ASCII chat message through the isolated input server."""

@@ -46,6 +46,43 @@ BUILTIN_ROLES: dict[str, RoleProfile] = {
         utility_weights={"construction": 1.0, "gathering": 0.75, "exploration": 0.35},
         risk_tolerance=0.35,
     ),
+    "industrial_builder": RoleProfile(
+        role_id="industrial_builder",
+        description=(
+            "Continuously grows an industrial infrastructure: gather materials, "
+            "craft tools and storage, build a base with chests, deposit surplus "
+            "materials into storage, and keep exploring for new resources. Never "
+            "idles; always either gathering, building, storing, or exploring."
+        ),
+        standing_goals=(
+            "gather_materials",
+            "build_storage",
+            "store_materials",
+            "expand_workshop",
+            "explore_for_resources",
+        ),
+        utility_weights={
+            "gathering": 1.0,
+            "construction": 0.95,
+            "exploration": 0.75,
+            "progression": 0.6,
+            "survival": 0.4,
+        },
+        risk_tolerance=0.4,
+        preferred_skills=(
+            "gather_nearby_wood",
+            "gather_cobblestone",
+            "mine_coal_ore",
+            "craft_crafting_table",
+            "craft_storage_units",
+            "deposit_in_storage",
+            "build_workshop_shell",
+            "explore_forward",
+            "traverse_level_ground",
+        ),
+        knowledge_domains=("crafting", "storage", "structures", "mining"),
+        reserve_targets={"oak_log": 16, "cobblestone": 32, "coal": 8, "oak_planks": 16},
+    ),
     "redstone_engineer": RoleProfile(
         role_id="redstone_engineer",
         standing_goals=("maintain_redstone_stock", "automate_repetitive_work", "prototype_systems"),
