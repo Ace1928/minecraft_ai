@@ -595,11 +595,11 @@ class IsolatedX11InputBackend:
         self.target_window_id = target_window_id
         self._input_window_id = target_window_id
         self._host_monitor_binding = host_monitor_binding
-        # Host-monitor play never steals the operator's focus. Input is instead
+        # Host-display play never steals the operator's focus. Input is instead
         # delivered directly to the Minecraft window (window-targeted events):
         # keyboard/buttons/motion reach the game while the operator keeps the
         # desktop to themselves, so the pointer is never farmed or captured.
-        self._targeted = host_monitor_binding is not None
+        self._targeted = allow_host
         self._targeted_pointer: _TargetedPointer | None = None
         try:
             self._display: Any = display_module.Display(display_name)
@@ -617,7 +617,8 @@ class IsolatedX11InputBackend:
             input_window = _resolve_minecraft_input_window(self._display, target_window_id)
             self._input_window_id = int(input_window.id)
         if host_monitor_binding is None:
-            self._ensure_input_focus()
+            if not self._targeted:
+                self._ensure_input_focus()
         else:
             validate_host_monitor_window(
                 self._display,

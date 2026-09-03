@@ -193,7 +193,7 @@ def _capture_live_bedrock_frame() -> CapturedFrame | None:
                 host_binding.monitor,
                 host_binding.bound_ns,
             )
-        key = (display, window_id, allow_host, binding_key)
+        key = (display, window_id, allow_host, binding_key, "x11")
         with _live_capture_lock:
             global _live_capture, _live_capture_key
             if _live_capture is not None and _live_capture_key != key:
@@ -207,6 +207,7 @@ def _capture_live_bedrock_frame() -> CapturedFrame | None:
                         window_id,
                         allow_host=allow_host,
                         host_monitor_binding=host_binding,
+                        source="x11",
                     )
                     _live_capture_key = key
                 except (OSError, RuntimeError, ValueError):

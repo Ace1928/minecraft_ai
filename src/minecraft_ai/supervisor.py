@@ -226,7 +226,9 @@ class Supervisor:
             else HostMonitorBinding.from_payload(host_monitor_binding)
         )
         if allow_host and binding is None:
-            raise RuntimeError("host-display input requires an exact dedicated-monitor binding")
+            # Unbound host-display play: input is targeted at the exact window
+            # (XSendEvent, no focus steal), so no monitor binding is required.
+            pass
         if binding is not None and not allow_host:
             raise RuntimeError("dedicated-monitor binding requires explicit host access")
 

@@ -323,12 +323,13 @@ def run(
     if not bedrock_session_alive(session):
         raise typer.BadParameter("The managed Bedrock session is not alive.")
     if session.mode == "direct":
-        raise typer.BadParameter(
-            "Direct host-display sessions are observation/debug only and cannot be armed. "
-            "Bind its exact dedicated output with `minecraft-ai bedrock bind-monitor OUTPUT`, "
-            "or stop it and launch the default isolated session."
-        )
-    if session.mode not in {"xephyr", "weston", "host-monitor"}:
+        if capture_source != "x11":
+            raise typer.BadParameter(
+                "Direct host-display sessions need `--capture-source x11` (window-targeted "
+                "XGetImage) plus targeted window input; bind a dedicated output or stop "
+                "with `minecraft-ai bedrock stop` to launch the isolated session."
+            )
+    if session.mode not in {"xephyr", "weston", "host-monitor", "direct"}:
         raise typer.BadParameter(f"Unsupported managed Bedrock mode: {session.mode!r}")
     window_id = wait_for_minecraft_window(session, timeout_s=30.0)
     host_binding = session.host_monitor_binding()
@@ -337,7 +338,9 @@ def run(
             raise typer.BadParameter(
                 "Host-monitor session lost its exact Minecraft window binding; rebind it."
             )
-    allow_host = host_binding is not None
+    if session.mode == "direct":
+        host_binding = None
+    allow_host = host_binding is not None or session.mode == "direct"
     install = discover_bedrock_linux_install()
     build = install.selected_build if install is not None else None
     if install is None or build is None:

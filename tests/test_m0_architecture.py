@@ -139,12 +139,38 @@ def test_state_schema_migrates_v1_and_preserves_failure_streak(tmp_path: Path) -
     assert "consecutive_failures" in columns
 
 
-def test_supervisor_rejects_unbound_host_display_input_even_when_requested() -> None:
+def test_supervisor_accepts_unbound_host_display_input_when_targeted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     supervisor = Supervisor()
     supervisor.start()
 
-    with pytest.raises(RuntimeError, match="dedicated-monitor binding"):
-        supervisor.attach_bedrock_x11(":0", 1, allow_host=True)
+    class _ProbeBackend:
+        backend_id = "bedrock-isolated-x11-xtest"
+        live_capable = True
+        display_name = ":0"
+        target_window_id = None
+
+        def __init__(self, display, *, target_window_id=None, allow_host=False,
+                     host_monitor_binding=None):
+            self.display_name = display
+            self.target_window_id = target_window_id
+
+        def probe_target(self) -> bool:
+            return True
+
+        def release_all(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "minecraft_ai.platforms.bedrock_x11.IsolatedX11InputBackend",
+        _ProbeBackend,
+    )
+    supervisor.attach_bedrock_x11(":0", 1, allow_host=True)
+    assert supervisor.backend is not None
 
 
 def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> None:
