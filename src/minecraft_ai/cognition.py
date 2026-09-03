@@ -110,8 +110,7 @@ class _DecisionRepairBounds:
     def prompt_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "allowed_skills": [
-                {"s": skill_id, "p": parameters}
-                for skill_id, parameters in self.allowed_skills
+                {"s": skill_id, "p": parameters} for skill_id, parameters in self.allowed_skills
             ],
             "required_action_constraints": dict(self.required_action_constraints),
         }
@@ -397,8 +396,9 @@ class HighLevelController:
                         "allow_attack:false, allow_use:false, or allow_jump:false in p. "
                         "Treat recent_skill_runs and evaluation as empirical evidence. Avoid a "
                         "skill after two consecutive failures; choose another listed skill or "
-                        "return s null with x true and request needed perception. A fresh "
-                        "operator correction permits one evidence-producing retry."
+                        "return s null with x true and request needed perception. Every q item "
+                        "must be a literal missing fresh_facts key, never a prose question. "
+                        "A fresh operator correction permits one evidence-producing retry."
                     ),
                 ),
                 ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
@@ -611,9 +611,7 @@ class HighLevelController:
             and (allowed_skill_ids is None or skill.skill_id in allowed_skill_ids)
         )
         constraints = (
-            ()
-            if active is None
-            else tuple(_explicit_action_constraints(active.text).items())
+            () if active is None else tuple(_explicit_action_constraints(active.text).items())
         )
         return _DecisionRepairBounds(
             allowed_skills=allowed_skills,
@@ -705,7 +703,7 @@ class HighLevelController:
                 "skill_parameters": dict(repair_bounds.required_action_constraints),
                 "request_replan": True,
                 "ask_perception": tuple(
-                    dict.fromkeys((*decision.ask_perception, "walkable route around the obstacle"))
+                    dict.fromkeys((*decision.ask_perception, "obstacle.ahead"))
                 ),
             }
         )

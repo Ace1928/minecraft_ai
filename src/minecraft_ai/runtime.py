@@ -18,6 +18,7 @@ from .cognition import (
 from .action_levels import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
 from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
+from .grounded_perception import resolve_grounded_output_keys
 from .memory import MemoryStore
 from .motor import MotorIntent
 from .perception import ActivePerceptionQuery, PerceptionBlackboard, PerceptionFact, Track
@@ -580,8 +581,20 @@ class AgentRuntime:
 
         active = self.executor.run
         if active is None or active.outcome != SkillOutcome.RUNNING:
-            self._flush_pending_skill_stats()
-            return
+            # Never idle the player while cognition is in flight: keep a
+            # precondition-free exploration option running so motor keeps
+            # emitting movement. Cognition switches skills when it returns.
+            rescue = self._explore_keep_alive()
+            if rescue is not None:
+                self.executor.start(
+                    rescue,
+                    run_id=uuid.uuid4().hex,
+                    context_key="explore-keepalive",
+                )
+                active = self.executor.run
+            if active is None or active.outcome != SkillOutcome.RUNNING:
+                self._flush_pending_skill_stats()
+                return
         motor_started = time.perf_counter()
         result = self.executor.tick(
             self.blackboard,
@@ -616,6 +629,19 @@ class AgentRuntime:
                     run_id=uuid.uuid4().hex,
                     context_key=result.run.context_key,
                 )
+
+    def _explore_keep_alive(self) -> SkillSpec | None:
+        """Pick a precondition-free option to keep motor busy while cognition decides.
+
+        This runs only when no skill is currently running (the idle gap after a
+        terminal run). The MOTION-level traversal option routes to the fast
+        learned motion expert (VPT), which continuously emits locomotion even
+        without fresh semantic/grounding data -- precisely what prevents the
+        idle freeze that the latent STEVE body produces while cognition is in
+        flight.
+        """
+        for skill_id in ("traverse_level_ground", "explore_forward"):
+            return self.skills.specs.get(skill_id)
 
     def _route_observed_scene_recovery(self) -> None:
         """Preempt stale world work when a verified blocking scene event arrives."""
@@ -714,12 +740,34 @@ class AgentRuntime:
         active = self.executor.run
         skill_id = active.skill_id if active is not None else None
         question = self._semantic_question(skill_id)
+        output_keys = list(
+            (
+                "scene.mode",
+                "scene.playable",
+                "danger.immediate",
+                "obstacle.ahead",
+                "target.visible",
+                "target.dx",
+                "target.dy",
+            )
+        )
+        if skill_id is not None:
+            spec = self.skills.get(skill_id)
+            for condition in (
+                *spec.preconditions,
+                *(item for group in spec.initiation_alternatives for item in group),
+                *spec.success_conditions,
+                *spec.failure_conditions,
+            ):
+                if resolve_grounded_output_keys((), condition.key):
+                    output_keys.append(condition.key)
         query = ActivePerceptionQuery(
             query_id=uuid.uuid4().hex,
             question=question,
             skill_id=skill_id,
             frame_id=frame_id,
             deadline_ms=_semantic_deadline_ms(self.semantic_hz),
+            output_keys=tuple(dict.fromkeys(output_keys)),
         )
         if self.perception.request_semantics(query):
             self.metrics.semantic_requests += 1
@@ -868,6 +916,7 @@ class AgentRuntime:
                 question=question,
                 skill_id=decision.skill_id,
                 frame_id=latest.frame_id,
+                output_keys=resolve_grounded_output_keys((), question),
             )
             self.perception.request_semantics(query)
         game_chat = _authorized_game_chat(decision, self.blackboard)

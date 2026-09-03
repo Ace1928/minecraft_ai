@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import importlib
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -56,6 +56,7 @@ class OpenAICompatibleLocalModel:
     thinking_budget_tokens: int | None = None
     reasoning_format: Literal["none", "deepseek", "deepseek-legacy"] | None = None
     allow_remote: bool = False
+    _grammar_supported: bool | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         lowered = self.base_url.lower()
@@ -162,6 +163,45 @@ class OpenAICompatibleLocalModel:
             },
         )
 
+    def inspect_constrained(
+        self,
+        prompt: str,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        name: str,
+        schema: dict[str, object],
+        grammar: str,
+    ) -> ModelResponse:
+        """Use llama.cpp's enforced grammar when the local endpoint exposes it.
+
+        Some llama.cpp revisions accept the OpenAI ``json_schema`` field but
+        silently decode unconstrained text. The native ``grammar`` request
+        field is an actual sampler constraint. Other OpenAI-compatible local
+        servers keep the portable response-format path.
+        """
+
+        if self._llama_grammar_available():
+            try:
+                return self._inspect(
+                    prompt,
+                    image_bytes=image_bytes,
+                    mime_type=mime_type,
+                    grammar=grammar,
+                )
+            except Exception as exc:
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                if status_code not in {400, 404, 422}:
+                    raise
+                self._grammar_supported = False
+        return self.inspect_structured(
+            prompt,
+            image_bytes=image_bytes,
+            mime_type=mime_type,
+            name=name,
+            schema=schema,
+        )
+
     def _inspect(
         self,
         prompt: str,
@@ -169,6 +209,7 @@ class OpenAICompatibleLocalModel:
         image_bytes: bytes,
         mime_type: str,
         response_format: dict[str, object] | None = None,
+        grammar: str | None = None,
     ) -> ModelResponse:
         import time
 
@@ -197,6 +238,8 @@ class OpenAICompatibleLocalModel:
             payload["reasoning_format"] = self.reasoning_format
         if response_format is not None:
             payload["response_format"] = response_format
+        if grammar is not None:
+            payload["grammar"] = grammar
         with _LOCAL_MODEL_INFERENCE_LOCK:
             with self._client() as client:
                 response = client.post(
@@ -212,6 +255,27 @@ class OpenAICompatibleLocalModel:
             model=str(raw.get("model", self.model_id)) if isinstance(raw, dict) else self.model_id,
             latency_ms=(time.perf_counter() - started) * 1000.0,
         )
+
+    def _llama_grammar_available(self) -> bool:
+        if self._grammar_supported is not None:
+            return self._grammar_supported
+        props_url = self.base_url.rstrip("/")
+        if props_url.endswith("/v1"):
+            props_url = props_url[:-3]
+        props_url += "/props"
+        try:
+            with self._client() as client:
+                response = client.get(props_url)
+                response.raise_for_status()
+                payload = response.json()
+            self._grammar_supported = bool(
+                isinstance(payload, dict)
+                and isinstance(payload.get("build_info"), str)
+                and payload.get("build_info")
+            )
+        except Exception:
+            self._grammar_supported = False
+        return self._grammar_supported
 
 
 def _extract_chat_text(raw: Any) -> str:
