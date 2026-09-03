@@ -240,6 +240,88 @@ class _RetryRepairingModel(_ShelterSelectingModel):
         )
 
 
+class _MalformedThenRepairingModel(_ShelterSelectingModel):
+    def __init__(self, *, repair_text: str | None = None) -> None:
+        super().__init__()
+        self.calls: list[tuple[tuple[ModelMessage, ...], str]] = []
+        self.repair_text = repair_text or json.dumps(
+            {
+                "r": "Recovered the explicit option",
+                "g": "survive",
+                "s": "explore_forward",
+                "p": {},
+            }
+        )
+
+    def complete_structured(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        del schema
+        self.calls.append((messages, name))
+        text = (
+            '{"r":"Continue","g":"survive","s":"explore_forward","p":{'
+            if len(self.calls) == 1
+            else self.repair_text
+        )
+        return ModelResponse(text=text, model=self.model_id, latency_ms=1.0)
+
+
+class _AlwaysMalformedModel(_MalformedThenRepairingModel):
+    def complete_structured(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        response = super().complete_structured(
+            messages,
+            name=name,
+            schema=schema,
+        )
+        return response.model_copy(update={"text": '{"r":"still truncated"'})
+
+
+class _AuthorityRepairingModel(_ShelterSelectingModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[tuple[ModelMessage, ...]] = []
+
+    def complete_structured(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        del name, schema
+        self.calls.append(messages)
+        if len(self.calls) == 1:
+            payload = {
+                "r": "Try an option that does not exist",
+                "g": "wrong-goal",
+                "s": "invented_skill",
+                "p": {"allow_attack": True},
+            }
+        else:
+            payload = {
+                "r": "Use the allowed traversal option",
+                "g": "wrong-goal",
+                "s": "explore_forward",
+                "p": {"allow_attack": True, "invented": "claim"},
+                "o": "I will explore without attacking.",
+            }
+        return ModelResponse(
+            text=json.dumps(payload),
+            model=self.model_id,
+            latency_ms=1.0,
+        )
+
+
 def _context() -> CognitionContext:
     return CognitionContext(
         role=get_role("generalist"),
@@ -356,6 +438,80 @@ def test_high_level_uses_lossless_compact_structured_wire_schema() -> None:
     assert "required" not in model.schema
     assert decision.skill_id == "explore_forward"
     assert decision.reasoning_summary == "Explore while gathering evidence"
+
+
+def test_high_level_repairs_truncated_json_once_with_compact_bounded_context() -> None:
+    model = _MalformedThenRepairingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    decision = controller.decide(_board(), _context())
+
+    assert decision.skill_id == "explore_forward"
+    assert len(model.calls) == 2
+    assert model.calls[0][1] == "cognition_decision"
+    repair_messages, repair_name = model.calls[1]
+    assert repair_name == "cognition_decision_json_repair"
+    assert len(repair_messages) == 2
+    assert sum(len(message.content) for message in repair_messages) < 3_000
+    assert "fresh_facts" not in "".join(message.content for message in repair_messages)
+    repair_payload = json.loads(repair_messages[1].content)
+    assert repair_payload["rejected_output"].endswith('"p":{')
+    assert {item["s"] for item in repair_payload["authority_bounds"]["allowed_skills"]}
+    assert controller.metrics.calls == 2
+    assert controller.metrics.repairs == 1
+    assert controller.metrics.json_repairs == 1
+    assert controller.metrics.json_repair_failures == 0
+    assert controller.metrics.failures == 0
+
+
+def test_high_level_json_repair_is_single_attempt_and_fails_closed() -> None:
+    model = _AlwaysMalformedModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    decision = controller.decide(_board(), _context())
+
+    assert len(model.calls) == 2
+    assert decision.skill_id is None
+    assert decision.request_replan is True
+    assert controller.metrics.calls == 2
+    assert controller.metrics.json_repairs == 1
+    assert controller.metrics.json_repair_failures == 1
+    assert controller.metrics.failures == 1
+    assert "after one bounded repair" in (controller.metrics.last_error or "")
+
+
+def test_compact_option_repair_preserves_operator_authority_and_parameter_bounds() -> None:
+    message = OperatorMessage(
+        message_id="bounded-repair",
+        created_ns=2,
+        text="Explore the visible open ground, but do not attack.",
+        status=OperatorMessageStatus.DELIVERED,
+    )
+    context = _context()
+    context.operator_messages = (message,)
+    model = _AuthorityRepairingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    decision = controller.decide(_board(), context)
+
+    assert len(model.calls) == 2
+    assert decision.chosen_goal_id == "operator:bounded-repair"
+    assert decision.skill_id == "explore_forward"
+    assert decision.skill_parameters == {"allow_attack": False}
+    assert decision.say == "I will explore without attacking."
+    repair_messages = model.calls[1]
+    assert len(repair_messages) == 2
+    assert sum(len(message.content) for message in repair_messages) < 3_000
+    combined = "".join(item.content for item in repair_messages)
+    assert "fresh_facts" not in combined
+    assert "ACTIVE OPERATOR DIRECTIVE" not in combined
+    repair_payload = json.loads(repair_messages[1].content)
+    assert repair_payload["authority_bounds"]["authority_goal_id"] == (
+        "operator:bounded-repair"
+    )
+    assert repair_payload["authority_bounds"]["required_action_constraints"] == {
+        "allow_attack": False
+    }
 
 
 def test_high_level_receives_explicit_active_operator_correction() -> None:

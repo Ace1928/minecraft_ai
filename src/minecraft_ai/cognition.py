@@ -4,13 +4,13 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .execution import initiation_satisfied
 from .memory import MemoryRecord
-from .models import LanguageModel, ModelMessage
+from .models import LanguageModel, ModelMessage, ModelResponse
 from .perception import PerceptionBlackboard
 from .planning import Goal
 from .roles import RoleProfile
@@ -92,9 +92,58 @@ class HighLevelMetrics:
     repairs: int = 0
     failures: int = 0
     retry_repairs: int = 0
+    json_repairs: int = 0
+    json_repair_failures: int = 0
     last_latency_ms: float = 0.0
     last_error: str | None = None
     last_model: str | None = None
+
+
+@dataclass(frozen=True)
+class _DecisionRepairBounds:
+    """Small authority capsule for one learned structured-output repair."""
+
+    allowed_skills: tuple[tuple[str, tuple[str, ...]], ...]
+    authority_goal_id: str | None = None
+    required_action_constraints: tuple[tuple[str, bool], ...] = ()
+
+    def prompt_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "allowed_skills": [
+                {"s": skill_id, "p": parameters}
+                for skill_id, parameters in self.allowed_skills
+            ],
+            "required_action_constraints": dict(self.required_action_constraints),
+        }
+        if self.authority_goal_id is not None:
+            payload["authority_goal_id"] = self.authority_goal_id
+        return payload
+
+
+_JSON_REPAIR_SYSTEM = (
+    "You are a bounded JSON normalizer, not a planner. Repair exactly one malformed or "
+    "truncated Minecraft cognition response into the strict wire schema supplied by the API. "
+    "Wire keys are r=brief summary, g=goal id, s=skill id or null, p=parameter object, "
+    "o=operator reply, c=authorized game chat, x=replan, q=at most two perception questions, "
+    "w=research query. Always emit p. Preserve only explicit complete values from "
+    "rejected_output and authority_bounds. Never invent observations, inventory, outcomes, "
+    "goals, chat, or parameters. s must be null or an allowed skill. Preserve authority_goal_id "
+    "and required_action_constraints exactly when present. If the action cannot be recovered "
+    "without invention, emit s=null, p containing only required constraints, and x=true. "
+    "Return JSON only."
+)
+
+_SEMANTIC_REPAIR_SYSTEM = (
+    "Make exactly one bounded correction to a rejected Minecraft cognition decision. The user "
+    "JSON below is the complete repair context; do not assume or invent omitted world state. "
+    "Return only the strict compact wire JSON. Select s only from authority_bounds.allowed_skills "
+    "and use only its listed parameter names. Preserve authority_goal_id and every false "
+    "required_action_constraint exactly. If no allowed option is justified, return s=null, "
+    "p containing the required constraints, x=true, and ask for at most two needed perceptions."
+)
+
+_MAX_REJECTED_OUTPUT_CHARS = 2_048
+_MAX_REPAIR_REASON_CHARS = 640
 
 
 def _operator_prompt_payload(message: OperatorMessage) -> dict[str, object]:
@@ -237,6 +286,8 @@ class HighLevelController:
     ) -> CognitionDecision:
         try:
             latest = blackboard.latest()
+            feasible_skill_payloads = self._feasible_skill_payloads(blackboard)
+            repair_bounds = self._decision_repair_bounds(blackboard, context)
             facts = {
                 key: {
                     "value": fact.value,
@@ -321,7 +372,7 @@ class HighLevelController:
                     ],
                 },
                 "fresh_facts": facts,
-                "skills": self._feasible_skill_payloads(blackboard),
+                "skills": feasible_skill_payloads,
             }
             messages = (
                 ModelMessage(
@@ -369,18 +420,13 @@ class HighLevelController:
                     )
                 ),
             )
-            decision = self._complete(messages)
-            decision = self._scope_operator_decision(decision, blackboard, context)
-            operator_goal_ids = {
-                f"operator:{message.message_id}" for message in context.operator_messages
-            }
-            if decision.say is not None and decision.chosen_goal_id not in operator_goal_ids:
-                decision = decision.model_copy(update={"say": None})
+            decision = self._complete(messages, repair_bounds=repair_bounds)
+            decision = self._apply_decision_authority(decision, blackboard, context)
             if decision.skill_id is not None and decision.skill_id not in self.skills.specs:
                 return self._repair_infeasible(
-                    messages,
                     decision,
                     blackboard,
+                    context,
                     reason=f"unknown skill id {decision.skill_id!r}",
                 )
             if decision.skill_id is not None:
@@ -395,9 +441,9 @@ class HighLevelController:
                         for condition in group
                     )
                     return self._repair_infeasible(
-                        messages,
                         decision,
                         blackboard,
+                        context,
                         reason=(
                             f"option {selected.skill_id!r} is infeasible because these fresh "
                             f"preconditions are missing: {', '.join(missing)}"
@@ -407,7 +453,6 @@ class HighLevelController:
                 blocked_run = self._blocking_skill_run(decision, context)
                 if blocked_run is not None:
                     return self._repair_repeated_failure(
-                        messages,
                         decision,
                         blackboard,
                         context,
@@ -426,6 +471,20 @@ class HighLevelController:
                 request_replan=True,
             )
 
+    def _apply_decision_authority(
+        self,
+        decision: CognitionDecision,
+        blackboard: PerceptionBlackboard,
+        context: CognitionContext,
+    ) -> CognitionDecision:
+        decision = self._scope_operator_decision(decision, blackboard, context)
+        operator_goal_ids = {
+            f"operator:{message.message_id}" for message in context.operator_messages
+        }
+        if decision.say is not None and decision.chosen_goal_id not in operator_goal_ids:
+            return decision.model_copy(update={"say": None})
+        return decision
+
     def _scope_operator_decision(
         self,
         decision: CognitionDecision,
@@ -440,6 +499,9 @@ class HighLevelController:
             ),
             None,
         )
+        danger = blackboard.fact("danger.immediate", min_confidence=0.7)
+        if danger is not None and bool(danger.value):
+            active = None
         if active is None:
             return decision
         danger = blackboard.fact("danger.immediate", min_confidence=0.7)
@@ -477,6 +539,8 @@ class HighLevelController:
             "repairs": self.metrics.repairs,
             "failures": self.metrics.failures,
             "retry_repairs": self.metrics.retry_repairs,
+            "json_repairs": self.metrics.json_repairs,
+            "json_repair_failures": self.metrics.json_repair_failures,
             "last_latency_ms": round(self.metrics.last_latency_ms, 3),
             "last_error": self.metrics.last_error,
             "last_model": self.metrics.last_model,
@@ -522,6 +586,41 @@ class HighLevelController:
             )
         return payloads
 
+    def _decision_repair_bounds(
+        self,
+        blackboard: PerceptionBlackboard,
+        context: CognitionContext,
+        *,
+        allowed_skill_ids: set[str] | None = None,
+    ) -> _DecisionRepairBounds:
+        active = next(
+            (
+                message
+                for message in context.operator_messages
+                if message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+            ),
+            None,
+        )
+        allowed_skills = tuple(
+            (skill.skill_id, tuple(skill.parameters))
+            for skill in sorted(
+                self.skills.specs.values(),
+                key=lambda candidate: candidate.skill_id,
+            )
+            if initiation_satisfied(skill, blackboard)
+            and (allowed_skill_ids is None or skill.skill_id in allowed_skill_ids)
+        )
+        constraints = (
+            ()
+            if active is None
+            else tuple(_explicit_action_constraints(active.text).items())
+        )
+        return _DecisionRepairBounds(
+            allowed_skills=allowed_skills,
+            authority_goal_id=None if active is None else f"operator:{active.message_id}",
+            required_action_constraints=constraints,
+        )
+
     def _blocking_skill_run(
         self,
         decision: CognitionDecision,
@@ -558,7 +657,6 @@ class HighLevelController:
 
     def _repair_repeated_failure(
         self,
-        messages: tuple[ModelMessage, ...],
         decision: CognitionDecision,
         blackboard: PerceptionBlackboard,
         context: CognitionContext,
@@ -574,32 +672,29 @@ class HighLevelController:
         )
         self.metrics.repairs += 1
         self.metrics.retry_repairs += 1
-        repair_messages = (
-            *messages,
-            ModelMessage(role="assistant", content=decision.model_dump_json()),
-            ModelMessage(
-                role="user",
-                content=(
-                    f"That decision is rejected by empirical execution evidence: option "
-                    f"{failed_skill!r} recently ended as {blocked_run.outcome.value!r} with "
-                    f"reason {blocked_run.failure_reason!r} and has repeated consecutive "
-                    "failures. Recently blocked options are "
-                    f"{json.dumps(sorted(blocked_skill_ids))}. Do not alternate back to any of "
-                    "them. Select a different feasible learned option from "
-                    f"{json.dumps(feasible)}, or return skill_id null, request_replan true, "
-                    "and request the perception needed to choose safely. Preserve the current "
-                    "goal and explicit operator action constraints."
-                ),
-            ),
+        repair_bounds = self._decision_repair_bounds(
+            blackboard,
+            context,
+            allowed_skill_ids=set(feasible),
         )
-        repaired = self._complete(repair_messages)
-        repaired = self._scope_operator_decision(repaired, blackboard, context)
+        repair_messages = _semantic_repair_messages(
+            decision,
+            repair_bounds,
+            repair_kind="repeated_execution_failure",
+            reason=(
+                f"{failed_skill!r} ended as {blocked_run.outcome.value!r} with reason "
+                f"{blocked_run.failure_reason!r} and has repeated consecutive failures"
+            ),
+            blocked_skill_ids=tuple(sorted(blocked_skill_ids)),
+        )
+        repaired = self._complete(repair_messages, repair_bounds=repair_bounds)
+        repaired = self._apply_decision_authority(repaired, blackboard, context)
         if repaired.skill_id is None and repaired.request_replan:
             self.metrics.last_error = None
-            return repaired
+            return _enforce_repair_bounds(repaired, repair_bounds)
         if repaired.skill_id in feasible:
             self.metrics.last_error = None
-            return repaired
+            return _enforce_repair_bounds(repaired, repair_bounds)
         self.metrics.last_error = f"repeated-option-blocked:{failed_skill}"
         return decision.model_copy(
             update={
@@ -607,7 +702,7 @@ class HighLevelController:
                     f"Blocked repeated {failed_skill} after empirical timeout/failure evidence."
                 ),
                 "skill_id": None,
-                "skill_parameters": {},
+                "skill_parameters": dict(repair_bounds.required_action_constraints),
                 "request_replan": True,
                 "ask_perception": tuple(
                     dict.fromkeys((*decision.ask_perception, "walkable route around the obstacle"))
@@ -615,26 +710,60 @@ class HighLevelController:
             }
         )
 
-    def _complete(self, messages: tuple[ModelMessage, ...]) -> CognitionDecision:
+    def _complete(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        repair_bounds: _DecisionRepairBounds,
+    ) -> CognitionDecision:
+        response = self._request_model(messages, name="cognition_decision")
+        try:
+            return _parse_decision(response.text)
+        except (RuntimeError, ValidationError):
+            self.metrics.repairs += 1
+            self.metrics.json_repairs += 1
+            repair_messages = _json_repair_messages(response.text, repair_bounds)
+            repaired_response = self._request_model(
+                repair_messages,
+                name="cognition_decision_json_repair",
+            )
+            try:
+                repaired = _parse_decision(repaired_response.text)
+            except (RuntimeError, ValidationError) as repair_exc:
+                self.metrics.json_repair_failures += 1
+                raise RuntimeError(
+                    "high-level model returned invalid structured output after one bounded repair"
+                ) from repair_exc
+            return _enforce_repair_bounds(repaired, repair_bounds)
+
+    def _request_model(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+    ) -> ModelResponse:
         structured = getattr(self.model, "complete_structured", None)
         if callable(structured):
-            response = structured(
-                messages,
-                name="cognition_decision",
-                schema=_CognitionWireDecision.model_json_schema(),
+            response = cast(
+                ModelResponse,
+                structured(
+                    messages,
+                    name=name,
+                    schema=_CognitionWireDecision.model_json_schema(),
+                ),
             )
         else:
             response = self.model.complete(messages)
         self.metrics.calls += 1
         self.metrics.last_latency_ms = response.latency_ms
         self.metrics.last_model = response.model
-        return _parse_decision(response.text)
+        return response
 
     def _repair_infeasible(
         self,
-        messages: tuple[ModelMessage, ...],
         decision: CognitionDecision,
         blackboard: PerceptionBlackboard,
+        context: CognitionContext,
         *,
         reason: str,
         missing: tuple[str, ...] = (),
@@ -645,37 +774,139 @@ class HighLevelController:
             if initiation_satisfied(skill, blackboard)
         )
         self.metrics.repairs += 1
-        repair_messages = (
-            *messages,
-            ModelMessage(role="assistant", content=decision.model_dump_json()),
-            ModelMessage(
-                role="user",
-                content=(
-                    f"That decision is rejected: {reason}. Select one concrete skill_id from "
-                    f"this currently feasible set: {json.dumps(feasible)}. Preserve the goal "
-                    "when possible, do not invent observations, and return the same strict "
-                    "compact wire schema."
-                ),
-            ),
+        repair_bounds = self._decision_repair_bounds(
+            blackboard,
+            context,
+            allowed_skill_ids=set(feasible),
         )
-        repaired = self._complete(repair_messages)
+        repair_messages = _semantic_repair_messages(
+            decision,
+            repair_bounds,
+            repair_kind="infeasible_option",
+            reason=reason,
+            missing_facts=missing,
+        )
+        repaired = self._complete(repair_messages, repair_bounds=repair_bounds)
+        repaired = self._apply_decision_authority(repaired, blackboard, context)
         if (
             repaired.skill_id is not None
             and repaired.skill_id in feasible
             and repaired.skill_id in self.skills.specs
         ):
             self.metrics.last_error = None
-            return repaired
+            return _enforce_repair_bounds(repaired, repair_bounds)
         self.metrics.last_error = f"infeasible-decision: {reason}"
         return decision.model_copy(
             update={
                 "reasoning_summary": f"Blocked infeasible decision; {reason}",
                 "skill_id": None,
-                "skill_parameters": {},
+                "skill_parameters": dict(repair_bounds.required_action_constraints),
                 "request_replan": True,
                 "ask_perception": tuple(dict.fromkeys((*decision.ask_perception, *missing))),
             }
         )
+
+
+def _compact_wire_payload(decision: CognitionDecision) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "r": decision.reasoning_summary[:120],
+        "p": decision.skill_parameters,
+    }
+    optional_values: tuple[tuple[str, object | None], ...] = (
+        ("g", decision.chosen_goal_id),
+        ("s", decision.skill_id),
+        ("o", None if decision.say is None else decision.say[:160]),
+        ("c", None if decision.game_chat is None else decision.game_chat[:160]),
+        ("w", None if decision.research_query is None else decision.research_query[:160]),
+    )
+    for key, value in optional_values:
+        if value is not None:
+            payload[key] = value
+    if decision.request_replan:
+        payload["x"] = True
+    if decision.ask_perception:
+        payload["q"] = tuple(question[:160] for question in decision.ask_perception[:2])
+    return payload
+
+
+def _json_repair_messages(
+    rejected_output: str,
+    bounds: _DecisionRepairBounds,
+) -> tuple[ModelMessage, ...]:
+    payload = {
+        "rejected_output": rejected_output[:_MAX_REJECTED_OUTPUT_CHARS],
+        "authority_bounds": bounds.prompt_payload(),
+        "safe_fallback": {
+            "s": None,
+            "p": dict(bounds.required_action_constraints),
+            "x": True,
+        },
+    }
+    return (
+        ModelMessage(role="system", content=_JSON_REPAIR_SYSTEM),
+        ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
+    )
+
+
+def _semantic_repair_messages(
+    decision: CognitionDecision,
+    bounds: _DecisionRepairBounds,
+    *,
+    repair_kind: str,
+    reason: str,
+    blocked_skill_ids: tuple[str, ...] = (),
+    missing_facts: tuple[str, ...] = (),
+) -> tuple[ModelMessage, ...]:
+    payload = {
+        "repair": repair_kind,
+        "reason": reason[:_MAX_REPAIR_REASON_CHARS],
+        "rejected": _compact_wire_payload(decision),
+        "authority_bounds": bounds.prompt_payload(),
+        "blocked_skills": blocked_skill_ids,
+        "missing_facts": missing_facts,
+        "safe_fallback": {
+            "s": None,
+            "p": dict(bounds.required_action_constraints),
+            "x": True,
+        },
+    }
+    return (
+        ModelMessage(role="system", content=_SEMANTIC_REPAIR_SYSTEM),
+        ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
+    )
+
+
+def _enforce_repair_bounds(
+    decision: CognitionDecision,
+    bounds: _DecisionRepairBounds,
+) -> CognitionDecision:
+    allowed_parameters = dict(bounds.allowed_skills)
+    required_constraints: dict[str, str | int | float | bool] = dict(
+        bounds.required_action_constraints
+    )
+    goal_id = bounds.authority_goal_id or decision.chosen_goal_id
+    if decision.skill_id is not None and decision.skill_id not in allowed_parameters:
+        return CognitionDecision(
+            reasoning_summary="Repaired decision violated the allowed option bounds.",
+            chosen_goal_id=goal_id,
+            skill_parameters=required_constraints,
+            request_replan=True,
+            ask_perception=decision.ask_perception[:2],
+        )
+    if decision.skill_id is None:
+        parameters = required_constraints
+    else:
+        permitted = set(allowed_parameters[decision.skill_id]) | set(required_constraints)
+        parameters = {
+            key: value for key, value in decision.skill_parameters.items() if key in permitted
+        }
+        parameters.update(required_constraints)
+    return decision.model_copy(
+        update={
+            "chosen_goal_id": goal_id,
+            "skill_parameters": parameters,
+        }
+    )
 
 
 def _parse_decision(text: str) -> CognitionDecision:
