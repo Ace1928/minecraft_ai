@@ -102,6 +102,10 @@ class CognitionContext:
     wiki: tuple[WikiEvidence, ...]
     operator_messages: tuple[OperatorMessage, ...] = ()
     recent_skill_runs: tuple[SkillRun, ...] = ()
+    current_plan: tuple[str, ...] = ()
+    plan_goal_id: str | None = None
+    plan_index: int = 0
+    plan_started_ns: int = 0
 
 
 @dataclass
@@ -371,6 +375,16 @@ class HighLevelController:
                     }
                     for run in context.recent_skill_runs
                 ],
+                "current_plan": {
+                    "goal": context.plan_goal_id,
+                    "steps": list(context.current_plan),
+                    "next": context.plan_index,
+                    "started_ago_ms": (
+                        0
+                        if context.plan_started_ns == 0
+                        else max(0, int((time.monotonic_ns() - context.plan_started_ns) // 1_000_000))
+                    ),
+                },
                 "frame": None
                 if latest is None
                 else {
@@ -410,6 +424,10 @@ class HighLevelController:
                         "w=research query, d=one practical direction (goal condition) for the "
                         "current skill under 280 chars, n=up to 5 short sequential plan steps. "
                         "Omit null, empty, and false keys; p is required. "
+                        "current_plan is your running long-horizon plan (steps + next index): "
+                        "continue it, do not restate completed steps, extend/tighten it, and "
+                        "only replace it on goal failure or clear dead-end evidence. Reuse n "
+                        "across decisions so you improve step-by-step over time. "
                         "fresh_facts is the only authoritative observed game state. skills "
                         "contains only currently executable options: use only a listed skill_id, "
                         "prefer concrete progression with verifiable success evidence, and never "

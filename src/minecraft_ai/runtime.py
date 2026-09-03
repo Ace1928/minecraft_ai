@@ -538,6 +538,11 @@ class AgentRuntime:
     )
     _execution_revision: int = field(default=0, init=False)
     _pending_execution_revision: int = field(default=0, init=False)
+    _plan_steps: tuple[str, ...] = field(default=(), init=False)
+    _plan_goal_id: str | None = field(default=None, init=False)
+    _plan_index: int = field(default=0, init=False)
+    _plan_started_ns: int = field(default=0, init=False)
+    _plan_step_completed_ns: int = field(default=0, init=False)
     _last_operator_target_id: str | None = field(default=None, init=False)
     _policy_warmup_error: str | None = field(default=None, init=False)
     _cognition_requested: bool = field(default=True, init=False)
@@ -699,6 +704,7 @@ class AgentRuntime:
                 self._flush_pending_skill_stats(force=True)
             if result.run.outcome == SkillOutcome.SUCCEEDED:
                 self.metrics.skill_successes += 1
+                self._advance_plan_on_step_complete(result.run)
             elif result.run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
                 self.metrics.skill_failures += 1
 
@@ -907,6 +913,27 @@ class AgentRuntime:
             "and chat."
         )
 
+    def _cognition_due(self, *, operator_waiting: bool) -> bool:
+        """Decide whether high-level cognition is worth invoking right now.
+
+        Decouples planning from the motor loop's cadence: while a skill is
+        actively executing under a fresh, non-exhausted plan there is nothing
+        new to decide and re-invoking the (slow, local) VLM every cycle would
+        churn planning effort for no benefit (motor never waits on cognition, so
+        this is purely a planning-cadence decision). Fall through to True only
+        when an event genuinely needs a decision: a skill finished, the plan is
+        exhausted, an operator asked, or an explicit replan is requested.
+        """
+        if operator_waiting or self._cognition_requested:
+            return True
+        active = self.executor.run
+        plan_active = bool(self._plan_steps) and 0 <= self._plan_index < len(self._plan_steps)
+        return not (
+            active is not None
+            and active.outcome == SkillOutcome.RUNNING
+            and plan_active
+        )
+
     def _start_cognition_if_due(self) -> None:
         if self._pending_decision is not None:
             return
@@ -918,6 +945,8 @@ class AgentRuntime:
             and not operator_waiting
             and now - self._last_cognition_ns < interval
         ):
+            return
+        if not self._cognition_due(operator_waiting=operator_waiting):
             return
         context = self._cognition_context()
         self._pending_operator_message_ids = tuple(
@@ -977,6 +1006,7 @@ class AgentRuntime:
             self._cognition_requested = True
             return
         self._last_decision = decision
+        self._adopt_plan_if_revised(decision)
         if self.state_db is not None and self._pending_operator_message_ids:
             selected_message_id = _selected_operator_message_id(
                 decision,
@@ -1044,6 +1074,70 @@ class AgentRuntime:
                     parameters=decision.skill_parameters,
                     instruction=decision.instruction,
                 )
+
+    def _advance_plan_on_step_complete(self, run: SkillRun) -> None:
+        """Mark one persistent plan step done after a skill succeeds.
+
+        Steps are short free-form plans from the high-level VLM, so we cannot
+        reliably attribute a success to a specific step string. Instead we treat
+        a completed skill as consuming the current step position and advance the
+        plan index, preserving ordering while remaining permissive. The goal of
+        the last accepted decision is used only as a sanity gate so an off-plan
+        success (e.g. an operator-message task that overrides the standing plan)
+        does not silently eat plan progress.
+        """
+        if not self._plan_steps:
+            return
+        if self._plan_index >= len(self._plan_steps):
+            return
+        if self._last_decision is not None:
+            decision_goal = self._last_decision.chosen_goal_id
+            if (
+                self._plan_goal_id is not None
+                and decision_goal is not None
+                and decision_goal != self._plan_goal_id
+            ):
+                return
+        self._plan_index += 1
+        self._plan_step_completed_ns = time.monotonic_ns()
+
+    def _adopt_plan_if_revised(self, decision: CognitionDecision) -> None:
+        """Persist a long-horizon plan across motor ticks.
+
+        The high-level VLM re-decides on its own cadence; the motor loop acts on
+        the current skill+instruction every 20 Hz. This plan state lets planning
+        span many motor ticks instead of being discarded each decision.
+
+        Replacement rules avoid thrashing a running plan:
+          * New goal, or the current plan is exhausted -> adopt fresh (index 0).
+          * Same goal and plan still running: only refresh the stored steps
+            without moving our position when the new plan still opens with the
+            current remaining steps (a genuine extension/refinement). An exact
+            echo of the remaining steps changes nothing.
+        """
+        steps = decision.plan_steps
+        if not steps:
+            return
+        goal_changed = (
+            decision.chosen_goal_id is not None
+            and decision.chosen_goal_id != self._plan_goal_id
+        )
+        remaining = self._plan_steps[self._plan_index:]
+        if not goal_changed and remaining:
+            if self._is_prefix(remaining, steps):
+                if steps != remaining:
+                    self._plan_steps = steps
+                return
+            return
+        if goal_changed or not remaining:
+            self._plan_steps = steps
+            self._plan_goal_id = decision.chosen_goal_id
+            self._plan_index = 0
+            self._plan_started_ns = time.monotonic_ns()
+
+    @staticmethod
+    def _is_prefix(prefix: tuple[str, ...], steps: tuple[str, ...]) -> bool:
+        return len(prefix) <= len(steps) and steps[: len(prefix)] == prefix
 
     def _publish_player_chat_facts(self) -> None:
         """Turn freshly observed player chat lines into an authorizing fact.
@@ -1209,6 +1303,10 @@ class AgentRuntime:
             wiki=(),
             operator_messages=operator_messages,
             recent_skill_runs=tuple(self._recent_skill_runs),
+            current_plan=self._plan_steps[self._plan_index:],
+            plan_goal_id=self._plan_goal_id,
+            plan_index=self._plan_index,
+            plan_started_ns=self._plan_started_ns,
         )
 
     def _telemetry_payload(self, *, state: str) -> dict[str, object]:
@@ -1278,6 +1376,16 @@ class AgentRuntime:
             "active_skill_parameters": ({} if running is None else self.executor.policy_parameters),
             "active_instruction": None if running is None else self.executor.instruction,
             "plan_steps": [] if decision is None else list(decision.plan_steps),
+            "persistent_plan": {
+                "goal": self._plan_goal_id,
+                "steps": list(self._plan_steps),
+                "next": self._plan_index,
+                "started_ago_ms": (
+                    0
+                    if self._plan_started_ns == 0
+                    else int((time.monotonic_ns() - self._plan_started_ns) // 1_000_000)
+                ),
+            },
             "skill_outcome": None if running is None else running.outcome.value,
             "recent_skill_runs": [run.model_dump(mode="json") for run in self._recent_skill_runs],
             "chosen_goal_id": None if decision is None else decision.chosen_goal_id,

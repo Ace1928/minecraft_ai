@@ -892,3 +892,105 @@ def test_no_game_chat_without_authority() -> None:
     )
     decision = CognitionDecision(skill_id="explore_forward", game_chat="answer")
     assert _authorized_game_chat(decision, board) is None
+
+
+def test_persistent_plan_adoption_and_advancement() -> None:
+    from minecraft_ai.runtime import AgentRuntime
+
+    runtime = object.__new__(AgentRuntime)
+    runtime._plan_steps = ()
+    runtime._plan_goal_id = None
+    runtime._plan_index = 0
+    runtime._plan_started_ns = 0
+    runtime._plan_step_completed_ns = 0
+    runtime._last_decision = None
+
+    # Adopt a fresh plan for a goal.
+    decision = CognitionDecision(
+        chosen_goal_id="progression:build",
+        plan_steps=("gather wood", "craft planks", "place blocks"),
+    )
+    runtime._adopt_plan_if_revised(decision)
+    assert runtime._plan_steps == ("gather wood", "craft planks", "place blocks")
+    assert runtime._plan_goal_id == "progression:build"
+    assert runtime._plan_index == 0
+    assert runtime._plan_started_ns > 0
+
+    # A skill success advances the plan index under the same goal.
+    runtime._last_decision = decision
+    runtime._advance_plan_on_step_complete(_run("gather_wood"))
+    assert runtime._plan_index == 1
+
+    # Re-declaring the same remaining plan (no goal change, not exhausted,
+    # identical remaining steps) must not reset the index (no thrash).
+    echo = CognitionDecision(
+        chosen_goal_id="progression:build",
+        plan_steps=("gather wood", "craft planks", "place blocks"),
+    )
+    runtime._adopt_plan_if_revised(echo)
+    assert runtime._plan_index == 1
+
+    # Exhausting the plan lets a new decision revive/restart it.
+    runtime._plan_index = 3
+    renewed = CognitionDecision(
+        chosen_goal_id="progression:build",
+        plan_steps=("expand house", "add roof"),
+    )
+    runtime._adopt_plan_if_revised(renewed)
+    assert runtime._plan_steps == ("expand house", "add roof")
+    assert runtime._plan_index == 0
+
+    # Success under an operator override goal does not consume plan progress.
+    runtime._plan_index = 0
+    runtime._plan_goal_id = "progression:build"
+    runtime._last_decision = CognitionDecision(chosen_goal_id="operator:abc")
+    runtime._advance_plan_on_step_complete(_run("navigate"))
+    assert runtime._plan_index == 0
+
+
+def _run(skill_id: str):
+    from minecraft_ai.skills import SkillOutcome, SkillRun
+
+    return SkillRun(
+        run_id="r",
+        skill_id=skill_id,
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.SUCCEEDED,
+    )
+
+
+def test_cognition_skips_while_plan_executing() -> None:
+    from minecraft_ai.runtime import AgentRuntime
+    from minecraft_ai.skills import SkillRun, SkillOutcome
+
+    runtime = object.__new__(AgentRuntime)
+    runtime._cognition_requested = False
+    runtime._plan_steps = ("a", "b")
+    runtime._plan_index = 0
+
+    class _Executor:
+        run = SkillRun(run_id="r", skill_id="explore_forward", started_ns=1)
+
+    runtime.executor = _Executor()  # type: ignore[assignment]
+    runtime._pending_decision = None
+
+    assert runtime._cognition_due(operator_waiting=False) is False
+
+
+def test_cognition_due_when_plan_exhausted() -> None:
+    from minecraft_ai.runtime import AgentRuntime
+    from minecraft_ai.skills import SkillRun
+
+    runtime = object.__new__(AgentRuntime)
+    runtime._cognition_requested = False
+    runtime._plan_steps = ("a",)
+    runtime._plan_index = 1  # exhausted
+
+    class _Executor:
+        run = SkillRun(run_id="r", skill_id="explore_forward", started_ns=1)
+
+    runtime.executor = _Executor()  # type: ignore[assignment]
+    runtime._pending_decision = None
+
+    assert runtime._cognition_due(operator_waiting=False) is True
