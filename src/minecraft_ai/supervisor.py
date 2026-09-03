@@ -13,7 +13,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator
 
-import fcntl
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 from platformdirs import user_runtime_dir
 
@@ -33,6 +36,32 @@ RUNTIME_DIR = Path(user_runtime_dir(APP_NAME))
 CONTROL_FILE = RUNTIME_DIR / "control.json"
 STATUS_FILE = RUNTIME_DIR / "supervisor-state.json"
 LOCK_FILE = RUNTIME_DIR / "supervisor.lock"
+
+
+if sys.platform == "win32":
+
+    def _acquire_file_lock(handle: BinaryIO) -> None:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            raise BlockingIOError from exc
+
+    def _release_file_lock(handle: BinaryIO) -> None:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+else:
+
+    def _acquire_file_lock(handle: BinaryIO) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _release_file_lock(handle: BinaryIO) -> None:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _bounded_camera_calibration_deltas(
@@ -627,15 +656,18 @@ def _exclusive_runtime_lock() -> Iterator[None]:
     """Permit exactly one supervisor process to own the public control plane."""
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     handle: BinaryIO = LOCK_FILE.open("a+b")
+    acquired = False
     try:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _acquire_file_lock(handle)
+            acquired = True
         except BlockingIOError as exc:
             raise RuntimeError("another minecraft-ai supervisor already owns the runtime") from exc
         yield
     finally:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            if acquired:
+                _release_file_lock(handle)
         finally:
             handle.close()
 

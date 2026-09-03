@@ -641,8 +641,11 @@ class PortableStackLauncher:
             if completed.returncode not in {0, 128}:
                 raise RuntimeError(f"taskkill failed with code {completed.returncode}")
         else:
+            kill_group = getattr(os, "killpg", None)
+            if not callable(kill_group):
+                raise RuntimeError("process-group termination is unavailable on this platform")
             try:
-                os.killpg(pid, signal.SIGTERM)
+                kill_group(pid, signal.SIGTERM)
             except ProcessLookupError:
                 return
             deadline = time.monotonic() + timeout_s
@@ -655,7 +658,7 @@ class PortableStackLauncher:
                     return
                 time.sleep(self.poll_interval_s)
             try:
-                os.killpg(pid, signal.SIGKILL)
+                kill_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
             except ProcessLookupError:
                 return
             if child is not None:
