@@ -73,6 +73,7 @@ def launch_agent_process(
     role: str,
     config_file: Path | None = None,
     allow_host_capture: bool = False,
+    capture_source: str = "pipewire",
 ) -> AgentProcess:
     if agent_alive():
         raise RuntimeError("agent process is already running")
@@ -97,6 +98,7 @@ def launch_agent_process(
         command.extend(("--config", str(config_file)))
     if allow_host_capture:
         command.append("--allow-host-capture")
+    command.extend(("--capture-source", capture_source))
     with AGENT_LOG.open("ab", buffering=0) as log:
         child = subprocess.Popen(
             command,

@@ -282,6 +282,11 @@ def run(
     role: str = typer.Option("generalist", help="Role/archetype profile."),
     edition: Edition = typer.Option(DEFAULT_EDITION, "--edition"),
     live: bool = typer.Option(False, help="Run the realtime isolated Bedrock agent."),
+    capture_source: str = typer.Option(
+        "pipewire",
+        "--capture-source",
+        help="Capture source: pipewire (default) or x11 (window-targeted XGetImage).",
+    ),
 ) -> None:
     """Start supervisor; with --live attach Bedrock and start the player loop."""
     _ensure_dirs()
@@ -342,22 +347,38 @@ def run(
         )
     version = build.version
 
-    capture = create_bedrock_capture(
-        session.display,
-        window_id,
-        allow_host=allow_host,
-        host_monitor_binding=host_binding,
-    )
-    try:
-        launch_frame = capture.capture()
-    finally:
-        capture.close()
-    if not bedrock_survival_hud_present(launch_frame):
+    import time as _time
+
+    launch_frame = None
+    hud_verified = False
+    last_capture_error: Exception | None = None
+    for attempt in range(12):
+        capture = None
+        try:
+            capture = create_bedrock_capture(
+                session.display,
+                window_id,
+                allow_host=allow_host,
+                host_monitor_binding=host_binding,
+                source=capture_source,
+            )
+            for _ in range(2):
+                launch_frame = capture.capture()
+                if bedrock_survival_hud_present(launch_frame):
+                    hud_verified = True
+                    break
+        except Exception as exc:
+            last_capture_error = exc
+        finally:
+            if capture is not None:
+                capture.close()
+        if hud_verified:
+            break
+        _time.sleep(2.0)
+    if not hud_verified or launch_frame is None:
         raise typer.BadParameter(
             "Live control requires a complete in-world survival HUD before arming. "
-            f"The captured {launch_frame.width}x{launch_frame.height} frame did not "
-            "contain both the heart bank and hotbar; open the world or relaunch "
-            "Bedrock with the default fullscreen 1920x1080 Weston session."
+            f"last capture error: {last_capture_error}"
         )
     print(
         "[green]Complete survival HUD verified[/green] "
@@ -435,6 +456,7 @@ def run(
             instance_id=target,
             role=role,
             allow_host_capture=allow_host,
+            capture_source=capture_source,
         )
     except Exception as exc:
         _command("disarm")

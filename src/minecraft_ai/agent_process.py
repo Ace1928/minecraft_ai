@@ -36,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--role", default=None)
     parser.add_argument("--config", default=None)
     parser.add_argument("--allow-host-capture", action="store_true")
+    parser.add_argument("--capture-source", default="pipewire", choices=["pipewire", "x11"])
     return parser
 
 
@@ -78,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
             args.window_id,
             allow_host=bool(args.allow_host_capture),
             host_monitor_binding=host_binding,
+            source=args.capture_source,
         )
         capture_probe = capture.capture()
 

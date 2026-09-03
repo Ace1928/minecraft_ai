@@ -308,6 +308,93 @@ class _NativeRelativeMouse:
         self._x11.XFlush(self._display)
 
 
+class _TargetedPointer:
+    """Window-targeted mouse for host-monitor play without focus stealing.
+
+    Bedrock's grabbed, recentered pointer cannot be driven through XTEST while
+    the operator uses the desktop (the recenter would follow the server pointer
+    and the deltas would land in whichever window owns the cursor). Motion and
+    buttons are therefore injected straight into the Minecraft window with
+    synthetic events and a virtual cursor position that mirrors the game's own
+    recentering: each delta advances the virtual position, which is wrapped
+    back to the window centre after crossing the edge, exactly like the
+    captured pointer the game expects.
+    """
+
+    def __init__(self, backend: Any, event_module: Any, x: Any) -> None:
+        self._backend = backend
+        self._event = event_module
+        self._x = x
+        self._px = 0
+        self._py = 0
+        self._ready = False
+
+    def _window_and_size(self) -> tuple[Any, int, int]:
+        window = self._backend._input_window()
+        geometry = window.get_geometry()
+        return window, int(geometry.width) or 1, int(geometry.height) or 1
+
+    def _motion_options(self) -> dict[str, Any]:
+        root = self._backend._display.screen().root.id
+        return {
+            "time": 0,
+            "root": root,
+            "window": self._backend._input_window_id,
+            "same_screen": 1,
+            "child": 0,
+            "root_x": 0,
+            "root_y": 0,
+            "event_x": self._px,
+            "event_y": self._py,
+            "state": 0,
+            "detail": 0,
+        }
+
+    def move(self, mouse_dx: int, mouse_dy: int) -> None:
+        window, width, height = self._window_and_size()
+        if not self._ready:
+            self._px, self._py = width // 2, height // 2
+            self._ready = True
+        self._px += int(mouse_dx)
+        self._py += int(mouse_dy)
+        # Re-center like the game's captured pointer: wrap off the far edge.
+        if self._px < 0 or self._px > width:
+            self._px = width // 2
+        if self._py < 0 or self._py > height:
+            self._py = height // 2
+        self._px = max(0, min(self._px, width))
+        self._py = max(0, min(self._py, height))
+        motion = self._event.MotionNotify(**self._motion_options())
+        window.send_event(motion, event_mask=self._x.PointerMotionMask)
+        self._backend._display.sync()
+
+    def click(self, button: int, down: bool) -> None:
+        window, _, _ = self._window_and_size()
+        common = {
+            "time": 0,
+            "root": self._backend._display.screen().root.id,
+            "window": self._backend._input_window_id,
+            "same_screen": 1,
+            "child": 0,
+            "root_x": 0,
+            "root_y": 0,
+            "event_x": self._px,
+            "event_y": self._py,
+            "state": 0,
+        }
+        if down:
+            event = self._event.ButtonPress(detail=button, **common)
+            window.send_event(event, event_mask=self._x.ButtonPressMask)
+        else:
+            event = self._event.ButtonRelease(detail=button, **common)
+            window.send_event(event, event_mask=self._x.ButtonReleaseMask)
+        self._backend._display.sync()
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+
 _KEYSYM_NAMES: dict[str, str] = {
     "w": "w",
     "a": "a",
@@ -508,6 +595,12 @@ class IsolatedX11InputBackend:
         self.target_window_id = target_window_id
         self._input_window_id = target_window_id
         self._host_monitor_binding = host_monitor_binding
+        # Host-monitor play never steals the operator's focus. Input is instead
+        # delivered directly to the Minecraft window (window-targeted events):
+        # keyboard/buttons/motion reach the game while the operator keeps the
+        # desktop to themselves, so the pointer is never farmed or captured.
+        self._targeted = host_monitor_binding is not None
+        self._targeted_pointer: _TargetedPointer | None = None
         try:
             self._display: Any = display_module.Display(display_name)
         except Exception as exc:
@@ -523,16 +616,20 @@ class IsolatedX11InputBackend:
         if target_window_id is not None:
             input_window = _resolve_minecraft_input_window(self._display, target_window_id)
             self._input_window_id = int(input_window.id)
-            if host_monitor_binding is None:
-                self._ensure_input_focus()
-            else:
-                validate_host_monitor_window(
-                    self._display,
-                    host_monitor_binding,
-                    target_window_id=target_window_id,
-                    input_window_id=self._input_window_id,
-                )
+        if host_monitor_binding is None:
+            self._ensure_input_focus()
+        else:
+            validate_host_monitor_window(
+                self._display,
+                host_monitor_binding,
+                target_window_id=target_window_id,
+                input_window_id=self._input_window_id,
+                require_focus=False,
+            )
         self._relative_mouse = _NativeRelativeMouse(display_name)
+        if self._targeted:
+            event_module = importlib.import_module("Xlib.protocol.event")
+            self._targeted_pointer = _TargetedPointer(self, event_module, self._x)
 
     @property
     def held_keys(self) -> frozenset[str]:
@@ -573,6 +670,36 @@ class IsolatedX11InputBackend:
             raise IsolationError(f"unsupported key for X11 backend: {key!r}")
         return keycode
 
+    def _input_window(self) -> Any:
+        return self._display.create_resource_object("window", self._input_window_id)
+
+    def _targeted_key(self, keycode: int, down: bool) -> None:
+        """Deliver a key event directly to the Minecraft window (no focus needed)."""
+        window = self._input_window()
+        common = {
+            "time": 0,
+            "root": self._display.screen().root.id,
+            "window": self._input_window_id,
+            "same_screen": 1,
+            "child": 0,
+            "root_x": 0,
+            "root_y": 0,
+            "event_x": 0,
+            "event_y": 0,
+            "state": 0,
+            "detail": keycode,
+        }
+        event_module = importlib.import_module("Xlib.protocol.event")
+        if down:
+            window.send_event(
+                event_module.KeyPress(**common), event_mask=self._x.KeyPressMask
+            )
+        else:
+            window.send_event(
+                event_module.KeyRelease(**common), event_mask=self._x.KeyReleaseMask
+            )
+        self._display.sync()
+
     def probe_target(self) -> bool:
         if self.target_window_id is None:
             return True
@@ -584,6 +711,10 @@ class IsolatedX11InputBackend:
         return True
 
     def _ensure_input_focus(self) -> None:
+        """Keyboard events need the isolated display's focus. Host-monitor
+        sessions are targeted instead, so the operator keeps their focus."""
+        if self._targeted:
+            return
         input_window_id = self._input_window_id
         if input_window_id is None:
             return
@@ -591,10 +722,6 @@ class IsolatedX11InputBackend:
             current = self._display.get_input_focus().focus
             if _window_is_descendant_or_same(current, input_window_id):
                 return
-            if self._host_monitor_binding is not None:
-                raise IsolationError(
-                    "host-display focus left Minecraft; refusing to steal operator focus"
-                )
             input_window = self._display.create_resource_object(
                 "window",
                 input_window_id,
@@ -610,7 +737,7 @@ class IsolatedX11InputBackend:
         if not self.probe_target():
             self.release_all()
             raise IsolationError("Bedrock target window disappeared")
-        if self._host_monitor_binding is not None and self.target_window_id is not None:
+        if not self._targeted and self._host_monitor_binding is not None and self.target_window_id is not None:
             try:
                 validate_host_monitor_window(
                     self._display,
@@ -624,28 +751,43 @@ class IsolatedX11InputBackend:
                 raise
         self._ensure_input_focus()
         for key in action.keys_up:
-            self._xtest.fake_input(self._display, self._x.KeyRelease, self._keycode(key))
+            if self._targeted:
+                self._targeted_key(self._keycode(key), down=False)
+            else:
+                self._xtest.fake_input(self._display, self._x.KeyRelease, self._keycode(key))
             self._held_keys.discard(key.lower())
         for button in action.buttons_up:
             button_id = _BUTTONS.get(button.lower())
             if button_id is None:
                 raise IsolationError(f"unsupported mouse button: {button!r}")
-            self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
+            if self._targeted:
+                self._targeted_pointer.click(button_id, down=False)
+            else:
+                self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
             self._held_buttons.discard(button.lower())
         if action.mouse_dx or action.mouse_dy:
             relative_x, relative_y = _wine_relative_motion_delta(
                 action.mouse_dx,
                 action.mouse_dy,
             )
-            self._relative_mouse.move(relative_x, relative_y)
+            if self._targeted:
+                self._targeted_pointer.move(relative_x, relative_y)
+            else:
+                self._relative_mouse.move(relative_x, relative_y)
         for key in action.keys_down:
-            self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))
+            if self._targeted:
+                self._targeted_key(self._keycode(key), down=True)
+            else:
+                self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))
             self._held_keys.add(key.lower())
         for button in action.buttons_down:
             button_id = _BUTTONS.get(button.lower())
             if button_id is None:
                 raise IsolationError(f"unsupported mouse button: {button!r}")
-            self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
+            if self._targeted:
+                self._targeted_pointer.click(button_id, down=True)
+            else:
+                self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
             self._held_buttons.add(button.lower())
         self._display.sync()
 
@@ -655,7 +797,7 @@ class IsolatedX11InputBackend:
         if not self.probe_target():
             self.release_all()
             raise IsolationError("Bedrock target window disappeared")
-        if self._host_monitor_binding is not None and self.target_window_id is not None:
+        if not self._targeted and self._host_monitor_binding is not None and self.target_window_id is not None:
             try:
                 validate_host_monitor_window(
                     self._display,
@@ -699,11 +841,17 @@ class IsolatedX11InputBackend:
             raise
         finally:
             for key in sorted(previous_keys):
-                self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))
+                if self._targeted:
+                    self._targeted_key(self._keycode(key), down=True)
+                else:
+                    self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))
             for button in sorted(previous_buttons):
                 button_id = _BUTTONS.get(button)
                 if button_id is not None:
-                    self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
+                    if self._targeted:
+                        self._targeted_pointer.click(button_id, down=True)
+                    else:
+                        self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
             self._held_keys = previous_keys
             self._held_buttons = previous_buttons
             self._display.sync()
@@ -716,15 +864,25 @@ class IsolatedX11InputBackend:
         base = _SHIFT_MAP.get(char, char.lower() if char.isalpha() else char)
         if shifted:
             shift = self._keycode("shift")
-            self._xtest.fake_input(self._display, self._x.KeyPress, shift)
+            if self._targeted:
+                self._targeted_key(shift, down=True)
+            else:
+                self._xtest.fake_input(self._display, self._x.KeyPress, shift)
         try:
             self._tap_key(base)
         finally:
             if shifted:
-                self._xtest.fake_input(self._display, self._x.KeyRelease, shift)
+                if self._targeted:
+                    self._targeted_key(shift, down=False)
+                else:
+                    self._xtest.fake_input(self._display, self._x.KeyRelease, shift)
 
     def _tap_key(self, key: str) -> None:
         keycode = self._keycode(key)
+        if self._targeted:
+            self._targeted_key(keycode, down=True)
+            self._targeted_key(keycode, down=False)
+            return
         self._xtest.fake_input(self._display, self._x.KeyPress, keycode)
         self._xtest.fake_input(self._display, self._x.KeyRelease, keycode)
 
@@ -732,16 +890,22 @@ class IsolatedX11InputBackend:
         try:
             for key in sorted(set(_KEYSYM_NAMES) | self._held_keys):
                 try:
-                    self._xtest.fake_input(
-                        self._display,
-                        self._x.KeyRelease,
-                        self._keycode(key),
-                    )
+                    if self._targeted:
+                        self._targeted_key(self._keycode(key), down=False)
+                    else:
+                        self._xtest.fake_input(
+                            self._display,
+                            self._x.KeyRelease,
+                            self._keycode(key),
+                        )
                 except Exception:
                     continue
             for button_id in sorted(set(_BUTTONS.values())):
                 try:
-                    self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
+                    if self._targeted:
+                        self._targeted_pointer.click(button_id, down=False)
+                    else:
+                        self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
                 except Exception:
                     continue
             self._display.sync()
