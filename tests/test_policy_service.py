@@ -21,6 +21,8 @@ from minecraft_ai.policy_service import (
     LearnedPolicyOutput,
     GroundedPolicyRouter,
     TemporalPolicyClient,
+    _RocketTwoBackend,
+    _SteveOneBackend,
     _apply_action_constraints,
     _apply_discrete_action_contract,
     _crop_bbox_to_full,
@@ -117,9 +119,7 @@ def _operator_tracked_board(
     if reference_image_path is not None:
         attributes["reference_image_path"] = str(reference_image_path)
         attributes["reference_image_sha256"] = "a" * 64
-    track = current.tracks[0].model_copy(
-        update={"attributes": attributes}
-    )
+    track = current.tracks[0].model_copy(update={"attributes": attributes})
     board.upsert_semantic_track(instance_id=current.instance_id, track=track)
     if current_dhash is not None:
         board.merge_semantics(
@@ -396,9 +396,7 @@ def test_mineclip_scene_belief_is_conservative(
     mode: str,
     playable: bool | None,
 ) -> None:
-    observed_mode, observed_playable, confidence, returned = _mineclip_scene_belief(
-        probabilities
-    )
+    observed_mode, observed_playable, confidence, returned = _mineclip_scene_belief(probabilities)
 
     assert observed_mode == mode
     assert observed_playable is playable
@@ -619,9 +617,7 @@ def test_policy_config_requires_hashes_provenance_and_paths(tmp_path: Path) -> N
     scene_model = tmp_path / "fast-scene.pt"
     scene_model.touch()
     with pytest.raises(ValueError, match="scene model configuration is incomplete"):
-        _validate_policy_config(
-            config.model_copy(update={"scene_model_path": str(scene_model)})
-        )
+        _validate_policy_config(config.model_copy(update={"scene_model_path": str(scene_model)}))
     _validate_policy_config(
         config.model_copy(
             update={
@@ -669,6 +665,111 @@ def test_option_condition_scale_overrides_policy_default() -> None:
 
     assert _intent_condition_scale({"condition_scale": 6.0}, default=4.0) == 6.0
     assert _intent_condition_scale({}, default=4.0) == 4.0
+
+
+class _ConditionPolicy:
+    def __init__(self) -> None:
+        self.prepared: list[tuple[str, float, bool]] = []
+        self.initialized: list[dict[str, object]] = []
+
+    def prepare_condition(
+        self,
+        instruction: dict[str, object],
+        *,
+        deterministic: bool,
+    ) -> dict[str, object]:
+        text = str(instruction["text"])
+        scale = float(instruction["cond_scale"])
+        self.prepared.append((text, scale, deterministic))
+        return {"text": text, "cond_scale": scale}
+
+    def initial_state(
+        self,
+        _batch_size: int,
+        condition: dict[str, object],
+    ) -> list[str]:
+        self.initialized.append(condition)
+        return [f"initial:{condition['text']}"]
+
+
+def test_steve_goal_change_preserves_same_episode_recurrent_state() -> None:
+    policy = _ConditionPolicy()
+    backend = object.__new__(_SteveOneBackend)
+    backend.policy = policy
+    backend.deterministic_condition = True
+    backend.hidden_state = ["episode-memory"]
+    backend.condition = {"text": "explore", "cond_scale": 4.0}
+    backend.instruction = "explore"
+    backend.active_condition_scale = 4.0
+    backend.discrete_actions_emitted = {"inventory"}
+
+    backend._update_condition("jump forward", 6.0)
+
+    assert backend.hidden_state == ["episode-memory"]
+    assert policy.initialized == []
+    assert policy.prepared == [("jump forward", 6.0, True)]
+    assert backend.discrete_actions_emitted == set()
+
+
+def test_steve_cfg_topology_change_reinitializes_recurrent_state() -> None:
+    policy = _ConditionPolicy()
+    backend = object.__new__(_SteveOneBackend)
+    backend.policy = policy
+    backend.deterministic_condition = True
+    backend.hidden_state = ["paired-cfg-memory"]
+    backend.condition = {"text": "explore", "cond_scale": 4.0}
+    backend.instruction = "explore"
+    backend.active_condition_scale = 4.0
+    backend.discrete_actions_emitted = set()
+
+    backend._update_condition("explore", 0.0)
+
+    assert backend.hidden_state == ["initial:explore"]
+    assert policy.initialized == [{"text": "explore", "cond_scale": 0.0}]
+
+
+def test_rocket_new_grounding_resets_recurrent_state_and_previous_action() -> None:
+    backend = object.__new__(_RocketTwoBackend)
+    backend.numpy = numpy
+    backend.hidden_state = ["previous-target-memory"]
+    backend.grounding_signature = "log-1:2"
+    backend.previous_action = {
+        "camera": numpy.asarray([4.0, -2.0], dtype=numpy.float32),
+        "jump": numpy.asarray(1, dtype=numpy.int64),
+    }
+
+    backend._reset_grounding_context("coal-2:2")
+
+    assert backend.hidden_state is None
+    assert backend.grounding_signature == "coal-2:2"
+    assert numpy.array_equal(
+        backend.previous_action["camera"],
+        numpy.zeros(2, dtype=numpy.float32),
+    )
+    assert all(
+        int(backend.previous_action[key.replace("_", ".")]) == 0
+        for key in (
+            "forward",
+            "back",
+            "left",
+            "right",
+            "inventory",
+            "sprint",
+            "sneak",
+            "jump",
+            "attack",
+            "use",
+            "hotbar_1",
+            "hotbar_2",
+            "hotbar_3",
+            "hotbar_4",
+            "hotbar_5",
+            "hotbar_6",
+            "hotbar_7",
+            "hotbar_8",
+            "hotbar_9",
+        )
+    )
 
 
 def test_decoded_policy_camera_uses_independent_axis_calibration() -> None:
@@ -751,9 +852,7 @@ def test_cursor_motion_does_not_corrupt_world_pitch_estimate(tmp_path: Path) -> 
         inference_ns=1,
         model_version="official-v1",
     )
-    cursor = world.model_copy(
-        update={"mouse_dx": 5, "mouse_dy": 5, "camera_semantics": "cursor"}
-    )
+    cursor = world.model_copy(update={"mouse_dx": 5, "mouse_dy": 5, "camera_semantics": "cursor"})
 
     world_action = client._output_action(world, sequence=1)
     cursor_action = client._output_action(cursor, sequence=2)

@@ -168,10 +168,7 @@ class TemporalPolicyClient:
 
     def merge_perception(self, blackboard: PerceptionBlackboard) -> bool:
         observation = self._last_scene_observation
-        if (
-            observation is None
-            or observation.observed_ns <= self._last_scene_feedback_ns
-        ):
+        if observation is None or observation.observed_ns <= self._last_scene_feedback_ns:
             return False
         updated = _merge_learned_scene_observation(
             blackboard,
@@ -259,7 +256,8 @@ class TemporalPolicyClient:
             "model_version": self.config.model_version,
             "source_commit": self.config.source_commit,
             "license": self.config.license,
-            "goal_conditioned": self.config.provider in {
+            "goal_conditioned": self.config.provider
+            in {
                 "minestudio-steve1",
                 "minestudio-rocket2",
             },
@@ -290,20 +288,14 @@ class TemporalPolicyClient:
                     "mouse_dx": self._last_prediction.mouse_dx,
                     "mouse_dy": self._last_prediction.mouse_dy,
                     "camera_semantics": self._last_prediction.camera_semantics,
-                    "target_exists_probability": (
-                        self._last_prediction.target_exists_probability
-                    ),
+                    "target_exists_probability": (self._last_prediction.target_exists_probability),
                     "target_point_yx": self._last_prediction.target_point_yx,
                     "target_bbox_xyxy": self._last_prediction.target_bbox_xyxy,
                     "scene_mode": self._last_prediction.scene_mode,
                     "scene_playable": self._last_prediction.scene_playable,
                     "scene_confidence": self._last_prediction.scene_confidence,
-                    "scene_class_probabilities": (
-                        self._last_prediction.scene_class_probabilities
-                    ),
-                    "scene_model_version": (
-                        self._last_prediction.scene_model_version
-                    ),
+                    "scene_class_probabilities": (self._last_prediction.scene_class_probabilities),
+                    "scene_model_version": (self._last_prediction.scene_model_version),
                     "suppressed_actions": self._last_prediction.suppressed_actions,
                 }
             ),
@@ -337,9 +329,7 @@ class TemporalPolicyClient:
                     "mode": self._last_scene_observation.mode,
                     "playable": self._last_scene_observation.playable,
                     "confidence": self._last_scene_observation.confidence,
-                    "class_probabilities": (
-                        self._last_scene_observation.class_probabilities
-                    ),
+                    "class_probabilities": (self._last_scene_observation.class_probabilities),
                     "model_version": self._last_scene_observation.model_version,
                 }
             ),
@@ -547,10 +537,7 @@ class TemporalPolicyClient:
     def _output_action(self, output: LearnedPolicyOutput, sequence: int) -> MotorAction:
         self._record_learned_action(output)
         self._last_prediction = output
-        if (
-            output.target_exists_probability is not None
-            and self._consumed_frame_captured_ns > 0
-        ):
+        if output.target_exists_probability is not None and self._consumed_frame_captured_ns > 0:
             self._last_target_observation = GroundedTargetObservation(
                 observed_ns=self._consumed_frame_captured_ns,
                 probability=output.target_exists_probability,
@@ -569,8 +556,7 @@ class TemporalPolicyClient:
                 playable=output.scene_playable,
                 confidence=output.scene_confidence,
                 class_probabilities=dict(output.scene_class_probabilities),
-                model_version=output.scene_model_version
-                or f"{output.model_version}/mineclip",
+                model_version=output.scene_model_version or f"{output.model_version}/mineclip",
             )
         self._predicted_camera_total = (
             self._predicted_camera_total[0] + output.mouse_dx,
@@ -629,16 +615,11 @@ class TemporalPolicyClient:
             "use": "right" in buttons,
         }
         labels.update(
-            {
-                f"constraint_suppressed.{action}": True
-                for action in output.suppressed_actions
-            }
+            {f"constraint_suppressed.{action}": True for action in output.suppressed_actions}
         )
         for label, selected in labels.items():
             if selected:
-                self._learned_action_counts[label] = (
-                    self._learned_action_counts.get(label, 0) + 1
-                )
+                self._learned_action_counts[label] = self._learned_action_counts.get(label, 0) + 1
 
     def _conditioned_intent(
         self,
@@ -939,11 +920,7 @@ class GroundedPolicyRouter:
         if latest is None:
             return False
         target = next(
-            (
-                track
-                for track in latest.tracks
-                if track.track_id == self._grounded_track_id
-            ),
+            (track for track in latest.tracks if track.track_id == self._grounded_track_id),
             None,
         )
         if target is None:
@@ -970,9 +947,7 @@ class GroundedPolicyRouter:
             x0, y0, x1, y1 = bbox_xyxy
             if x1 > x0 and y1 > y0:
                 region = ScreenRegion(x=x0, y=y0, width=x1 - x0, height=y1 - y0)
-        source = (
-            f"learned:{self.grounded.policy_id}:aux-localization:not-training-label"
-        )
+        source = f"learned:{self.grounded.policy_id}:aux-localization:not-training-label"
         attributes = dict(target.attributes)
         attributes.update(
             {
@@ -1181,16 +1156,13 @@ def _validate_policy_config(config: PolicyConfig) -> None:
     if any(scene_model.values()) and not all(scene_model.values()):
         missing_scene = sorted(key for key, value in scene_model.items() if not value)
         raise ValueError(
-            "learned scene model configuration is incomplete: "
-            + ", ".join(missing_scene)
+            "learned scene model configuration is incomplete: " + ", ".join(missing_scene)
         )
     if all(scene_model.values()):
         if config.provider != "minestudio-steve1":
             raise ValueError("learned scene model is currently supported by STEVE-1 only")
         if not Path(config.scene_model_path).exists():
-            raise ValueError(
-                f"learned scene model does not exist: {config.scene_model_path}"
-            )
+            raise ValueError(f"learned scene model does not exist: {config.scene_model_path}")
     if config.license.lower() != "mit" and not config.research_only:
         raise ValueError(f"unapproved learned policy license: {config.license}")
     if (
@@ -1252,13 +1224,8 @@ def _fast_scene_belief(
     if set(probabilities) != required:
         missing = sorted(required - set(probabilities))
         extra = sorted(set(probabilities) - required)
-        raise ValueError(
-            f"invalid fast scene classes: missing={missing}, extra={extra}"
-        )
-    normalized = {
-        key: max(0.0, min(1.0, float(probabilities[key])))
-        for key in sorted(required)
-    }
+        raise ValueError(f"invalid fast scene classes: missing={missing}, extra={extra}")
+    normalized = {key: max(0.0, min(1.0, float(probabilities[key]))) for key in sorted(required)}
     mode = max(normalized, key=normalized.__getitem__)
     confidence = normalized[mode]
     if confidence < min_confidence:
@@ -1288,9 +1255,7 @@ def _mineclip_scene_belief(
         missing = sorted(required - set(probabilities))
         extra = sorted(set(probabilities) - required)
         raise ValueError(f"invalid MineCLIP scene classes: missing={missing}, extra={extra}")
-    normalized = {
-        key: max(0.0, min(1.0, float(probabilities[key]))) for key in sorted(required)
-    }
+    normalized = {key: max(0.0, min(1.0, float(probabilities[key]))) for key in sorted(required)}
     inventory = normalized["inventory"]
     chat = normalized["chat"]
     world = normalized["world"] + normalized["wall"]
@@ -1560,29 +1525,20 @@ class _SteveOneBackend:
         self.inference_count += 1
         instruction = _intent_instruction(intent)
         condition_scale = _intent_condition_scale(intent, default=self.condition_scale)
-        if (
-            instruction != self.instruction
-            or condition_scale != self.active_condition_scale
-            or self.condition is None
-        ):
-            self.condition = self.policy.prepare_condition(
-                {"cond_scale": condition_scale, "text": instruction},
-                deterministic=self.deterministic_condition,
-            )
-            self.hidden_state = self.policy.initial_state(1, self.condition)
-            self.instruction = instruction
-            self.active_condition_scale = condition_scale
-            self.discrete_actions_emitted.clear()
+        self._update_condition(instruction, condition_scale)
         rgb = _center_crop_16_9(frame[:, :, [2, 1, 0]], self.numpy)
         resized = self.cv2.resize(rgb, (128, 128), interpolation=self.cv2.INTER_LINEAR)
         image = self.torch.from_numpy(resized[None, None].copy()).to(self.device)
-        scene_belief: tuple[
-            Literal["world", "inventory", "chat", "unknown"],
-            bool | None,
-            float,
-            dict[str, float],
-            str,
-        ] | None = None
+        scene_belief: (
+            tuple[
+                Literal["world", "inventory", "chat", "unknown"],
+                bool | None,
+                float,
+                dict[str, float],
+                str,
+            ]
+            | None
+        ) = None
         with self.torch.inference_mode():
             if self._should_probe_scene(intent):
                 scene_belief = self._infer_scene(frame)
@@ -1637,14 +1593,46 @@ class _SteveOneBackend:
             suppressed_actions=suppressed,
         )
 
+    def _update_condition(self, instruction: str, condition_scale: float) -> None:
+        """Change the goal without erasing same-episode temporal memory.
+
+        STEVE-1 was trained with goal embeddings that change inside a trajectory.
+        The recurrent state describes the physical episode, not one planner
+        option, so resetting it on every instruction change repeatedly replays
+        the controller's cold-start distribution.  Only a transition between
+        single-branch and classifier-free-guidance state layouts requires a new
+        recurrent state.
+        """
+
+        if (
+            instruction == self.instruction
+            and condition_scale == self.active_condition_scale
+            and self.condition is not None
+        ):
+            return
+        previous_instruction = self.instruction
+        previous_scale = self.active_condition_scale
+        condition = self.policy.prepare_condition(
+            {"cond_scale": condition_scale, "text": instruction},
+            deterministic=self.deterministic_condition,
+        )
+        topology_changed = previous_scale is not None and (previous_scale != 0.0) != (
+            condition_scale != 0.0
+        )
+        if self.hidden_state is None or topology_changed:
+            self.hidden_state = self.policy.initial_state(1, condition)
+        self.condition = condition
+        self.instruction = instruction
+        self.active_condition_scale = condition_scale
+        if instruction != previous_instruction:
+            self.discrete_actions_emitted.clear()
+
     def _should_probe_scene(self, intent: dict[str, Any]) -> bool:
         mode = str(intent.get("mode") or "").casefold()
         if mode in {"gui", "close_inventory"} or mode.startswith("craft"):
             return True
         interval = self.scene_probe_interval
-        return interval > 0 and (
-            self.inference_count == 1 or self.inference_count % interval == 0
-        )
+        return interval > 0 and (self.inference_count == 1 or self.inference_count % interval == 0)
 
     def _infer_scene(
         self,
@@ -1664,9 +1652,7 @@ class _SteveOneBackend:
                 interpolation=self.cv2.INTER_AREA,
             )
             image = (
-                self.torch.from_numpy(
-                    resized.transpose(2, 0, 1)[None].copy()
-                )
+                self.torch.from_numpy(resized.transpose(2, 0, 1)[None].copy())
                 .float()
                 .div_(255.0)
                 .to(self.device)
@@ -1683,10 +1669,7 @@ class _SteveOneBackend:
         # or process and avoids routing every frame through a general VLM.
         rgb = self.numpy.ascontiguousarray(frame[:, :, [2, 1, 0]])
         resized = self.cv2.resize(rgb, (256, 160), interpolation=self.cv2.INTER_LINEAR)
-        video = (
-            self.torch.from_numpy(resized.transpose(2, 0, 1)[None, None].copy())
-            .to(self.device)
-        )
+        video = self.torch.from_numpy(resized.transpose(2, 0, 1)[None, None].copy()).to(self.device)
         features = self.policy.mineclip.encode_video(video)
         logits, _ = self.policy.mineclip.forward_reward_head(
             features,
@@ -1782,8 +1765,7 @@ class _RocketTwoBackend:
         interaction_id = int(intent.get("interaction_id", -1))
         signature = _rocket_grounding_signature(track, interaction_id)
         if signature != self.grounding_signature:
-            self.hidden_state = None
-            self.grounding_signature = signature
+            self._reset_grounding_context(signature)
             if isinstance(track, dict):
                 reference = _rocket_reference_frame(track, frame, self.cv2)
                 reference_rgb = reference[:, :, [2, 1, 0]]
@@ -1855,6 +1837,13 @@ class _RocketTwoBackend:
             target_bbox_xyxy=bbox_xyxy,
             suppressed_actions=suppressed,
         )
+
+    def _reset_grounding_context(self, signature: str) -> None:
+        """Reset both ROCKET temporal inputs when its grounded option changes."""
+
+        self.hidden_state = None
+        self.grounding_signature = signature
+        self.previous_action = self._empty_previous_action()
 
     def _empty_previous_action(self) -> dict[str, Any]:
         return {
@@ -2168,9 +2157,7 @@ def _decoded_policy_output(
     if bool(decoded["use"][0]):
         buttons.add("right")
     pitch, yaw = decoded["camera"][0]
-    effective_pitch_scale = (
-        camera_scale if camera_pitch_scale is None else camera_pitch_scale
-    )
+    effective_pitch_scale = camera_scale if camera_pitch_scale is None else camera_pitch_scale
     return LearnedPolicyOutput(
         keys=tuple(sorted(keys)),
         buttons=tuple(sorted(buttons)),
@@ -2208,12 +2195,8 @@ def _rocket_target_estimate(
     if exist is None or point is None or bbox is None:
         return None, None, None
     probability = float(exist.detach().sigmoid().cpu().reshape(-1)[0].item())
-    point_values = [
-        float(value) for value in point.detach().cpu().reshape(-1).tolist()[:2]
-    ]
-    bbox_values = [
-        float(value) for value in bbox.detach().cpu().reshape(-1).tolist()[:4]
-    ]
+    point_values = [float(value) for value in point.detach().cpu().reshape(-1).tolist()[:2]]
+    bbox_values = [float(value) for value in bbox.detach().cpu().reshape(-1).tolist()[:4]]
     if len(point_values) != 2 or len(bbox_values) != 4:
         return probability, None, None
     point_yx = tuple(max(0.0, min(1.0, value)) for value in point_values)

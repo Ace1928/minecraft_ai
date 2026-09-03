@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from minecraft_ai.datasets import DatasetSource, DatasetSourceType, TrajectoryManifest
 from minecraft_ai.eval import (
@@ -13,6 +14,7 @@ from minecraft_ai.eval import (
     compare_reports,
 )
 from minecraft_ai.eval.bedrock_worlds import BEDROCK_WORLD_CONTRACTS
+from minecraft_ai.eval.metrics import TraceMetricAccumulator
 from minecraft_ai.perception import FrameState
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.safety import MotorAction
@@ -117,8 +119,7 @@ def test_benchmark_requires_outcome_evidence_and_persists_report(tmp_path: Path)
         database.save_benchmark_report(report)
         loaded = database.load_benchmark_report_payload(report.benchmark_run_id)
         stored_results = database.connection.execute(
-            "SELECT task_id, status FROM benchmark_task_results "
-            "WHERE benchmark_run_id=?",
+            "SELECT task_id, status FROM benchmark_task_results WHERE benchmark_run_id=?",
             (report.benchmark_run_id,),
         ).fetchall()
     assert loaded["suite_id"] == "bedrock-m1-baseline-v1"
@@ -138,3 +139,42 @@ def test_comparison_refuses_small_sample_promotion_evidence() -> None:
     )
 
     assert comparison["promotion_evidence_sufficient"] is False
+
+
+def test_trace_metrics_separate_jump_edges_holds_and_world_pitch_drift() -> None:
+    accumulator = TraceMetricAccumulator()
+    actions = (
+        MotorAction(
+            sequence=0,
+            keys_down=("space", "w"),
+            mouse_dy=7,
+        ),
+        MotorAction(sequence=1, mouse_dy=4),
+        MotorAction(sequence=2, keys_up=("space",), mouse_dy=-2),
+        MotorAction(
+            sequence=3,
+            mouse_dy=99,
+            camera_semantics="cursor",
+        ),
+    )
+    for index, action in enumerate(actions):
+        step = SimpleNamespace(
+            action=action,
+            step_index=index,
+            accepted_ns=None,
+            captured_ns=index,
+            frame_hash=str(index),
+        )
+        accumulator.add(SimpleNamespace(step=step))
+
+    values = accumulator.finish().values
+
+    assert values["action.jump_presses"] == 1
+    assert values["action.jump_held_steps"] == 2
+    assert values["action.forward_held_steps"] == 4
+    assert values["camera.world_updates"] == 3
+    assert values["camera.world_pitch_net_units"] == 9
+    assert values["camera.world_pitch_down_units"] == 11
+    assert values["camera.world_pitch_up_units"] == 2
+    assert values["camera.world_pitch_down_max_streak"] == 2
+    assert values["camera.world_pitch_up_max_streak"] == 1

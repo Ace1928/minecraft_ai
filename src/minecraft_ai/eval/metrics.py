@@ -42,6 +42,19 @@ class TraceMetricAccumulator:
         self.inventory_presses = 0
         self.hotbar_presses = 0
         self.mouse_distance = 0
+        self.world_camera_updates = 0
+        self.world_camera_yaw_units = 0
+        self.world_camera_pitch_units = 0
+        self.world_camera_pitch_down_units = 0
+        self.world_camera_pitch_up_units = 0
+        self.longest_world_pitch_down_streak = 0
+        self.longest_world_pitch_up_streak = 0
+        self.world_pitch_down_streak = 0
+        self.world_pitch_up_streak = 0
+        self.jump_held_steps = 0
+        self.forward_held_steps = 0
+        self.sprint_jump_held_steps = 0
+        self.held_keys: set[str] = set()
         self.sequence_violations = 0
         self.latencies: list[float] = []
         self.longest_static_moving = 0
@@ -65,17 +78,41 @@ class TraceMetricAccumulator:
         self.inventory_presses += "e" in keys_down
         self.hotbar_presses += bool(keys_down.intersection(set("123456789")))
         self.mouse_distance += abs(action.mouse_dx) + abs(action.mouse_dy)
+        self.held_keys.difference_update(action.keys_up)
+        self.held_keys.update(keys_down)
+        self.jump_held_steps += "space" in self.held_keys
+        self.forward_held_steps += "w" in self.held_keys
+        self.sprint_jump_held_steps += {"ctrl", "space", "w"}.issubset(self.held_keys)
+        if action.camera_semantics == "world":
+            self.world_camera_updates += bool(action.mouse_dx or action.mouse_dy)
+            self.world_camera_yaw_units += action.mouse_dx
+            self.world_camera_pitch_units += action.mouse_dy
+            self.world_camera_pitch_down_units += max(0, action.mouse_dy)
+            self.world_camera_pitch_up_units += max(0, -action.mouse_dy)
+            if action.mouse_dy > 0:
+                self.world_pitch_down_streak += 1
+                self.world_pitch_up_streak = 0
+            elif action.mouse_dy < 0:
+                self.world_pitch_up_streak += 1
+                self.world_pitch_down_streak = 0
+            else:
+                self.world_pitch_down_streak = 0
+                self.world_pitch_up_streak = 0
+            self.longest_world_pitch_down_streak = max(
+                self.longest_world_pitch_down_streak,
+                self.world_pitch_down_streak,
+            )
+            self.longest_world_pitch_up_streak = max(
+                self.longest_world_pitch_up_streak,
+                self.world_pitch_up_streak,
+            )
         self.sequence_violations += action.sequence != sample.step.step_index
         if sample.step.accepted_ns is not None:
-            self.latencies.append(
-                (sample.step.accepted_ns - sample.step.captured_ns) / 1_000_000.0
-            )
+            self.latencies.append((sample.step.accepted_ns - sample.step.captured_ns) / 1_000_000.0)
         moving = bool(keys_down.intersection({"w", "a", "s", "d"}))
         if moving and sample.step.frame_hash == self.previous_hash:
             self.static_moving += 1
-            self.longest_static_moving = max(
-                self.longest_static_moving, self.static_moving
-            )
+            self.longest_static_moving = max(self.longest_static_moving, self.static_moving)
         else:
             self.static_moving = 0
         self.previous_hash = sample.step.frame_hash
@@ -97,6 +134,16 @@ class TraceMetricAccumulator:
             "action.inventory_presses": self.inventory_presses,
             "action.hotbar_presses": self.hotbar_presses,
             "action.mouse_distance": self.mouse_distance,
+            "action.jump_held_steps": self.jump_held_steps,
+            "action.forward_held_steps": self.forward_held_steps,
+            "action.sprint_jump_held_steps": self.sprint_jump_held_steps,
+            "camera.world_updates": self.world_camera_updates,
+            "camera.world_yaw_net_units": self.world_camera_yaw_units,
+            "camera.world_pitch_net_units": self.world_camera_pitch_units,
+            "camera.world_pitch_down_units": self.world_camera_pitch_down_units,
+            "camera.world_pitch_up_units": self.world_camera_pitch_up_units,
+            "camera.world_pitch_down_max_streak": (self.longest_world_pitch_down_streak),
+            "camera.world_pitch_up_max_streak": self.longest_world_pitch_up_streak,
             "safety.sequence_violations": self.sequence_violations,
             "trace.stuck_max_identical_moving_steps": self.longest_static_moving,
         }
@@ -137,17 +184,13 @@ def wilson_interval(
     center = (proportion + z * z / (2 * samples)) / denominator
     margin = (
         z
-        * math.sqrt(
-            proportion * (1.0 - proportion) / samples + z * z / (4 * samples * samples)
-        )
+        * math.sqrt(proportion * (1.0 - proportion) / samples + z * z / (4 * samples * samples))
         / denominator
     )
     return max(0.0, center - margin), min(1.0, center + margin)
 
 
-def compare_reports(
-    baseline: dict[str, object], candidate: dict[str, object]
-) -> dict[str, object]:
+def compare_reports(baseline: dict[str, object], candidate: dict[str, object]) -> dict[str, object]:
     baseline_summary = _summary(baseline)
     candidate_summary = _summary(candidate)
     baseline_passed = _int_value(baseline_summary.get("passed", 0))
