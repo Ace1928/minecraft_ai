@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .grounded_perception import (
     GroundedPerceptionHarness,
+    GroundedPerceptionRepairError,
     GroundedPerceptionReport,
 )
 from .models import VisionLanguageModel
@@ -228,6 +229,9 @@ class ActiveVLMMetrics:
     claim_rejections: int = 0
     prose_rejections: int = 0
     unknown_claims: int = 0
+    schema_repair_attempts: int = 0
+    schema_repair_successes: int = 0
+    schema_repair_failures: int = 0
 
 
 @dataclass
@@ -319,13 +323,21 @@ class ActiveVLMWorker:
             return not self._stop.is_set() and not self._work_admitted
 
     def _inspect(self, job: SemanticJob) -> tuple[SemanticObservation, float]:
-        report, latency_ms = GroundedPerceptionHarness(self.model).inspect(
-            job.frame,
-            frame_id=job.query.frame_id,
-            question=job.query.question,
-            output_keys=job.query.output_keys,
-        )
-        return _semantic_observation(report), latency_ms
+        try:
+            result = GroundedPerceptionHarness(self.model).inspect_detailed(
+                job.frame,
+                frame_id=job.query.frame_id,
+                question=job.query.question,
+                output_keys=job.query.output_keys,
+            )
+        except GroundedPerceptionRepairError:
+            self.metrics.schema_repair_attempts += 1
+            self.metrics.schema_repair_failures += 1
+            raise
+        if result.schema_repaired:
+            self.metrics.schema_repair_attempts += 1
+            self.metrics.schema_repair_successes += 1
+        return _semantic_observation(result.report), result.latency_ms
 
     def _publish(self, job: SemanticJob, observation: SemanticObservation) -> None:
         latest = self.blackboard.raw_latest()
@@ -444,6 +456,9 @@ class ActiveVLMWorker:
             "claim_rejections": self.metrics.claim_rejections,
             "prose_rejections": self.metrics.prose_rejections,
             "unknown_claims": self.metrics.unknown_claims,
+            "schema_repair_attempts": self.metrics.schema_repair_attempts,
+            "schema_repair_successes": self.metrics.schema_repair_successes,
+            "schema_repair_failures": self.metrics.schema_repair_failures,
         }
 
 
