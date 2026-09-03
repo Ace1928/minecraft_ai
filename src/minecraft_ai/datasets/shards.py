@@ -171,6 +171,26 @@ class TrajectoryShardWriter:
                         frame_hash=sample.step.frame_hash,
                         action_json=sample.step.action.model_dump_json(),
                         action_level=sample.step.action_level.value,
+                        action_origin=sample.step.action_origin.value,
+                        policy_id=sample.step.policy_id,
+                        model_version=sample.step.model_version,
+                        route_id=sample.step.route_id,
+                        policy_action_kind=sample.step.policy_action_kind,
+                        policy_request_id=sample.step.policy_request_id,
+                        prediction_id=sample.step.prediction_id,
+                        condition_id=sample.step.condition_id,
+                        condition_json=(
+                            None
+                            if sample.step.condition is None
+                            else json.dumps(
+                                sample.step.condition,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                        ),
+                        behavior_token=sample.step.behavior_token,
+                        latent_id=sample.step.latent_id,
+                        target_track_id=sample.step.target_track_id,
                         skill_run_id=sample.step.skill_run_id,
                         skill_id=sample.step.skill_id,
                         goal_id=sample.step.goal_id,

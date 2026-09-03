@@ -5,7 +5,9 @@ import time
 
 import pytest
 
+from minecraft_ai.action_levels import ActionLevel
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
+from minecraft_ai.execution import ExecutionTick
 from minecraft_ai.knowledge import Edition, GameVersion, KnowledgeGraph
 from minecraft_ai.memory import MemoryKind, MemoryRecord, MemoryStore
 from minecraft_ai.perception import (
@@ -16,11 +18,13 @@ from minecraft_ai.perception import (
     Track,
 )
 from minecraft_ai.planning import Goal, GoalScorer
+from minecraft_ai.motor import MotorIntent
 from minecraft_ai.roles import BUILTIN_ROLES, get_role
 from minecraft_ai.cognition import CognitionDecision
 from minecraft_ai.runtime import (
     AgentRuntime,
     RuntimeMetrics,
+    _accepted_action_provenance,
     _authorized_game_chat,
     _active_operator_messages,
     _first_feasible_recovery,
@@ -30,6 +34,7 @@ from minecraft_ai.runtime import (
     _semantic_deadline_ms,
     _semantic_refresh_allowed,
 )
+from minecraft_ai.safety import MotorAction
 from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
 from minecraft_ai.skills import (
     SkillLibrary,
@@ -39,6 +44,152 @@ from minecraft_ai.skills import (
     SkillStage,
     SkillStats,
 )
+from minecraft_ai.trajectory import ActionOrigin, motor_condition_id
+
+
+def test_accepted_action_provenance_resolves_bound_model_route_and_condition() -> None:
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=7,
+            captured_ns=time.monotonic_ns(),
+            instance_id="bedrock:provenance",
+            width=1280,
+            height=720,
+            tracks=(
+                Track(
+                    track_id="track:weak-log",
+                    label="oak_log",
+                    confidence=0.7,
+                    region=ScreenRegion(x=0.1, y=0.1, width=0.1, height=0.2),
+                    first_seen_ns=1,
+                    last_seen_ns=1,
+                ),
+                Track(
+                    track_id="track:strong-log",
+                    label="oak_log",
+                    confidence=0.95,
+                    region=ScreenRegion(x=0.5, y=0.2, width=0.2, height=0.4),
+                    first_seen_ns=1,
+                    last_seen_ns=1,
+                ),
+            ),
+        )
+    )
+    intent = MotorIntent(
+        skill_id="mine_log",
+        mode="mine",
+        episode_id="run-7",
+        action_level=ActionLevel.SKILL,
+        instruction="mine log",
+        target_label="oak_log",
+    )
+    causal_condition = intent.model_dump(mode="json")
+    causal_condition["action_level"] = ActionLevel.GROUNDED.value
+    causal_condition["target_track"] = {
+        "track_id": "track:weak-log",
+        "label": "oak_log",
+        "confidence": 0.7,
+    }
+    causal_condition["interaction_id"] = 2
+    run = SkillRun(run_id="run-7", skill_id="mine_log", started_ns=1)
+    execution = ExecutionTick(
+        run=run,
+        action=MotorAction(sequence=17, keys_down=("w",)),
+        motor_intent=intent,
+        policy_status={
+            "policy_id": "router:test",
+            "active_route": "semantic",
+            "episode_action_level": "grounded",
+            "primary": {
+                "policy_id": "learned:minestudio-steve1:steve1-1x",
+                "model_version": "steve1-1x",
+                "last_action_provenance": {
+                    "action_kind": "prediction",
+                    "request_id": "request-from-earlier-frame",
+                    "prediction_id": "prediction-from-earlier-frame",
+                    "action_level": "grounded",
+                    "condition": causal_condition,
+                    "target_track_id": "track:weak-log",
+                    "model_version": "steve1-1x-output",
+                    "behavior_token": 91,
+                    "latent_id": "z_091",
+                },
+                "last_prediction": {
+                    "behavior_token": 41,
+                    "latent_id": "z_041",
+                },
+            },
+        },
+        action_origin=ActionOrigin.POLICY,
+    )
+
+    provenance = _accepted_action_provenance(
+        execution,
+        board,
+        fallback_policy_id="fallback",
+    )
+
+    assert provenance.policy_id == "learned:minestudio-steve1:steve1-1x"
+    assert provenance.model_version == "steve1-1x-output"
+    assert provenance.route_id == "semantic"
+    assert provenance.policy_action_kind == "prediction"
+    assert provenance.policy_request_id == "request-from-earlier-frame"
+    assert provenance.prediction_id == "prediction-from-earlier-frame"
+    assert provenance.action_level == ActionLevel.GROUNDED
+    assert provenance.behavior_token == 91
+    assert provenance.latent_id == "z_091"
+    # The current frame prefers the strong track, but the emitted action came
+    # from an asynchronous request conditioned on the earlier weak track.
+    assert provenance.target_track_id == "track:weak-log"
+    assert provenance.condition == causal_condition
+    assert provenance.condition_id == motor_condition_id(
+        causal_condition,
+        route_id="semantic",
+        target_track_id="track:weak-log",
+    )
+
+
+def test_reset_action_does_not_inherit_previous_prediction_condition() -> None:
+    board = PerceptionBlackboard()
+    intent = MotorIntent(
+        skill_id="mine_log",
+        mode="mine",
+        episode_id="run-7",
+        action_level=ActionLevel.GROUNDED,
+    )
+    execution = ExecutionTick(
+        run=SkillRun(run_id="run-7", skill_id="mine_log", started_ns=1),
+        action=MotorAction(sequence=18, keys_up=("w",)),
+        motor_intent=intent,
+        policy_status={
+            "policy_id": "router:test",
+            "active_route": "semantic",
+            "last_action_provenance": {
+                "action_kind": "prediction_hold",
+                "condition": intent.model_dump(mode="json"),
+                "policy_id": "learned:stale",
+            },
+        },
+        action_origin=ActionOrigin.RESET,
+    )
+
+    provenance = _accepted_action_provenance(
+        execution,
+        board,
+        fallback_policy_id="fallback",
+    )
+
+    assert provenance.origin == ActionOrigin.RESET
+    assert provenance.policy_id == "router:test"
+    assert provenance.route_id == "reset"
+    assert provenance.policy_action_kind == "reset"
+    assert provenance.action_level == ActionLevel.GROUNDED
+    assert provenance.condition is None
+    assert provenance.condition_id is None
+    assert provenance.policy_request_id is None
+    assert provenance.prediction_id is None
+    assert provenance.target_track_id is None
 
 
 def test_blackboard_rejects_instance_switch_and_stale_fact() -> None:

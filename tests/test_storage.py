@@ -148,7 +148,9 @@ def test_busy_timeout_can_be_bounded_for_realtime_callers(tmp_path: Path) -> Non
     assert timeout == (100,)
 
 
-def test_v5_migration_adds_accept_time_and_benchmark_evidence(tmp_path: Path) -> None:
+def test_v5_migration_adds_accept_time_benchmark_and_action_provenance(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "state.sqlite3"
     connection = sqlite3.connect(path)
     connection.executescript(
@@ -189,6 +191,17 @@ def test_v5_migration_adds_accept_time_and_benchmark_evidence(tmp_path: Path) ->
             correction_of_step INTEGER,
             PRIMARY KEY(trajectory_id, step_index)
         );
+        INSERT INTO trajectories(
+            trajectory_id, started_ns, ended_ns, source_type, game_version, payload
+        ) VALUES('legacy', 1, 2, 'synthetic', '1.test', '{}');
+        INSERT INTO trajectory_shards(
+            shard_id, trajectory_id, path, sha256, first_step_index,
+            last_step_index, step_count, bytes
+        ) VALUES('legacy-shard', 'legacy', '/tmp/legacy.tar', 'hash', 0, 0, 1, 1);
+        INSERT INTO trajectory_steps_index(
+            trajectory_id, step_index, captured_ns, shard_id, sample_key,
+            frame_hash, action_json, action_level
+        ) VALUES('legacy', 0, 1, 'legacy-shard', '000000000000', 'hash', '{}', 'raw');
         """
     )
     connection.commit()
@@ -197,9 +210,7 @@ def test_v5_migration_adds_accept_time_and_benchmark_evidence(tmp_path: Path) ->
     with StateDatabase(path) as database:
         columns = {
             str(row[1])
-            for row in database.connection.execute(
-                "PRAGMA table_info(trajectory_steps_index)"
-            )
+            for row in database.connection.execute("PRAGMA table_info(trajectory_steps_index)")
         }
         tables = {
             str(row[0])
@@ -210,7 +221,31 @@ def test_v5_migration_adds_accept_time_and_benchmark_evidence(tmp_path: Path) ->
         version = database.connection.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
+        legacy_origin = database.connection.execute(
+            "SELECT action_origin FROM trajectory_steps_index "
+            "WHERE trajectory_id='legacy' AND step_index=0"
+        ).fetchone()
+        indexes = {
+            str(row[1])
+            for row in database.connection.execute("PRAGMA index_list(trajectory_steps_index)")
+        }
 
-    assert "accepted_ns" in columns
+    assert {
+        "accepted_ns",
+        "action_origin",
+        "policy_id",
+        "model_version",
+        "route_id",
+        "policy_action_kind",
+        "policy_request_id",
+        "prediction_id",
+        "condition_id",
+        "condition_json",
+        "behavior_token",
+        "latent_id",
+        "target_track_id",
+    } <= columns
     assert {"benchmark_runs", "benchmark_task_results"} <= tables
-    assert version == ("6",)
+    assert version == ("7",)
+    assert legacy_origin == ("legacy",)
+    assert "idx_trajectory_steps_policy_route" in indexes

@@ -17,7 +17,7 @@ class _Response:
 
 
 class _TrackingClient:
-    def __init__(self, state: dict[str, int], guard: threading.Lock) -> None:
+    def __init__(self, state: dict[str, Any], guard: threading.Lock) -> None:
         self.state = state
         self.guard = guard
 
@@ -28,6 +28,7 @@ class _TrackingClient:
         return None
 
     def post(self, *_args: object, **_kwargs: object) -> _Response:
+        self.state["json"] = _kwargs.get("json")
         with self.guard:
             self.state["active"] += 1
             self.state["peak"] = max(self.state["peak"], self.state["active"])
@@ -55,3 +56,42 @@ def test_local_model_calls_serialize_shared_gpu_work(monkeypatch: Any) -> None:
         assert [future.result().text for future in futures] == ["ok", "ok"]
 
     assert state["peak"] == 1
+
+
+def test_local_model_uses_bounded_configured_generation_budget(monkeypatch: Any) -> None:
+    state: dict[str, Any] = {"active": 0, "peak": 0}
+    guard = threading.Lock()
+
+    def client(_model: OpenAICompatibleLocalModel) -> _TrackingClient:
+        return _TrackingClient(state, guard)
+
+    monkeypatch.setattr(OpenAICompatibleLocalModel, "_client", client)
+    model = OpenAICompatibleLocalModel(
+        model_id="planner",
+        max_tokens=96,
+        thinking_budget_tokens=0,
+        reasoning_format="none",
+    )
+    model.complete((ModelMessage(role="user", content="decide"),))
+
+    assert state["json"]["max_tokens"] == 96
+    assert state["json"]["thinking_budget_tokens"] == 0
+    assert state["json"]["reasoning_format"] == "none"
+
+
+def test_local_model_omits_backend_specific_reasoning_controls_by_default(
+    monkeypatch: Any,
+) -> None:
+    state: dict[str, Any] = {"active": 0, "peak": 0}
+    guard = threading.Lock()
+
+    def client(_model: OpenAICompatibleLocalModel) -> _TrackingClient:
+        return _TrackingClient(state, guard)
+
+    monkeypatch.setattr(OpenAICompatibleLocalModel, "_client", client)
+    OpenAICompatibleLocalModel(model_id="portable").complete(
+        (ModelMessage(role="user", content="decide"),)
+    )
+
+    assert "thinking_budget_tokens" not in state["json"]
+    assert "reasoning_format" not in state["json"]

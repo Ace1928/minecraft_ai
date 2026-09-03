@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from .eval.evaluator import BenchmarkReport
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class StateDatabase:
@@ -160,6 +160,18 @@ class StateDatabase:
                 frame_hash TEXT NOT NULL,
                 action_json TEXT NOT NULL,
                 action_level TEXT NOT NULL,
+                action_origin TEXT NOT NULL DEFAULT 'legacy',
+                policy_id TEXT,
+                model_version TEXT,
+                route_id TEXT,
+                policy_action_kind TEXT,
+                policy_request_id TEXT,
+                prediction_id TEXT,
+                condition_id TEXT,
+                condition_json TEXT,
+                behavior_token INTEGER,
+                latent_id TEXT,
+                target_track_id TEXT,
                 skill_run_id TEXT,
                 skill_id TEXT,
                 goal_id TEXT,
@@ -232,10 +244,17 @@ class StateDatabase:
             if version == 5:
                 self._migrate_v5_to_v6()
                 version = 6
+            if version == 6:
+                self._migrate_v6_to_v7()
+                version = 7
             self.connection.execute(
                 "UPDATE meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
             )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trajectory_steps_policy_route "
+            "ON trajectory_steps_index(policy_id, model_version, route_id)"
+        )
         self.connection.commit()
 
     def _migrate_v2_to_v3(self) -> None:
@@ -352,6 +371,35 @@ class StateDatabase:
             CREATE INDEX IF NOT EXISTS idx_benchmark_task_results_status
                 ON benchmark_task_results(benchmark_run_id, status);
             """
+        )
+
+    def _migrate_v6_to_v7(self) -> None:
+        columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(trajectory_steps_index)")
+        }
+        additions = {
+            "action_origin": "TEXT NOT NULL DEFAULT 'legacy'",
+            "policy_id": "TEXT",
+            "model_version": "TEXT",
+            "route_id": "TEXT",
+            "policy_action_kind": "TEXT",
+            "policy_request_id": "TEXT",
+            "prediction_id": "TEXT",
+            "condition_id": "TEXT",
+            "condition_json": "TEXT",
+            "behavior_token": "INTEGER",
+            "latent_id": "TEXT",
+            "target_track_id": "TEXT",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                self.connection.execute(
+                    f"ALTER TABLE trajectory_steps_index ADD COLUMN {name} {declaration}"
+                )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trajectory_steps_policy_route "
+            "ON trajectory_steps_index(policy_id, model_version, route_id)"
         )
 
     def _migrate_v1_to_v2(self) -> None:
@@ -719,6 +767,18 @@ class StateDatabase:
         frame_hash: str,
         action_json: str,
         action_level: str,
+        action_origin: str,
+        policy_id: str | None,
+        model_version: str | None,
+        route_id: str | None,
+        policy_action_kind: str | None,
+        policy_request_id: str | None,
+        prediction_id: str | None,
+        condition_id: str | None,
+        condition_json: str | None,
+        behavior_token: int | None,
+        latent_id: str | None,
+        target_track_id: str | None,
         skill_run_id: str | None,
         skill_id: str | None,
         goal_id: str | None,
@@ -730,9 +790,11 @@ class StateDatabase:
             """
             INSERT INTO trajectory_steps_index(
                 trajectory_id, step_index, captured_ns, accepted_ns, shard_id, sample_key,
-                frame_hash, action_json, action_level, skill_run_id, skill_id,
-                goal_id, plan_node_id, correction_of_step
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                frame_hash, action_json, action_level, action_origin, policy_id, model_version,
+                route_id, policy_action_kind, policy_request_id, prediction_id, condition_id,
+                condition_json, behavior_token, latent_id, target_track_id, skill_run_id,
+                skill_id, goal_id, plan_node_id, correction_of_step
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(trajectory_id, step_index) DO UPDATE SET
                 captured_ns=excluded.captured_ns,
                 accepted_ns=excluded.accepted_ns,
@@ -741,6 +803,18 @@ class StateDatabase:
                 frame_hash=excluded.frame_hash,
                 action_json=excluded.action_json,
                 action_level=excluded.action_level,
+                action_origin=excluded.action_origin,
+                policy_id=excluded.policy_id,
+                model_version=excluded.model_version,
+                route_id=excluded.route_id,
+                policy_action_kind=excluded.policy_action_kind,
+                policy_request_id=excluded.policy_request_id,
+                prediction_id=excluded.prediction_id,
+                condition_id=excluded.condition_id,
+                condition_json=excluded.condition_json,
+                behavior_token=excluded.behavior_token,
+                latent_id=excluded.latent_id,
+                target_track_id=excluded.target_track_id,
                 skill_run_id=excluded.skill_run_id,
                 skill_id=excluded.skill_id,
                 goal_id=excluded.goal_id,
@@ -757,6 +831,18 @@ class StateDatabase:
                 frame_hash,
                 action_json,
                 action_level,
+                action_origin,
+                policy_id,
+                model_version,
+                route_id,
+                policy_action_kind,
+                policy_request_id,
+                prediction_id,
+                condition_id,
+                condition_json,
+                behavior_token,
+                latent_id,
+                target_track_id,
                 skill_run_id,
                 skill_id,
                 goal_id,

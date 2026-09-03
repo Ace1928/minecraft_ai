@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from minecraft_ai.action_levels import ActionLevel
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.cognition import BootstrapCognitionPolicy, CognitionContext
 from minecraft_ai.perception import FrameState, PerceptionBlackboard
@@ -170,17 +171,20 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert exploration.action_permissions.allow_jump is True
     assert exploration.policy_instruction == "Run around and explore the Minecraft world."
     assert obstacle.policy_ref == "traverse_obstacle"
+    assert obstacle.action_level == ActionLevel.MOTION
     assert obstacle.policy_instruction == "jump forward"
     assert obstacle.policy_condition_scale == 6.0
     assert obstacle.action_permissions.allow_jump is True
     assert obstacle.action_permissions.allow_attack is False
     assert obstacle.action_permissions.allow_use is False
     assert close_inventory.policy_ref == "close_inventory"
+    assert close_inventory.action_level == ActionLevel.GUI
     assert close_inventory.policy_instruction == "close inventory"
     assert close_inventory.success_conditions[0].key == "scene.playable"
 
     reacquire = skills.get("reacquire_target")
     assert reacquire.policy_ref == "navigate"
+    assert reacquire.action_level == ActionLevel.GROUNDED
     assert reacquire.success_conditions[0].key == "target.tracking_confidence"
     assert reacquire.success_conditions[0].operator == "gte"
     assert reacquire.success_conditions[0].value == 0.65
@@ -189,6 +193,7 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert respawn.preconditions[0].key == "scene.death"
     assert respawn.success_conditions[0].key == "scene.playable"
     assert respawn.policy_ref == "death_gui"
+    assert respawn.action_level == ActionLevel.GUI
     assert respawn.policy_instruction == "respawn"
     assert retreat.preconditions[0].operator == "truthy"
     assert escape.preconditions[0].key == "environment.underwater"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from minecraft_ai.action_levels import ActionLevel
 from minecraft_ai.skill_editor import SkillLifecycleManager, SkillPromotionEvidence
 from minecraft_ai.skills import (
     SkillCondition,
@@ -76,10 +77,12 @@ def test_synthesize_recovery_variant() -> None:
         skill_id="mine_coal",
         name="Mine Coal",
         policy_ref="mine",
+        action_level=ActionLevel.GROUNDED,
     )
 
     variant = editor.draft_recovery_candidate("mine_coal", "failure:lava_near")
     assert variant.skill_id == "mine_coal_recovery_candidate"
     assert variant.stage == SkillStage.CANDIDATE
+    assert variant.action_level == ActionLevel.GROUNDED
     assert any(cond.key == "lava_near" for cond in variant.failure_conditions)
     assert library.get("mine_coal_recovery_candidate") == variant

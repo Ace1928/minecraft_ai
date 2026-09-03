@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy
 import pytest
 
+from minecraft_ai.action_levels import ActionLevel
 from minecraft_ai.config import PolicyConfig
 from minecraft_ai.motor import MotorIntent
 from minecraft_ai.perception import (
@@ -21,6 +22,7 @@ from minecraft_ai.policy_service import (
     LearnedPolicyOutput,
     GroundedPolicyRouter,
     TemporalPolicyClient,
+    _PolicyRequestContext,
     _RocketTwoBackend,
     _SteveOneBackend,
     _apply_action_constraints,
@@ -41,6 +43,7 @@ from minecraft_ai.policy_service import (
     _validate_policy_config,
 )
 from minecraft_ai.safety import MotorAction
+from minecraft_ai.trajectory import motor_condition_id
 
 
 class _RoutingPolicy:
@@ -50,6 +53,8 @@ class _RoutingPolicy:
         self.calls = 0
         self.resets = 0
         self.warmups = 0
+        self.reported_status: dict[str, object] = {}
+        self.last_intent: MotorIntent | None = None
 
     def act(
         self,
@@ -59,6 +64,7 @@ class _RoutingPolicy:
         sequence: int,
     ) -> MotorAction:
         self.calls += 1
+        self.last_intent = intent
         return MotorAction(sequence=sequence, keys_down=(self.key,))
 
     def reset(self) -> MotorAction:
@@ -67,6 +73,9 @@ class _RoutingPolicy:
 
     def warmup(self) -> None:
         self.warmups += 1
+
+    def status(self) -> dict[str, object]:
+        return {"policy_id": self.policy_id, **self.reported_status}
 
 
 class _TargetFeedbackPolicy(_RoutingPolicy):
@@ -138,41 +147,107 @@ def _operator_tracked_board(
     return board
 
 
-def test_grounded_router_requires_fresh_track_and_supported_interaction() -> None:
+def test_grounded_router_uses_rocket_only_as_grounding_observer() -> None:
     primary = _RoutingPolicy("steve", key="w")
     grounded = _RoutingPolicy("rocket", key="a")
     router = GroundedPolicyRouter(primary, grounded, max_track_age_ms=100)
-    mine = MotorIntent(skill_id="mine", mode="mine")
+    mine = MotorIntent(
+        skill_id="mine",
+        mode="mine",
+        episode_id="mine-1",
+        action_level=ActionLevel.GROUNDED,
+    )
 
     first = router.act(PerceptionBlackboard(), mine, sequence=1)
     assert first.keys_down == ("w",)
     assert grounded.calls == 0
 
     second = router.act(_tracked_board(), mine, sequence=2)
-    assert second.keys_down == ("a",)
-    assert second.keys_up == ("w",)
-    assert router.status()["active_route"] == "grounded"
+    assert second.keys_down == ("w",)
+    assert second.keys_up == ()
+    assert grounded.calls == 1
+    status = router.status()
+    assert status["active_route"] == "semantic"
+    assert status["grounding_role"] == "asynchronous-target-belief-only"
+    assert status["grounding_discarded_actions"] == 1
 
     router.reset()
-    third = router.act(_tracked_board(age_ms=500), mine, sequence=4)
+    third = router.act(
+        _tracked_board(age_ms=500),
+        mine.model_copy(update={"episode_id": "mine-2"}),
+        sequence=4,
+    )
     assert third.keys_down == ("w",)
     assert third.keys_up == ()
-    assert router.status()["switches"] == 1
+    assert router.status()["switches"] == 0
 
-    explore = MotorIntent(skill_id="explore", mode="explore")
+    explore = MotorIntent(
+        skill_id="explore",
+        mode="explore",
+        episode_id="explore-1",
+        action_level=ActionLevel.LATENT,
+    )
     router.act(_tracked_board(), explore, sequence=5)
     assert grounded.calls == 1
 
 
-def test_grounded_router_prewarms_both_learned_controllers() -> None:
+def test_grounded_router_prewarms_every_learned_controller() -> None:
     primary = _RoutingPolicy("steve", key="w")
     grounded = _RoutingPolicy("rocket", key="a")
-    router = GroundedPolicyRouter(primary, grounded)
+    raw_motion = _RoutingPolicy("vpt", key="space")
+    router = GroundedPolicyRouter(primary, grounded, raw_motion=raw_motion)
 
     router.warmup()
 
     assert primary.warmups == 1
     assert grounded.warmups == 1
+    assert raw_motion.warmups == 1
+
+
+def test_grounded_router_binds_vpt_body_for_atomic_motion_episode() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _RoutingPolicy("rocket", key="a")
+    raw_motion = _RoutingPolicy("openai-vpt-1x", key="space")
+    router = GroundedPolicyRouter(primary, grounded, raw_motion=raw_motion)
+    motion = MotorIntent(
+        skill_id="traverse_visible_obstacle",
+        mode="traverse_obstacle",
+        episode_id="motion-1",
+        action_level=ActionLevel.MOTION,
+    )
+
+    first = router.act(PerceptionBlackboard(), motion, sequence=1)
+    assert first.keys_down == ("space",)
+    assert first.keys_up == ("w",)
+
+    # A malformed mid-episode level change is observable but cannot hand the
+    # physical body to a different recurrent expert.
+    conflicting = router.act(
+        PerceptionBlackboard(),
+        motion.model_copy(update={"action_level": ActionLevel.LATENT}),
+        sequence=2,
+    )
+    assert conflicting.keys_down == ("space",)
+    assert primary.calls == 0
+
+    semantic = router.act(
+        PerceptionBlackboard(),
+        MotorIntent(
+            skill_id="explore_forward",
+            mode="explore",
+            episode_id="semantic-1",
+            action_level=ActionLevel.LATENT,
+        ),
+        sequence=3,
+    )
+    assert semantic.keys_down == ("w",)
+    assert semantic.keys_up == ("space",)
+    status = router.status()
+    assert status["active_route"] == "semantic"
+    assert status["episode_bindings"] == 2
+    assert status["episode_binding_conflicts"] == 1
+    assert status["switches"] == 2
+    assert status["raw_motion"] == {"policy_id": "openai-vpt-1x"}
 
 
 def test_grounded_router_routes_blocking_gui_to_dedicated_learned_expert() -> None:
@@ -183,7 +258,12 @@ def test_grounded_router_routes_blocking_gui_to_dedicated_learned_expert() -> No
 
     action = router.act(
         PerceptionBlackboard(),
-        MotorIntent(skill_id="respawn_after_death", mode="death_gui"),
+        MotorIntent(
+            skill_id="respawn_after_death",
+            mode="death_gui",
+            episode_id="respawn-1",
+            action_level=ActionLevel.GUI,
+        ),
         sequence=1,
     )
 
@@ -195,7 +275,7 @@ def test_grounded_router_routes_blocking_gui_to_dedicated_learned_expert() -> No
     assert (primary.warmups, grounded.warmups, gui.warmups) == (1, 1, 1)
 
 
-def test_grounded_router_shares_one_physical_pitch_state(tmp_path: Path) -> None:
+def test_grounded_router_excludes_observer_camera_from_physical_pitch(tmp_path: Path) -> None:
     config = _policy_config(tmp_path).model_copy(
         update={
             "camera_max_step": 100,
@@ -205,7 +285,8 @@ def test_grounded_router_shares_one_physical_pitch_state(tmp_path: Path) -> None
     )
     primary = TemporalPolicyClient(config=config, frame_provider=lambda: None)
     grounded = TemporalPolicyClient(config=config, frame_provider=lambda: None)
-    router = GroundedPolicyRouter(primary, grounded)
+    raw_motion = TemporalPolicyClient(config=config, frame_provider=lambda: None)
+    router = GroundedPolicyRouter(primary, grounded, raw_motion=raw_motion)
 
     primary._output_action(
         LearnedPolicyOutput(
@@ -215,23 +296,35 @@ def test_grounded_router_shares_one_physical_pitch_state(tmp_path: Path) -> None
         ),
         sequence=1,
     )
-    grounded._output_action(
+    raw_motion._output_action(
         LearnedPolicyOutput(
             mouse_dy=40,
             inference_ns=1,
-            model_version="grounded",
+            model_version="raw-motion",
         ),
         sequence=1,
     )
 
     assert primary.status()["estimated_pitch_units"] == 70
-    assert grounded.status()["estimated_pitch_units"] == 70
+    assert raw_motion.status()["estimated_pitch_units"] == 70
+    assert grounded.status()["estimated_pitch_units"] == 0
 
-    saturated = grounded._output_action(
+    discarded = grounded._output_action(
         LearnedPolicyOutput(
             mouse_dy=50,
             inference_ns=1,
             model_version="grounded",
+        ),
+        sequence=2,
+    )
+
+    assert discarded.mouse_dy == 50
+    assert primary.status()["estimated_pitch_units"] == 70
+    saturated = raw_motion._output_action(
+        LearnedPolicyOutput(
+            mouse_dy=50,
+            inference_ns=1,
+            model_version="raw-motion",
         ),
         sequence=2,
     )
@@ -243,7 +336,8 @@ def test_grounded_router_shares_one_physical_pitch_state(tmp_path: Path) -> None
     router.restore_world_camera_state(estimated_pitch_units=-37)
 
     assert primary.status()["estimated_pitch_units"] == -37
-    assert grounded.status()["estimated_pitch_units"] == -37
+    assert raw_motion.status()["estimated_pitch_units"] == -37
+    assert grounded.status()["estimated_pitch_units"] == 50
     assert grounded.status()["camera_envelope_saturated"] is False
 
 
@@ -285,7 +379,16 @@ def test_grounded_router_merges_temporally_filtered_target_feedback() -> None:
     grounded = _TargetFeedbackPolicy("rocket", key="a")
     router = GroundedPolicyRouter(primary, grounded)
     board = _tracked_board()
-    router.act(board, MotorIntent(skill_id="approach", mode="approach"), sequence=1)
+    router.act(
+        board,
+        MotorIntent(
+            skill_id="approach",
+            mode="approach",
+            episode_id="approach-1",
+            action_level=ActionLevel.GROUNDED,
+        ),
+        sequence=1,
+    )
     observed_ns = time.monotonic_ns()
     grounded.observation = GroundedTargetObservation(
         observed_ns=observed_ns,
@@ -344,7 +447,16 @@ def test_grounded_router_keeps_small_learned_target_box_outside_near_range() -> 
     grounded = _TargetFeedbackPolicy("rocket", key="a")
     router = GroundedPolicyRouter(primary, grounded)
     board = _tracked_board()
-    router.act(board, MotorIntent(skill_id="approach", mode="approach"), sequence=1)
+    router.act(
+        board,
+        MotorIntent(
+            skill_id="approach",
+            mode="approach",
+            episode_id="approach-1",
+            action_level=ActionLevel.GROUNDED,
+        ),
+        sequence=1,
+    )
     observed_ns = time.monotonic_ns()
     grounded.observation = GroundedTargetObservation(
         observed_ns=observed_ns,
@@ -473,19 +585,30 @@ def test_grounded_router_rejects_stale_unbound_operator_region() -> None:
 
     action = router.act(
         _operator_tracked_board(age_ms=10_000),
-        MotorIntent(skill_id="mine", mode="mine"),
+        MotorIntent(
+            skill_id="mine",
+            mode="mine",
+            episode_id="mine-1",
+            action_level=ActionLevel.GROUNDED,
+        ),
         sequence=1,
     )
 
     assert action.keys_down == ("w",)
-    assert router.status()["active_route"] == "primary"
+    assert router.status()["active_route"] == "semantic"
+    assert router.status()["grounding_active"] is False
 
 
 def test_grounded_router_holds_hash_bound_target_only_inside_active_option() -> None:
     primary = _RoutingPolicy("steve", key="w")
     grounded = _RoutingPolicy("rocket", key="a")
     router = GroundedPolicyRouter(primary, grounded, max_track_age_ms=100)
-    mine = MotorIntent(skill_id="mine", mode="mine")
+    mine = MotorIntent(
+        skill_id="mine",
+        mode="mine",
+        episode_id="mine-1",
+        action_level=ActionLevel.GROUNDED,
+    )
     board = _operator_tracked_board(
         age_ms=10_000,
         reference_dhash="0123456789abcdef",
@@ -493,7 +616,8 @@ def test_grounded_router_holds_hash_bound_target_only_inside_active_option() -> 
     )
 
     admitted = router.act(board, mine, sequence=1)
-    assert admitted.keys_down == ("a",)
+    assert admitted.keys_down == ("w",)
+    assert grounded.calls == 1
 
     changed = board.fact("frame.dhash", min_confidence=1.0)
     assert changed is not None
@@ -502,10 +626,15 @@ def test_grounded_router_holds_hash_bound_target_only_inside_active_option() -> 
         facts=(changed.model_copy(update={"value": "fedcba9876543210"}),),
     )
     held = router.act(board, mine, sequence=2)
-    assert held.keys_down == ("a",)
+    assert held.keys_down == ("w",)
+    assert grounded.calls == 2
 
     router.reset()
-    rejected = router.act(board, mine, sequence=4)
+    rejected = router.act(
+        board,
+        mine.model_copy(update={"episode_id": "mine-2"}),
+        sequence=4,
+    )
     assert rejected.keys_down == ("w",)
 
 
@@ -522,12 +651,25 @@ def test_grounded_router_admits_persisted_cross_view_reference(tmp_path: Path) -
             current_dhash="fedcba9876543210",
             reference_image_path=reference,
         ),
-        MotorIntent(skill_id="approach", mode="approach"),
+        MotorIntent(
+            skill_id="approach",
+            mode="approach",
+            episode_id="approach-1",
+            action_level=ActionLevel.GROUNDED,
+        ),
         sequence=1,
     )
 
-    assert action.keys_down == ("a",)
-    assert router.status()["active_route"] == "grounded"
+    assert action.keys_down == ("w",)
+    status = router.status()
+    assert status["active_route"] == "semantic"
+    assert status["grounding_active"] is True
+    assert status["grounded_track_id"] == "log-1"
+    assert status["grounding_episode_id"] == "approach-1"
+    assert primary.last_intent is not None
+    assert primary.last_intent.target_track_id == "log-1"
+    assert grounded.last_intent is not None
+    assert grounded.last_intent.target_track_id == "log-1"
 
 
 def test_rocket_reference_frame_verifies_persisted_artifact(tmp_path: Path) -> None:
@@ -612,6 +754,10 @@ def test_policy_config_requires_hashes_provenance_and_paths(tmp_path: Path) -> N
     with pytest.raises(ValueError, match="camera_recovery_release"):
         _validate_policy_config(
             config.model_copy(update={"camera_pitch_limit": 20, "camera_recovery_release": 20})
+        )
+    with pytest.raises(ValueError, match="action_hold_ms"):
+        _validate_policy_config(
+            config.model_copy(update={"action_hold_ms": 200, "action_hold_max_ms": 100})
         )
 
     scene_model = tmp_path / "fast-scene.pt"
@@ -1059,33 +1205,63 @@ def test_slow_policy_uses_bounded_sample_and_hold_window(tmp_path: Path) -> None
     assert client._held_until_ns <= before + 260_000_000
 
 
-def test_async_policy_releases_expired_keys_but_holds_continuous_button(
+@pytest.mark.parametrize("provider", ("minestudio-steve1", "minestudio-rocket2"))
+def test_slow_learned_policy_renews_key_and_button_state_without_gaps(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    provider: str,
 ) -> None:
-    frame = CapturedFrame(frame_id=1, captured_ns=1, width=1, height=1, bgra=b"\0" * 4)
-    client = TemporalPolicyClient(
-        config=_policy_config(tmp_path, deadline_ms=150),
-        frame_provider=lambda: frame,
+    clock_ns = [1_000_000_000]
+    monkeypatch.setattr(
+        "minecraft_ai.policy_service.time.monotonic_ns",
+        lambda: clock_ns[0],
     )
+    client = TemporalPolicyClient(
+        config=_policy_config(tmp_path, deadline_ms=1_000).model_copy(
+            update={"provider": provider}
+        ),
+        frame_provider=lambda: None,
+    )
+    client._output_action(
+        LearnedPolicyOutput(
+            keys=("space", "w"),
+            buttons=("left",),
+            inference_ns=180_000_000,
+            model_version="official-v1",
+        ),
+        sequence=1,
+    )
+    client._pending_request_id = "in-flight"
+    client._pending_deadline_ns = 2_000_000_000
+    clock_ns[0] = 1_300_000_000
+
+    action = client._hold(sequence=2)
+
+    assert action.keys_up == ()
+    assert action.buttons_up == ()
+    assert client._held_keys == {"space", "w"}
+    assert client._held_buttons == {"left"}
+    status = client.status()["adaptive_action_hold"]
+    assert isinstance(status, dict)
+    assert status["latency_ema_ms"] == 180.0
+    assert status["horizon_ms"] == 216
+    assert status["renewals"] == 1
+
+
+def test_expired_learned_state_releases_keys_and_buttons_without_pending_prediction(
+    tmp_path: Path,
+) -> None:
+    client = TemporalPolicyClient(config=_policy_config(tmp_path), frame_provider=lambda: None)
     client._held_keys = {"shift", "w"}
     client._held_buttons = {"left"}
     client._held_until_ns = time.monotonic_ns() - 1
-    client._pending_request_id = "in-flight"
-    client._pending_deadline_ns = time.monotonic_ns() + 100_000_000
-    monkeypatch.setattr(client, "_ensure_started", lambda _size: None)
-    monkeypatch.setattr(client, "_consume_pending_response", lambda: None)
 
-    action = client.act(
-        PerceptionBlackboard(),
-        MotorIntent(skill_id="explore", mode="explore"),
-        sequence=1,
-    )
+    action = client._hold(sequence=1)
 
     assert action.keys_up == ("shift", "w")
-    assert action.buttons_up == ()
+    assert action.buttons_up == ("left",)
     assert not client._held_keys
-    assert client._held_buttons == {"left"}
+    assert not client._held_buttons
 
 
 def test_async_policy_releases_continuous_button_at_request_deadline(
@@ -1112,6 +1288,46 @@ def test_async_policy_releases_continuous_button_at_request_deadline(
     assert action.buttons_up == ("left",)
     assert not client._held_buttons
     assert client.metrics.deadline_misses == 1
+    hold_status = client.status()["adaptive_action_hold"]
+    assert isinstance(hold_status, dict)
+    assert hold_status["last_invalidation_reason"] == "request-deadline-expired"
+
+
+def test_safety_scene_invalidation_releases_learned_state_immediately(
+    tmp_path: Path,
+) -> None:
+    client = TemporalPolicyClient(config=_policy_config(tmp_path), frame_provider=lambda: None)
+    client._held_keys = {"w"}
+    client._held_buttons = {"left"}
+    client._held_until_ns = time.monotonic_ns() + 1_000_000_000
+    board = _tracked_board()
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(
+            PerceptionFact(
+                key="scene.playable",
+                value=False,
+                confidence=1.0,
+                observed_ns=time.monotonic_ns(),
+                source="safety:test",
+                expires_after_ms=1_000,
+            ),
+        ),
+    )
+
+    action = client.act(
+        board,
+        MotorIntent(skill_id="explore", mode="explore"),
+        sequence=1,
+    )
+
+    assert action.keys_up == ("w",)
+    assert action.buttons_up == ("left",)
+    assert not client._held_keys
+    assert not client._held_buttons
+    hold_status = client.status()["adaptive_action_hold"]
+    assert isinstance(hold_status, dict)
+    assert hold_status["last_invalidation_reason"] == "scene-blocked"
 
 
 def test_policy_status_exposes_predicted_and_emitted_camera(tmp_path: Path) -> None:
@@ -1144,6 +1360,8 @@ def test_policy_status_exposes_predicted_and_emitted_camera(tmp_path: Path) -> N
         "scene_confidence": None,
         "scene_class_probabilities": {},
         "scene_model_version": None,
+        "behavior_token": None,
+        "latent_id": None,
         "suppressed_actions": (),
     }
     assert status["last_emitted_camera"] == {"mouse_dx": 1, "mouse_dy": -1}
@@ -1156,6 +1374,132 @@ def test_policy_status_exposes_predicted_and_emitted_camera(tmp_path: Path) -> N
         "camera": 1,
         "forward": 1,
     }
+
+
+def test_async_action_provenance_stays_bound_to_consumed_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = CapturedFrame(frame_id=1, captured_ns=1, width=1, height=1, bgra=b"\0" * 4)
+    client = TemporalPolicyClient(
+        config=_policy_config(tmp_path, deadline_ms=500),
+        frame_provider=lambda: frame,
+    )
+    board = _tracked_board()
+    intent = MotorIntent(
+        skill_id="mine_visible_block",
+        mode="mine",
+        episode_id="episode-old",
+        action_level=ActionLevel.GROUNDED,
+        target_label="oak log",
+    )
+    condition = client._conditioned_intent(intent, board)
+    client._consumed_request_context = _PolicyRequestContext(
+        request_id="request-old",
+        condition=condition,
+        target_track_id="log-1",
+        interaction_id=2,
+    )
+    responses: list[dict[str, object] | None] = [
+        {
+            "output": {
+                "keys": ["w"],
+                "inference_ns": 1,
+                "model_version": "official-v1",
+                "behavior_token": 41,
+                "latent_id": "z_041",
+            }
+        },
+        None,
+    ]
+    monkeypatch.setattr(client, "_ensure_started", lambda _size: None)
+    monkeypatch.setattr(client, "_consume_pending_response", lambda: responses.pop(0))
+
+    client.act(board, intent, sequence=1)
+    first = client.status()["last_action_provenance"]
+    assert isinstance(first, dict)
+    assert first["action_kind"] == "prediction"
+    assert first["request_id"] == "request-old"
+    assert first["episode_id"] == "episode-old"
+    assert first["action_level"] == "grounded"
+    assert first["target_track_id"] == "log-1"
+    assert first["interaction_id"] == 2
+    assert first["behavior_token"] == 41
+    assert first["latent_id"] == "z_041"
+    assert first["condition"] == condition
+
+    new_intent = intent.model_copy(update={"episode_id": "episode-new"})
+    new_condition = client._conditioned_intent(new_intent, board)
+    client._pending_request_id = "request-new"
+    client._pending_request_context = _PolicyRequestContext(
+        request_id="request-new",
+        condition=new_condition,
+        target_track_id="log-1",
+        interaction_id=2,
+    )
+    client._pending_deadline_ns = time.monotonic_ns() + 100_000_000
+
+    client.act(board, new_intent, sequence=2)
+    held = client.status()["last_action_provenance"]
+    assert isinstance(held, dict)
+    assert held["action_kind"] == "prediction_hold"
+    assert held["request_id"] == "request-old"
+    assert held["episode_id"] == "episode-old"
+    pending = client.status()["pending_request"]
+    assert isinstance(pending, dict)
+    assert pending["request_id"] == "request-new"
+    assert pending["condition"] == new_condition
+
+    client.reset()
+    released = client.status()["last_action_provenance"]
+    assert isinstance(released, dict)
+    assert released["action_kind"] == "release"
+    assert released["request_id"] is None
+    assert released["condition"] is None
+
+
+def test_router_reidentifies_exact_prediction_condition_for_bound_route() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _RoutingPolicy("rocket", key="a")
+    raw_motion = _RoutingPolicy("openai-vpt-1x", key="space")
+    condition = MotorIntent(
+        skill_id="traverse_visible_obstacle",
+        mode="traverse_obstacle",
+        episode_id="motion-1",
+        action_level=ActionLevel.MOTION,
+    ).model_dump(mode="json")
+    raw_motion.reported_status["last_action_provenance"] = {
+        "action_kind": "prediction",
+        "prediction_id": "request-1",
+        "request_id": "request-1",
+        "condition_id": "direct-id",
+        "condition": condition,
+        "episode_id": "motion-1",
+        "action_level": "motion",
+        "target_track_id": None,
+        "interaction_id": -1,
+        "policy_id": raw_motion.policy_id,
+        "model_version": "openai-vpt-foundation-1x",
+        "route_id": "direct",
+        "behavior_token": None,
+        "latent_id": None,
+    }
+    router = GroundedPolicyRouter(primary, grounded, raw_motion=raw_motion)
+    router.act(
+        PerceptionBlackboard(),
+        MotorIntent.model_validate(condition),
+        sequence=1,
+    )
+
+    provenance = router.status()["last_action_provenance"]
+    assert isinstance(provenance, dict)
+    assert provenance["route_id"] == "raw_motion"
+    assert provenance["request_id"] == "request-1"
+    assert provenance["condition_id"] == motor_condition_id(
+        condition,
+        route_id="raw_motion",
+        target_track_id=None,
+    )
 
 
 def test_policy_status_counts_learned_jump_before_state_hold_actions(tmp_path: Path) -> None:

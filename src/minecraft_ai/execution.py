@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .motor import MotorIntent, MotorPolicy
 from .perception import PerceptionBlackboard
 from .safety import MotorAction
 from .skills import SkillActionPermissions, SkillCondition, SkillOutcome, SkillRun, SkillSpec
+from .trajectory import ActionOrigin
 
 
 @dataclass(frozen=True)
@@ -14,6 +15,9 @@ class ExecutionTick:
     run: SkillRun
     action: MotorAction | None
     recovery_skills: tuple[str, ...] = ()
+    motor_intent: MotorIntent | None = None
+    policy_status: dict[str, object] = field(default_factory=dict)
+    action_origin: ActionOrigin = ActionOrigin.POLICY
 
 
 class SkillExecutor:
@@ -25,6 +29,7 @@ class SkillExecutor:
         self._run: SkillRun | None = None
         self._parameters: dict[str, str | int | float | bool] = {}
         self._initiated = False
+        self._last_intent: MotorIntent | None = None
 
     @property
     def run(self) -> SkillRun | None:
@@ -68,6 +73,7 @@ class SkillExecutor:
         self._spec = spec
         self._parameters = dict(parameters or {})
         self._initiated = False
+        self._last_intent = None
         self._run = SkillRun(
             run_id=run_id,
             skill_id=spec.skill_id,
@@ -126,13 +132,21 @@ class SkillExecutor:
         intent = MotorIntent(
             skill_id=self._spec.skill_id,
             mode=self._spec.policy_ref or self._spec.skill_id,
+            episode_id=self._run.run_id,
+            action_level=self._spec.action_level,
             instruction=_policy_instruction(self._spec),
             condition_scale=self._spec.policy_condition_scale,
             target_label=_target_label(self._parameters),
             parameters=self.policy_parameters,
         )
         action = self.policy.act(blackboard, intent, sequence=sequence)
-        return ExecutionTick(run=self._run, action=action)
+        self._last_intent = intent
+        return ExecutionTick(
+            run=self._run,
+            action=action,
+            motor_intent=intent,
+            policy_status=_policy_status_snapshot(self.policy),
+        )
 
     def cancel(self, *, now_ns: int | None = None) -> ExecutionTick:
         if self._run is None:
@@ -158,9 +172,28 @@ class SkillExecutor:
                 "failure_reason": reason,
             }
         )
+        motor_intent = self._last_intent
         release = self.policy.reset()
+        policy_status = _policy_status_snapshot(self.policy)
+        self._last_intent = None
         recovery = self._spec.recovery_skills if recover else ()
-        return ExecutionTick(run=self._run, action=release, recovery_skills=recovery)
+        return ExecutionTick(
+            run=self._run,
+            action=release,
+            recovery_skills=recovery,
+            motor_intent=motor_intent,
+            policy_status=policy_status,
+            action_origin=ActionOrigin.RESET,
+        )
+
+
+def _policy_status_snapshot(policy: MotorPolicy) -> dict[str, object]:
+    status = getattr(policy, "status", None)
+    if callable(status):
+        reported = status()
+        if isinstance(reported, dict):
+            return reported
+    return {"policy_id": policy.policy_id}
 
 
 def _skill_instruction(
@@ -228,11 +261,7 @@ def initiation_satisfied(
     now_ns: int | None = None,
 ) -> bool:
     """Evaluate OR-of-AND initiation groups for a learned option contract."""
-    groups = tuple(
-        group
-        for group in (spec.preconditions, *spec.initiation_alternatives)
-        if group
-    )
+    groups = tuple(group for group in (spec.preconditions, *spec.initiation_alternatives) if group)
     if not groups:
         return True
     return any(conditions_satisfied(group, blackboard, now_ns=now_ns) for group in groups)

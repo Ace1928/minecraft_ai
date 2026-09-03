@@ -76,6 +76,9 @@ def main(argv: list[str] | None = None) -> int:
                 base_url=config.high_level.base_url,
                 api_key=config.high_level.api_key,
                 timeout_s=config.high_level.timeout_s,
+                max_tokens=config.high_level.max_tokens,
+                thinking_budget_tokens=config.high_level.thinking_budget_tokens,
+                reasoning_format=config.high_level.reasoning_format,
             )
             high_level = HighLevelController(high_model, skills)
 
@@ -88,6 +91,9 @@ def main(argv: list[str] | None = None) -> int:
                 base_url=config.vision_language.base_url,
                 api_key=config.vision_language.api_key,
                 timeout_s=config.vision_language.timeout_s,
+                max_tokens=config.vision_language.max_tokens,
+                thinking_budget_tokens=config.vision_language.thinking_budget_tokens,
+                reasoning_format=config.vision_language.reasoning_format,
             )
             active_vlm = ActiveVLMWorker(vlm_model, blackboard, args.instance_id)
 
@@ -118,10 +124,19 @@ def main(argv: list[str] | None = None) -> int:
                         frame_provider=lambda: perception.last_capture,
                     )
                 )
+                raw_motion_policy = (
+                    None
+                    if config.raw_motion_policy is None or not config.raw_motion_policy.enabled
+                    else TemporalPolicyClient(
+                        config.raw_motion_policy,
+                        frame_provider=lambda: perception.last_capture,
+                    )
+                )
                 policy = GroundedPolicyRouter(
                     primary_policy,
                     grounded_policy,
                     gui=gui_policy,
+                    raw_motion=raw_motion_policy,
                 )
             else:
                 policy = primary_policy

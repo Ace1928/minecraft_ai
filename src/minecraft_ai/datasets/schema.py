@@ -4,14 +4,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
-class ActionLevel(StrEnum):
-    RAW = "raw"
-    MOTION = "motion"
-    LATENT = "latent"
-    GROUNDED = "grounded"
-    GUI = "gui"
-    SKILL = "skill"
+from ..action_levels import ActionLevel as ActionLevel
 
 
 class DatasetSourceType(StrEnum):

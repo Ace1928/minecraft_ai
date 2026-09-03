@@ -114,6 +114,39 @@ class _IdleCapturingModel(_ShelterSelectingModel):
         )
 
 
+class _WireCapturingModel(_ShelterSelectingModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.schema: dict[str, object] = {}
+
+    def complete_structured(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, object],
+    ) -> ModelResponse:
+        del messages, name
+        self.schema = schema
+        return ModelResponse(
+            text=json.dumps(
+                {
+                    "r": "Explore while gathering evidence",
+                    "g": "role:generalist:0:survive",
+                    "s": "explore_forward",
+                    "p": {},
+                    "o": None,
+                    "c": None,
+                    "x": False,
+                    "q": [],
+                    "w": None,
+                }
+            ),
+            model=self.model_id,
+            latency_ms=1.0,
+        )
+
+
 class _TargetSelectingModel(_ShelterSelectingModel):
     def complete_structured(
         self,
@@ -313,6 +346,18 @@ def test_operator_response_and_game_chat_are_distinct_schema_channels() -> None:
     assert decision.game_chat == "Visible to players inside Bedrock."
 
 
+def test_high_level_uses_lossless_compact_structured_wire_schema() -> None:
+    model = _WireCapturingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    decision = controller.decide(_board(), _context())
+
+    assert set(model.schema["properties"]) == {"r", "g", "s", "p", "o", "c", "x", "q", "w"}
+    assert "required" not in model.schema
+    assert decision.skill_id == "explore_forward"
+    assert decision.reasoning_summary == "Explore while gathering evidence"
+
+
 def test_high_level_receives_explicit_active_operator_correction() -> None:
     older = OperatorMessage(
         message_id="old",
@@ -335,13 +380,9 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
     assert payload["active_operator_message"]["message_id"] == "correction"
     assert "Stop and climb the hill" in model.initial_messages[-1].content
     assert "explore_forward" in {skill["skill_id"] for skill in payload["skills"]}
-    explore = next(
-        skill for skill in payload["skills"] if skill["skill_id"] == "explore_forward"
-    )
+    explore = next(skill for skill in payload["skills"] if skill["skill_id"] == "explore_forward")
     assert {"allow_attack", "allow_use", "allow_jump"}.issubset(explore["parameters"])
-    assert "establish_basic_shelter" not in {
-        skill["skill_id"] for skill in payload["skills"]
-    }
+    assert "establish_basic_shelter" not in {skill["skill_id"] for skill in payload["skills"]}
     assert (
         "must be addressed before any conflicting standing goal"
         in model.initial_messages[0].content

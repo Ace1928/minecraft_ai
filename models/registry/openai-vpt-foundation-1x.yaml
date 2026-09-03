@@ -3,9 +3,13 @@ model_version: openai-vpt-foundation-1x
 provider: openai
 architecture: VPT 1x MinecraftPolicy
 purpose: human-interface temporal behavior prior
-promotion_status: candidate-live-foundation
+promotion_status: eligible-fast-body-candidate
 goal_conditioned: false
 temporal_memory: true
+eligible_action_levels:
+  - raw
+  - motion
+runtime_role: atomic-episode-body
 source:
   repository: https://github.com/openai/Video-Pre-Training
   commit: 095519fbd4ee0e9281d19f19601e45629de9ac3f
@@ -27,4 +31,5 @@ runtime:
 limitations:
   - This foundation checkpoint is not goal conditioned.
   - Java-to-Bedrock input and visual domain adaptation is not yet trained.
+  - RAW/MOTION eligibility is a routing role, not a preferred-policy or SOTA claim.
   - It is not eligible for preferred-policy claims until it beats the frozen Bedrock baseline.

@@ -12,11 +12,16 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from .datasets import DatasetSource, DatasetSourceType, TrajectoryManifest
+from .datasets import ActionLevel, DatasetSource, DatasetSourceType, TrajectoryManifest
 from .perception import FrameState
 from .platforms.bedrock_x11 import IsolatedX11Capture, require_isolated_display
 from .safety import MotorAction
-from .trajectory import TrajectoryRecorder, new_trajectory_id
+from .trajectory import (
+    ActionOrigin,
+    ActionProvenance,
+    TrajectoryRecorder,
+    new_trajectory_id,
+)
 
 
 class HumanInputKind(StrEnum):
@@ -38,9 +43,7 @@ class HumanInputEvent:
 
 _EVENT_LINE = re.compile(r"^EVENT type (13|14|15|16|17) \(")
 _DETAIL_LINE = re.compile(r"^\s*detail:\s*(\d+)\s*$")
-_VALUATOR_LINE = re.compile(
-    r"^\s*(0|1):\s*(-?(?:\d+(?:\.\d*)?|\.\d+))(?:\s+\([^)]*\))?\s*$"
-)
+_VALUATOR_LINE = re.compile(r"^\s*(0|1):\s*(-?(?:\d+(?:\.\d*)?|\.\d+))(?:\s+\([^)]*\))?\s*$")
 _RAW_EVENT_KINDS = {
     13: HumanInputKind.KEY_PRESS,
     14: HumanInputKind.KEY_RELEASE,
@@ -183,17 +186,11 @@ class HumanInputAccumulator:
                 button = _BUTTON_NAMES.get(event.detail)
                 if button is None:
                     return
-                if (
-                    event.kind == HumanInputKind.BUTTON_PRESS
-                    and button not in self._held_buttons
-                ):
+                if event.kind == HumanInputKind.BUTTON_PRESS and button not in self._held_buttons:
                     self._held_buttons.add(button)
                     self._buttons_down.add(button)
                     self._buttons_up.discard(button)
-                elif (
-                    event.kind == HumanInputKind.BUTTON_RELEASE
-                    and button in self._held_buttons
-                ):
+                elif event.kind == HumanInputKind.BUTTON_RELEASE and button in self._held_buttons:
                     self._held_buttons.remove(button)
                     self._buttons_up.add(button)
                     self._buttons_down.discard(button)
@@ -397,6 +394,12 @@ def record_human_session(request: HumanRecordingRequest) -> TrajectoryManifest:
             )
             recorder.record_accepted(
                 action=action,
+                provenance=ActionProvenance(
+                    policy_id="human:xinput2-raw-observed",
+                    route_id="human",
+                    action_level=ActionLevel.RAW,
+                    origin=ActionOrigin.HUMAN,
+                ),
                 supervisor_response={
                     "accepted_sequence": sequence,
                     "accepted_monotonic_ns": accepted_ns,

@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from minecraft_ai.datasets import DatasetSource, DatasetSourceType, TrajectoryManifest
+from minecraft_ai.datasets import ActionLevel, DatasetSource, DatasetSourceType, TrajectoryManifest
 from minecraft_ai.eval import (
     BenchmarkCategory,
     BenchmarkRunner,
@@ -19,7 +19,7 @@ from minecraft_ai.perception import FrameState
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.storage import StateDatabase
-from minecraft_ai.trajectory import TrajectoryRecorder
+from minecraft_ai.trajectory import ActionOrigin, ActionProvenance, TrajectoryRecorder
 
 
 def _record_jump_trajectory(tmp_path: Path) -> Path:
@@ -67,6 +67,12 @@ def _record_jump_trajectory(tmp_path: Path) -> Path:
     )
     assert recorder.record_accepted(
         action=MotorAction(sequence=0, keys_down=("w", "ctrl", "space")),
+        provenance=ActionProvenance(
+            policy_id="synthetic:benchmark-fixture",
+            route_id="synthetic",
+            action_level=ActionLevel.RAW,
+            origin=ActionOrigin.SYNTHETIC,
+        ),
         supervisor_response={
             "accepted_sequence": 0,
             "accepted_monotonic_ns": captured_ns + 4_000_000,

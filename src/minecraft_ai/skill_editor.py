@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
+from .action_levels import ActionLevel
 from .skills import (
     SkillCondition,
     SkillLibrary,
@@ -42,6 +43,7 @@ class SkillLifecycleManager:
         name: str,
         description: str = "",
         policy_ref: str | None = None,
+        action_level: ActionLevel = ActionLevel.LATENT,
         parameters: Sequence[str] = (),
         preconditions: Sequence[SkillCondition] = (),
         initiation_alternatives: Sequence[Sequence[SkillCondition]] = (),
@@ -62,14 +64,13 @@ class SkillLifecycleManager:
             stage=stage,
             parameters=tuple(parameters),
             preconditions=tuple(preconditions),
-            initiation_alternatives=tuple(
-                tuple(group) for group in initiation_alternatives
-            ),
+            initiation_alternatives=tuple(tuple(group) for group in initiation_alternatives),
             invariants=tuple(invariants),
             success_conditions=tuple(success_conditions),
             failure_conditions=tuple(failure_conditions),
             recovery_skills=tuple(recovery_skills),
             max_duration_ms=max_duration_ms,
+            action_level=action_level,
             policy_ref=policy_ref or skill_id,
         )
         self.library.register(spec)
@@ -84,6 +85,7 @@ class SkillLifecycleManager:
         name: str | None = None,
         description: str | None = None,
         policy_ref: str | None = None,
+        action_level: ActionLevel | None = None,
         preconditions: Sequence[SkillCondition] | None = None,
         initiation_alternatives: Sequence[Sequence[SkillCondition]] | None = None,
         invariants: Sequence[SkillCondition] | None = None,
@@ -99,6 +101,7 @@ class SkillLifecycleManager:
                 "name": current.name if name is None else name,
                 "description": current.description if description is None else description,
                 "policy_ref": current.policy_ref if policy_ref is None else policy_ref,
+                "action_level": (current.action_level if action_level is None else action_level),
                 "preconditions": (
                     current.preconditions if preconditions is None else tuple(preconditions)
                 ),
@@ -107,9 +110,7 @@ class SkillLifecycleManager:
                     if initiation_alternatives is None
                     else tuple(tuple(group) for group in initiation_alternatives)
                 ),
-                "invariants": (
-                    current.invariants if invariants is None else tuple(invariants)
-                ),
+                "invariants": (current.invariants if invariants is None else tuple(invariants)),
                 "success_conditions": (
                     current.success_conditions
                     if success_conditions is None
@@ -193,6 +194,7 @@ class SkillLifecycleManager:
             name=new_name,
             description=f"Unpromoted recovery candidate for {target_id}: {failure_reason}",
             policy_ref=parent.policy_ref,
+            action_level=parent.action_level,
             parameters=parent.parameters,
             preconditions=parent.preconditions,
             initiation_alternatives=parent.initiation_alternatives,

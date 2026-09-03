@@ -8,18 +8,69 @@ import threading
 import time
 import uuid
 import zlib
-from dataclasses import dataclass, field
-from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlparse
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .datasets.schema import ActionLevel, DatasetValidationReport, TrajectoryManifest
 from .datasets.shards import TrajectoryShardWriter
+from .motor import MotorIntent
 from .perception import FrameState
 from .platforms.bedrock_x11 import CapturedFrame
 from .safety import MotorAction
+
+
+class ActionOrigin(StrEnum):
+    """The mechanism that emitted an action later accepted by the supervisor."""
+
+    POLICY = "policy"
+    RESET = "reset"
+    HUMAN = "human"
+    SYNTHETIC = "synthetic"
+    LEGACY = "legacy"
+
+
+class ActionProvenance(BaseModel):
+    """Causal policy/route/condition identity captured before actuation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    policy_id: str = Field(min_length=1, max_length=512)
+    model_version: str | None = Field(default=None, min_length=1, max_length=256)
+    route_id: str = Field(min_length=1, max_length=128)
+    policy_action_kind: str | None = Field(default=None, min_length=1, max_length=128)
+    policy_request_id: str | None = Field(default=None, min_length=1, max_length=256)
+    prediction_id: str | None = Field(default=None, min_length=1, max_length=256)
+    action_level: ActionLevel
+    origin: ActionOrigin
+    condition_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    condition: dict[str, Any] | None = None
+    behavior_token: int | None = Field(default=None, ge=0)
+    latent_id: str | None = Field(default=None, min_length=1, max_length=256)
+    target_track_id: str | None = Field(default=None, min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def validate_condition_identity(self) -> ActionProvenance:
+        if self.condition is None:
+            return self
+        _validate_condition_links(
+            self.condition,
+            action_level=self.action_level,
+            target_track_id=self.target_track_id,
+        )
+        expected = motor_condition_id(
+            self.condition,
+            route_id=self.route_id,
+            target_track_id=self.target_track_id,
+        )
+        if self.condition_id != expected:
+            raise ValueError("condition_id does not identify the serialized motor condition")
+        return self
 
 
 class TrajectoryStep(BaseModel):
@@ -36,6 +87,17 @@ class TrajectoryStep(BaseModel):
     action: MotorAction
     action_level: ActionLevel
     behavior_token: int | None = None
+    latent_id: str | None = Field(default=None, min_length=1, max_length=256)
+    action_origin: ActionOrigin = ActionOrigin.LEGACY
+    policy_id: str | None = Field(default=None, min_length=1, max_length=512)
+    model_version: str | None = Field(default=None, min_length=1, max_length=256)
+    route_id: str | None = Field(default=None, min_length=1, max_length=128)
+    policy_action_kind: str | None = Field(default=None, min_length=1, max_length=128)
+    policy_request_id: str | None = Field(default=None, min_length=1, max_length=256)
+    prediction_id: str | None = Field(default=None, min_length=1, max_length=256)
+    condition_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    condition: dict[str, Any] | None = None
+    target_track_id: str | None = Field(default=None, min_length=1, max_length=512)
     skill_run_id: str | None = None
     skill_id: str | None = None
     goal_id: str | None = None
@@ -45,6 +107,26 @@ class TrajectoryStep(BaseModel):
     reward_signals: dict[str, float] = Field(default_factory=dict)
     event_ids: tuple[str, ...] = ()
     correction_of_step: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_provenance(self) -> TrajectoryStep:
+        if self.condition is None:
+            return self
+        if self.route_id is None:
+            raise ValueError("serialized motor condition requires route_id")
+        _validate_condition_links(
+            self.condition,
+            action_level=self.action_level,
+            target_track_id=self.target_track_id,
+        )
+        expected = motor_condition_id(
+            self.condition,
+            route_id=self.route_id,
+            target_track_id=self.target_track_id,
+        )
+        if self.condition_id != expected:
+            raise ValueError("trajectory condition_id does not match serialized condition")
+        return self
 
 
 @dataclass(frozen=True)
@@ -84,9 +166,7 @@ class TrajectoryReader:
         for shard_path in shard_paths:
             with tarfile.open(shard_path, mode="r") as archive:
                 members = {
-                    member.name: member
-                    for member in archive.getmembers()
-                    if member.isfile()
+                    member.name: member for member in archive.getmembers() if member.isfile()
                 }
                 step_names = sorted(name for name in members if name.endswith(".step.json"))
                 for step_name in step_names:
@@ -118,21 +198,15 @@ class TrajectoryReader:
                     header = json.loads(header_raw)
                     if not isinstance(header, dict) or header.get("codec") != "zlib":
                         raise ValueError(f"step {expected_index} has unsupported frame header")
-                    compressed = self._read_member(
-                        archive, members[f"{key}.frame.bgra.zlib"]
-                    )
+                    compressed = self._read_member(archive, members[f"{key}.frame.bgra.zlib"])
                     pixels = zlib.decompress(compressed)
                     width = int(header["width"])
                     height = int(header["height"])
-                    if len(pixels) != width * height * 4 or len(pixels) != int(
-                        header["raw_bytes"]
-                    ):
+                    if len(pixels) != width * height * 4 or len(pixels) != int(header["raw_bytes"]):
                         raise ValueError(f"step {expected_index} frame byte count mismatch")
                     if hashlib.sha256(pixels).hexdigest() != step.frame_hash:
                         raise ValueError(f"step {expected_index} frame hash mismatch")
-                    blackboard_raw = self._read_member(
-                        archive, members[f"{key}.blackboard.json"]
-                    )
+                    blackboard_raw = self._read_member(archive, members[f"{key}.blackboard.json"])
                     blackboard = FrameState.model_validate_json(blackboard_raw)
                     if (
                         blackboard.captured_ns != step.captured_ns
@@ -140,12 +214,11 @@ class TrajectoryReader:
                         or blackboard.height != height
                     ):
                         raise ValueError(f"step {expected_index} blackboard/frame misalignment")
-                    expected_blackboard_hash = _reference_sha256(
-                        step.blackboard_snapshot_ref
-                    )
-                    if expected_blackboard_hash is not None and hashlib.sha256(
-                        blackboard_raw
-                    ).hexdigest() != expected_blackboard_hash:
+                    expected_blackboard_hash = _reference_sha256(step.blackboard_snapshot_ref)
+                    if (
+                        expected_blackboard_hash is not None
+                        and hashlib.sha256(blackboard_raw).hexdigest() != expected_blackboard_hash
+                    ):
                         raise ValueError(f"step {expected_index} blackboard hash mismatch")
                     yield ReplayTrajectorySample(
                         step=step,
@@ -268,10 +341,10 @@ class TrajectoryRecorder:
         self,
         *,
         action: MotorAction,
+        provenance: ActionProvenance,
         supervisor_response: dict[str, object],
         frame: CapturedFrame,
         blackboard: FrameState,
-        action_level: ActionLevel = ActionLevel.RAW,
         skill_run_id: str | None = None,
         skill_id: str | None = None,
         goal_id: str | None = None,
@@ -295,6 +368,14 @@ class TrajectoryRecorder:
         frame_hash = hashlib.sha256(frame.bgra).hexdigest()
         blackboard_json = blackboard.model_dump_json().encode()
         blackboard_hash = hashlib.sha256(blackboard_json).hexdigest()
+        condition_skill_id = _condition_text(provenance.condition, "skill_id")
+        condition_run_id = _condition_text(provenance.condition, "episode_id")
+        if skill_id is not None and condition_skill_id not in {None, skill_id}:
+            raise ValueError("skill_id does not match the accepted action condition")
+        if skill_run_id is not None and condition_run_id not in {None, skill_run_id}:
+            raise ValueError("skill_run_id does not match the accepted action condition")
+        accepted_skill_id = skill_id if skill_id is not None else condition_skill_id
+        accepted_skill_run_id = skill_run_id if skill_run_id is not None else condition_run_id
         sample_key = f"{self.manifest.trajectory_id}/{self._step_index:012d}"
         shard_id = f"{self.manifest.trajectory_id}-shard-{self._step_index // self.shard_steps:06d}"
         step = TrajectoryStep(
@@ -306,9 +387,21 @@ class TrajectoryRecorder:
             frame_hash=frame_hash,
             previous_action=self._previous_action,
             action=action,
-            action_level=action_level,
-            skill_run_id=skill_run_id,
-            skill_id=skill_id,
+            action_level=provenance.action_level,
+            behavior_token=provenance.behavior_token,
+            latent_id=provenance.latent_id,
+            action_origin=provenance.origin,
+            policy_id=provenance.policy_id,
+            model_version=provenance.model_version,
+            route_id=provenance.route_id,
+            policy_action_kind=provenance.policy_action_kind,
+            policy_request_id=provenance.policy_request_id,
+            prediction_id=provenance.prediction_id,
+            condition_id=provenance.condition_id,
+            condition=provenance.condition,
+            target_track_id=provenance.target_track_id,
+            skill_run_id=accepted_skill_run_id,
+            skill_id=accepted_skill_id,
             goal_id=goal_id,
             plan_node_id=plan_node_id,
             blackboard_snapshot_ref=(
@@ -368,6 +461,48 @@ class TrajectoryRecorder:
 
 def new_trajectory_id(prefix: str = "trajectory") -> str:
     return f"{prefix}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:12]}"
+
+
+def motor_condition_id(
+    condition: MotorIntent | dict[str, Any],
+    *,
+    route_id: str,
+    target_track_id: str | None,
+) -> str:
+    """Content identity for the complete stable condition routed to a motor policy."""
+
+    serialized = (
+        condition.model_dump(mode="json") if isinstance(condition, MotorIntent) else condition
+    )
+    payload = {
+        "condition": serialized,
+        "route_id": route_id,
+        "target_track_id": target_track_id,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _condition_text(condition: dict[str, Any] | None, key: str) -> str | None:
+    if condition is None:
+        return None
+    value = condition.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _validate_condition_links(
+    condition: dict[str, Any],
+    *,
+    action_level: ActionLevel,
+    target_track_id: str | None,
+) -> None:
+    reported_level = condition.get("action_level")
+    if isinstance(reported_level, str) and reported_level != action_level.value:
+        raise ValueError("action_level does not match the serialized motor condition")
+    target = condition.get("target_track")
+    reported_target = target.get("track_id") if isinstance(target, dict) else None
+    if isinstance(reported_target, str) and reported_target != target_track_id:
+        raise ValueError("target_track_id does not match the serialized motor condition")
 
 
 def _reference_sha256(reference: str) -> str | None:

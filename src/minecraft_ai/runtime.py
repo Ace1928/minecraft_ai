@@ -15,10 +15,11 @@ from .cognition import (
     CognitionDecision,
     HighLevelController,
 )
-from .datasets import ActionLevel
+from .action_levels import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
-from .execution import SkillExecutor, initiation_satisfied
+from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
 from .memory import MemoryStore
+from .motor import MotorIntent
 from .perception import ActivePerceptionQuery, PerceptionBlackboard, PerceptionFact, Track
 from .perception_service import RealtimePerceptionService, perceptual_hash_distance
 from .planning import Goal
@@ -32,7 +33,7 @@ from .social import (
     SocialState,
 )
 from .telemetry import TelemetryPublisher
-from .trajectory import TrajectoryRecorder
+from .trajectory import ActionOrigin, ActionProvenance, TrajectoryRecorder, motor_condition_id
 from .storage import StateDatabase
 from .supervisor import send_command
 
@@ -44,6 +45,150 @@ def _semantic_deadline_ms(semantic_hz: float) -> int:
     return min(10_000, max(250, int(1000 / semantic_hz)))
 
 
+def _accepted_action_provenance(
+    execution: ExecutionTick | None,
+    blackboard: PerceptionBlackboard,
+    *,
+    fallback_policy_id: str,
+) -> ActionProvenance:
+    """Resolve the exact route snapshot that produced a supervisor-bound action."""
+
+    status = {} if execution is None else execution.policy_status
+    is_reset = execution is not None and execution.action_origin == ActionOrigin.RESET
+    route_value = "reset" if is_reset else status.get("active_route", "direct")
+    route_id = route_value if isinstance(route_value, str) and route_value else "direct"
+    component_key = "primary" if route_id == "semantic" else route_id
+    component = status.get(component_key)
+    selected = component if isinstance(component, dict) else status
+    causal = selected.get("last_action_provenance")
+    causal_fields = causal if isinstance(causal, dict) and not is_reset else {}
+    policy_value = causal_fields.get("policy_id", selected.get("policy_id"))
+    policy_id = (
+        policy_value if isinstance(policy_value, str) and policy_value else fallback_policy_id
+    )
+    version_value = selected.get("model_version")
+    model_version = version_value if isinstance(version_value, str) and version_value else None
+    prediction = selected.get("last_prediction")
+    prediction_fields = prediction if isinstance(prediction, dict) else {}
+    behavior_value = causal_fields.get(
+        "behavior_token",
+        prediction_fields.get("behavior_token"),
+    )
+    behavior_token = (
+        behavior_value
+        if isinstance(behavior_value, int)
+        and not isinstance(behavior_value, bool)
+        and behavior_value >= 0
+        else None
+    )
+    latent_value = causal_fields.get("latent_id", prediction_fields.get("latent_id"))
+    latent_id = latent_value if isinstance(latent_value, str) and latent_value else None
+    action_kind_value = causal_fields.get("action_kind")
+    policy_action_kind = (
+        action_kind_value
+        if isinstance(action_kind_value, str) and action_kind_value
+        else ("reset" if is_reset else "direct")
+    )
+    request_value = causal_fields.get("request_id")
+    policy_request_id = request_value if isinstance(request_value, str) and request_value else None
+    prediction_value = causal_fields.get("prediction_id")
+    prediction_id = (
+        prediction_value if isinstance(prediction_value, str) and prediction_value else None
+    )
+    intent = None if execution is None else execution.motor_intent
+    causal_condition = causal_fields.get("condition")
+    if is_reset or (causal and causal_condition is None):
+        condition = None
+    elif isinstance(causal_condition, dict):
+        condition = causal_condition
+    else:
+        condition = None if intent is None else intent.model_dump(mode="json")
+    causal_target = causal_fields.get("target_track_id")
+    if is_reset:
+        target_track_id = None
+    elif isinstance(causal, dict):
+        target_track_id = (
+            causal_target if isinstance(causal_target, str) and causal_target else None
+        )
+    else:
+        target_track_id = _condition_target_track_id(intent, blackboard)
+    causal_version = causal_fields.get("model_version")
+    if isinstance(causal_version, str) and causal_version:
+        model_version = causal_version
+    condition_id = (
+        None
+        if condition is None
+        else motor_condition_id(
+            condition,
+            route_id=route_id,
+            target_track_id=target_track_id,
+        )
+    )
+    action_level = _reported_action_level(execution, status, causal_fields)
+    return ActionProvenance(
+        policy_id=policy_id,
+        model_version=model_version,
+        route_id=route_id,
+        policy_action_kind=policy_action_kind,
+        policy_request_id=policy_request_id,
+        prediction_id=prediction_id,
+        action_level=action_level,
+        origin=(ActionOrigin.POLICY if execution is None else execution.action_origin),
+        condition_id=condition_id,
+        condition=condition,
+        behavior_token=behavior_token,
+        latent_id=latent_id,
+        target_track_id=target_track_id,
+    )
+
+
+def _reported_action_level(
+    execution: ExecutionTick | None,
+    status: dict[str, object],
+    causal_fields: dict[str, object],
+) -> ActionLevel:
+    """Prefer the condition that causally produced an asynchronous action."""
+
+    causal_level = causal_fields.get("action_level")
+    if not isinstance(causal_level, str):
+        causal_condition = causal_fields.get("condition")
+        if isinstance(causal_condition, dict):
+            causal_level = causal_condition.get("action_level")
+    if isinstance(causal_level, str):
+        try:
+            return ActionLevel(causal_level)
+        except ValueError:
+            pass
+    if execution is not None and execution.motor_intent is not None:
+        return execution.motor_intent.action_level
+    reported = status.get("episode_action_level")
+    if isinstance(reported, str):
+        try:
+            return ActionLevel(reported)
+        except ValueError:
+            pass
+    return ActionLevel.RAW
+
+
+def _condition_target_track_id(
+    intent: MotorIntent | None,
+    blackboard: PerceptionBlackboard,
+) -> str | None:
+    if intent is None:
+        return None
+    latest = blackboard.latest()
+    if latest is None:
+        return None
+    candidates = tuple(
+        track
+        for track in latest.tracks
+        if intent.target_label is None or track.label.casefold() == intent.target_label.casefold()
+    )
+    if not candidates:
+        return None
+    return max(candidates, key=lambda track: track.confidence).track_id
+
+
 def _semantic_refresh_allowed(
     *,
     cognition_requested: bool,
@@ -53,10 +198,7 @@ def _semantic_refresh_allowed(
 ) -> bool:
     """Keep optional semantic refreshes behind strategic and operator work."""
     return not (
-        cognition_requested
-        or cognition_pending
-        or operator_message_pending
-        or not worker_available
+        cognition_requested or cognition_pending or operator_message_pending or not worker_available
     )
 
 
@@ -101,10 +243,7 @@ def _operator_target_facts(
         )
     reference = target.attributes.get("reference_dhash")
     observed = None if current_hash is None else current_hash.value
-    if (
-        not isinstance(reference, str)
-        or not isinstance(observed, str)
-    ):
+    if not isinstance(reference, str) or not isinstance(observed, str):
         return tuple(facts)
     try:
         if perceptual_hash_distance(reference, observed) > 6:
@@ -210,8 +349,7 @@ def _active_operator_messages(
         message
         for message in messages
         if message.status == OperatorMessageStatus.ACKNOWLEDGED
-        and message.kind
-        in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+        and message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
     )
     return tuple(
         sorted(
@@ -353,6 +491,13 @@ class AgentRuntime:
             self.perception.active_vlm.start()
         try:
             self.telemetry.publish(self._telemetry_payload(state="warming"), force=True)
+            # Strategic inference and policy checkpoint loading are independent.
+            # Start the first typed decision from a real captured frame before
+            # warming the learned policies so CPU model startup latency is not
+            # paid serially while the avatar stands idle.
+            if self.perception.last_capture is None:
+                self.perception.capture_once()
+            self._start_cognition_if_due()
             self._warmup_policy()
             while not self._stop.is_set():
                 tick_started = time.perf_counter()
@@ -371,9 +516,9 @@ class AgentRuntime:
             try:
                 current = self.executor.run
                 if current is not None and current.outcome == SkillOutcome.RUNNING:
-                    release = self.executor.cancel().action
-                    if release is not None:
-                        self._send_motor(release)
+                    cancelled = self.executor.cancel()
+                    if cancelled.action is not None:
+                        self._send_motor(cancelled.action, execution=cancelled)
             except Exception:
                 pass
             try:
@@ -419,10 +564,7 @@ class AgentRuntime:
             # can recover on the next fresh capture.
             send_command("release-inputs", lease_id=self.lease_id)
             self.telemetry.publish(self._telemetry_payload(state="capture-stalled"))
-            if (
-                self.metrics.consecutive_stale_frames
-                >= self.stale_frame_consecutive_limit
-            ):
+            if self.metrics.consecutive_stale_frames >= self.stale_frame_consecutive_limit:
                 raise RuntimeError(
                     "capture stream is stale for "
                     f"{self.metrics.consecutive_stale_frames} consecutive frames"
@@ -448,7 +590,7 @@ class AgentRuntime:
         )
         self._merge_policy_perception()
         if result.action is not None:
-            self._send_motor(result.action)
+            self._send_motor(result.action, execution=result)
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
         if result.run.outcome != SkillOutcome.RUNNING:
             self._recent_skill_runs.appendleft(result.run)
@@ -492,7 +634,7 @@ class AgentRuntime:
             context_key = running.context_key
             cancelled = self.executor.cancel()
             if cancelled.action is not None:
-                self._send_motor(cancelled.action)
+                self._send_motor(cancelled.action, execution=cancelled)
             self._recent_skill_runs.appendleft(cancelled.run)
             self._execution_revision += 1
         self.executor.start(
@@ -517,7 +659,17 @@ class AgentRuntime:
                 return
             self._stop.wait(interval_s)
 
-    def _send_motor(self, action: MotorAction) -> None:
+    def _send_motor(
+        self,
+        action: MotorAction,
+        *,
+        execution: ExecutionTick | None = None,
+    ) -> None:
+        provenance = _accepted_action_provenance(
+            execution,
+            self.blackboard,
+            fallback_policy_id=self.executor.policy.policy_id,
+        )
         accepted = send_command(
             "motor-action",
             lease_id=self.lease_id,
@@ -527,13 +679,13 @@ class AgentRuntime:
             frame = self.perception.last_capture
             blackboard = self.blackboard.latest()
             if frame is not None and blackboard is not None:
-                running = self.executor.run
+                running = self.executor.run if execution is None else execution.run
                 self.trajectory.record_accepted(
                     action=action,
+                    provenance=provenance,
                     supervisor_response=accepted,
                     frame=frame,
                     blackboard=blackboard,
-                    action_level=ActionLevel.RAW,
                     skill_run_id=None if running is None else running.run_id,
                     skill_id=None if running is None else running.skill_id,
                     goal_id=None
@@ -639,8 +791,7 @@ class AgentRuntime:
         self._pending_operator_message_ids = tuple(
             message.message_id
             for message in context.operator_messages
-            if message.status
-            in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+            if message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
         )
         if self.state_db is not None:
             for message in context.operator_messages:
@@ -735,7 +886,7 @@ class AgentRuntime:
                 ):
                     cancelled = self.executor.cancel()
                     if cancelled.action is not None:
-                        self._send_motor(cancelled.action)
+                        self._send_motor(cancelled.action, execution=cancelled)
                     self._recent_skill_runs.appendleft(cancelled.run)
                     self._execution_revision += 1
                     spec = self.skills.get(decision.skill_id)
@@ -818,10 +969,7 @@ class AgentRuntime:
         if self.state_db is None or not self._pending_operator_status_updates:
             return
         now = time.monotonic_ns()
-        if (
-            not force
-            and now - self._last_operator_storage_retry_ns < 1_000_000_000
-        ):
+        if not force and now - self._last_operator_storage_retry_ns < 1_000_000_000:
             return
         self._last_operator_storage_retry_ns = now
         for message_id, update in tuple(self._pending_operator_status_updates.items()):
@@ -908,9 +1056,9 @@ class AgentRuntime:
             for key, fact in sorted(fresh_facts.items())
         }
         latest = self.blackboard.latest()
-        perception_status["tracks"] = [] if latest is None else [
-            track.model_dump(mode="json") for track in latest.tracks
-        ]
+        perception_status["tracks"] = (
+            [] if latest is None else [track.model_dump(mode="json") for track in latest.tracks]
+        )
         return {
             "schema_version": 1,
             "state": state,
@@ -933,19 +1081,14 @@ class AgentRuntime:
             "consecutive_stale_frames": self.metrics.consecutive_stale_frames,
             "storage_contentions": self.metrics.storage_contentions,
             "storage_backlog": (
-                len(self._pending_skill_stats)
-                + len(self._pending_operator_status_updates)
+                len(self._pending_skill_stats) + len(self._pending_operator_status_updates)
             ),
             "last_storage_error": self.metrics.last_storage_error,
             "active_skill": None if running is None else running.skill_id,
-            "active_skill_parameters": (
-                {} if running is None else self.executor.policy_parameters
-            ),
+            "active_skill_parameters": ({} if running is None else self.executor.policy_parameters),
             "active_instruction": None if running is None else self.executor.instruction,
             "skill_outcome": None if running is None else running.outcome.value,
-            "recent_skill_runs": [
-                run.model_dump(mode="json") for run in self._recent_skill_runs
-            ],
+            "recent_skill_runs": [run.model_dump(mode="json") for run in self._recent_skill_runs],
             "chosen_goal_id": None if decision is None else decision.chosen_goal_id,
             "reasoning_summary": None if decision is None else decision.reasoning_summary,
             "operator_response": None if decision is None else decision.say,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .action_levels import ActionLevel
 from .skills import (
     SkillActionPermissions,
     SkillCondition,
@@ -20,7 +21,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
     specs = (
         SkillSpec(
             skill_id="approach_visible_target",
-            version=6,
+            version=7,
             name="Approach visible target",
             description=(
                 "Approach the visually localized target across safe terrain, keep it near the "
@@ -41,6 +42,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 "reacquire_target",
             ),
             max_duration_ms=15_000,
+            action_level=ActionLevel.GROUNDED,
             policy_ref="approach",
             policy_instruction="approach the visible target",
             action_permissions=SkillActionPermissions(
@@ -53,7 +55,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="reacquire_target",
-            version=7,
+            version=8,
             name="Reacquire target",
             description=(
                 "Look around deliberately to find the requested target again, stabilize it near "
@@ -70,6 +72,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             ),
             expected_effects=("target_visible",),
             max_duration_ms=8_000,
+            action_level=ActionLevel.GROUNDED,
             policy_ref="navigate",
             policy_instruction="find the target",
             action_permissions=SkillActionPermissions(
@@ -83,7 +86,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="mine_visible_block",
-            version=3,
+            version=4,
             name="Mine visible block",
             description=(
                 "Approach the visible mineable block, aim at its center, hold attack until it "
@@ -104,12 +107,13 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 "retreat_from_danger",
             ),
             max_duration_ms=20_000,
+            action_level=ActionLevel.GROUNDED,
             policy_ref="mine",
             policy_instruction="mine the target block",
         ),
         SkillSpec(
             skill_id="attack_visible_hostile",
-            version=3,
+            version=4,
             name="Attack visible hostile",
             description=(
                 "Defend against the visible hostile while tracking it, maintaining safe combat "
@@ -123,6 +127,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             expected_effects=("hostile_defeated",),
             recovery_skills=("escape_submersion", "retreat_from_danger"),
             max_duration_ms=30_000,
+            action_level=ActionLevel.GROUNDED,
             policy_ref="attack",
             policy_instruction="fight the target",
         ),
@@ -158,12 +163,8 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 "leave the water onto stable dry ground"
             ),
             stage=SkillStage.EXPERIMENTAL,
-            preconditions=(
-                SkillCondition(key="environment.underwater", operator="truthy"),
-            ),
-            success_conditions=(
-                SkillCondition(key="environment.underwater", operator="falsy"),
-            ),
+            preconditions=(SkillCondition(key="environment.underwater", operator="truthy"),),
+            success_conditions=(SkillCondition(key="environment.underwater", operator="falsy"),),
             expected_effects=("player_resurfaced", "dry_ground_reached"),
             max_duration_ms=12_000,
             policy_ref="escape_submersion",
@@ -206,7 +207,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="traverse_visible_obstacle",
-            version=3,
+            version=4,
             name="Traverse visible obstacle",
             description=(
                 "Use learned short-horizon movement and camera control to jump over or climb "
@@ -218,17 +219,17 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             expected_effects=("obstacle_crossed", "locomotion_progress"),
             recovery_skills=("escape_submersion", "retreat_from_danger"),
             max_duration_ms=8_000,
+            # Bind this short, atomic locomotion episode to the fast VPT body.
+            # The checkpoint chooses the native keys/camera; this metadata is
+            # only an explicit abstraction contract, never a jump macro.
+            action_level=ActionLevel.MOTION,
             policy_ref="traverse_obstacle",
-            # Frozen-frame evaluation on the current Bedrock corner produced
-            # learned jump on 20/40 policy decisions, versus 0/40 for the
-            # generic ``go explore`` latent. This remains a STEVE-1 option, not
-            # an injected Space key or handcrafted obstacle reflex.
+            # VPT is goal-unconditioned, so this text is not represented as a
+            # claim that it follows instructions. It remains useful only for a
+            # configured semantic fallback and for provenance/evaluation.
             policy_instruction="jump forward",
-            # Exact-frame action-distribution evaluation of the promoted
-            # official STEVE-1 checkpoint measured forward+jump probability
-            # rising from 0.242 at CFG 4 to 0.480 at CFG 6, with the latter
-            # becoming the modal action. Keep that evidence local to this
-            # option instead of globally over-guiding exploration/camera use.
+            # The scale is likewise consumed by STEVE only when the optional
+            # RAW/MOTION body is unavailable; it does not alter VPT logits.
             policy_condition_scale=6.0,
             action_permissions=SkillActionPermissions(
                 allow_attack=False,
@@ -240,7 +241,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="use_target",
-            version=3,
+            version=4,
             name="Use target",
             description=(
                 "Approach and interact once with the visible target, then wait for and verify the "
@@ -252,12 +253,13 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             success_conditions=(SkillCondition(key="interaction.changed", operator="truthy"),),
             expected_effects=("target_used",),
             max_duration_ms=5_000,
+            action_level=ActionLevel.GROUNDED,
             policy_ref="use",
             policy_instruction="use the target",
         ),
         SkillSpec(
             skill_id="activate_visible_gui_control",
-            version=1,
+            version=2,
             name="Activate visible GUI control",
             description=(
                 "Use the explicitly grounded visible GUI control, verify the resulting screen "
@@ -268,12 +270,13 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             success_conditions=(SkillCondition(key="scene.playable", operator="truthy"),),
             expected_effects=("gui_transition",),
             max_duration_ms=10_000,
+            action_level=ActionLevel.GUI,
             policy_ref="gui",
             policy_instruction="click button",
         ),
         SkillSpec(
             skill_id="respawn_after_death",
-            version=1,
+            version=2,
             name="Respawn after death",
             description=(
                 "Use the learned GUI policy to activate Bedrock's visible Respawn control, "
@@ -284,6 +287,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             success_conditions=(SkillCondition(key="scene.playable", operator="truthy"),),
             expected_effects=("respawned", "playable_scene_restored"),
             max_duration_ms=15_000,
+            action_level=ActionLevel.GUI,
             # This remains a learned UI option: the contract supplies no screen
             # coordinate, click macro, or privileged game-state action.
             policy_ref="death_gui",
@@ -291,19 +295,19 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="close_open_inventory",
-            version=2,
+            version=3,
             name="Close open inventory",
             description=(
-                "Close the currently open Bedrock inventory through STEVE-1's learned inventory "
+                "Close the currently open Bedrock inventory through the learned GUI expert's "
                 "action and verify that the playable world returns before resuming locomotion"
             ),
             stage=SkillStage.EXPERIMENTAL,
             success_conditions=(SkillCondition(key="scene.playable", operator="truthy"),),
             expected_effects=("inventory_closed", "playable_scene_restored"),
             max_duration_ms=10_000,
-            # This mode deliberately has no ROCKET interaction ID. STEVE-1's
-            # VPT action space contains the learned inventory toggle; ROCKET-2
-            # is a grounded world-interaction controller and cannot emit it.
+            action_level=ActionLevel.GUI,
+            # This option deliberately has no ROCKET body route. The GUI
+            # expert owns its native inventory toggle for the entire episode.
             policy_ref="close_inventory",
             policy_instruction="close inventory",
             action_permissions=SkillActionPermissions(
@@ -314,7 +318,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="place_block",
-            version=4,
+            version=5,
             name="Place block",
             description=(
                 "Select the requested block, aim at a stable adjacent face, place it once, and "
@@ -325,13 +329,14 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             success_conditions=(SkillCondition(key="placement.changed", operator="truthy"),),
             expected_effects=("block_placed",),
             max_duration_ms=5_000,
+            action_level=ActionLevel.GROUNDED,
             policy_ref="place",
             policy_instruction="place a block",
             action_permissions=SkillActionPermissions(allow_attack=False, allow_jump=False),
         ),
         SkillSpec(
             skill_id="gather_nearby_wood",
-            version=3,
+            version=4,
             name="Gather nearby wood",
             description=(
                 "Find a nearby tree, approach a visible trunk rather than leaves, mine connected "
@@ -349,13 +354,14 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 "reacquire_target",
             ),
             max_duration_ms=90_000,
+            action_level=ActionLevel.GROUNDED,
             policy_ref="gather_wood",
             policy_instruction="mine log",
             action_permissions=SkillActionPermissions(allow_use=False),
         ),
         SkillSpec(
             skill_id="craft_wood_planks",
-            version=2,
+            version=3,
             name="Craft wood planks",
             description=(
                 "Open the Bedrock inventory crafting interface, convert one available log into "
@@ -367,12 +373,13 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("inventory.logs-=1", "inventory.planks>=4"),
             max_duration_ms=45_000,
+            action_level=ActionLevel.GUI,
             policy_ref="craft_planks",
             policy_instruction="craft planks",
         ),
         SkillSpec(
             skill_id="craft_crafting_table",
-            version=2,
+            version=3,
             name="Craft a crafting table",
             description=(
                 "Use the Bedrock crafting interface to arrange four wood planks into a crafting "
@@ -386,6 +393,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("inventory.planks-=4", "inventory.crafting_table>=1"),
             max_duration_ms=60_000,
+            action_level=ActionLevel.GUI,
             policy_ref="craft_crafting_table",
             policy_instruction="craft a crafting table",
         ),
@@ -398,9 +406,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 "shelter with solid walls, a roof, and a controlled doorway before night"
             ),
             stage=SkillStage.CANDIDATE,
-            preconditions=(
-                SkillCondition(key="inventory.build_blocks", operator="gte", value=12),
-            ),
+            preconditions=(SkillCondition(key="inventory.build_blocks", operator="gte", value=12),),
             success_conditions=(
                 SkillCondition(key="environment.shelter_enclosed", operator="truthy"),
             ),

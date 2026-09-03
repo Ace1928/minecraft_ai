@@ -4,7 +4,7 @@ import base64
 import importlib
 import threading
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -52,6 +52,9 @@ class OpenAICompatibleLocalModel:
     base_url: str = "http://127.0.0.1:8080/v1"
     api_key: str = "local"
     timeout_s: float = 60.0
+    max_tokens: int = 256
+    thinking_budget_tokens: int | None = None
+    reasoning_format: Literal["none", "deepseek", "deepseek-legacy"] | None = None
     allow_remote: bool = False
 
     def __post_init__(self) -> None:
@@ -99,8 +102,12 @@ class OpenAICompatibleLocalModel:
             "model": self.model_id,
             "messages": [message.model_dump(mode="json") for message in messages],
             "temperature": 0.2,
-            "max_tokens": 512,
+            "max_tokens": self.max_tokens,
         }
+        if self.thinking_budget_tokens is not None:
+            payload["thinking_budget_tokens"] = self.thinking_budget_tokens
+        if self.reasoning_format is not None:
+            payload["reasoning_format"] = self.reasoning_format
         if response_format is not None:
             payload["response_format"] = response_format
         # Multiple local llama.cpp servers may share one GPU. Concurrent VLM
@@ -182,8 +189,12 @@ class OpenAICompatibleLocalModel:
                 }
             ],
             "temperature": 0.1,
-            "max_tokens": 512,
+            "max_tokens": self.max_tokens,
         }
+        if self.thinking_budget_tokens is not None:
+            payload["thinking_budget_tokens"] = self.thinking_budget_tokens
+        if self.reasoning_format is not None:
+            payload["reasoning_format"] = self.reasoning_format
         if response_format is not None:
             payload["response_format"] = response_format
         with _LOCAL_MODEL_INFERENCE_LOCK:

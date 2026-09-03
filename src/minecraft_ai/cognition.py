@@ -46,6 +46,35 @@ class CognitionDecision(BaseModel):
     research_query: str | None = None
 
 
+class _CognitionWireDecision(BaseModel):
+    """Lossless, token-efficient transport form for local structured decoders."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    r: str = Field(default="", max_length=120)
+    g: str | None = None
+    s: str | None = None
+    p: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    o: str | None = Field(default=None, max_length=160)
+    c: str | None = Field(default=None, max_length=160)
+    x: bool = False
+    q: tuple[str, ...] = Field(default=(), max_length=2)
+    w: str | None = Field(default=None, max_length=160)
+
+    def expand(self) -> CognitionDecision:
+        return CognitionDecision(
+            reasoning_summary=self.r,
+            chosen_goal_id=self.g,
+            skill_id=self.s,
+            skill_parameters=self.p,
+            say=self.o,
+            game_chat=self.c,
+            request_replan=self.x,
+            ask_perception=self.q,
+            research_query=self.w,
+        )
+
+
 @dataclass
 class CognitionContext:
     role: RoleProfile
@@ -237,12 +266,12 @@ class HighLevelController:
                     content=(
                         "You are the high-level controller of a Minecraft agent. Decide goals, "
                         "social responses, research/perception requests, and which available "
-                        "closed-loop skill to execute. Return one JSON object matching: "
-                        "reasoning_summary:string, chosen_goal_id:string|null, "
-                        "skill_id:string|null, "
-                        "skill_parameters:object, say:string|null, game_chat:string|null, "
-                        "request_replan:boolean, ask_perception:string[], "
-                        "research_query:string|null. "
+                        "closed-loop skill to execute. Return one compact JSON object using the "
+                        "strict wire keys: r=reasoning summary under 12 words, g=chosen goal id, "
+                        "s=skill id or null, p=skill parameters object, o=operator-console reply "
+                        "or null, c=authorized Bedrock chat or null, x=request replan boolean, "
+                        "q=perception questions array, w=research query. Omit keys whose value "
+                        "would be null, empty, or false. "
                         "The skills list contains only options executable from current fresh "
                         "observations. Use only listed skill ids. The say field is an operator-"
                         "console response: set it only when directly replying to a fresh "
@@ -362,8 +391,7 @@ class HighLevelController:
             (
                 message
                 for message in context.operator_messages
-                if message.kind
-                in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+                if message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
             ),
             None,
         )
@@ -426,20 +454,17 @@ class HighLevelController:
                     "stage": skill.stage.value,
                     "parameters": list(skill.parameters),
                     "preconditions": [
-                        condition.model_dump(mode="json")
-                        for condition in skill.preconditions
+                        condition.model_dump(mode="json") for condition in skill.preconditions
                     ],
                     "initiation_alternatives": [
                         [condition.model_dump(mode="json") for condition in group]
                         for group in skill.initiation_alternatives
                     ],
                     "invariants": [
-                        condition.model_dump(mode="json")
-                        for condition in skill.invariants
+                        condition.model_dump(mode="json") for condition in skill.invariants
                     ],
                     "success_conditions": [
-                        condition.model_dump(mode="json")
-                        for condition in skill.success_conditions
+                        condition.model_dump(mode="json") for condition in skill.success_conditions
                     ],
                     "expected_effects": list(skill.expected_effects),
                     "currently_feasible": True,
@@ -505,8 +530,7 @@ class HighLevelController:
         feasible = sorted(
             skill.skill_id
             for skill in self.skills.specs.values()
-            if skill.skill_id not in blocked_skill_ids
-            and initiation_satisfied(skill, blackboard)
+            if skill.skill_id not in blocked_skill_ids and initiation_satisfied(skill, blackboard)
         )
         self.metrics.repairs += 1
         self.metrics.retry_repairs += 1
@@ -546,9 +570,7 @@ class HighLevelController:
                 "skill_parameters": {},
                 "request_replan": True,
                 "ask_perception": tuple(
-                    dict.fromkeys(
-                        (*decision.ask_perception, "walkable route around the obstacle")
-                    )
+                    dict.fromkeys((*decision.ask_perception, "walkable route around the obstacle"))
                 ),
             }
         )
@@ -559,7 +581,7 @@ class HighLevelController:
             response = structured(
                 messages,
                 name="cognition_decision",
-                schema=CognitionDecision.model_json_schema(),
+                schema=_CognitionWireDecision.model_json_schema(),
             )
         else:
             response = self.model.complete(messages)
@@ -592,7 +614,7 @@ class HighLevelController:
                     f"That decision is rejected: {reason}. Select one concrete skill_id from "
                     f"this currently feasible set: {json.dumps(feasible)}. Preserve the goal "
                     "when possible, do not invent observations, and return the same strict "
-                    "decision schema."
+                    "compact wire schema."
                 ),
             ),
         )
@@ -611,9 +633,7 @@ class HighLevelController:
                 "skill_id": None,
                 "skill_parameters": {},
                 "request_replan": True,
-                "ask_perception": tuple(
-                    dict.fromkeys((*decision.ask_perception, *missing))
-                ),
+                "ask_perception": tuple(dict.fromkeys((*decision.ask_perception, *missing))),
             }
         )
 
@@ -631,4 +651,6 @@ def _parse_decision(text: str) -> CognitionDecision:
         raw = json.loads(candidate)
     except ValueError as exc:
         raise RuntimeError("high-level model did not return valid JSON") from exc
+    if isinstance(raw, dict) and any(key in raw for key in ("r", "g", "s", "p")):
+        return _CognitionWireDecision.model_validate(raw).expand()
     return CognitionDecision.model_validate(raw)

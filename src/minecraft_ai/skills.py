@@ -5,6 +5,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .action_levels import ActionLevel
+
 
 class SkillStage(StrEnum):
     CANDIDATE = "candidate"
@@ -61,6 +63,7 @@ class SkillSpec(BaseModel):
     expected_effects: tuple[str, ...] = ()
     recovery_skills: tuple[str, ...] = ()
     max_duration_ms: int = Field(default=30_000, ge=50, le=3_600_000)
+    action_level: ActionLevel = ActionLevel.LATENT
     policy_ref: str | None = None
     policy_instruction: str | None = Field(default=None, min_length=1, max_length=256)
     policy_condition_scale: float | None = Field(default=None, ge=0.0, le=12.0)

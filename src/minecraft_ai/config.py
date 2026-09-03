@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from platformdirs import user_config_dir, user_data_dir
@@ -16,6 +17,16 @@ class ModelConfig(BaseModel):
     base_url: str = "http://127.0.0.1:8080/v1"
     api_key: str = "local"
     timeout_s: float = Field(default=60.0, gt=0.0, le=600.0)
+    # Keep strategic decoding bounded independently from request timeout. A
+    # cognition decision is a small typed object; allowing hundreds of extra
+    # tokens on a CPU endpoint can stall embodiment for minutes.
+    max_tokens: int = Field(default=256, ge=32, le=2048)
+    # llama.cpp accepts these per request. They remain opt-in because other
+    # OpenAI-compatible endpoints may reject extension fields they do not know.
+    # Zero makes typed realtime decisions skip hidden chain-of-thought while
+    # retaining the explicit bounded summary.
+    thinking_budget_tokens: int | None = Field(default=None, ge=-1, le=4096)
+    reasoning_format: Literal["none", "deepseek", "deepseek-legacy"] | None = None
 
 
 class TrajectoryConfig(BaseModel):
@@ -50,7 +61,14 @@ class PolicyConfig(BaseModel):
     threads: int = Field(default=4, ge=1, le=64)
     startup_timeout_s: float = Field(default=60.0, ge=5.0, le=600.0)
     deadline_ms: int = Field(default=48, ge=10, le=5000)
+    # A successful prediction establishes the minimum freshness horizon for its
+    # learned key/button state. While the successor prediction is in flight,
+    # the runtime renews that state using measured inference latency, bounded by
+    # ``action_hold_max_ms``. It never renews without a pending prediction.
     action_hold_ms: int = Field(default=50, ge=50, le=250)
+    action_hold_max_ms: int = Field(default=250, ge=50, le=250)
+    action_hold_latency_margin: float = Field(default=1.20, ge=1.0, le=3.0)
+    action_hold_ema_alpha: float = Field(default=0.25, gt=0.0, le=1.0)
     stochastic: bool = True
     condition_scale: float = Field(default=4.0, ge=0.0, le=12.0)
     deterministic_condition: bool = True
@@ -106,9 +124,14 @@ class RuntimeConfig(BaseModel):
     lease_renew_ms: int = Field(default=500, ge=100, le=2000)
     high_level: ModelConfig = Field(default_factory=ModelConfig)
     vision_language: ModelConfig = Field(default_factory=ModelConfig)
+    # Semantic/LATENT body (normally STEVE-1). Existing configurations retain
+    # this field and behavior; the specialized body slots below are optional.
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     grounded_policy: PolicyConfig | None = None
     gui_policy: PolicyConfig | None = None
+    # Fast native RAW/MOTION body (currently OpenAI VPT 1x). It is selected
+    # only by an explicit action-level contract for the lifetime of one option.
+    raw_motion_policy: PolicyConfig | None = None
     trajectory: TrajectoryConfig = Field(default_factory=TrajectoryConfig)
     online_wiki: bool = True
 

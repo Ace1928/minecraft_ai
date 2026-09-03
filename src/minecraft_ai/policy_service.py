@@ -20,11 +20,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .action_levels import ActionLevel
 from .config import PolicyConfig
 from .motor import MotorIntent, MotorPolicy
 from .perception import PerceptionBlackboard, PerceptionFact, ScreenRegion
 from .perception_service import perceptual_hash_distance
 from .platforms.bedrock_x11 import CapturedFrame
+from .policy_timing import InferenceRateHold
 from .safety import MotorAction
 
 
@@ -46,6 +48,8 @@ class LearnedPolicyOutput(BaseModel):
     scene_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     scene_class_probabilities: dict[str, float] = Field(default_factory=dict)
     scene_model_version: str | None = None
+    behavior_token: int | None = Field(default=None, ge=0)
+    latent_id: str | None = Field(default=None, min_length=1, max_length=256)
     suppressed_actions: tuple[str, ...] = ()
 
 
@@ -65,9 +69,9 @@ class PolicyServiceMetrics:
 class WorldCameraState:
     """Actuator-domain pitch shared by all policies driving one game view.
 
-    Learned controllers retain independent temporal model states, but STEVE
-    and ROCKET move the same physical Minecraft camera. A per-client pitch
-    accumulator lets route switches spend the physical envelope repeatedly.
+    Learned controllers retain independent temporal model states, but every
+    body expert moves the same physical Minecraft camera. Grounding observers
+    are deliberately excluded from this accumulator.
     """
 
     estimated_pitch_units: int = 0
@@ -96,6 +100,16 @@ class LearnedSceneObservation:
     model_version: str
 
 
+@dataclass(frozen=True)
+class _PolicyRequestContext:
+    """Immutable condition identity attached to one asynchronous request."""
+
+    request_id: str
+    condition: dict[str, object]
+    target_track_id: str | None
+    interaction_id: int | None
+
+
 @dataclass
 class TemporalPolicyClient:
     """Deadline-aware client for an isolated learned temporal policy process."""
@@ -110,12 +124,16 @@ class TemporalPolicyClient:
     _held_keys: set[str] = field(default_factory=set, init=False)
     _held_buttons: set[str] = field(default_factory=set, init=False)
     _held_until_ns: int = field(default=0, init=False)
+    _action_hold: InferenceRateHold = field(init=False)
     _last_sequence: int = field(default=-1, init=False)
     _pending_request_id: str | None = field(default=None, init=False)
     _pending_deadline_ns: int = field(default=0, init=False)
     _pending_miss_recorded: bool = field(default=False, init=False)
     _consumed_miss_recorded: bool = field(default=False, init=False)
     _pending_frame_captured_ns: int = field(default=0, init=False)
+    _pending_request_context: _PolicyRequestContext | None = field(default=None, init=False)
+    _consumed_request_context: _PolicyRequestContext | None = field(default=None, init=False)
+    _applied_request_context: _PolicyRequestContext | None = field(default=None, init=False)
     _consumed_frame_captured_ns: int = field(default=0, init=False)
     _discard_pending_response: bool = field(default=False, init=False)
     _world_camera_state: WorldCameraState = field(
@@ -129,6 +147,7 @@ class TemporalPolicyClient:
         init=False,
     )
     _last_prediction: LearnedPolicyOutput | None = field(default=None, init=False)
+    _last_action_provenance: dict[str, object] = field(default_factory=dict, init=False)
     _last_emitted_camera: tuple[int, int] = field(default=(0, 0), init=False)
     _predicted_camera_total: tuple[int, int] = field(default=(0, 0), init=False)
     _emitted_camera_total: tuple[int, int] = field(default=(0, 0), init=False)
@@ -147,6 +166,16 @@ class TemporalPolicyClient:
     def __post_init__(self) -> None:
         _validate_policy_config(self.config)
         self.policy_id = f"learned:{self.config.provider}:{self.config.model_version}"
+        self._action_hold = InferenceRateHold(
+            minimum_ms=self.config.action_hold_ms,
+            maximum_ms=self.config.action_hold_max_ms,
+            latency_margin=self.config.action_hold_latency_margin,
+            ema_alpha=self.config.action_hold_ema_alpha,
+        )
+        self._last_action_provenance = _empty_action_provenance(
+            policy_id=self.policy_id,
+            action_kind="empty_hold",
+        )
 
     def bind_world_camera_state(self, state: WorldCameraState) -> None:
         """Bind this controller to the physical camera shared with its peers."""
@@ -191,10 +220,10 @@ class TemporalPolicyClient:
         self._last_sequence = sequence
         if _learned_scene_blocked(blackboard, intent):
             self.metrics.scene_blocks += 1
-            return self._release(sequence)
+            return self._release(sequence, reason="scene-blocked")
         frame = self.frame_provider()
         if frame is None:
-            return self._release(sequence)
+            return self._release(sequence, reason="frame-unavailable")
         try:
             self._ensure_started(len(frame.bgra))
             response = self._consume_pending_response()
@@ -204,9 +233,10 @@ class TemporalPolicyClient:
                 if not self._pending_miss_recorded:
                     self.metrics.deadline_misses += 1
                     self._pending_miss_recorded = True
-                return self._release(sequence)
+                return self._release(sequence, reason="request-deadline-expired")
             if self._discard_pending_response:
                 response = None
+                self._consumed_request_context = None
                 self._discard_pending_response = False
             if response is None:
                 if self._pending_camera != (0, 0):
@@ -225,14 +255,19 @@ class TemporalPolicyClient:
             if output.inference_ns > self.config.deadline_ms * 1_000_000:
                 if not self._consumed_miss_recorded:
                     self.metrics.deadline_misses += 1
-                return self._release(sequence)
-            action = self._output_action(output, sequence)
+                return self._release(sequence, reason="inference-deadline-exceeded")
+            action = self._output_action(
+                output,
+                sequence,
+                request_context=self._consumed_request_context,
+            )
+            self._consumed_request_context = None
             return action
         except Exception as exc:
             self.metrics.failures += 1
             self.metrics.last_error = f"{type(exc).__name__}: {exc}"
             self.close()
-            return self._release(sequence)
+            return self._release(sequence, reason="policy-error")
 
     def reset(self) -> MotorAction:
         sequence = self._last_sequence + 1
@@ -246,7 +281,7 @@ class TemporalPolicyClient:
             except OSError:
                 self.close()
         self._last_sequence = sequence
-        return self._release(sequence)
+        return self._release(sequence, reason="policy-reset")
 
     def status(self) -> dict[str, object]:
         process = self._process
@@ -276,9 +311,26 @@ class TemporalPolicyClient:
             "camera_max_step": self.config.camera_max_step,
             "camera_pitch_limit": self.config.camera_pitch_limit,
             "action_hold_ms": self.config.action_hold_ms,
+            "adaptive_action_hold": self._action_hold.status(),
+            "held_state": {
+                "keys": tuple(sorted(self._held_keys)),
+                "buttons": tuple(sorted(self._held_buttons)),
+                "until_ns": self._held_until_ns,
+            },
             "estimated_pitch_units": self._world_camera_state.estimated_pitch_units,
             "camera_envelope_saturated": self._camera_envelope_saturated,
             "button_zero_order_hold": True,
+            "last_action_provenance": dict(self._last_action_provenance),
+            "pending_request": (
+                None
+                if self._pending_request_context is None
+                else {
+                    "request_id": self._pending_request_context.request_id,
+                    "condition": self._pending_request_context.condition,
+                    "target_track_id": self._pending_request_context.target_track_id,
+                    "interaction_id": self._pending_request_context.interaction_id,
+                }
+            ),
             "last_prediction": (
                 None
                 if self._last_prediction is None
@@ -296,6 +348,8 @@ class TemporalPolicyClient:
                     "scene_confidence": self._last_prediction.scene_confidence,
                     "scene_class_probabilities": (self._last_prediction.scene_class_probabilities),
                     "scene_model_version": (self._last_prediction.scene_model_version),
+                    "behavior_token": self._last_prediction.behavior_token,
+                    "latent_id": self._last_prediction.latent_id,
                     "suppressed_actions": self._last_prediction.suppressed_actions,
                 }
             ),
@@ -376,6 +430,9 @@ class TemporalPolicyClient:
         self._pending_miss_recorded = False
         self._consumed_miss_recorded = False
         self._pending_frame_captured_ns = 0
+        self._pending_request_context = None
+        self._consumed_request_context = None
+        self._applied_request_context = None
         self._consumed_frame_captured_ns = 0
         self._discard_pending_response = False
         self._last_target_observation = None
@@ -383,6 +440,10 @@ class TemporalPolicyClient:
         self._last_scene_feedback_ns = 0
         self._pending_camera = (0, 0)
         self._pending_camera_semantics = "world"
+        self._last_action_provenance = _empty_action_provenance(
+            policy_id=self.policy_id,
+            action_kind="release",
+        )
 
     def warmup(self) -> None:
         """Load and verify the configured checkpoint before its first live action."""
@@ -471,8 +532,10 @@ class TemporalPolicyClient:
         if response is None:
             return None
         request_id = self._pending_request_id
+        request_context = self._pending_request_context
         self._consumed_frame_captured_ns = self._pending_frame_captured_ns
         self._pending_request_id = None
+        self._pending_request_context = None
         self._pending_deadline_ns = 0
         self._pending_frame_captured_ns = 0
         self._consumed_miss_recorded = self._pending_miss_recorded
@@ -483,6 +546,7 @@ class TemporalPolicyClient:
             raise RuntimeError(str(response.get("error", "policy inference failed")))
         if response.get("type") != "prediction":
             raise RuntimeError(f"unexpected policy response: {response.get('type')}")
+        self._consumed_request_context = request_context
         return response
 
     def _submit(
@@ -497,6 +561,8 @@ class TemporalPolicyClient:
         self._memory.buf[: len(frame.bgra)] = frame.bgra  # type: ignore[index]
         request_id = uuid.uuid4().hex
         deadline_ns = time.monotonic_ns() + self.config.deadline_ms * 1_000_000
+        condition = self._conditioned_intent(intent, blackboard)
+        target_track_id, interaction_id = _condition_target_metadata(condition)
         request = {
             "type": "infer",
             "request_id": request_id,
@@ -506,13 +572,19 @@ class TemporalPolicyClient:
                 "length": len(frame.bgra),
                 "captured_ns": frame.captured_ns,
             },
-            "intent": self._conditioned_intent(intent, blackboard),
+            "intent": condition,
             "deadline_ns": deadline_ns,
         }
         self._process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
         self._process.stdin.flush()
         self.metrics.requests += 1
         self._pending_request_id = request_id
+        self._pending_request_context = _PolicyRequestContext(
+            request_id=request_id,
+            condition=condition,
+            target_track_id=target_track_id,
+            interaction_id=interaction_id,
+        )
         self._pending_deadline_ns = deadline_ns
         self._pending_frame_captured_ns = frame.captured_ns
         self._pending_miss_recorded = False
@@ -534,9 +606,17 @@ class TemporalPolicyClient:
             raise RuntimeError("learned policy returned a non-object response")
         return payload
 
-    def _output_action(self, output: LearnedPolicyOutput, sequence: int) -> MotorAction:
+    def _output_action(
+        self,
+        output: LearnedPolicyOutput,
+        sequence: int,
+        *,
+        request_context: _PolicyRequestContext | None = None,
+    ) -> MotorAction:
+        self._action_hold.observe(output.inference_ns)
         self._record_learned_action(output)
         self._last_prediction = output
+        self._applied_request_context = request_context
         if output.target_exists_probability is not None and self._consumed_frame_captured_ns > 0:
             self._last_target_observation = GroundedTargetObservation(
                 observed_ns=self._consumed_frame_captured_ns,
@@ -592,7 +672,13 @@ class TemporalPolicyClient:
         )
         self._held_keys = desired_keys
         self._held_buttons = desired_buttons
-        self._held_until_ns = time.monotonic_ns() + self.config.action_hold_ms * 1_000_000
+        self._held_until_ns = time.monotonic_ns() + self._action_hold.horizon_ms * 1_000_000
+        self._last_action_provenance = _prediction_action_provenance(
+            policy_id=self.policy_id,
+            action_kind="prediction",
+            context=request_context,
+            output=output,
+        )
         return action
 
     def _record_learned_action(self, output: LearnedPolicyOutput) -> None:
@@ -633,8 +719,11 @@ class TemporalPolicyClient:
             candidates = [
                 track
                 for track in tracks
-                if intent.target_label is None
-                or track.label.casefold() == intent.target_label.casefold()
+                if (intent.target_track_id is None or track.track_id == intent.target_track_id)
+                and (
+                    intent.target_label is None
+                    or track.label.casefold() == intent.target_label.casefold()
+                )
             ]
             if candidates:
                 target = max(candidates, key=lambda track: track.confidence)
@@ -699,31 +788,53 @@ class TemporalPolicyClient:
         return mouse_dx, mouse_dy
 
     def _hold(self, sequence: int) -> MotorAction:
-        """Bound locomotion while preserving continuous interaction semantics.
-
-        ROCKET and STEVE emit state, not clicks.  When inference is slower than
-        the 20 Hz training clock, releasing an attack button at the locomotion
-        hold boundary repeatedly cancels Minecraft's block-breaking progress.
-        Keep buttons latched until the next prediction (or the request deadline)
-        while releasing movement keys at the bounded sample-and-hold boundary.
-        """
+        """Retain learned state while its valid successor is being inferred."""
+        now_ns = time.monotonic_ns()
+        has_held_state = bool(self._held_keys or self._held_buttons)
+        if has_held_state and self._pending_request_id is not None:
+            renewed_until_ns = self._action_hold.renew_until_ns(
+                now_ns=now_ns,
+                prediction_pending=True,
+                request_deadline_ns=self._pending_deadline_ns,
+            )
+            if renewed_until_ns is not None:
+                self._held_until_ns = max(self._held_until_ns, renewed_until_ns)
         keys_up: tuple[str, ...] = ()
-        if self._held_keys and time.monotonic_ns() >= self._held_until_ns:
+        buttons_up: tuple[str, ...] = ()
+        if has_held_state and now_ns >= self._held_until_ns:
             keys_up = tuple(sorted(self._held_keys))
+            buttons_up = tuple(sorted(self._held_buttons))
             self._held_keys.clear()
+            self._held_buttons.clear()
             self._held_until_ns = 0
         camera_semantics = self._pending_camera_semantics
         mouse_dx, mouse_dy = self._drain_camera()
-        return MotorAction(
+        action = MotorAction(
             sequence=sequence,
             keys_up=keys_up,
+            buttons_up=buttons_up,
             mouse_dx=mouse_dx,
             mouse_dy=mouse_dy,
             camera_semantics=camera_semantics,
             duration_ms=50,
         )
+        if self._applied_request_context is not None and self._last_prediction is not None:
+            self._last_action_provenance = _prediction_action_provenance(
+                policy_id=self.policy_id,
+                action_kind="prediction_hold",
+                context=self._applied_request_context,
+                output=self._last_prediction,
+            )
+        else:
+            self._last_action_provenance = _empty_action_provenance(
+                policy_id=self.policy_id,
+                action_kind="empty_hold",
+            )
+        return action
 
-    def _release(self, sequence: int) -> MotorAction:
+    def _release(self, sequence: int, *, reason: str) -> MotorAction:
+        if self._held_keys or self._held_buttons:
+            self._action_hold.invalidate(reason)
         action = MotorAction(
             sequence=sequence,
             keys_up=tuple(sorted(self._held_keys)),
@@ -735,22 +846,32 @@ class TemporalPolicyClient:
         self._pending_camera = (0, 0)
         self._pending_camera_semantics = "world"
         self._last_emitted_camera = (0, 0)
+        self._applied_request_context = None
+        self._consumed_request_context = None
+        self._last_action_provenance = _empty_action_provenance(
+            policy_id=self.policy_id,
+            action_kind="release",
+        )
         return action
 
 
 @dataclass
 class GroundedPolicyRouter:
-    """Route open-world, grounded, and blocking-GUI actions to learned experts.
+    """Bind one body expert for an entire executable option episode.
 
-    ROCKET is only eligible when the current blackboard contains a recent,
-    confident localized target and the requested interaction belongs to its
-    published interaction taxonomy. This keeps target masks evidence-backed and
-    prevents an empty or stale VLM box from silently becoming motor ground truth.
+    The caller supplies an explicit :class:`ActionLevel`; this router never
+    guesses an abstraction from prose, target presence, or model confidence.
+    The fast VPT body is eligible for RAW/MOTION, STEVE remains the semantic
+    LATENT/SKILL body, and the GUI expert owns GUI episodes. ROCKET never owns
+    the physical body: for GROUNDED episodes it runs asynchronously and its
+    body action is discarded, while its auxiliary localization is admitted as
+    a temporally filtered target belief.
     """
 
     primary: MotorPolicy
     grounded: MotorPolicy
     gui: MotorPolicy | None = None
+    raw_motion: MotorPolicy | None = None
     min_track_confidence: float = 0.65
     max_track_age_ms: int = 15_000
     target_confidence_alpha: float = 0.2
@@ -758,9 +879,19 @@ class GroundedPolicyRouter:
     target_near_max_center_error: float = 0.35
     policy_id: str = field(init=False)
     _active: MotorPolicy = field(init=False)
-    _active_route: str = field(default="primary", init=False)
+    _active_route: str = field(default="semantic", init=False)
     _last_sequence: int = field(default=-1, init=False)
     _switches: int = field(default=0, init=False)
+    _episode_id: str | None = field(default=None, init=False)
+    _episode_level: ActionLevel | None = field(default=None, init=False)
+    _episode_bindings: int = field(default=0, init=False)
+    _episode_binding_conflicts: int = field(default=0, init=False)
+    _fallback_bindings: int = field(default=0, init=False)
+    _last_binding_conflict: tuple[str, ActionLevel] | None = field(default=None, init=False)
+    _grounding_active: bool = field(default=False, init=False)
+    _grounding_sequence: int = field(default=-1, init=False)
+    _grounding_requests: int = field(default=0, init=False)
+    _grounding_discarded_actions: int = field(default=0, init=False)
     _grounded_track_id: str | None = field(default=None, init=False)
     _grounded_interaction_id: int | None = field(default=None, init=False)
     _grounded_confidence: float = field(default=0.0, init=False)
@@ -783,10 +914,15 @@ class GroundedPolicyRouter:
             raise ValueError("target_near_max_center_error is outside the normalized frame")
         self._active = self.primary
         policy_ids = [self.primary.policy_id, self.grounded.policy_id]
+        if self.raw_motion is not None:
+            policy_ids.append(self.raw_motion.policy_id)
         if self.gui is not None:
             policy_ids.append(self.gui.policy_id)
         self.policy_id = "router:" + "+".join(policy_ids)
-        for policy in self._policies():
+        # Only body experts share the physical camera accumulator. ROCKET's
+        # predicted camera is intentionally discarded with the rest of its
+        # action and therefore must never mutate actuator state indirectly.
+        for policy in self._body_policies():
             bind = getattr(policy, "bind_world_camera_state", None)
             if callable(bind):
                 bind(self._world_camera_state)
@@ -801,41 +937,108 @@ class GroundedPolicyRouter:
         if sequence <= self._last_sequence:
             raise ValueError("motor policy sequence must increase monotonically")
         self._last_sequence = sequence
-        if self.gui is not None and intent.mode.casefold() == "death_gui":
-            route = "gui"
-            selected = self.gui
-        elif self._has_grounded_target(blackboard, intent):
-            route = "grounded"
-            selected = self.grounded
-        else:
-            route = "primary"
-            selected = self.primary
-        release: MotorAction | None = None
-        if selected is not self._active:
-            release = self._active.reset()
-            self._active = selected
-            self._active_route = route
-            self._switches += 1
-        if route != "grounded":
-            self._grounded_track_id = None
-            self._grounded_interaction_id = None
-            self._grounded_confidence = 0.0
-            self._last_grounded_feedback_ns = 0
-        action = selected.act(blackboard, intent, sequence=sequence)
+        release = self._bind_episode(intent)
+        grounding_bound = self._episode_level == ActionLevel.GROUNDED and (
+            self._bind_grounded_target(blackboard, intent)
+        )
+        routed_intent = (
+            intent.model_copy(update={"target_track_id": self._grounded_track_id})
+            if grounding_bound and self._grounded_track_id is not None
+            else intent
+        )
+        action = self._active.act(blackboard, routed_intent, sequence=sequence)
+        if grounding_bound:
+            self._observe_grounding(blackboard, routed_intent)
+        elif self._grounding_active:
+            self._deactivate_grounding()
         return action if release is None else _merge_policy_release(action, release)
 
-    def reset(self) -> MotorAction:
-        sequence = self._last_sequence + 1
-        release = MotorAction(sequence=sequence)
-        for policy in self._policies():
-            release = _merge_policy_release(release, policy.reset())
-        self._last_sequence = sequence
-        self._active = self.primary
-        self._active_route = "primary"
+    def _bind_episode(self, intent: MotorIntent) -> MotorAction | None:
+        episode_id = intent.episode_id or f"legacy:{intent.skill_id}"
+        if episode_id == self._episode_id:
+            if intent.action_level != self._episode_level:
+                conflict = (episode_id, intent.action_level)
+                if conflict != self._last_binding_conflict:
+                    self._episode_binding_conflicts += 1
+                    self._last_binding_conflict = conflict
+            return None
+
+        selected, route, used_fallback = self._body_for_level(intent.action_level)
+        release: MotorAction | None = None
+        # A new atomic option receives fresh recurrent state even when it uses
+        # the same expert as its predecessor. Normal SkillExecutor termination
+        # already resets the router; this also makes direct callers safe.
+        if self._episode_id is not None or selected is not self._active:
+            release = self._active.reset()
+        if selected is not self._active:
+            self._switches += 1
+        if self._grounding_active:
+            self._deactivate_grounding()
+        self._active = selected
+        self._active_route = route
+        self._episode_id = episode_id
+        self._episode_level = intent.action_level
+        self._episode_bindings += 1
+        self._fallback_bindings += int(used_fallback)
+        self._last_binding_conflict = None
+        return release
+
+    def _body_for_level(
+        self,
+        level: ActionLevel,
+    ) -> tuple[MotorPolicy, str, bool]:
+        if level == ActionLevel.GUI:
+            if self.gui is not None:
+                return self.gui, "gui", False
+            return self.primary, "semantic", True
+        if level in {ActionLevel.RAW, ActionLevel.MOTION}:
+            if self.raw_motion is not None:
+                return self.raw_motion, "raw_motion", False
+            return self.primary, "semantic", True
+        # GROUNDED means semantic body plus an independently observed ROCKET
+        # target belief. LATENT and SKILL also remain with the semantic body.
+        return self.primary, "semantic", False
+
+    def _observe_grounding(
+        self,
+        blackboard: PerceptionBlackboard,
+        intent: MotorIntent,
+    ) -> None:
+        self._grounding_sequence += 1
+        # ROCKET's worker is deadline-aware and normally only enqueues/consumes
+        # one process response here. Its returned body command is deliberately
+        # ignored; only target_observation() may later update the blackboard.
+        self.grounded.act(
+            blackboard,
+            intent,
+            sequence=self._grounding_sequence,
+        )
+        self._grounding_active = True
+        self._grounding_requests += 1
+        self._grounding_discarded_actions += 1
+
+    def _deactivate_grounding(self) -> None:
+        if self._grounding_active:
+            release = self.grounded.reset()
+            self._grounding_sequence = max(self._grounding_sequence, release.sequence)
+        self._grounding_active = False
         self._grounded_track_id = None
         self._grounded_interaction_id = None
         self._grounded_confidence = 0.0
         self._last_grounded_feedback_ns = 0
+
+    def reset(self) -> MotorAction:
+        sequence = self._last_sequence + 1
+        release = MotorAction(sequence=sequence)
+        for policy in self._body_policies():
+            release = _merge_policy_release(release, policy.reset())
+        self._deactivate_grounding()
+        self._last_sequence = sequence
+        self._active = self.primary
+        self._active_route = "semantic"
+        self._episode_id = None
+        self._episode_level = None
+        self._last_binding_conflict = None
         return release
 
     def close(self) -> None:
@@ -852,11 +1055,37 @@ class GroundedPolicyRouter:
                 warmup()
 
     def status(self) -> dict[str, object]:
+        primary_status = _policy_status(self.primary)
+        grounded_status = _policy_status(self.grounded)
+        raw_motion_status = None if self.raw_motion is None else _policy_status(self.raw_motion)
+        gui_status = None if self.gui is None else _policy_status(self.gui)
+        active_status = _policy_status(self._active)
         status = {
             "policy_id": self.policy_id,
             "provider": "grounded-router",
             "active_route": self._active_route,
             "switches": self._switches,
+            "episode_id": self._episode_id,
+            "episode_action_level": (
+                None if self._episode_level is None else self._episode_level.value
+            ),
+            "episode_bindings": self._episode_bindings,
+            "episode_binding_conflicts": self._episode_binding_conflicts,
+            "fallback_bindings": self._fallback_bindings,
+            "grounding_role": "asynchronous-target-belief-only",
+            "grounding_active": self._grounding_active,
+            "grounding_episode_id": self._episode_id if self._grounding_active else None,
+            "grounded_track_id": self._grounded_track_id,
+            "grounded_interaction_id": self._grounded_interaction_id,
+            "grounding_requests": self._grounding_requests,
+            "grounding_discarded_actions": self._grounding_discarded_actions,
+            "grounding_observer_last_action_provenance": grounded_status.get(
+                "last_action_provenance"
+            ),
+            "last_action_provenance": _routed_action_provenance(
+                active_status.get("last_action_provenance"),
+                route_id=self._active_route,
+            ),
             "min_track_confidence": self.min_track_confidence,
             "max_track_age_ms": self.max_track_age_ms,
             "target_confidence_alpha": self.target_confidence_alpha,
@@ -865,27 +1094,33 @@ class GroundedPolicyRouter:
             "world_camera": {
                 "estimated_pitch_units": self._world_camera_state.estimated_pitch_units,
             },
-            "primary": _policy_status(self.primary),
-            "grounded": _policy_status(self.grounded),
+            "primary": primary_status,
+            "grounded": grounded_status,
         }
-        if self.gui is not None:
-            status["gui"] = _policy_status(self.gui)
+        if raw_motion_status is not None:
+            status["raw_motion"] = raw_motion_status
+        if gui_status is not None:
+            status["gui"] = gui_status
         return status
 
     def restore_world_camera_state(self, *, estimated_pitch_units: int) -> None:
-        """Restore the one physical pitch accumulator shared by every route."""
+        """Restore the one physical pitch accumulator shared by body routes."""
         self._world_camera_state.estimated_pitch_units = estimated_pitch_units
-        for policy in self._policies():
+        for policy in self._body_policies():
             restore = getattr(policy, "restore_world_camera_state", None)
             if callable(restore):
                 restore(estimated_pitch_units=estimated_pitch_units)
 
     def _policies(self) -> tuple[MotorPolicy, ...]:
-        return (
-            (self.primary, self.grounded)
-            if self.gui is None
-            else (self.primary, self.grounded, self.gui)
+        return _unique_policies(
+            self.primary,
+            self.raw_motion,
+            self.gui,
+            self.grounded,
         )
+
+    def _body_policies(self) -> tuple[MotorPolicy, ...]:
+        return _unique_policies(self.primary, self.raw_motion, self.gui)
 
     def merge_perception(self, blackboard: PerceptionBlackboard) -> bool:
         """Merge STEVE scene belief and ROCKET target belief independently."""
@@ -903,7 +1138,7 @@ class GroundedPolicyRouter:
         a training label. An exponential temporal belief prevents one noisy
         frame from destroying an otherwise stable recurrent target lease.
         """
-        if self._active_route != "grounded" or self._grounded_track_id is None:
+        if not self._grounding_active or self._grounded_track_id is None:
             return False
         observe = getattr(self.grounded, "target_observation", None)
         if not callable(observe):
@@ -1024,7 +1259,7 @@ class GroundedPolicyRouter:
         )
         return track_updated and facts_updated
 
-    def _has_grounded_target(
+    def _bind_grounded_target(
         self,
         blackboard: PerceptionBlackboard,
         intent: MotorIntent,
@@ -1039,6 +1274,7 @@ class GroundedPolicyRouter:
             track
             for track in latest.tracks
             if track.confidence >= self.min_track_confidence
+            and (intent.target_track_id is None or track.track_id == intent.target_track_id)
             and (
                 intent.target_label is None
                 or track.label.casefold() == intent.target_label.casefold()
@@ -1049,25 +1285,25 @@ class GroundedPolicyRouter:
         # A stale rectangle alone cannot re-arm a process; a verified persisted
         # cross-view image can, because it contains the actual visual reference.
         if (
-            self._active_route == "grounded"
+            self._grounding_active
             and interaction_id == self._grounded_interaction_id
             and any(track.track_id == self._grounded_track_id for track in candidates)
         ):
             return True
         cutoff = time.monotonic_ns() - self.max_track_age_ms * 1_000_000
         current_hash = blackboard.fact("frame.dhash", min_confidence=1.0)
-        selected = next(
-            (
-                track
-                for track in candidates
-                if track.last_seen_ns >= cutoff
-                or _operator_reference_matches(track, current_hash)
-                or _operator_reference_artifact_available(track)
-            ),
-            None,
+        eligible = tuple(
+            track
+            for track in candidates
+            if track.last_seen_ns >= cutoff
+            or _operator_reference_matches(track, current_hash)
+            or _operator_reference_artifact_available(track)
         )
-        if selected is None:
+        if not eligible:
             return False
+        # Match TemporalPolicyClient's explicit target binding so the body
+        # condition and ROCKET observer identify the same evidence track.
+        selected = max(eligible, key=lambda track: track.confidence)
         self._grounded_track_id = selected.track_id
         self._grounded_interaction_id = interaction_id
         self._grounded_confidence = selected.confidence
@@ -1105,6 +1341,141 @@ def _operator_reference_artifact_available(track: object) -> bool:
         and len(digest) == 64
         and Path(path).is_file()
     )
+
+
+def _unique_policies(*policies: MotorPolicy | None) -> tuple[MotorPolicy, ...]:
+    unique: list[MotorPolicy] = []
+    seen: set[int] = set()
+    for policy in policies:
+        if policy is None or id(policy) in seen:
+            continue
+        seen.add(id(policy))
+        unique.append(policy)
+    return tuple(unique)
+
+
+def _condition_target_metadata(
+    condition: dict[str, object],
+) -> tuple[str | None, int | None]:
+    direct_target = condition.get("target_track_id")
+    target_track_id = direct_target if isinstance(direct_target, str) and direct_target else None
+    target = condition.get("target_track")
+    if isinstance(target, dict):
+        value = target.get("track_id")
+        if isinstance(value, str) and value:
+            target_track_id = value
+    interaction = condition.get("interaction_id")
+    interaction_id = (
+        interaction if isinstance(interaction, int) and not isinstance(interaction, bool) else None
+    )
+    return target_track_id, interaction_id
+
+
+def _policy_condition_id(
+    condition: dict[str, object],
+    *,
+    route_id: str,
+    target_track_id: str | None,
+) -> str:
+    payload = {
+        "condition": condition,
+        "route_id": route_id,
+        "target_track_id": target_track_id,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _empty_action_provenance(
+    *,
+    policy_id: str,
+    action_kind: Literal["release", "empty_hold"],
+) -> dict[str, object]:
+    return {
+        "action_kind": action_kind,
+        "prediction_id": None,
+        "request_id": None,
+        "condition_id": None,
+        "condition": None,
+        "episode_id": None,
+        "action_level": None,
+        "target_track_id": None,
+        "interaction_id": None,
+        "policy_id": policy_id,
+        "model_version": None,
+        "route_id": "direct",
+        "behavior_token": None,
+        "latent_id": None,
+    }
+
+
+def _prediction_action_provenance(
+    *,
+    policy_id: str,
+    action_kind: Literal["prediction", "prediction_hold"],
+    context: _PolicyRequestContext | None,
+    output: LearnedPolicyOutput,
+) -> dict[str, object]:
+    condition = None if context is None else context.condition
+    target_track_id = None if context is None else context.target_track_id
+    episode_id: str | None = None
+    action_level: str | None = None
+    if condition is not None:
+        episode = condition.get("episode_id")
+        episode_id = episode if isinstance(episode, str) and episode else None
+        level = condition.get("action_level")
+        action_level = level if isinstance(level, str) and level else None
+    request_id = None if context is None else context.request_id
+    return {
+        "action_kind": action_kind,
+        "prediction_id": request_id,
+        "request_id": request_id,
+        "condition_id": (
+            None
+            if condition is None
+            else _policy_condition_id(
+                condition,
+                route_id="direct",
+                target_track_id=target_track_id,
+            )
+        ),
+        "condition": condition,
+        "episode_id": episode_id,
+        "action_level": action_level,
+        "target_track_id": target_track_id,
+        "interaction_id": None if context is None else context.interaction_id,
+        "policy_id": policy_id,
+        "model_version": output.model_version,
+        "route_id": "direct",
+        "behavior_token": output.behavior_token,
+        "latent_id": output.latent_id,
+    }
+
+
+def _routed_action_provenance(
+    provenance: object,
+    *,
+    route_id: str,
+) -> dict[str, object] | None:
+    if not isinstance(provenance, dict):
+        return None
+    routed = dict(provenance)
+    routed["route_id"] = route_id
+    condition = routed.get("condition")
+    target_track_id = routed.get("target_track_id")
+    normalized_target = (
+        target_track_id if isinstance(target_track_id, str) and target_track_id else None
+    )
+    routed["condition_id"] = (
+        _policy_condition_id(
+            condition,
+            route_id=route_id,
+            target_track_id=normalized_target,
+        )
+        if isinstance(condition, dict)
+        else None
+    )
+    return routed
 
 
 def _policy_status(policy: MotorPolicy) -> dict[str, object]:
@@ -1170,6 +1541,8 @@ def _validate_policy_config(config: PolicyConfig) -> None:
         and config.camera_recovery_release >= config.camera_pitch_limit
     ):
         raise ValueError("camera_recovery_release must be smaller than camera_pitch_limit")
+    if config.action_hold_ms > config.action_hold_max_ms:
+        raise ValueError("action_hold_ms must not exceed action_hold_max_ms")
 
 
 def _learned_scene_blocked(

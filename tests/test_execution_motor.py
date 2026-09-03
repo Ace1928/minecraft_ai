@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import time
 
+from minecraft_ai.action_levels import ActionLevel
 from minecraft_ai.execution import SkillExecutor
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.skills import SkillActionPermissions, SkillCondition, SkillOutcome, SkillSpec
+from minecraft_ai.trajectory import ActionOrigin
 
 
 class _IntentCapturePolicy:
@@ -88,6 +90,7 @@ def test_skill_contract_becomes_learned_policy_instruction() -> None:
         name="Mine log",
         description="Approach and mine a visible tree log",
         policy_ref="mine",
+        action_level=ActionLevel.GROUNDED,
         policy_instruction="mine log",
         policy_condition_scale=5.5,
     )
@@ -98,9 +101,14 @@ def test_skill_contract_becomes_learned_policy_instruction() -> None:
         now_ns=100,
     )
 
-    executor.tick(_board(), sequence=1, now_ns=200)
+    tick = executor.tick(_board(), sequence=1, now_ns=200)
 
     assert policy.intent is not None
+    assert tick.motor_intent == policy.intent
+    assert tick.policy_status == {"policy_id": "capture"}
+    assert tick.action_origin == ActionOrigin.POLICY
+    assert policy.intent.episode_id == "r1"
+    assert policy.intent.action_level == ActionLevel.GROUNDED
     assert policy.intent.instruction == "mine log"
     assert policy.intent.condition_scale == 5.5
     assert policy.intent.target_label == "oak_log"
@@ -194,6 +202,9 @@ def test_skill_success_releases_held_input() -> None:
     assert done.action is not None
     assert "w" in done.action.keys_up
     assert "left" in done.action.buttons_up
+    assert done.motor_intent == running.motor_intent
+    assert done.policy_status["policy_id"] == policy.policy_id
+    assert done.action_origin == ActionOrigin.RESET
 
 
 def test_failure_requests_recovery_and_releases() -> None:
