@@ -157,6 +157,7 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     open_inventory = skills.get("open_inventory")
     close_inventory = skills.get("close_open_inventory")
     exploration = skills.get("explore_forward")
+    level_ground = skills.get("traverse_level_ground")
     obstacle = skills.get("traverse_visible_obstacle")
 
     assert "visible trunk" in gather.description
@@ -171,6 +172,10 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert exploration.action_permissions.allow_attack is False
     assert exploration.action_permissions.allow_jump is True
     assert exploration.policy_instruction == "Run around and explore the Minecraft world."
+    assert level_ground.policy_ref == "traverse_level_ground"
+    assert level_ground.action_level == ActionLevel.MOTION
+    assert level_ground.action_permissions.allow_jump is False
+    assert level_ground.action_permissions.allow_attack is False
     assert obstacle.policy_ref == "traverse_obstacle"
     assert obstacle.action_level == ActionLevel.MOTION
     assert obstacle.policy_instruction == "jump forward"
