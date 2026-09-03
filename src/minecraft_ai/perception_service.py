@@ -1,22 +1,25 @@
 from __future__ import annotations
 
 import importlib
-import io
-import json
 import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .grounded_perception import (
+    GroundedPerceptionHarness,
+    GroundedPerceptionReport,
+)
 from .models import VisionLanguageModel
 from .perception import (
     ActivePerceptionQuery,
     ChatLine,
     FrameState,
     PerceptionBlackboard,
+    PerceptionEvidence,
     PerceptionFact,
     ScreenRegion,
     Track,
@@ -55,18 +58,23 @@ class SemanticTrack(BaseModel):
     y: float = Field(ge=0.0, le=1.0)
     width: float = Field(gt=0.0, le=1.0)
     height: float = Field(gt=0.0, le=1.0)
+    evidence_id: str | None = Field(default=None, max_length=256)
 
 
 class SemanticObservation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    scene_mode: Literal["world", "gui", "loading", "menu", "death", "unknown"]
-    scene_playable: bool
-    uncertainty: float = Field(ge=0.0, le=1.0)
-    danger_immediate: bool
-    obstacle_ahead: bool
-    target_visible: bool
-    scene_summary: str = Field(min_length=1, max_length=512)
+    scene_mode: Literal["world", "gui", "loading", "menu", "death", "unknown"] | None = None
+    scene_playable: bool | None = None
+    uncertainty: float = Field(default=1.0, ge=0.0, le=1.0)
+    danger_immediate: bool | None = None
+    obstacle_ahead: bool | None = None
+    target_visible: bool | None = None
+    scene_summary: str = Field(
+        default="No claims established from visible pixel evidence.",
+        min_length=1,
+        max_length=2048,
+    )
     target_dx: float | None = Field(default=None, ge=-1.0, le=1.0)
     target_dy: float | None = Field(default=None, ge=-1.0, le=1.0)
     target_kind: str | None = Field(default=None, max_length=128)
@@ -80,23 +88,29 @@ class SemanticObservation(BaseModel):
     player_air_visible: bool | None = None
     facts: dict[str, str | int | float | bool] = Field(default_factory=dict)
     confidences: dict[str, float] = Field(default_factory=dict)
+    evidence: tuple[PerceptionEvidence, ...] = ()
+    evidence_refs: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    rejection_count: int = Field(default=0, ge=0)
+    unknown_claim_count: int = Field(default=0, ge=0)
+    prose_rejected: bool = False
     tracks: tuple[SemanticTrack, ...] = ()
     chat: tuple[str, ...] = ()
+    chat_evidence_ids: tuple[str, ...] = ()
 
     def canonical_facts(self) -> dict[str, str | int | float | bool]:
         values = dict(self.facts)
         values.update(
             {
-                "scene.mode": self.scene_mode,
-                "scene.playable": self.scene_playable,
                 "perception.uncertainty": self.uncertainty,
-                "danger.immediate": self.danger_immediate,
-                "obstacle.ahead": self.obstacle_ahead,
-                "target.visible": self.target_visible,
                 "scene.summary": self.scene_summary,
             }
         )
         optional = {
+            "scene.mode": self.scene_mode,
+            "scene.playable": self.scene_playable,
+            "danger.immediate": self.danger_immediate,
+            "obstacle.ahead": self.obstacle_ahead,
+            "target.visible": self.target_visible,
             "target.dx": self.target_dx,
             "target.dy": self.target_dy,
             "target.kind": self.target_kind,
@@ -111,6 +125,83 @@ class SemanticObservation(BaseModel):
         }
         values.update({key: value for key, value in optional.items() if value is not None})
         return values
+
+
+def _semantic_observation(report: GroundedPerceptionReport) -> SemanticObservation:
+    """Convert only validated/cited claims into the legacy runtime surface."""
+    values = report.observed_values()
+    mapped_keys = {
+        "scene.mode",
+        "scene.playable",
+        "danger.immediate",
+        "obstacle.ahead",
+        "target.visible",
+        "target.dx",
+        "target.dy",
+        "target.kind",
+        "target.mineable",
+        "target.near",
+        "inventory.logs",
+        "inventory.planks",
+        "inventory.crafting_table",
+        "inventory.build_blocks",
+        "player.submerged",
+        "player.air_visible",
+    }
+    extra_facts = {key: value for key, value in values.items() if key not in mapped_keys}
+    scene_mode = cast(
+        Literal["world", "gui", "loading", "menu", "death", "unknown"] | None,
+        values.get("scene.mode"),
+    )
+    evidence_refs = report.evidence_by_key()
+    summary_evidence = tuple(
+        dict.fromkeys(
+            evidence_id for references in evidence_refs.values() for evidence_id in references
+        )
+    )
+    if summary_evidence:
+        evidence_refs["scene.summary"] = summary_evidence
+    return SemanticObservation(
+        scene_mode=scene_mode,
+        scene_playable=cast(bool | None, values.get("scene.playable")),
+        uncertainty=report.uncertainty,
+        danger_immediate=cast(bool | None, values.get("danger.immediate")),
+        obstacle_ahead=cast(bool | None, values.get("obstacle.ahead")),
+        target_visible=cast(bool | None, values.get("target.visible")),
+        scene_summary=report.deterministic_summary,
+        target_dx=cast(float | None, values.get("target.dx")),
+        target_dy=cast(float | None, values.get("target.dy")),
+        target_kind=cast(str | None, values.get("target.kind")),
+        target_mineable=cast(bool | None, values.get("target.mineable")),
+        target_near=cast(bool | None, values.get("target.near")),
+        inventory_logs=cast(int | None, values.get("inventory.logs")),
+        inventory_planks=cast(int | None, values.get("inventory.planks")),
+        inventory_crafting_table=cast(int | None, values.get("inventory.crafting_table")),
+        inventory_build_blocks=cast(int | None, values.get("inventory.build_blocks")),
+        player_submerged=cast(bool | None, values.get("player.submerged")),
+        player_air_visible=cast(bool | None, values.get("player.air_visible")),
+        facts=extra_facts,
+        confidences=report.confidence_by_key(),
+        evidence=report.evidence,
+        evidence_refs=evidence_refs,
+        rejection_count=len(report.rejections),
+        unknown_claim_count=sum(claim.status != "observed" for claim in report.claims),
+        prose_rejected=bool(report.model_summary and not report.summary_accepted),
+        tracks=tuple(
+            SemanticTrack(
+                label=item.label,
+                confidence=item.confidence,
+                x=item.x,
+                y=item.y,
+                width=item.width,
+                height=item.height,
+                evidence_id=item.evidence_id,
+            )
+            for item in report.tracks
+        ),
+        chat=tuple(item.text for item in report.chat),
+        chat_evidence_ids=tuple(item.evidence_id for item in report.chat),
+    )
 
 
 @dataclass(frozen=True)
@@ -134,6 +225,9 @@ class ActiveVLMMetrics:
     last_hash_distance: int | None = None
     last_error: str | None = None
     last_fact_keys: tuple[str, ...] = ()
+    claim_rejections: int = 0
+    prose_rejections: int = 0
+    unknown_claims: int = 0
 
 
 @dataclass
@@ -205,6 +299,9 @@ class ActiveVLMWorker:
                 self.metrics.last_latency_ms = latency_ms
                 self.metrics.last_error = None
                 self.metrics.last_fact_keys = tuple(sorted(observation.canonical_facts()))
+                self.metrics.claim_rejections += observation.rejection_count
+                self.metrics.prose_rejections += int(observation.prose_rejected)
+                self.metrics.unknown_claims += observation.unknown_claim_count
                 self._publish(job, observation)
             except Exception as exc:
                 # Semantic VLM failure must never terminate capture or motor control.
@@ -222,40 +319,13 @@ class ActiveVLMWorker:
             return not self._stop.is_set() and not self._work_admitted
 
     def _inspect(self, job: SemanticJob) -> tuple[SemanticObservation, float]:
-        png = _bgra_to_png(job.frame)
-        prompt = (
-            "Inspect this Minecraft Bedrock screenshot. Answer only the supplied strict JSON "
-            "schema. Always populate scene_mode, scene_playable, uncertainty, "
-            "danger_immediate, obstacle_ahead, target_visible, and scene_summary from visible "
-            "evidence. Determine the current scene from the actual HUD and controls; historical "
-            "death or drowning text in chat does not mean the player is currently dead. In "
-            "world mode report only visible HUD state, immediate hazards, "
-            "terrain affordances, and task-relevant targets. Only report target.visible=true "
-            "with target_dx and target_dy in -1..1 when a target is visibly localized. Never "
-            "infer hidden inventory, coordinates, seed, biome, identity, or time of day. "
-            "For a visible actionable resource include target_kind, target_mineable, and "
-            "target_near. Report only visibly readable counts using inventory_logs, "
-            "inventory_planks, inventory_crafting_table, and inventory_build_blocks when those "
-            "items are visible in the hotbar or an open inventory; omit unknown counts. Report "
-            "player_submerged and player_air_visible when visually supported. Every tracks "
-            "entry must be an object with exactly label:string, "
-            "confidence:number, x:number, y:number, width:number, height:number; coordinates "
-            "and sizes are normalized 0..1. Use tracks:[] when nothing should be tracked. "
-            f"Question: {job.query.question}"
+        report, latency_ms = GroundedPerceptionHarness(self.model).inspect(
+            job.frame,
+            frame_id=job.query.frame_id,
+            question=job.query.question,
+            output_keys=job.query.output_keys,
         )
-        structured = getattr(self.model, "inspect_structured", None)
-        if callable(structured):
-            response = structured(
-                prompt,
-                image_bytes=png,
-                mime_type="image/png",
-                name="minecraft_semantic_observation",
-                schema=SemanticObservation.model_json_schema(),
-            )
-        else:
-            response = self.model.inspect(prompt, image_bytes=png, mime_type="image/png")
-        raw_text = _strip_code_fence(response.text)
-        return SemanticObservation.model_validate(json.loads(raw_text)), response.latency_ms
+        return _semantic_observation(report), latency_ms
 
     def _publish(self, job: SemanticJob, observation: SemanticObservation) -> None:
         latest = self.blackboard.raw_latest()
@@ -276,8 +346,7 @@ class ActiveVLMWorker:
         )
         current_ui_hash = (
             current_ui_hash_fact.value
-            if current_ui_hash_fact is not None
-            and isinstance(current_ui_hash_fact.value, str)
+            if current_ui_hash_fact is not None and isinstance(current_ui_hash_fact.value, str)
             else None
         )
         ui_hash_distance = (
@@ -305,6 +374,7 @@ class ActiveVLMWorker:
                 observed_ns=now,
                 source=f"vlm:{self.model.model_id}:{job.query.query_id}",
                 expires_after_ms=max(15_000, job.query.deadline_ms * 3),
+                evidence_refs=observation.evidence_refs.get(key, ()),
             )
             for key, value in observation.canonical_facts().items()
         ) + (
@@ -330,17 +400,27 @@ class ActiveVLMWorker:
                 ),
                 first_seen_ns=now,
                 last_seen_ns=now,
+                evidence_refs=() if item.evidence_id is None else (item.evidence_id,),
             )
             for index, item in enumerate(observation.tracks)
         )
         chat = tuple(
-            ChatLine(text=text, observed_ns=now, confidence=0.7) for text in observation.chat
+            ChatLine(
+                text=text,
+                observed_ns=now,
+                confidence=0.7,
+                evidence_refs=(observation.chat_evidence_ids[index],)
+                if index < len(observation.chat_evidence_ids)
+                else (),
+            )
+            for index, text in enumerate(observation.chat)
         )
         self.blackboard.merge_semantics(
             instance_id=self.instance_id,
             facts=facts,
             tracks=tracks,
             chat=chat,
+            evidence=observation.evidence,
         )
 
     def status(self) -> dict[str, object]:
@@ -361,6 +441,9 @@ class ActiveVLMWorker:
             "last_hash_distance": self.metrics.last_hash_distance,
             "last_error": self.metrics.last_error,
             "last_fact_keys": list(self.metrics.last_fact_keys),
+            "claim_rejections": self.metrics.claim_rejections,
+            "prose_rejections": self.metrics.prose_rejections,
+            "unknown_claims": self.metrics.unknown_claims,
         }
 
 
@@ -528,35 +611,6 @@ class RealtimePerceptionService:
         self.capture_source.close()
 
 
-def _bgra_to_png(frame: CapturedFrame) -> bytes:
-    try:
-        image_module = importlib.import_module("PIL.Image")
-    except ImportError as exc:
-        raise RuntimeError("install minecraft-ai[vision] for VLM image encoding") from exc
-    image = image_module.frombytes(
-        "RGBA",
-        (frame.width, frame.height),
-        frame.bgra,
-        "raw",
-        "BGRA",
-    )
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG", optimize=False)
-    return buffer.getvalue()
-
-
-def _strip_code_fence(text: str) -> str:
-    candidate = text.strip()
-    if not candidate.startswith("```"):
-        return candidate
-    lines = candidate.splitlines()
-    if lines:
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
-
-
 def frame_dhash(frame: CapturedFrame) -> str:
     """Return a compact image-similarity signal without assigning semantics."""
     return frame_region_dhash(frame, y_start=0.0, y_end=1.0)
@@ -705,9 +759,7 @@ def bedrock_air_bubbles(frame: CapturedFrame) -> int | None:
     if pixels is not None:
         roi = pixels[y_start:y_end, x_start:x_end, :3]
         blue, green, red = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
-        matched = int(
-            ((blue >= 230) & (green >= 110) & (green <= 210) & (red <= 100)).sum()
-        )
+        matched = int(((blue >= 230) & (green >= 110) & (green <= 210) & (red <= 100)).sum())
     else:
         source = memoryview(frame.bgra)
         matched = 0
@@ -715,11 +767,7 @@ def bedrock_air_bubbles(frame: CapturedFrame) -> int | None:
             for x in range(x_start, x_end):
                 offset = (y * frame.width + x) * 4
                 blue, green, red = source[offset : offset + 3]
-                matched += int(
-                    int(blue) >= 230
-                    and 110 <= int(green) <= 210
-                    and int(red) <= 100
-                )
+                matched += int(int(blue) >= 230 and 110 <= int(green) <= 210 and int(red) <= 100)
     area_scale = (frame.width / 1279.0) * (frame.height / 635.0)
     if matched < max(8, round(32 * area_scale)):
         return None
@@ -790,10 +838,7 @@ def _region_palette_ratio(
             if palette == "primary":
                 selected = green >= 90 and green >= red * 1.18 and green >= blue * 1.05
             else:
-                selected = (
-                    max(red, green, blue) - min(red, green, blue) <= 18
-                    and 100 <= red <= 230
-                )
+                selected = max(red, green, blue) - min(red, green, blue) <= 18 and 100 <= red <= 230
             matched += int(selected)
             sampled += 1
     return matched / sampled if sampled else 0.0

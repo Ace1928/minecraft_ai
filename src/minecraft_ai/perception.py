@@ -4,6 +4,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,6 +19,36 @@ class ScreenRegion(BaseModel):
     height: float = Field(gt=0.0, le=1.0)
 
 
+class EvidenceRegion(StrEnum):
+    """Stable screen partitions used to ground semantic observations."""
+
+    WORLD = "world"
+    HUD = "hud"
+    HOTBAR = "hotbar"
+    CHAT = "chat"
+    GUI = "gui"
+
+
+class PerceptionEvidence(BaseModel):
+    """Content-addressed reference to the exact pixels supporting a claim.
+
+    The pixels remain in the synchronized trajectory/frame store.  This small
+    manifest is safe to keep on the realtime blackboard and lets downstream
+    planners distinguish visible evidence from an unsupported model assertion.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evidence_id: str = Field(min_length=1, max_length=256)
+    frame_id: int = Field(ge=0)
+    captured_ns: int = Field(gt=0)
+    region_kind: EvidenceRegion
+    region: ScreenRegion
+    pixel_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    crop_width: int = Field(gt=0)
+    crop_height: int = Field(gt=0)
+
+
 class Track(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -28,6 +59,7 @@ class Track(BaseModel):
     first_seen_ns: int
     last_seen_ns: int
     attributes: dict[str, str | int | float | bool] = Field(default_factory=dict)
+    evidence_refs: tuple[str, ...] = ()
 
 
 class ChatLine(BaseModel):
@@ -37,6 +69,7 @@ class ChatLine(BaseModel):
     speaker: str | None = None
     observed_ns: int
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    evidence_refs: tuple[str, ...] = ()
 
 
 class PlayerEstimate(BaseModel):
@@ -58,6 +91,7 @@ class PerceptionFact(BaseModel):
     observed_ns: int
     source: str
     expires_after_ms: int = Field(default=1000, ge=1)
+    evidence_refs: tuple[str, ...] = ()
 
     def fresh(self, now_ns: int | None = None) -> bool:
         now = time.monotonic_ns() if now_ns is None else now_ns
@@ -76,6 +110,7 @@ class FrameState(BaseModel):
     tracks: tuple[Track, ...] = ()
     chat: tuple[ChatLine, ...] = ()
     facts: tuple[PerceptionFact, ...] = ()
+    evidence: tuple[PerceptionEvidence, ...] = ()
 
 
 T = TypeVar("T")
@@ -110,6 +145,7 @@ class PerceptionBlackboard:
     _facts: dict[str, PerceptionFact] = field(default_factory=dict)
     _semantic_tracks: tuple[Track, ...] = ()
     _chat: tuple[ChatLine, ...] = ()
+    _evidence: dict[str, PerceptionEvidence] = field(default_factory=dict)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
 
     def __post_init__(self) -> None:
@@ -126,7 +162,14 @@ class PerceptionBlackboard:
                     raise ValueError("frame ids must increase monotonically")
                 if frame.captured_ns <= previous.captured_ns:
                     raise ValueError("frame timestamps must increase monotonically")
+            self._validate_evidence_refs_locked(
+                frame.facts,
+                frame.tracks,
+                frame.chat,
+                additional_evidence=frame.evidence,
+            )
             self._frames.append(frame)
+            self._merge_evidence_locked(frame.evidence)
             self._merge_facts_locked(frame.facts)
             if frame.tracks:
                 self._semantic_tracks = frame.tracks
@@ -140,6 +183,7 @@ class PerceptionBlackboard:
         facts: tuple[PerceptionFact, ...] = (),
         tracks: tuple[Track, ...] = (),
         chat: tuple[ChatLine, ...] = (),
+        evidence: tuple[PerceptionEvidence, ...] = (),
     ) -> bool:
         """Merge late semantic results without fabricating capture timestamps.
 
@@ -149,6 +193,13 @@ class PerceptionBlackboard:
             latest = self._frames.latest()
             if latest is None or latest.instance_id != instance_id:
                 return False
+            self._validate_evidence_refs_locked(
+                facts,
+                tracks,
+                chat,
+                additional_evidence=evidence,
+            )
+            self._merge_evidence_locked(evidence)
             self._merge_facts_locked(facts)
             if tracks:
                 newest_track_ns = max(track.last_seen_ns for track in tracks)
@@ -167,12 +218,46 @@ class PerceptionBlackboard:
                 )
             return True
 
+    def _validate_evidence_refs_locked(
+        self,
+        facts: tuple[PerceptionFact, ...],
+        tracks: tuple[Track, ...],
+        chat: tuple[ChatLine, ...],
+        *,
+        additional_evidence: tuple[PerceptionEvidence, ...] = (),
+    ) -> None:
+        known_evidence = set(self._evidence)
+        known_evidence.update(item.evidence_id for item in additional_evidence)
+        dangling = {
+            evidence_id
+            for fact in facts
+            for evidence_id in fact.evidence_refs
+            if evidence_id not in known_evidence
+        }
+        dangling.update(
+            evidence_id
+            for track in tracks
+            for evidence_id in track.evidence_refs
+            if evidence_id not in known_evidence
+        )
+        dangling.update(
+            evidence_id
+            for line in chat
+            for evidence_id in line.evidence_refs
+            if evidence_id not in known_evidence
+        )
+        if dangling:
+            raise ValueError(
+                "perception observations reference unknown evidence: " + ", ".join(sorted(dangling))
+            )
+
     def upsert_semantic_track(self, *, instance_id: str, track: Track) -> bool:
         """Add or replace one durable semantic track without discarding peers."""
         with self._lock:
             latest = self._frames.latest()
             if latest is None or latest.instance_id != instance_id:
                 return False
+            self._validate_evidence_refs_locked((), (track,), ())
             tracks = {existing.track_id: existing for existing in self._semantic_tracks}
             tracks[track.track_id] = track
             self._semantic_tracks = tuple(tracks.values())
@@ -181,9 +266,7 @@ class PerceptionBlackboard:
     def remove_semantic_track(self, track_id: str) -> bool:
         """Remove one semantic track, returning whether it was present."""
         with self._lock:
-            retained = tuple(
-                track for track in self._semantic_tracks if track.track_id != track_id
-            )
+            retained = tuple(track for track in self._semantic_tracks if track.track_id != track_id)
             removed = len(retained) != len(self._semantic_tracks)
             self._semantic_tracks = retained
             return removed
@@ -194,16 +277,44 @@ class PerceptionBlackboard:
             if existing is None or fact.observed_ns >= existing.observed_ns:
                 self._facts[fact.key] = fact
 
+    def _merge_evidence_locked(self, evidence: tuple[PerceptionEvidence, ...]) -> None:
+        for item in evidence:
+            self._evidence[item.evidence_id] = item
+        # Evidence is only a compact manifest, but bound it so a long-running
+        # process cannot grow without limit if semantic queries are frequent.
+        if len(self._evidence) > 512:
+            retained = sorted(
+                self._evidence.values(),
+                key=lambda item: (item.captured_ns, item.evidence_id),
+                reverse=True,
+            )[:512]
+            self._evidence = {item.evidence_id: item for item in retained}
+
     def latest(self) -> FrameState | None:
         with self._lock:
             frame = self._frames.latest()
             if frame is None:
                 return None
+            facts = tuple(self.fresh_facts().values())
+            referenced = {evidence_id for fact in facts for evidence_id in fact.evidence_refs}
+            referenced.update(
+                evidence_id
+                for track in self._semantic_tracks
+                for evidence_id in track.evidence_refs
+            )
+            referenced.update(
+                evidence_id for line in self._chat for evidence_id in line.evidence_refs
+            )
             return frame.model_copy(
                 update={
                     "tracks": self._semantic_tracks or frame.tracks,
                     "chat": self._chat,
-                    "facts": tuple(self.fresh_facts().values()),
+                    "facts": facts,
+                    "evidence": tuple(
+                        self._evidence[evidence_id]
+                        for evidence_id in sorted(referenced)
+                        if evidence_id in self._evidence
+                    ),
                 }
             )
 

@@ -51,23 +51,40 @@ class _StructuredVisionModel:
         name: str,
         schema: dict[str, object],
     ) -> ModelResponse:
-        assert "Every tracks entry must be an object" in prompt
+        assert "Pixel evidence manifest" in prompt
+        assert "status=unknown or abstain" in prompt
         assert image_bytes.startswith(b"\x89PNG")
         assert mime_type == "image/png"
-        assert name == "minecraft_semantic_observation"
+        assert name == "minecraft_grounded_perception"
         self.schema = schema
         return ModelResponse(
             text=(
-                '{"scene_mode":"world","scene_playable":true,"uncertainty":0.1,'
-                '"danger_immediate":false,"obstacle_ahead":false,"target_visible":true,'
-                '"scene_summary":"Tree ahead","target_dx":0.0,"target_dy":0.0,'
-                '"target_kind":"oak_log","target_mineable":true,"target_near":false,'
-                '"inventory_logs":null,"inventory_planks":null,'
-                '"inventory_crafting_table":null,"inventory_build_blocks":null,'
-                '"player_submerged":null,"player_air_visible":null,"facts":{},'
-                '"confidences":{},'
-                '"tracks":[{"label":"oak_log","confidence":0.9,"x":0.5,"y":0.5,'
-                '"width":0.2,"height":0.4}],"chat":[]}'
+                '{"uncertainty":0.1,"prose_summary":'
+                '"[scene.mode=\\"world\\" @frame-1:world]",'
+                '"claims":['
+                '{"key":"scene.mode","status":"observed","value":"world",'
+                '"confidence":0.99,"evidence_ids":["frame-1:world"],"reason":null},'
+                '{"key":"scene.playable","status":"observed","value":true,'
+                '"confidence":0.99,"evidence_ids":["frame-1:world"],"reason":null},'
+                '{"key":"danger.immediate","status":"observed","value":false,'
+                '"confidence":0.9,"evidence_ids":["frame-1:world"],"reason":null},'
+                '{"key":"obstacle.ahead","status":"observed","value":false,'
+                '"confidence":0.8,"evidence_ids":["frame-1:world"],"reason":null},'
+                '{"key":"target.visible","status":"observed","value":true,'
+                '"confidence":0.9,"evidence_ids":["frame-1:world"],"reason":null},'
+                '{"key":"target.dx","status":"observed","value":0.0,'
+                '"confidence":0.9,"evidence_ids":["frame-1:world"],"reason":null},'
+                '{"key":"target.dy","status":"observed","value":0.0,'
+                '"confidence":0.9,"evidence_ids":["frame-1:world"],"reason":null},'
+                '{"key":"target.kind","status":"observed","value":"oak_log",'
+                '"confidence":0.9,"evidence_ids":["frame-1:world"],"reason":null},'
+                '{"key":"target.mineable","status":"observed","value":true,'
+                '"confidence":0.9,"evidence_ids":["frame-1:world"],"reason":null},'
+                '{"key":"target.near","status":"observed","value":false,'
+                '"confidence":0.8,"evidence_ids":["frame-1:world"],"reason":null}],'
+                '"tracks":[{"label":"oak_log","confidence":0.9,'
+                '"evidence_id":"frame-1:world","x":0.5,"y":0.4,'
+                '"width":0.2,"height":0.3}],"chat":[]}'
             ),
             model=self.model_id,
             latency_ms=12.0,
@@ -211,6 +228,17 @@ def test_active_vlm_prefers_strict_structured_vision_contract() -> None:
     assert model.schema is not None
     assert observation.canonical_facts()["target.kind"] == "oak_log"
     assert observation.tracks[0].label == "oak_log"
+    assert observation.tracks[0].evidence_id == "frame-1:world"
+    assert observation.evidence_refs["target.kind"] == ("frame-1:world",)
+    assert {item.region_kind.value for item in observation.evidence} == {
+        "world",
+        "hud",
+        "hotbar",
+        "chat",
+        "gui",
+    }
+    assert observation.rejection_count == 0
+    assert not observation.prose_rejected
     assert latency_ms == 12.0
 
 
