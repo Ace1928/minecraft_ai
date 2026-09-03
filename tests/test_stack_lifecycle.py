@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import minecraft_ai.stack_lifecycle as stack_module
 from minecraft_ai.config import ModelConfig, RuntimeConfig
 from minecraft_ai.stack_lifecycle import (
     FileProbe,
@@ -44,6 +45,58 @@ def _wait_dead(pid: int, timeout_s: float = 3.0) -> None:
             return
         time.sleep(0.02)
     pytest.fail(f"process {pid} remained alive")
+
+
+def test_windows_process_probe_is_non_destructive(monkeypatch: pytest.MonkeyPatch) -> None:
+    probed: list[int] = []
+
+    def fake_windows_pid_alive(pid: int) -> bool:
+        probed.append(pid)
+        return False
+
+    monkeypatch.setattr(stack_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        stack_module,
+        "_windows_pid_alive",
+        fake_windows_pid_alive,
+    )
+
+    assert stack_module._pid_alive(42) is False
+    assert probed == [42]
+
+
+def test_windows_spawn_avoids_runner_incompatible_process_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    sentinel = object()
+
+    def fake_popen(command: tuple[str, ...], **kwargs: object) -> object:
+        calls.append((command, kwargs))
+        return sentinel
+
+    service = ServiceSpec(
+        service_id="daemon",
+        mode=ServiceMode.DAEMON,
+        command=("program",),
+        probes=(ProcessProbe(),),
+        log_path=tmp_path / "daemon.log",
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="windows-spawn", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr(stack_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(stack_module.subprocess, "Popen", fake_popen)
+
+    result = launcher._spawn(service, service.command)
+
+    assert result is sentinel
+    assert len(calls) == 1
+    assert calls[0][0] == ("program",)
+    assert calls[0][1]["close_fds"] is True
+    assert "creationflags" not in calls[0][1]
 
 
 def test_stack_starts_in_dependency_order_is_idempotent_and_stops(tmp_path: Path) -> None:

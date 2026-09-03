@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -16,7 +17,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Iterator, Mapping
+from typing import Any, Iterator, Mapping
 from urllib.parse import urlsplit
 
 from platformdirs import user_data_dir, user_runtime_dir
@@ -26,6 +27,7 @@ from .config import RuntimeConfig
 
 _SERVICE_ID = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _MANIFEST_SCHEMA = 1
+_IS_WINDOWS = os.name == "nt"
 
 
 class ServiceMode(StrEnum):
@@ -572,7 +574,7 @@ class PortableStackLauncher:
         log_path = self._log_path(service)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("ab", buffering=0) as log:
-            if os.name == "nt":
+            if _IS_WINDOWS:
                 return subprocess.Popen(
                     command,
                     cwd=None if service.cwd is None else str(service.cwd),
@@ -580,8 +582,7 @@ class PortableStackLauncher:
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
-                    close_fds=False,
-                    creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                    close_fds=True,
                 )
             return subprocess.Popen(
                 command,
@@ -1019,11 +1020,41 @@ def _command_digest(command: tuple[str, ...]) -> str:
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if _IS_WINDOWS:
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except OSError:
         return False
     return True
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    """Query a Windows process without using the destructive os.kill shim."""
+    win_dll = getattr(ctypes, "WinDLL", None)
+    if win_dll is None:
+        return False
+    kernel32: Any = win_dll("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+    open_process.restype = ctypes.c_void_p
+    wait_for_single_object = kernel32.WaitForSingleObject
+    wait_for_single_object.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
+    wait_for_single_object.restype = ctypes.c_ulong
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (ctypes.c_void_p,)
+    close_handle.restype = ctypes.c_int
+
+    synchronize = 0x00100000
+    wait_timeout = 0x00000102
+    handle = open_process(synchronize, False, pid)
+    if not handle:
+        return False
+    try:
+        wait_result = int(wait_for_single_object(handle, 0))
+        return wait_result == wait_timeout
+    finally:
+        close_handle(handle)
 
 
 def _pid_matches(pid: int, expected_digest: str) -> bool:

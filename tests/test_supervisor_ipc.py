@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
+from platformdirs import user_runtime_dir
 
 import minecraft_ai.supervisor as supervisor_module
 from minecraft_ai.supervisor import send_command, supervisor_alive
@@ -16,14 +17,17 @@ def test_supervisor_process_ipc_lifecycle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime_dir = tmp_path / "minecraft-ai"
+    if os.name == "nt":
+        monkeypatch.setenv("WIN_PD_OVERRIDE_LOCAL_APPDATA", str(tmp_path))
+    else:
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    runtime_dir = Path(user_runtime_dir("minecraft-ai"))
     control_file = runtime_dir / "control.json"
     monkeypatch.setattr(supervisor_module, "RUNTIME_DIR", runtime_dir)
     monkeypatch.setattr(supervisor_module, "CONTROL_FILE", control_file)
     monkeypatch.setattr(supervisor_module, "STATUS_FILE", runtime_dir / "supervisor-state.json")
     monkeypatch.setattr(supervisor_module, "LOCK_FILE", runtime_dir / "supervisor.lock")
     env = os.environ.copy()
-    env["XDG_RUNTIME_DIR"] = str(tmp_path)
 
     process = subprocess.Popen(
         [sys.executable, "-m", "minecraft_ai.supervisor", "--role", "builder"],

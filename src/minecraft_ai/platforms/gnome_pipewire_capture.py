@@ -353,12 +353,15 @@ def _attach_shared_memory(
     if block.size < expected_size:
         block.close()
         raise IsolationError("GNOME capture worker shared memory is undersized")
-    # The worker owns unlinking. An attaching process must not later remove the
-    # producer's allocation merely because Python's legacy tracker saw it.
-    try:
-        resource_tracker.unregister(getattr(block, "_name", name), "shared_memory")
-    except (KeyError, ValueError):
-        pass
+    # The worker owns unlinking. An attaching POSIX process must not later
+    # remove the producer's allocation merely because Python's legacy tracker
+    # saw it. Windows named mappings are not registered with that POSIX-only
+    # tracker; asking it to unregister there attempts an invalid helper spawn.
+    if os.name != "nt":
+        try:
+            resource_tracker.unregister(getattr(block, "_name", name), "shared_memory")
+        except (KeyError, ValueError):
+            pass
     return block
 
 
