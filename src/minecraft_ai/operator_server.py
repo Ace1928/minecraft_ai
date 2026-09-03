@@ -23,9 +23,16 @@ from .config import app_paths
 from .emergency import emergency_reason, emergency_stop_latched
 from .perception import ScreenRegion, Track
 from .perception_service import bedrock_survival_hud_present, frame_dhash
-from .platforms import discover_bedrock_linux_install, find_bedrock_linux_instances
+from .platforms import (
+    HostMonitorBinding,
+    IsolatedX11Capture,
+    MutterPipeWireCapture,
+    create_bedrock_capture,
+    discover_bedrock_linux_install,
+    find_bedrock_linux_instances,
+)
 from .platforms.bedrock_session import BedrockSession, bedrock_session_alive
-from .platforms.bedrock_x11 import CapturedFrame, IsolatedX11Capture
+from .platforms.bedrock_x11 import CapturedFrame
 from .social import OperatorMessage, OperatorMessageKind
 from .storage import StateDatabase
 from .supervisor import STATUS_FILE, send_command, supervisor_alive
@@ -46,6 +53,9 @@ class _FrameReference:
 
 _frame_references: OrderedDict[str, _FrameReference] = OrderedDict()
 _frame_references_lock = threading.Lock()
+_live_capture_lock = threading.Lock()
+_live_capture_key: tuple[object, ...] | None = None
+_live_capture: IsolatedX11Capture | MutterPipeWireCapture | None = None
 
 
 def _cache_frame_reference(frame: CapturedFrame, dhash: str) -> str:
@@ -136,39 +146,87 @@ def operator_status() -> dict[str, object]:
 
 def _capture_live_bedrock_frame() -> CapturedFrame | None:
     """Capture Bedrock even while the agent process is safely disarmed."""
-    targets: list[tuple[str, int, bool]] = []
+    targets: list[tuple[str, int, bool, HostMonitorBinding | None]] = []
+    session: BedrockSession | None
+    try:
+        session = BedrockSession.load()
+    except (OSError, ValueError, TypeError, KeyError):
+        session = None
     try:
         process = AgentProcess.load()
     except (OSError, ValueError, TypeError, KeyError):
         process = None
     if process is not None:
-        targets.append((process.display, process.window_id, process.allow_host_capture))
-    try:
-        session = BedrockSession.load()
-    except (OSError, ValueError, TypeError, KeyError):
-        session = None
+        binding = None
+        if process.allow_host_capture and session is not None:
+            process_binding = session.host_monitor_binding()
+            if (
+                process_binding is not None
+                and process_binding.display == process.display
+                and process_binding.window_id == process.window_id
+            ):
+                binding = process_binding
+        targets.append(
+            (
+                process.display,
+                process.window_id,
+                process.allow_host_capture,
+                binding,
+            )
+        )
     if session is not None and bedrock_session_alive(session):
         window_id = session.find_window()
         if window_id is not None:
-            candidate = (
+            session_target = (
                 session.display,
                 window_id,
                 session.mode in {"direct", "host-monitor"},
+                session.host_monitor_binding(),
             )
-            if candidate not in targets:
-                targets.append(candidate)
-    for display, window_id, allow_host in targets:
-        try:
-            capture = IsolatedX11Capture(display, window_id, allow_host=allow_host)
-        except (OSError, RuntimeError, ValueError):
-            continue
-        try:
-            return capture.capture()
-        except (OSError, RuntimeError, ValueError):
-            continue
-        finally:
-            capture.close()
+            if session_target not in targets:
+                targets.append(session_target)
+    for display, window_id, allow_host, host_binding in targets:
+        binding_key: tuple[object, ...] | None = None
+        if host_binding is not None:
+            binding_key = (
+                host_binding.output_name,
+                host_binding.monitor,
+                host_binding.bound_ns,
+            )
+        key = (display, window_id, allow_host, binding_key)
+        with _live_capture_lock:
+            global _live_capture, _live_capture_key
+            if _live_capture is not None and _live_capture_key != key:
+                _live_capture.close()
+                _live_capture = None
+                _live_capture_key = None
+            if _live_capture is None:
+                try:
+                    _live_capture = create_bedrock_capture(
+                        display,
+                        window_id,
+                        allow_host=allow_host,
+                        host_monitor_binding=host_binding,
+                    )
+                    _live_capture_key = key
+                except (OSError, RuntimeError, ValueError):
+                    continue
+            try:
+                return _live_capture.capture()
+            except (OSError, RuntimeError, ValueError):
+                _live_capture.close()
+                _live_capture = None
+                _live_capture_key = None
     return None
+
+
+def _close_live_bedrock_capture() -> None:
+    global _live_capture, _live_capture_key
+    with _live_capture_lock:
+        if _live_capture is not None:
+            _live_capture.close()
+        _live_capture = None
+        _live_capture_key = None
 
 
 def _persist_operator_reference(track_id: str, frame: CapturedFrame) -> tuple[Path, str]:
@@ -428,6 +486,7 @@ def serve_operator_dashboard(*, host: str = "127.0.0.1", port: int = 8765) -> No
         server.serve_forever(poll_interval=0.25)
     finally:
         server.server_close()
+        _close_live_bedrock_capture()
 
 
 DASHBOARD_HTML = """<!doctype html>

@@ -846,6 +846,66 @@ def _wine_content_rect(
     )
 
 
+def resolve_host_monitor_content_rect(
+    display_name: str,
+    binding: HostMonitorBinding,
+) -> tuple[int, int, int, int]:
+    """Resolve the Wine client drawable without changing host-window geometry.
+
+    A host-monitor ScreenCast contains the complete physical output, including
+    Wine's desktop/title-bar pixels.  The agent must consume only the exact
+    Minecraft drawable.  Unlike ``_wine_content_rect`` (which may repair a
+    nested compositor), this host path is deliberately read-only: any clipped
+    or unexpected geometry invalidates capture instead of moving or resizing a
+    window on the operator's desktop.
+    """
+    if binding.display != display_name:
+        raise IsolationError("host-monitor binding display does not match capture display")
+    try:
+        display_module = importlib.import_module("Xlib.display")
+        display: Any = display_module.Display(display_name)
+    except Exception as exc:
+        raise IsolationError(f"cannot open host display {display_name}: {exc}") from exc
+    try:
+        validate_host_monitor_window(
+            display,
+            binding,
+            target_window_id=binding.window_id,
+        )
+        target = display.create_resource_object("window", binding.window_id)
+        minecraft_window: Any | None = None
+        for child in target.query_tree().children:
+            name = str(child.get_wm_name() or "").casefold()
+            if "minecraft" in name:
+                minecraft_window = child
+                break
+        if minecraft_window is None:
+            raise IsolationError("cannot resolve Wine Minecraft window inside bound monitor")
+        candidates = list(minecraft_window.query_tree().children)
+        if not candidates:
+            raise IsolationError("cannot resolve Wine Minecraft client drawable")
+        client = max(
+            candidates,
+            key=lambda item: int(item.get_geometry().width) * int(item.get_geometry().height),
+        )
+        geometry = client.get_geometry()
+        translated = target.translate_coords(client, 0, 0)
+        return _contained_content_rect(
+            parent_width=binding.monitor.width,
+            parent_height=binding.monitor.height,
+            x=int(translated.x),
+            y=int(translated.y),
+            content_width=int(geometry.width),
+            content_height=int(geometry.height),
+        )
+    except IsolationError:
+        raise
+    except Exception as exc:
+        raise IsolationError("cannot resolve bound Wine Minecraft drawable") from exc
+    finally:
+        display.close()
+
+
 def _content_axis_reposition_delta(
     *,
     parent_size: int,

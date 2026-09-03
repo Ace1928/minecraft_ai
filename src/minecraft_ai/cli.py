@@ -46,7 +46,7 @@ from .eval import (
 from .operator_server import serve_operator_dashboard
 from .perception_service import bedrock_survival_hud_present
 from .platforms import (
-    IsolatedX11Capture,
+    create_bedrock_capture,
     discover_bedrock_linux_install,
     find_bedrock_linux_instances,
 )
@@ -342,7 +342,12 @@ def run(
         )
     version = build.version
 
-    capture = IsolatedX11Capture(session.display, window_id, allow_host=allow_host)
+    capture = create_bedrock_capture(
+        session.display,
+        window_id,
+        allow_host=allow_host,
+        host_monitor_binding=host_binding,
+    )
     try:
         launch_frame = capture.capture()
     finally:

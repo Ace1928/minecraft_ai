@@ -16,7 +16,9 @@ from .models import OpenAICompatibleLocalModel
 from .motor import BootstrapMotorPolicy, MotorPolicy
 from .perception import PerceptionBlackboard
 from .perception_service import ActiveVLMWorker, RealtimePerceptionService
-from .platforms.bedrock_x11 import IsolatedX11Capture
+from .platforms import create_bedrock_capture
+from .platforms.bedrock_session import BedrockSession
+from .platforms.bedrock_x11 import IsolationError
 from .policy_service import GroundedPolicyRouter, TemporalPolicyClient
 from .roles import get_role
 from .runtime import AgentRuntime
@@ -60,10 +62,22 @@ def main(argv: list[str] | None = None) -> int:
         social = database.load_social()
 
         blackboard = PerceptionBlackboard()
-        capture = IsolatedX11Capture(
+        host_binding = None
+        if bool(args.allow_host_capture):
+            try:
+                session = BedrockSession.load()
+                host_binding = session.host_monitor_binding()
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                raise IsolationError(
+                    "host capture requires a valid managed Bedrock session"
+                ) from exc
+            if host_binding is None:
+                raise IsolationError("host capture requires a persisted exact host-monitor binding")
+        capture = create_bedrock_capture(
             args.display,
             args.window_id,
             allow_host=bool(args.allow_host_capture),
+            host_monitor_binding=host_binding,
         )
         capture_probe = capture.capture()
 
