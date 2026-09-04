@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 import sqlite3
 import threading
@@ -2080,6 +2080,50 @@ def test_actionable_operator_command_preempts_inflight_cognition_and_keepalive(
         persisted = database.load_operator_messages(limit=1)[0]
         assert persisted.status == OperatorMessageStatus.ACKNOWLEDGED
         assert persisted.response_text == "Starting that now."
+
+
+def test_operator_fast_path_does_not_queue_behind_detached_busy_worker(
+    tmp_path: Path,
+) -> None:
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    def occupy_worker() -> None:
+        worker_started.set()
+        release_worker.wait(timeout=5.0)
+
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime, _, model, terminal, sent_actions = (
+            _runtime_with_inflight_operator_cognition(
+                database,
+                message_text="Mine the marked dirt block.",
+            )
+        )
+        runtime._pending_decision = None
+        pool = ThreadPoolExecutor(max_workers=1)
+        runtime._pool = pool
+        occupied = pool.submit(occupy_worker)
+        assert worker_started.wait(timeout=1.0)
+
+        try:
+            runtime._start_cognition_if_due()
+
+            assert occupied.running()
+            assert runtime._pending_decision is None
+            assert model.calls == 0
+            assert runtime.metrics.cognition_calls == 1
+            assert terminal[0].run_id == "disposable-keepalive"
+            assert terminal[0].outcome == SkillOutcome.CANCELLED
+            assert "w" in sent_actions[0].keys_up
+            assert runtime.executor.run is not None
+            assert runtime.executor.run.skill_id == "mine_visible_block"
+            assert runtime.executor.parameters == {"target": "dirt"}
+            persisted = database.load_operator_messages(limit=1)[0]
+            assert persisted.status == OperatorMessageStatus.ACKNOWLEDGED
+            assert persisted.response_text == "Starting that now."
+        finally:
+            release_worker.set()
+            pool.shutdown(wait=True)
 
 
 @pytest.mark.parametrize(

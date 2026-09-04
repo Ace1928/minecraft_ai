@@ -1380,6 +1380,13 @@ class AgentRuntime:
         if not self._cognition_due(operator_waiting=operator_waiting):
             return
         context = self._cognition_context()
+        if self._stage_operator_fast_path(context):
+            # Literal, feasible operator authority does not need the model.
+            # Apply the completed decision on this motor-loop turn even when a
+            # previously detached model request still occupies the sole worker.
+            self.metrics.cognition_calls += 1
+            self._consume_cognition()
+            return
         self._pending_operator_message_ids = tuple(
             message.message_id
             for message in context.operator_messages
@@ -1420,7 +1427,21 @@ class AgentRuntime:
             return False
 
         context = self._cognition_context()
-        decision = self.high_level._operator_fast_path_decision(self.blackboard, context)
+        return self._stage_operator_fast_path(context, stale_future=stale_future)
+
+    def _stage_operator_fast_path(
+        self,
+        context: CognitionContext,
+        *,
+        stale_future: concurrent.futures.Future[CognitionDecision] | None = None,
+    ) -> bool:
+        """Stage one executable operator decision without occupying the model worker."""
+        if self.high_level is None or self.state_db is None:
+            return False
+        fast_path = getattr(self.high_level, "_operator_fast_path_decision", None)
+        if not callable(fast_path):
+            return False
+        decision = fast_path(self.blackboard, context)
         if decision is None:
             return False
         pending_ids = tuple(
@@ -1456,8 +1477,11 @@ class AgentRuntime:
 
         # A running thread-pool future cannot be interrupted safely. Cancel it
         # when it has not started, otherwise detach it; either way its stale
-        # result can no longer alter runtime state.
-        stale_future.cancel()
+        # result can no longer alter runtime state. New fast-path decisions also
+        # use this completed-future route so they never queue behind a detached
+        # worker.
+        if stale_future is not None:
+            stale_future.cancel()
         replacement: concurrent.futures.Future[CognitionDecision] = (
             concurrent.futures.Future()
         )
