@@ -12,6 +12,9 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Agent-only reload: live game, GPU server, input calibration and supervisor preserved.
 - [x] Exact traversal-stall recovery transaction implemented and tested. Live reorientation/query ran, but the initial VLM answer abstained; escape is not yet demonstrated.
 - [x] Version-pinned oak hotbar counts 0–16 and pre-break-to-post-collection exact +1 verification implemented. Hotbar evidence is not a whole-inventory count; unknown items, including spruce logs, abstain.
+- [x] Recognize all nine selected hotbar positions using the pinned vanilla selection-frame asset. Raw live replay recovers the previously rejected fourth-slot geometry; unknown spruce remains unknown to the oak-only counter.
+- [x] Turn an empty initial replan into canonical visual prerequisites when an explicit requested skill or failed run identifies what to observe. This closes one no-op path; live perception-to-action completion remains unverified.
+- [x] Permit exact vanilla leaf blocks in guarded hand-safe clearance, using the existing 2.5-second maximum verification lease. This is not a leaf-drop or live escape claim; stone/tool and gather-log restrictions remain unchanged.
 - [x] Failed crafting cleanup is plan-neutral; a verified no-logs failure persists a retry prerequisite until new positive wood evidence or one fresh explicit retry. This is permission to re-audit, not a retained inventory count.
 - [x] Experimental compact crosshair-query format fits the existing output budget, preserves crop provenance, and bounds numeric output. It is not promoted to live use: pinned daylight/dark-dirt probes still produced wrong block identities. Recognition accuracy and autonomous escape remain separate live gates below.
 - [x] Make the focused crosshair probe produce useful, correctly grounded live answers within the small model's output budget. On the live 1920x1054 dirt-overhang frame, the strict two-field probe returned `dirt` at 0.90 confidence in 36.96s; source/current crop dHash matched and RGB-grid drift was 0.318 against the 1.0 admission limit.
@@ -21,12 +24,14 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 
 Retain failed trajectories as failures. Do not promote a successful block break into resource possession, or test coverage into a completed live gameplay milestone.
 
-Latest live observation (`4ca2b96`): the agent-only reload preserved Minecraft,
-the supervisor, isolated input, and GPU server. The first three-minute sample
-recorded 387 motor actions, but none pressed attack; mining acquisition and
-reacquisition failed and traversal stalled. The decision-owned perception
-transaction was not selected in that sample. The next execution gate remains
-a real perception-to-action cycle followed by escape, not another activity count.
+Latest live observation (`5c258c1`): the agent-only reload preserved Minecraft,
+the supervisor, isolated input, and GPU server. The player remains beneath a
+leaf canopy; mining acquisition times out and traversal stalls. Two focused
+answers were rejected with crosshair RGB drift 1.013 and 1.456 against the 1.0
+limit after about 20 seconds. No successful decision-owned perception-to-action
+cycle was observed. A visible six-log stack predates the recorded accepted
+attacks and is not counted as an autonomous acquisition. The next execution
+gate remains actual guarded block clearance and movement, not activity counts.
 
 ## Phase 0 — Public extraction and safety foundation
 

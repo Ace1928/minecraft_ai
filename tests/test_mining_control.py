@@ -6,7 +6,7 @@ import pytest
 
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.execution import SkillExecutor, initiation_satisfied
-from minecraft_ai.mining_control import MiningLeaseGuard
+from minecraft_ai.mining_control import MiningLeaseGuard, is_hand_safe_soft_block
 from minecraft_ai.motor import MotorIntent
 from minecraft_ai.perception import (
     FrameState,
@@ -671,6 +671,8 @@ def test_gather_rejects_non_oak_log_before_attack() -> None:
         ("oak_log", "minecraft:stick", None),
         ("oak_log", None, None),
         ("dirt", None, None),
+        ("leaves", None, None),
+        ("minecraft:spruce_leaves", None, None),
         ("stone", "minecraft:stick", SkillFailureCode.MINING_WRONG_TOOL),
         ("stone", None, "pending"),
     ],
@@ -705,19 +707,38 @@ def test_verified_target_and_tool_gate(
         assert tick.recovery_skills == ("reacquire_target",)
 
 
-def test_gather_wood_rejects_verified_dirt_target() -> None:
+@pytest.mark.parametrize("kind", ["dirt", "leaves", "oak_leaves"])
+def test_gather_wood_rejects_verified_non_log_target(kind: str) -> None:
     now = time.monotonic_ns()
     policy = _ScriptedPolicy(MotorAction(sequence=0, buttons_down=("left",)))
     executor = _executor(policy, now_ns=now, mode="gather_wood")
 
     tick = executor.tick(
-        _mining_board(now_ns=now, kind="dirt"),
+        _mining_board(now_ns=now, kind=kind),
         sequence=1,
         now_ns=now,
     )
 
     assert tick.run.failure_code == SkillFailureCode.MINING_TARGET_MISMATCH
     assert tick.recovery_skills == ("reacquire_target",)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "leaves", "leaves2", "oak_leaves", "spruce_leaves", "birch_leaves",
+        "jungle_leaves", "acacia_leaves", "dark_oak_leaves", "mangrove_leaves",
+        "cherry_leaves", "azalea_leaves", "flowering_azalea_leaves",
+        "azalea_leaves_flowered", "pale_oak_leaves", "minecraft:oak_leaves",
+    ],
+)
+def test_exact_vanilla_leaves_are_hand_safe_obstructions(kind: str) -> None:
+    assert is_hand_safe_soft_block(kind)
+
+
+@pytest.mark.parametrize("kind", ["unknown_leaves", "oak_leaves_beside_stone", "leaf", "stone"])
+def test_leaf_like_or_unknown_labels_do_not_gain_hand_mining_permission(kind: str) -> None:
+    assert not is_hand_safe_soft_block(kind)
 
 
 @pytest.mark.parametrize(
@@ -806,7 +827,8 @@ def test_fresh_rocket_can_infer_exact_soft_block_as_hand_mineable() -> None:
     assert tick.run.outcome == SkillOutcome.RUNNING
 
 
-def test_fresh_rocket_does_not_override_explicit_not_mineable_evidence() -> None:
+@pytest.mark.parametrize("kind", ["dirt", "leaves"])
+def test_fresh_rocket_does_not_override_explicit_not_mineable_evidence(kind: str) -> None:
     now = time.monotonic_ns()
     policy = _ScriptedPolicy(MotorAction(sequence=0, buttons_down=("left",)))
     executor = _executor(policy, now_ns=now)
@@ -814,7 +836,7 @@ def test_fresh_rocket_does_not_override_explicit_not_mineable_evidence() -> None
     tick = executor.tick(
         _mining_board(
             now_ns=now,
-            kind="dirt",
+            kind=kind,
             item=None,
             track_attributes={"tracking_source": _ROCKET_SOURCE},
             target_source=_ROCKET_SOURCE,
@@ -1770,14 +1792,15 @@ def test_one_block_wall_clock_bound_releases_even_with_visual_change() -> None:
     assert stopped.action is not None and "left" in stopped.action.buttons_up
 
 
-def test_soft_block_lease_includes_bounded_break_verification_margin() -> None:
+@pytest.mark.parametrize("kind", ["dirt", "leaves", "spruce_leaves"])
+def test_soft_block_lease_includes_bounded_break_verification_margin(kind: str) -> None:
     now = time.monotonic_ns()
     guard = MiningLeaseGuard()
     intent = MotorIntent(skill_id="mine", mode="mine", episode_id="soft:one")
 
     started = guard.inspect(
         MotorAction(sequence=1, buttons_down=("left",)),
-        _mining_board(now_ns=now, kind="dirt", item=None),
+        _mining_board(now_ns=now, kind=kind, item=None),
         intent,
         now_ns=now,
     )
@@ -1785,7 +1808,7 @@ def test_soft_block_lease_includes_bounded_break_verification_margin() -> None:
         MotorAction(sequence=2, buttons_up=("left",)),
         _mining_board(
             now_ns=now + 2_499_000_000,
-            kind="dirt",
+            kind=kind,
             item=None,
             crosshair_hash=_HASH_B,
         ),
@@ -1796,7 +1819,7 @@ def test_soft_block_lease_includes_bounded_break_verification_margin() -> None:
         MotorAction(sequence=3),
         _mining_board(
             now_ns=now + 2_500_000_000,
-            kind="dirt",
+            kind=kind,
             item=None,
             crosshair_hash=_HASH_A,
         ),
@@ -1811,11 +1834,12 @@ def test_soft_block_lease_includes_bounded_break_verification_margin() -> None:
     assert at_deadline.force_release_left is True
 
 
-def test_absolute_mining_bound_caps_extended_soft_block_lease() -> None:
+@pytest.mark.parametrize("kind", ["dirt", "leaves"])
+def test_absolute_mining_bound_caps_extended_soft_block_lease(kind: str) -> None:
     now = time.monotonic_ns()
     guard = MiningLeaseGuard(absolute_max_ms=2_000)
     intent = MotorIntent(skill_id="mine", mode="mine", episode_id="soft:capped")
-    board = _mining_board(now_ns=now, kind="dirt", item=None)
+    board = _mining_board(now_ns=now, kind=kind, item=None)
 
     started = guard.inspect(
         MotorAction(sequence=1, buttons_down=("left",)),
@@ -1827,7 +1851,7 @@ def test_absolute_mining_bound_caps_extended_soft_block_lease() -> None:
         MotorAction(sequence=2),
         _mining_board(
             now_ns=now + 2_000_000_000,
-            kind="dirt",
+            kind=kind,
             item=None,
             crosshair_hash=_HASH_B,
         ),

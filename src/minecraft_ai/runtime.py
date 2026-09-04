@@ -4349,6 +4349,8 @@ class AgentRuntime:
             "recent_skill_runs": [run.model_dump(mode="json") for run in self._recent_skill_runs],
             "chosen_goal_id": None if decision is None else decision.chosen_goal_id,
             "reasoning_summary": None if decision is None else decision.reasoning_summary,
+            "perception_questions": [] if decision is None else list(decision.ask_perception),
+            "request_replan": False if decision is None else decision.request_replan,
             "operator_response": None if decision is None else decision.say,
             "pending_game_chat": None if decision is None else decision.game_chat,
             "cognition": cognition_status,

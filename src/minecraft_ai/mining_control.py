@@ -70,20 +70,36 @@ _UNBREAKABLE = frozenset(
 )
 _SOFT_BLOCKS = frozenset(
     {
+        # Leaves may be cleared by hand; collecting leaf blocks still requires
+        # separate drop evidence. Use exact names, not an arbitrary suffix match.
+        "acacia_leaves",
+        "azalea_leaves",
+        "azalea_leaves_flowered",
+        "birch_leaves",
+        "cherry_leaves",
         "clay",
         "coarse_dirt",
+        "dark_oak_leaves",
         "dirt",
+        "flowering_azalea_leaves",
         "grass_block",
         "gravel",
+        "jungle_leaves",
+        "leaves",
+        "leaves2",
+        "mangrove_leaves",
         "mud",
         "muddy_mangrove_roots",
         "mycelium",
+        "oak_leaves",
+        "pale_oak_leaves",
         "podzol",
         "red_sand",
         "sand",
         "snow_block",
         "soul_sand",
         "soul_soil",
+        "spruce_leaves",
     }
 )
 _STONE_BLOCKS = frozenset(
