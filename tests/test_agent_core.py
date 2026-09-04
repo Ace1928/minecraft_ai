@@ -800,6 +800,29 @@ def test_motor_send_propagates_unrelated_ipc_failure(
     assert trajectory.accepted_calls == 0
 
 
+def test_runtime_owns_global_sequence_across_independent_action_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, trajectory = _motor_shutdown_runtime()
+    sent: list[dict[str, object]] = []
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+
+    def accept(_command: str, **payload: object) -> dict[str, object]:
+        action = payload["action"]
+        assert isinstance(action, dict)
+        sent.append(action)
+        return {"accepted_sequence": action["sequence"]}
+
+    monkeypatch.setattr("minecraft_ai.runtime.send_command", accept)
+
+    # A freshly reset policy-local counter can lag the synthetic GUI route.
+    runtime._send_motor(MotorAction(sequence=1))
+
+    assert sent[0]["sequence"] == 7
+    assert runtime._sequence == 8
+    assert trajectory.accepted_calls == 1
+
+
 def test_motor_send_treats_transient_stop_during_ipc_as_expected_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

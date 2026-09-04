@@ -46,7 +46,7 @@ class BoundedPlankCraftController:
     outcome_timeout_ms: int = 80_000
     close_timeout_ms: int = 10_000
     retry_interval_ms: int = 2_000
-    max_toggle_attempts: int = 2
+    max_toggle_attempts: int = 1
     max_recipe_attempts: int = 1
     minimum_confidence: float = 0.70
     _run_id: str | None = field(default=None, init=False)
@@ -424,7 +424,12 @@ class BoundedPlankCraftController:
 
     def _tap_key(self, sequence: int, key: str) -> MotorAction:
         self._last_sequence = sequence
-        return MotorAction(sequence=sequence, keys_down=(key,), keys_up=(key,))
+        return MotorAction(
+            sequence=sequence,
+            keys_down=(key,),
+            keys_up=(key,),
+            duration_ms=50,
+        )
 
     def _click(
         self,
@@ -442,6 +447,7 @@ class BoundedPlankCraftController:
             cursor_x=cursor_x,
             cursor_y=cursor_y,
             camera_semantics="cursor",
+            duration_ms=50,
         )
 
     def _fail(self, reason: str) -> PlankCraftStep:

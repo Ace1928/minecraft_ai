@@ -177,7 +177,12 @@ def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes() -> None:
     opened = executor.tick(board, sequence=1, now_ns=now)
 
     assert opened.run.outcome == SkillOutcome.RUNNING
-    assert opened.action == MotorAction(sequence=1, keys_down=("e",), keys_up=("e",))
+    assert opened.action == MotorAction(
+        sequence=1,
+        keys_down=("e",),
+        keys_up=("e",),
+        duration_ms=50,
+    )
 
     _merge_fast_overlay(board, observed_ns=now + 100_000_000)
     awaiting_semantics = executor.tick(
@@ -202,6 +207,7 @@ def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes() -> None:
     assert clicked.action.camera_semantics == "cursor"
     assert clicked.action.cursor_x == 0.25
     assert clicked.action.cursor_y == 0.25
+    assert clicked.action.duration_ms == 50
 
     _merge_inventory(
         board,
@@ -213,7 +219,12 @@ def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes() -> None:
     closed = executor.tick(board, sequence=4, now_ns=now + 140 * _SECOND)
 
     assert closed.run.outcome == SkillOutcome.RUNNING
-    assert closed.action == MotorAction(sequence=4, keys_down=("e",), keys_up=("e",))
+    assert closed.action == MotorAction(
+        sequence=4,
+        keys_down=("e",),
+        keys_up=("e",),
+        duration_ms=50,
+    )
 
     board.merge_semantics(
         instance_id="bedrock:test",

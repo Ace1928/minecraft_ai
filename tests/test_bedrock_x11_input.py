@@ -92,7 +92,9 @@ def test_absolute_cursor_maps_cropped_frame_coordinates_to_wine_window(
     assert warped == [(584, 493)]
 
 
-def test_atomic_gui_tap_leaves_bedrock_backend_and_guard_state_in_agreement() -> None:
+def test_atomic_gui_tap_leaves_bedrock_backend_and_guard_state_in_agreement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     backend = object.__new__(IsolatedX11InputBackend)
     fake_xtest = _FakeXTest()
     backend._targeted = False
@@ -127,6 +129,8 @@ def test_atomic_gui_tap_leaves_bedrock_backend_and_guard_state_in_agreement() ->
     backend._position_pointer_in_game = lambda _x, _y: None  # type: ignore[method-assign]
     backend._keycode = lambda _key: 26  # type: ignore[method-assign]
 
+    sleeps: list[float] = []
+    monkeypatch.setattr("minecraft_ai.platforms.bedrock_x11.time.sleep", sleeps.append)
     action = MotorAction(
         sequence=1,
         keys_down=("e",),
@@ -136,6 +140,7 @@ def test_atomic_gui_tap_leaves_bedrock_backend_and_guard_state_in_agreement() ->
         cursor_x=0.25,
         cursor_y=0.25,
         camera_semantics="cursor",
+        duration_ms=50,
     )
     guard = MiningLeaseGuard()
     decision = guard.inspect(
@@ -159,6 +164,7 @@ def test_atomic_gui_tap_leaves_bedrock_backend_and_guard_state_in_agreement() ->
         backend._x.KeyRelease,
         backend._x.ButtonRelease,
     ]
+    assert sleeps == [0.05]
 
 
 def test_apply_rechecks_interlock_before_positive_events_but_keeps_releases() -> None:

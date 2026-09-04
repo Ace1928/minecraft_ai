@@ -883,6 +883,11 @@ class IsolatedX11InputBackend:
             # A token present in both down/up sets is an atomic tap.  Keep the
             # release in the same accepted supervisor action so GUI clicks and
             # inventory toggles cannot remain held if the next frame stalls.
+            # Flush and honor its bounded duration before release: Bedrock's
+            # gameplay controls are sampled and can miss a zero-time pulse.
+            if (tap_keys or tap_buttons) and action.duration_ms > 0:
+                self._display.sync()
+                time.sleep(action.duration_ms / 1000.0)
             for key in sorted(tap_keys):
                 self._send_key(self._keycode(key), down=False)
                 self._held_keys.discard(key.lower())

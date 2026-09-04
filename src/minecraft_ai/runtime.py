@@ -1207,6 +1207,14 @@ class AgentRuntime:
         if self._stop.is_set() or operator_pause_latched():
             self._stop.set()
             return
+        # The supervisor lease has one global replay counter, while learned
+        # policy bodies and synthetic controllers maintain independent local
+        # counters. Runtime is the sole merger of those routes, so it owns the
+        # final monotonically increasing wire sequence. In particular, a
+        # policy reset after a synthetic GUI action must never reuse sequence 0
+        # and trip the supervisor's fail-closed replay guard.
+        if action.sequence != self._sequence:
+            action = action.model_copy(update={"sequence": self._sequence})
         provenance = _accepted_action_provenance(
             execution,
             self.blackboard,
