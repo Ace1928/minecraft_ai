@@ -1028,12 +1028,15 @@ class HighLevelController:
             if (
                 decision.skill_id is None
                 and decision.request_replan
-                and not decision.ask_perception
+                and not any(
+                    resolve_grounded_output_keys((), question)
+                    for question in decision.ask_perception
+                )
                 and decision.research_query is None
             ):
                 # A valid top-level abstention bypasses the repair path. It
                 # still needs new evidence before another slow model call;
-                # otherwise null/x=true/q=[] can repeat forever on one scene.
+                # empty or entirely invented fact keys otherwise repeat forever.
                 candidates = repair_bounds.requested_skill_ids or tuple(
                     run.skill_id
                     for run in context.recent_skill_runs
@@ -1416,7 +1419,10 @@ class HighLevelController:
         repaired = self._complete(repair_messages, repair_bounds=repair_bounds)
         repaired = self._apply_decision_authority(repaired, blackboard, context)
         if repaired.skill_id is None and repaired.request_replan:
-            if not repaired.ask_perception:
+            if not any(
+                resolve_grounded_output_keys((), question)
+                for question in repaired.ask_perception
+            ):
                 repaired = repaired.model_copy(
                     update={"ask_perception": self._prerequisite_perception_keys(failed_skill)}
                 )

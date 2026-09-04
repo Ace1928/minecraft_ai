@@ -1239,7 +1239,7 @@ def test_operator_can_abstain_for_perception_without_violating_requested_skill()
     assert decision.request_replan is True
     assert decision.reasoning_summary == "No option selected yet"
     assert decision.chosen_goal_id == "operator:inspect-before-mining"
-    assert decision.ask_perception == ("terrain.safe_direction",)
+    assert decision.ask_perception == ("target.visible", "target.mineable")
 
 
 def test_operator_null_action_cannot_acknowledge_instruction_as_executed() -> None:
@@ -1264,18 +1264,22 @@ def test_operator_null_action_cannot_acknowledge_instruction_as_executed() -> No
 
 
 @pytest.mark.parametrize(
-    ("instruction", "failed_skill", "expected_keys"),
+    ("instruction", "failed_skill", "provided_keys", "expected_keys"),
     (
-        ("break the blocks in front of you", None, ("target.visible", "target.mineable")),
-        (None, "mine_visible_block", ("target.visible", "target.mineable")),
-        (None, "collect_recent_drop", ("obstacle.ahead",)),
-        (None, None, ()),
+        ("break the blocks in front of you", None, (), ("target.visible", "target.mineable")),
+        (None, "mine_visible_block", (), ("target.visible", "target.mineable")),
+        (None, "collect_recent_drop", (), ("obstacle.ahead",)),
+        (None, None, (), ()),
+        ("Explore", None, ("scene.horizon_visible",), ("obstacle.ahead",)),
+        (None, "explore_forward", ("scene.horizon_visible",), ("obstacle.ahead",)),
+        (None, "mine_visible_block", ("target.visible",), ("target.visible",)),
     ),
 )
 def test_top_level_empty_replan_requests_visual_evidence_without_another_model_call(
     monkeypatch: pytest.MonkeyPatch,
     instruction: str | None,
     failed_skill: str | None,
+    provided_keys: tuple[str, ...],
     expected_keys: tuple[str, ...],
 ) -> None:
     context = _context()
@@ -1294,7 +1298,7 @@ def test_top_level_empty_replan_requests_visual_evidence_without_another_model_c
 
     def complete(messages: object, **_kwargs: object) -> CognitionDecision:
         calls.append(messages)
-        return CognitionDecision(request_replan=True)
+        return CognitionDecision(request_replan=True, ask_perception=provided_keys)
 
     monkeypatch.setattr(controller, "_complete", complete)
     decision = controller.decide(_board(), context)
@@ -1328,6 +1332,11 @@ def test_top_level_research_request_does_not_buy_unrelated_visual_work(
         ("explore_forward", (), ("obstacle.ahead",)),
         ("collect_recent_drop", (), ("obstacle.ahead",)),
         ("mine_visible_block", ("target.visible",), ("target.visible",)),
+        (
+            "explore_forward",
+            ("scene.horizon_visible", "scene.nearby_obstacles_detected_and_type_of_obstacle_if_any"),
+            ("obstacle.ahead",),
+        ),
     ),
 )
 def test_empty_failed_repair_requests_new_evidence_instead_of_identical_replan(
