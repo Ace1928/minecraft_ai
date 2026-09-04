@@ -9,6 +9,7 @@ from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.execution import SkillExecutor
 from minecraft_ai.mining_control import MiningGuardDecision
 from minecraft_ai.motor import MotorIntent
+from minecraft_ai.outcome_verifier import OutcomeSignal
 from minecraft_ai.perception import (
     FrameState,
     PerceptionBlackboard,
@@ -710,6 +711,44 @@ def test_traversal_progress_is_evidence_without_finishing_the_skill() -> None:
     assert progressed.run.outcome == SkillOutcome.RUNNING
     assert progressed.outcome_verification is not None
     assert progressed.outcome_verification.signal.value == "locomotion_progress"
+
+
+def test_internal_obstacle_retry_can_finish_on_verified_locomotion_progress() -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy(
+        MotorAction(sequence=0, keys_down=("w",)),
+        MotorAction(sequence=0),
+        MotorAction(sequence=0),
+    )
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("traverse_visible_obstacle"),
+        run_id="headroom-retry",
+        now_ns=now,
+        complete_on_locomotion_progress=True,
+    )
+
+    executor.tick(
+        _traversal_board(now, luma_grid=_LUMA_A),
+        sequence=1,
+        now_ns=now,
+    )
+    executor.tick(
+        _traversal_board(now + 300_000_000, luma_grid=_LUMA_B),
+        sequence=2,
+        now_ns=now + 300_000_000,
+    )
+    progressed = executor.tick(
+        _traversal_board(now + 600_000_000, luma_grid=_LUMA_C),
+        sequence=3,
+        now_ns=now + 600_000_000,
+    )
+
+    assert progressed.run.outcome == SkillOutcome.SUCCEEDED
+    assert progressed.outcome_verification is not None
+    assert progressed.outcome_verification.signal == OutcomeSignal.LOCOMOTION_PROGRESS
+    assert progressed.action is not None
+    assert "w" in progressed.action.keys_up
 
 
 def test_starting_next_skill_resets_terminal_traversal_verifier() -> None:

@@ -8,7 +8,7 @@ import time
 import uuid
 from collections.abc import Iterable
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .cognition import (
@@ -25,16 +25,22 @@ from .episodes import RuntimeEvent, RuntimeEventKind
 from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
 from .grounded_perception import resolve_grounded_output_keys
 from .memory import MemoryKind, MemoryRecord, MemoryStore
+from .mining_control import (
+    is_hand_safe_soft_block,
+    normalize_block_kind,
+    track_contains_crosshair,
+)
 from .models import local_model_inference_available
 from .motor import MotorIntent
 from .outcome_verifier import OutcomeKind, OutcomeSignal, OutcomeStatus, OutcomeVerification
 from .perception import ActivePerceptionQuery, PerceptionBlackboard, PerceptionFact, Track
-from .perception_service import RealtimePerceptionService, perceptual_hash_distance
+from .perception_service import RealtimePerceptionService, frame_dhash, perceptual_hash_distance
 from .planning import Goal
 from .roles import RoleProfile
 from .safety import MotorAction
 from .skills import (
     SkillLibrary,
+    SkillFailureCode,
     SkillOutcome,
     SkillRun,
     SkillSpec,
@@ -65,6 +71,26 @@ _COGNITION_RETRY_MAX_NS = 30_000_000_000
 _OPERATOR_FOLLOWUP_DELAY_NS = 250_000_000
 _CRAFT_SEMANTIC_LATENCY_MARGIN = 1.25
 _CRAFT_SEMANTIC_MAX_REQUIRED_BUDGET_MS = 60_000
+_HEADROOM_QUERY_OUTPUT_KEYS = (
+    "scene.mode",
+    "scene.playable",
+    "danger.immediate",
+    "target.visible",
+    "target.kind",
+    "target.mineable",
+    "target.dx",
+    "target.dy",
+)
+_HEADROOM_CENTER_TOLERANCE = 0.15
+# Positive Bedrock pitch moves the open-sky crosshair toward the near terrain
+# lip that commonly causes this verified wedge. This is one bounded look-down
+# adjustment, not a scan; the next capture must confirm that the view changed.
+_HEADROOM_REORIENT_MOUSE_DY = 96
+_HEADROOM_MIN_TIMEOUT_S = 60.0
+_HEADROOM_TIMEOUT_MULTIPLIER = 5.0
+_HEADROOM_TIMEOUT_MARGIN_S = 5.0
+_HEADROOM_TRANSACTION_MAX_S = 180.0
+_HEADROOM_SETTLE_TIMEOUT_NS = 2_000_000_000
 
 
 @dataclass(frozen=True)
@@ -72,6 +98,56 @@ class _CraftSemanticProbe:
     run_id: str
     phase: PlankCraftPhase
     terminal_count_before: int
+
+
+@dataclass
+class _HeadroomRecovery:
+    """One fail-closed clear-and-retry transaction after a verified traversal stall."""
+
+    context_key: str
+    traversal_parameters: dict[str, str | int | float | bool]
+    deadline_ns: int
+    phase: str = "reorient"
+    reoriented_frame_id: int | None = None
+    pre_reorient_dhash: str | None = None
+    settle_deadline_ns: int | None = None
+    query_id: str | None = None
+    query_started_ns: int = 0
+    query_frame_dhash: str | None = None
+    mining_run_id: str | None = None
+    retry_run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class _HeadroomTarget:
+    kind: str
+    track_id: str
+
+
+def _headroom_deadline_ns(active_vlm: object, *, now_ns: int) -> int:
+    """Bound recovery without imposing a competing timeout on the VLM call.
+
+    The local inference lane is serialized and grounded inspection permits one
+    schema repair. The configured timeout sizes a conservative wait budget, but
+    a hard transaction cap ensures a busy or hung worker cannot wedge the agent.
+    A late worker result is harmless because query ownership is checked again.
+    """
+
+    model = getattr(active_vlm, "model", None)
+    configured = getattr(model, "timeout_s", _HEADROOM_MIN_TIMEOUT_S)
+    timeout_s = (
+        float(configured)
+        if isinstance(configured, (int, float))
+        and not isinstance(configured, bool)
+        and configured > 0
+        else _HEADROOM_MIN_TIMEOUT_S
+    )
+    timeout_s = max(_HEADROOM_MIN_TIMEOUT_S, timeout_s)
+    budget_s = min(
+        timeout_s * _HEADROOM_TIMEOUT_MULTIPLIER + _HEADROOM_TIMEOUT_MARGIN_S,
+        _HEADROOM_TRANSACTION_MAX_S,
+    )
+    return now_ns + int(budget_s * 1_000_000_000)
 
 
 def _expected_keepalive_expiry(run: SkillRun) -> bool:
@@ -95,6 +171,191 @@ def _verified_log_break(verification: OutcomeVerification | None) -> bool:
         return False
     target = verification.target_kind.casefold().removeprefix("minecraft:")
     return target == "log" or target.endswith("_log")
+
+
+def _verified_obstacle_stall(result: ExecutionTick) -> bool:
+    """Accept only the traversal verifier's exact obstacle-stall terminal signal."""
+
+    verification = result.outcome_verification
+    return bool(
+        result.run.skill_id == "traverse_visible_obstacle"
+        and result.run.outcome == SkillOutcome.FAILED
+        and result.run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
+        and verification is not None
+        and verification.run_id == result.run.run_id
+        and verification.kind == OutcomeKind.TRAVERSAL
+        and verification.status == OutcomeStatus.STALLED
+        and verification.signal == OutcomeSignal.LOCOMOTION_STALLED
+    )
+
+
+def _verified_block_break(result: ExecutionTick) -> bool:
+    verification = result.outcome_verification
+    return bool(
+        result.run.skill_id == "mine_visible_block"
+        and result.run.outcome == SkillOutcome.SUCCEEDED
+        and verification is not None
+        and verification.run_id == result.run.run_id
+        and verification.kind == OutcomeKind.MINING
+        and verification.status == OutcomeStatus.SUCCEEDED
+        and verification.signal == OutcomeSignal.BLOCK_BROKEN
+    )
+
+
+def _verified_traversal_progress(result: ExecutionTick) -> bool:
+    """Accept only a transaction-owned retry's exact locomotion progress proof."""
+
+    verification = result.outcome_verification
+    return bool(
+        result.run.skill_id == "traverse_visible_obstacle"
+        and result.run.outcome == SkillOutcome.SUCCEEDED
+        and verification is not None
+        and verification.run_id == result.run.run_id
+        and verification.kind == OutcomeKind.TRAVERSAL
+        and verification.status == OutcomeStatus.PROGRESS
+        and verification.signal == OutcomeSignal.LOCOMOTION_PROGRESS
+    )
+
+
+def _verified_headroom_retry(
+    result: ExecutionTick,
+    recovery: _HeadroomRecovery | None,
+) -> bool:
+    """Bind verified traversal progress to this transaction's sole retry run."""
+
+    return bool(
+        recovery is not None
+        and recovery.phase == "retry"
+        and recovery.retry_run_id == result.run.run_id
+        and recovery.context_key == result.run.context_key
+        and _verified_traversal_progress(result)
+    )
+
+
+def _headroom_retry_advances_plan(
+    result: ExecutionTick,
+    recovery: _HeadroomRecovery | None,
+    *,
+    plan_steps: tuple[str, ...],
+    plan_index: int,
+    plan_goal_id: str | None,
+) -> bool:
+    """Consume a plan step only when that active plan owned the recovered run."""
+
+    if not _verified_headroom_retry(result, recovery) or recovery is None:
+        return False
+    if recovery.context_key == _EXPLORE_KEEPALIVE_CONTEXT:
+        return False
+    expected_context = plan_goal_id or "default"
+    return bool(
+        0 <= plan_index < len(plan_steps)
+        and recovery.context_key == expected_context
+    )
+
+
+def _headroom_clear_target(
+    blackboard: PerceptionBlackboard,
+    recovery: _HeadroomRecovery,
+    *,
+    now_ns: int,
+) -> _HeadroomTarget | None:
+    """Resolve one exact, current, soft block from the recovery's own VLM query."""
+
+    query_id = recovery.query_id
+    requested_hash = recovery.query_frame_dhash
+    if query_id is None or requested_hash is None:
+        return None
+
+    required_keys = (
+        "scene.mode",
+        "scene.playable",
+        "danger.immediate",
+        "target.visible",
+        "target.kind",
+        "target.mineable",
+        "target.dx",
+        "target.dy",
+        "scene.observation_dhash",
+    )
+    facts = {
+        key: blackboard.fact(key, min_confidence=0.70, now_ns=now_ns)
+        for key in required_keys
+    }
+    if any(fact is None for fact in facts.values()):
+        return None
+    observed = tuple(fact for fact in facts.values() if fact is not None)
+    source = observed[0].source
+    observed_ns = observed[0].observed_ns
+    if (
+        not source.startswith("vlm:")
+        or not source.endswith(f":{query_id}")
+        or any(fact.source != source for fact in observed)
+        or any(fact.observed_ns != observed_ns for fact in observed)
+        or observed_ns <= recovery.query_started_ns
+    ):
+        return None
+
+    mode = facts["scene.mode"]
+    playable = facts["scene.playable"]
+    danger = facts["danger.immediate"]
+    visible = facts["target.visible"]
+    kind = facts["target.kind"]
+    mineable = facts["target.mineable"]
+    dx = facts["target.dx"]
+    dy = facts["target.dy"]
+    scene_hash = facts["scene.observation_dhash"]
+    assert mode is not None
+    assert playable is not None
+    assert danger is not None
+    assert visible is not None
+    assert kind is not None
+    assert mineable is not None
+    assert dx is not None
+    assert dy is not None
+    assert scene_hash is not None
+    if (
+        mode.value != "world"
+        or playable.value is not True
+        or danger.value is not False
+        or visible.value is not True
+        or mineable.value is not True
+        or not isinstance(kind.value, str)
+        or not is_hand_safe_soft_block(kind.value)
+        or not isinstance(dx.value, (int, float))
+        or isinstance(dx.value, bool)
+        or not isinstance(dy.value, (int, float))
+        or isinstance(dy.value, bool)
+        or abs(float(dx.value)) > _HEADROOM_CENTER_TOLERANCE
+        or abs(float(dy.value)) > _HEADROOM_CENTER_TOLERANCE
+        or scene_hash.value != requested_hash
+    ):
+        return None
+
+    current_hash = blackboard.fact("frame.dhash", min_confidence=1.0, now_ns=now_ns)
+    if current_hash is None or not isinstance(current_hash.value, str):
+        return None
+    try:
+        if perceptual_hash_distance(requested_hash, current_hash.value) > 6:
+            return None
+    except ValueError:
+        return None
+
+    latest = blackboard.latest()
+    if latest is None:
+        return None
+    normalized_kind = normalize_block_kind(kind.value)
+    candidates = tuple(
+        track
+        for track in latest.tracks
+        if track.track_id.startswith(f"vlm:{query_id}:")
+        and track.confidence >= 0.70
+        and track.last_seen_ns == observed_ns
+        and normalize_block_kind(track.label) == normalized_kind
+        and track_contains_crosshair(track)
+    )
+    if len(candidates) != 1:
+        return None
+    return _HeadroomTarget(kind=normalized_kind, track_id=candidates[0].track_id)
 
 
 def _semantic_deadline_ms(semantic_hz: float) -> int:
@@ -877,6 +1138,7 @@ class AgentRuntime:
     _last_storage_retry_ns: int = field(default=0, init=False)
     _last_operator_storage_retry_ns: int = field(default=0, init=False)
     _traversal_escalation_pending: bool = field(default=False, init=False)
+    _headroom_recovery: _HeadroomRecovery | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz < 0:
@@ -1023,6 +1285,7 @@ class AgentRuntime:
         self._start_cognition_if_due()
         self._request_semantics_if_due(frame.frame_id)
         self._route_observed_scene_recovery()
+        self._advance_headroom_recovery()
 
         active = self.executor.run
         if active is None or active.outcome != SkillOutcome.RUNNING:
@@ -1047,6 +1310,7 @@ class AgentRuntime:
             now_ns=time.monotonic_ns(),
         )
         self._merge_policy_perception()
+        result, headroom_deadline_expired = self._expire_late_headroom_child(result)
         if (
             result.run.skill_id == "collect_recent_drop"
             and result.run.outcome != SkillOutcome.RUNNING
@@ -1070,6 +1334,24 @@ class AgentRuntime:
             and _verified_log_break(result.outcome_verification)
             and "collect_recent_drop" in self.skills.specs
         )
+        headroom_child = bool(
+            headroom_deadline_expired or self._is_headroom_child_result(result)
+        )
+        headroom = getattr(self, "_headroom_recovery", None)
+        headroom_retry_advances_plan = bool(
+            headroom_child
+            and _headroom_retry_advances_plan(
+                result,
+                headroom,
+                plan_steps=self._plan_steps,
+                plan_index=self._plan_index,
+                plan_goal_id=self._plan_goal_id,
+            )
+        )
+        advance_plan = bool(
+            not collect_recent_drop
+            and (not headroom_child or headroom_retry_advances_plan)
+        )
         try:
             if result.action is not None:
                 self._send_motor(result.action, execution=result)
@@ -1078,13 +1360,13 @@ class AgentRuntime:
                 if result.outcome_verification is None:
                     self._record_terminal_run(
                         result.run,
-                        advance_plan=not collect_recent_drop,
+                        advance_plan=advance_plan,
                     )
                 else:
                     self._record_terminal_run(
                         result.run,
                         outcome_verification=result.outcome_verification,
-                        advance_plan=not collect_recent_drop,
+                        advance_plan=advance_plan,
                     )
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
         if result.run.outcome != SkillOutcome.RUNNING:
@@ -1108,6 +1390,8 @@ class AgentRuntime:
                     context_key=result.run.context_key,
                 )
                 return
+            if self._route_headroom_terminal(result):
+                return
             recovery = _first_feasible_recovery(
                 self.skills,
                 result.recovery_skills,
@@ -1124,6 +1408,291 @@ class AgentRuntime:
                     context_key=result.run.context_key,
                     parameters=_compatible_recovery_parameters(result.run, recovery),
                 )
+
+    def _is_headroom_child_result(self, result: ExecutionTick) -> bool:
+        recovery = getattr(self, "_headroom_recovery", None)
+        if recovery is None:
+            return False
+        return bool(
+            (recovery.phase == "mining" and result.run.run_id == recovery.mining_run_id)
+            or (recovery.phase == "retry" and result.run.run_id == recovery.retry_run_id)
+        )
+
+    def _expire_late_headroom_child(
+        self,
+        result: ExecutionTick,
+    ) -> tuple[ExecutionTick, bool]:
+        """Fail closed when a blocking child tick returns after transaction expiry."""
+
+        recovery = getattr(self, "_headroom_recovery", None)
+        if (
+            recovery is None
+            or not self._is_headroom_child_result(result)
+            or time.monotonic_ns() < recovery.deadline_ns
+        ):
+            return result, False
+
+        now_ns = time.monotonic_ns()
+        if result.run.outcome == SkillOutcome.RUNNING:
+            expired = self.executor.cancel(now_ns=now_ns)
+        else:
+            expired = replace(
+                result,
+                run=result.run.model_copy(
+                    update={
+                        "ended_ns": now_ns,
+                        "outcome": SkillOutcome.CANCELLED,
+                        "failure_reason": "headroom-transaction-expired",
+                        "failure_code": None,
+                    }
+                ),
+                recovery_skills=(),
+                outcome_verification=None,
+            )
+        self._headroom_recovery = None
+        self._traversal_escalation_pending = True
+        self._cognition_requested = True
+        return expired, True
+
+    def _route_headroom_terminal(self, result: ExecutionTick) -> bool:
+        """Advance or end one clear-and-retry transaction without recursive recovery."""
+
+        recovery = getattr(self, "_headroom_recovery", None)
+        if recovery is not None and self._is_headroom_child_result(result):
+            if recovery.phase == "mining":
+                if _verified_block_break(result):
+                    retry_id = uuid.uuid4().hex
+                    recovery.phase = "retry"
+                    recovery.retry_run_id = retry_id
+                    self.executor.start(
+                        self.skills.get("traverse_visible_obstacle"),
+                        run_id=retry_id,
+                        context_key=recovery.context_key,
+                        parameters=recovery.traversal_parameters,
+                        complete_on_locomotion_progress=True,
+                    )
+                else:
+                    self._headroom_recovery = None
+                    self._note_terminal_for_cognition(
+                        result.run,
+                        recovery_started=False,
+                    )
+                return True
+
+            retry_succeeded = _verified_headroom_retry(result, recovery)
+            self._headroom_recovery = None
+            if retry_succeeded:
+                self._traversal_escalation_pending = False
+            else:
+                self._traversal_escalation_pending = True
+            self._note_terminal_for_cognition(
+                result.run,
+                recovery_started=False,
+            )
+            return True
+
+        if not _verified_obstacle_stall(result):
+            return False
+        if (
+            not self._headroom_scene_is_safe()
+            or self.perception.active_vlm is None
+            or "mine_visible_block" not in self.skills.specs
+            or "traverse_visible_obstacle" not in self.skills.specs
+        ):
+            # Retain the ordinary declared recovery route (especially immediate
+            # danger retreat) when the optional visual transaction cannot start.
+            return False
+        self._note_terminal_for_cognition(result.run, recovery_started=True)
+        if getattr(self, "_headroom_recovery", None) is None:
+            now_ns = time.monotonic_ns()
+            active_vlm = self.perception.active_vlm
+            assert active_vlm is not None
+            self._headroom_recovery = _HeadroomRecovery(
+                context_key=result.run.context_key,
+                traversal_parameters=dict(result.run.parameters),
+                deadline_ns=_headroom_deadline_ns(active_vlm, now_ns=now_ns),
+            )
+        return True
+
+    def _advance_headroom_recovery(self) -> None:
+        """Request one exact grounding, then run one guarded clear and traversal retry."""
+
+        recovery = getattr(self, "_headroom_recovery", None)
+        if recovery is None:
+            return
+        now_ns = time.monotonic_ns()
+        if now_ns >= recovery.deadline_ns:
+            running = self.executor.run
+            child_run_id = (
+                recovery.mining_run_id
+                if recovery.phase == "mining"
+                else recovery.retry_run_id
+            )
+            if (
+                running is not None
+                and running.outcome == SkillOutcome.RUNNING
+                and running.run_id == child_run_id
+            ):
+                cancelled = self.executor.cancel()
+                try:
+                    if cancelled.action is not None:
+                        self._send_motor(cancelled.action, execution=cancelled)
+                finally:
+                    self._record_terminal_run(cancelled.run, advance_plan=False)
+            self._headroom_recovery = None
+            self._traversal_escalation_pending = True
+            self._cognition_requested = True
+            return
+        if recovery.phase in {"mining", "retry"}:
+            return
+        if not self._headroom_scene_is_safe():
+            self._headroom_recovery = None
+            return
+
+        running = self.executor.run
+        if running is not None and running.outcome == SkillOutcome.RUNNING:
+            self._headroom_recovery = None
+            return
+
+        if recovery.phase == "reorient":
+            latest = self.blackboard.raw_latest()
+            captured = self.perception.last_capture
+            if (
+                latest is None
+                or captured is None
+                or captured.captured_ns != latest.captured_ns
+            ):
+                self._headroom_recovery = None
+                return
+            recovery.pre_reorient_dhash = frame_dhash(captured)
+            self._send_motor(
+                MotorAction(
+                    sequence=self._sequence,
+                    mouse_dy=_HEADROOM_REORIENT_MOUSE_DY,
+                    camera_semantics="world",
+                )
+            )
+            recovery.phase = "settle"
+            recovery.reoriented_frame_id = latest.frame_id
+            recovery.settle_deadline_ns = (
+                time.monotonic_ns() + _HEADROOM_SETTLE_TIMEOUT_NS
+            )
+            return
+
+        if recovery.phase == "settle":
+            if (
+                recovery.settle_deadline_ns is None
+                or now_ns >= recovery.settle_deadline_ns
+            ):
+                self._headroom_recovery = None
+                self._traversal_escalation_pending = True
+                self._cognition_requested = True
+                return
+            latest = self.blackboard.raw_latest()
+            captured = self.perception.last_capture
+            if (
+                latest is None
+                or captured is None
+                or recovery.reoriented_frame_id is None
+                or recovery.pre_reorient_dhash is None
+                or latest.frame_id <= recovery.reoriented_frame_id
+                or captured.captured_ns != latest.captured_ns
+            ):
+                return
+            try:
+                visibly_reoriented = (
+                    perceptual_hash_distance(
+                        recovery.pre_reorient_dhash,
+                        frame_dhash(captured),
+                    )
+                    > 0
+                )
+            except ValueError:
+                self._headroom_recovery = None
+                return
+            if not visibly_reoriented:
+                return
+            recovery.phase = "request"
+
+        if recovery.phase == "request":
+            if self.perception.active_vlm is None:
+                self._headroom_recovery = None
+                return
+            if not self.perception.semantic_available():
+                return
+            captured = self.perception.last_capture
+            latest = self.blackboard.raw_latest()
+            if captured is None or latest is None:
+                self._headroom_recovery = None
+                return
+            query_id = uuid.uuid4().hex
+            query_started_ns = time.monotonic_ns()
+            query_frame_dhash = frame_dhash(captured)
+            query = ActivePerceptionQuery(
+                query_id=query_id,
+                question=(
+                    "Inspect only the single block exactly under the world crosshair that may "
+                    "be preventing forward or upward movement. Ground that exact block with one "
+                    "bounding box and report its canonical Minecraft block identifier, whether "
+                    "it is visibly mineable, world/playable scene state, immediate danger, and "
+                    "target dx/dy. Do not select an adjacent block and do not infer hidden state."
+                ),
+                skill_id="mine_visible_block",
+                frame_id=latest.frame_id,
+                deadline_ms=10_000,
+                output_keys=_HEADROOM_QUERY_OUTPUT_KEYS,
+            )
+            if not self.perception.request_semantics(query, frame=captured):
+                self._headroom_recovery = None
+                return
+            recovery.phase = "grounding"
+            recovery.query_id = query_id
+            recovery.query_started_ns = query_started_ns
+            recovery.query_frame_dhash = query_frame_dhash
+            self.metrics.semantic_requests += 1
+            return
+
+        target = _headroom_clear_target(
+            self.blackboard,
+            recovery,
+            now_ns=time.monotonic_ns(),
+        )
+        if target is not None:
+            run_id = uuid.uuid4().hex
+            recovery.phase = "mining"
+            recovery.mining_run_id = run_id
+            self.executor.start(
+                self.skills.get("mine_visible_block"),
+                run_id=run_id,
+                context_key=recovery.context_key,
+                parameters={
+                    "target": target.kind,
+                    "target_track_id": target.track_id,
+                },
+                instruction=(
+                    "Mine only the grounded soft block under the crosshair until it breaks."
+                ),
+            )
+            return
+
+        # Worker availability returns only after its publication or terminal
+        # failure. An available worker with no exact accepted answer means this
+        # single query abstained; never ask again or improvise another target.
+        if self.perception.semantic_available():
+            self._headroom_recovery = None
+
+    def _headroom_scene_is_safe(self) -> bool:
+        now_ns = time.monotonic_ns()
+        unsafe_truths = ("danger.immediate", "scene.death", "scene.ui_overlay")
+        if any(
+            (fact := self.blackboard.fact(key, min_confidence=0.65, now_ns=now_ns))
+            is not None
+            and fact.value is True
+            for key in unsafe_truths
+        ):
+            return False
+        playable = self.blackboard.fact("scene.playable", min_confidence=0.65, now_ns=now_ns)
+        return playable is None or playable.value is not False
 
     def _explore_keep_alive(self) -> SkillSpec | None:
         """Pick a precondition-free option to keep motor busy while cognition decides.
@@ -1197,6 +1766,10 @@ class AgentRuntime:
         recovery = _observed_scene_recovery(self.skills, self.blackboard)
         if recovery is None:
             return
+        # Death and modal UI recovery outrank the optional terrain-clear
+        # transaction at every phase. The normal cancellation path below owns
+        # releasing any active mining/traversal inputs.
+        self._headroom_recovery = None
         if running is not None and running.outcome == SkillOutcome.RUNNING:
             active_spec = self.skills.get(running.skill_id)
             if (
@@ -1327,6 +1900,10 @@ class AgentRuntime:
         # semantic_hz=0 is event-only active perception. Explicit questions from
         # cognition and bounded GUI transactions are still permitted events.
         if self.perception.active_vlm is None:
+            return
+        if getattr(self, "_headroom_recovery", None) is not None:
+            # The recovery owns exactly one narrowly scoped query. A periodic
+            # request must neither race it nor replace its target facts.
             return
         if self.semantic_hz <= 0:
             executor = getattr(self, "executor", None)
@@ -1555,6 +2132,28 @@ class AgentRuntime:
         )
 
     def _start_cognition_if_due(self) -> None:
+        headroom = getattr(self, "_headroom_recovery", None)
+        if headroom is not None:
+            if not self._queued_operator_message_waiting():
+                return
+            # Fresh operator authority cancels this optional autonomous
+            # transaction. If a child is running, release it before the normal
+            # operator fast path or model decision takes ownership.
+            running = self.executor.run
+            child_run_ids = {headroom.mining_run_id, headroom.retry_run_id}
+            self._headroom_recovery = None
+            if (
+                running is not None
+                and running.outcome == SkillOutcome.RUNNING
+                and running.run_id in child_run_ids
+            ):
+                cancelled = self.executor.cancel()
+                try:
+                    if cancelled.action is not None:
+                        self._send_motor(cancelled.action, execution=cancelled)
+                finally:
+                    self._record_terminal_run(cancelled.run, advance_plan=False)
+                self._execution_revision += 1
         executor = getattr(self, "executor", None)
         active = None if executor is None else executor.run
         if (

@@ -1392,6 +1392,19 @@ def track_contains_crosshair(track: Track) -> bool:
     )
 
 
+def normalize_block_kind(value: str) -> str:
+    """Return the canonical block label used by mining's safety rules."""
+
+    return _normalize_name(value)
+
+
+def is_hand_safe_soft_block(value: str) -> bool:
+    """Return whether mining already classifies this exact block as hand-safe soft terrain."""
+
+    rule = _block_rule(_normalize_name(value))
+    return rule is not None and rule.family == _BlockFamily.SOFT
+
+
 def _track_fresh(track: Track, *, now_ns: int, max_track_age_ms: int) -> bool:
     age_ns = now_ns - track.last_seen_ns
     return 0 <= age_ns <= max_track_age_ms * 1_000_000

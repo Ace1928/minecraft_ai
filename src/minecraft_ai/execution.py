@@ -79,6 +79,7 @@ class SkillExecutor:
         self._pending_mining_verification: _PendingMiningVerification | None = None
         self._inventory_open_sent = False
         self._inventory_close_sent = False
+        self._complete_on_locomotion_progress = False
 
     @property
     def run(self) -> SkillRun | None:
@@ -139,6 +140,7 @@ class SkillExecutor:
         parameters: dict[str, str | int | float | bool] | None = None,
         now_ns: int | None = None,
         instruction: str | None = None,
+        complete_on_locomotion_progress: bool = False,
     ) -> SkillRun:
         if self._run is not None and self._run.outcome == SkillOutcome.RUNNING:
             raise RuntimeError("a skill is already running")
@@ -154,6 +156,7 @@ class SkillExecutor:
         self._pending_mining_verification = None
         self._inventory_open_sent = False
         self._inventory_close_sent = False
+        self._complete_on_locomotion_progress = complete_on_locomotion_progress
         self._run = SkillRun(
             run_id=run_id,
             skill_id=spec.skill_id,
@@ -260,6 +263,11 @@ class SkillExecutor:
             ),
             condition_scale=self._spec.policy_condition_scale,
             target_label=_target_label(self._parameters),
+            target_track_id=(
+                _target_track_id(self._parameters)
+                if self._spec.skill_id == "mine_visible_block"
+                else None
+            ),
             parameters=self.policy_parameters,
         )
         action = self.policy.act(blackboard, intent, sequence=sequence)
@@ -329,6 +337,19 @@ class SkillExecutor:
                 failure_code=SkillFailureCode.MINING_VISUAL_STAGNATION,
                 force_release_left=True,
                 outcome_verification=verification,
+            )
+        if (
+            traversal_verification is not None
+            and traversal_verification.status == OutcomeStatus.PROGRESS
+            and traversal_verification.signal == OutcomeSignal.LOCOMOTION_PROGRESS
+            and self._complete_on_locomotion_progress
+        ):
+            return self._finish(
+                SkillOutcome.SUCCEEDED,
+                now,
+                None,
+                force_release_keys=_LOCOMOTION_RELEASE_KEYS,
+                outcome_verification=traversal_verification,
             )
         if (
             traversal_verification is not None
@@ -823,6 +844,13 @@ def _target_label(parameters: dict[str, str | int | float | bool]) -> str | None
     if not isinstance(target, str) or not target.strip():
         return None
     return target.strip()
+
+
+def _target_track_id(parameters: dict[str, str | int | float | bool]) -> str | None:
+    track_id = parameters.get("target_track_id")
+    if not isinstance(track_id, str) or not track_id.strip():
+        return None
+    return track_id.strip()
 
 
 def _reacquisition_satisfied(
