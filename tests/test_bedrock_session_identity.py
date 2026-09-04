@@ -44,9 +44,9 @@ def _session(*, mode: str = "direct", with_identity: bool = True) -> BedrockSess
 def test_launcher_identity_waits_for_shebang_exec_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pre_exec = ("python", "-m", "minecraft_ai", "bedrock", "launch")
+    pre_exec = ("/usr/bin/env", "python3", "/usr/bin/bedrock-on-linux", "play")
     stable = ("python3", "/usr/bin/bedrock-on-linux", "play")
-    identities = iter(((91, pre_exec), (91, stable)))
+    identities = iter(((91, pre_exec), (91, stable), (91, stable)))
     monkeypatch.setattr(sessions, "_IS_LINUX", True)
     monkeypatch.setattr(sessions, "_pid_alive", lambda _pid: True)
     monkeypatch.setattr(

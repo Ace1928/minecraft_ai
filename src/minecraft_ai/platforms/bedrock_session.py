@@ -295,17 +295,32 @@ def _required_process_identity(
     """Capture identity after a script launcher has completed its initial exec."""
 
     deadline = time.monotonic() + 1.0
+    stable_identity: tuple[int, tuple[str, ...]] | None = None
     while True:
         identity = _linux_process_identity(pid) if _IS_LINUX else None
         if identity is not None:
-            command = identity[1]
-            program_ready = expected_program is None or any(
-                Path(argument).name.casefold() == expected_program.casefold()
-                for argument in command
+            start_ticks, command = identity
+            executable_name = Path(command[0]).name.casefold() if command else ""
+            expected_name = expected_program.casefold() if expected_program is not None else None
+            interpreter_script = (
+                expected_name is not None
+                and executable_name.startswith(("python", "pypy"))
+                and len(command) > 1
+                and Path(command[1]).name.casefold() == expected_name
+            )
+            program_ready = (
+                expected_name is None
+                or executable_name == expected_name
+                or interpreter_script
             )
             argument_ready = required_argument is None or required_argument in command
             if program_ready and argument_ready:
-                return identity[0], _command_sha256(command)
+                candidate = (start_ticks, command)
+                if candidate == stable_identity:
+                    return start_ticks, _command_sha256(command)
+                stable_identity = candidate
+            else:
+                stable_identity = None
         if not _pid_alive(pid) or time.monotonic() >= deadline:
             break
         time.sleep(0.01)
