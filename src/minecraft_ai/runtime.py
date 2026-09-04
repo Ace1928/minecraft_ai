@@ -650,8 +650,15 @@ class AgentRuntime:
             self.metrics.consecutive_stale_frames += 1
             # A late frame must never extend a previously accepted key/button
             # state. Preserve the authenticated lease so a transient CPU stall
-            # can recover on the next fresh capture.
-            send_command("release-inputs", lease_id=self.lease_id)
+            # can recover on the next fresh capture. Releasing input is
+            # best-effort safety: a stalled supervisor or a missed reply must
+            # never take down the whole agent while it is already degraded on a
+            # stale capture, so a command failure here is tolerated — the lease
+            # revocation path and release_all remain the authoritative release.
+            try:
+                send_command("release-inputs", lease_id=self.lease_id)
+            except Exception:
+                pass
             self.telemetry.publish(self._telemetry_payload(state="capture-stalled"))
             if self.metrics.consecutive_stale_frames >= self.stale_frame_consecutive_limit:
                 raise RuntimeError(
@@ -764,15 +771,23 @@ class AgentRuntime:
         """Keep the motor lease alive independently of inference/cognition latency."""
         interval_s = self.lease_renew_ms / 1000.0
         ttl_ms = min(5000, max(3000, self.lease_renew_ms * 8))
+        missing = 0
         while not self._stop.is_set():
             try:
                 send_command("renew", lease_id=self.lease_id, ttl_ms=ttl_ms)
                 self._last_renew_ns = time.monotonic_ns()
                 self._lease_fault = None
+                missing = 0
             except Exception as exc:
+                # A transiently busy supervisor must not silently terminate the
+                # agent on one missed reply. The supervisor's own lease watchdog
+                # revokes the motor if the lease truly lapses; tolerate a bounded
+                # run of heartbeat failures before giving up and stopping.
+                missing += 1
                 self._lease_fault = f"{type(exc).__name__}: {exc}"
-                self._stop.set()
-                return
+                if missing >= 2:
+                    self._stop.set()
+                    return
             self._stop.wait(interval_s)
 
     def _send_motor(
