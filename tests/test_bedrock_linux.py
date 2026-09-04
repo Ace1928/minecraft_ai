@@ -155,6 +155,14 @@ def test_wine_client_crop_removes_window_decoration_without_reordering_pixels() 
     assert cropped == pixels[20:28] + pixels[36:44]
 
 
+def test_full_width_wine_crop_uses_the_contiguous_vertical_region() -> None:
+    pixels = bytes(range(4 * 4 * 3))
+
+    cropped = _crop_bgra(pixels, source_width=4, rect=(0, 1, 4, 2))
+
+    assert cropped == pixels[16:48]
+
+
 def test_wine_grab_bridge_preserves_relative_vpt_camera_deltas() -> None:
     # XTEST uses relative motion when root is X.NONE. VPT and Bedrock both use
     # positive pitch-down and positive yaw-right, so no absolute pointer

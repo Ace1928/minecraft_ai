@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
+from .crafting_control import BoundedPlankCraftController
 from .mining_control import MiningLeaseGuard
 from .motor import MotorIntent, MotorPolicy
 from .outcome_verifier import (
@@ -64,6 +65,7 @@ class SkillExecutor:
         self._initiated = False
         self._last_intent: MotorIntent | None = None
         self._mining_guard = MiningLeaseGuard()
+        self._plank_crafter = BoundedPlankCraftController()
         self._outcome_verifier = TemporalOutcomeVerifier()
         self._pending_mining_verification: _PendingMiningVerification | None = None
 
@@ -96,6 +98,17 @@ class SkillExecutor:
         if callable(close):
             close()
 
+    def plank_crafting_semantics_ready(
+        self,
+        blackboard: PerceptionBlackboard,
+        *,
+        now_ns: int,
+    ) -> bool:
+        return self._plank_crafter.semantic_request_ready(
+            blackboard,
+            now_ns=now_ns,
+        )
+
     def start(
         self,
         spec: SkillSpec,
@@ -115,6 +128,7 @@ class SkillExecutor:
         self._initiated = False
         self._last_intent = None
         self._mining_guard.reset()
+        self._plank_crafter.reset()
         self._outcome_verifier.reset()
         self._pending_mining_verification = None
         self._run = SkillRun(
@@ -142,7 +156,12 @@ class SkillExecutor:
         if self._pending_mining_verification is not None:
             return self._verify_released_mining_outcome(blackboard, now_ns=now)
         if now - self._run.started_ns >= self._spec.max_duration_ms * 1_000_000:
-            return self._finish(SkillOutcome.TIMED_OUT, now, "skill-timeout")
+            return self._finish(
+                SkillOutcome.TIMED_OUT,
+                now,
+                "skill-timeout",
+                recover=self._spec.skill_id == "craft_wood_planks",
+            )
         failed = _first_matching(self._spec.failure_conditions, blackboard, now_ns=now)
         if failed is not None:
             return self._finish(
@@ -152,7 +171,7 @@ class SkillExecutor:
                 recover=True,
             )
         if (
-            self._spec.skill_id != "mine_visible_block"
+            self._spec.skill_id not in {"mine_visible_block", "craft_wood_planks"}
             and self._spec.success_conditions
             and conditions_satisfied(
                 self._spec.success_conditions,
@@ -178,6 +197,13 @@ class SkillExecutor:
                 now,
                 "invariant-lost",
                 recover=True,
+            )
+
+        if self._spec.skill_id == "craft_wood_planks":
+            return self._tick_plank_crafting(
+                blackboard,
+                sequence=sequence,
+                now_ns=now,
             )
 
         intent = MotorIntent(
@@ -264,6 +290,52 @@ class SkillExecutor:
             action_origin=(ActionOrigin.SYNTHETIC if mining.synthetic else ActionOrigin.POLICY),
         )
 
+    def _tick_plank_crafting(
+        self,
+        blackboard: PerceptionBlackboard,
+        *,
+        sequence: int,
+        now_ns: int,
+    ) -> ExecutionTick:
+        if self._spec is None or self._run is None:
+            raise RuntimeError("no skill is running")
+        step = self._plank_crafter.step(
+            blackboard,
+            run_id=self._run.run_id,
+            sequence=sequence,
+            now_ns=now_ns,
+        )
+        intent = MotorIntent(
+            skill_id=self._spec.skill_id,
+            mode=step.mode,
+            episode_id=self._run.run_id,
+            action_level=self._spec.action_level,
+            instruction=step.instruction,
+            parameters=self.policy_parameters,
+        )
+        self._last_intent = intent
+        if step.failure_reason is not None:
+            return self._finish(
+                SkillOutcome.FAILED,
+                now_ns,
+                step.failure_reason,
+                recover=True,
+            )
+        if step.verification is not None:
+            return self._finish(
+                SkillOutcome.SUCCEEDED,
+                now_ns,
+                None,
+                outcome_verification=step.verification,
+            )
+        return ExecutionTick(
+            run=self._run,
+            action=step.action,
+            motor_intent=intent,
+            policy_status=_policy_status_snapshot(self.policy),
+            action_origin=ActionOrigin.SYNTHETIC,
+        )
+
     def _observe_mining_outcome(
         self,
         blackboard: PerceptionBlackboard,
@@ -343,13 +415,17 @@ class SkillExecutor:
     ) -> MotorAction:
         guard_keys = self._mining_guard.held_keys
         guard_buttons = self._mining_guard.held_buttons
+        crafting_sequence = self._plank_crafter.last_sequence
         mining_held = self._mining_guard.reset()
+        self._plank_crafter.reset()
         release_for_observation = getattr(self.policy, "release_for_observation", None)
         release = (
             release_for_observation()
             if preserve_outcome_perception and callable(release_for_observation)
             else self.policy.reset()
         )
+        if crafting_sequence >= 0 and release.sequence <= crafting_sequence:
+            release = release.model_copy(update={"sequence": crafting_sequence + 1})
         if mining_held or force_release_left:
             release = _force_button_release(release, "left")
         for button in tuple(sorted({*guard_buttons, *force_release_buttons})):
@@ -446,10 +522,15 @@ class SkillExecutor:
         )
 
     def cancel(self, *, now_ns: int | None = None) -> ExecutionTick:
-        if self._run is None:
+        if self._run is None or self._spec is None:
             raise RuntimeError("no skill is running")
         now = time.monotonic_ns() if now_ns is None else now_ns
-        return self._finish(SkillOutcome.CANCELLED, now, "cancelled")
+        return self._finish(
+            SkillOutcome.CANCELLED,
+            now,
+            "cancelled",
+            recover=self._spec.skill_id == "craft_wood_planks",
+        )
 
     def _finish(
         self,

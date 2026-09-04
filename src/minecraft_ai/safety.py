@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class SupervisorState(StrEnum):
@@ -94,6 +94,8 @@ class MotorAction(BaseModel):
     buttons_up: tuple[str, ...] = ()
     mouse_dx: int = Field(default=0, ge=-4096, le=4096)
     mouse_dy: int = Field(default=0, ge=-4096, le=4096)
+    cursor_x: float | None = Field(default=None, ge=0.0, le=1.0)
+    cursor_y: float | None = Field(default=None, ge=0.0, le=1.0)
     camera_semantics: Literal["world", "cursor"] = "world"
     duration_ms: int = Field(default=0, ge=0, le=1000)
 
@@ -107,13 +109,25 @@ class MotorAction(BaseModel):
             raise ValueError("invalid input token")
         return normalized
 
+    @model_validator(mode="after")
+    def _absolute_cursor_is_gui_only(self) -> MotorAction:
+        if (self.cursor_x is None) != (self.cursor_y is None):
+            raise ValueError("cursor_x and cursor_y must be supplied together")
+        if self.cursor_x is None:
+            return self
+        if self.camera_semantics != "cursor":
+            raise ValueError("absolute cursor targets require cursor semantics")
+        if self.mouse_dx or self.mouse_dy:
+            raise ValueError("absolute and relative pointer motion cannot be combined")
+        return self
+
     def action_kinds(self) -> frozenset[str]:
         kinds: set[str] = set()
         if self.keys_down or self.keys_up:
             kinds.add("keyboard")
         if self.buttons_down or self.buttons_up:
             kinds.add("button")
-        if self.mouse_dx or self.mouse_dy:
+        if self.mouse_dx or self.mouse_dy or self.cursor_x is not None:
             kinds.add("mouse")
         return frozenset(kinds)
 

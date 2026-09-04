@@ -17,6 +17,7 @@ class OutcomeKind(StrEnum):
     TRAVERSAL = "traversal"
     INVENTORY_OPEN = "inventory_open"
     INVENTORY_CLOSE = "inventory_close"
+    CRAFTING = "crafting"
 
 
 class OutcomeStatus(StrEnum):
@@ -36,6 +37,7 @@ class OutcomeSignal(StrEnum):
     GUI_TRANSITION_PROGRESS = "gui_transition_progress"
     INVENTORY_OPENED = "inventory_opened"
     INVENTORY_CLOSED = "inventory_closed"
+    PLANKS_CRAFTED = "planks_crafted"
     GUI_TRANSITION_STALLED = "gui_transition_stalled"
 
 

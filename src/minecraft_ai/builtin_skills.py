@@ -427,21 +427,32 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="craft_wood_planks",
-            version=3,
+            version=4,
             name="Craft wood planks",
             description=(
-                "Open the Bedrock inventory crafting interface, convert one available log into "
-                "wood planks, move the output into inventory, and close the interface safely"
+                "Open and visually verify the Bedrock inventory, right-click one freshly "
+                "grounded craftable planks recipe, require a fresh log decrease plus at least "
+                "four observed planks, and close the interface safely"
             ),
             stage=SkillStage.EXPERIMENTAL,
-            preconditions=(SkillCondition(key="inventory.logs", operator="gte", value=1),),
+            # The bounded controller opens the inventory first and establishes
+            # a GUI-grounded baseline there; world-view inventory counts are
+            # optional and must not prevent entry into the transaction.
+            preconditions=(),
             success_conditions=(SkillCondition(key="inventory.planks", operator="gte", value=4),),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("inventory.logs-=1", "inventory.planks>=4"),
-            max_duration_ms=45_000,
+            recovery_skills=("close_open_inventory",),
+            max_duration_ms=180_000,
             action_level=ActionLevel.GUI,
             policy_ref="craft_planks",
             policy_instruction="craft planks",
+            action_permissions=SkillActionPermissions(
+                allow_attack=False,
+                allow_jump=False,
+                allow_drop=False,
+                allow_hotbar=False,
+            ),
         ),
         SkillSpec(
             skill_id="craft_crafting_table",

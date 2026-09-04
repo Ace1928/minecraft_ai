@@ -19,6 +19,7 @@ from .cognition import (
 )
 from .action_levels import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
+from .daemon_executor import SingleWorkerDaemonExecutor
 from .episodes import RuntimeEvent, RuntimeEventKind
 from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
 from .grounded_perception import resolve_grounded_output_keys
@@ -540,16 +541,33 @@ def _observed_scene_recovery(
     if death is not None and bool(death.value):
         skill_id = "respawn_after_death"
     else:
-        mode = blackboard.fact("scene.mode", min_confidence=0.9)
-        if mode is None or mode.value != "inventory":
-            return None
-        if not _scene_claim_is_fresh(blackboard):
-            # The mode belief may be a stale VLM hint. Without a matching
-            # current frame hash we must not preempt world play over it;
-            # an inventory recovery would otherwise freeze the agent in
-            # close/open loops while the world sits fully playable.
-            return None
-        skill_id = "close_open_inventory"
+        inventory_overlay = blackboard.fact(
+            "scene.inventory_overlay",
+            min_confidence=0.9,
+        )
+        playable = blackboard.fact("scene.playable", min_confidence=0.9)
+        fast_inventory_interlock = bool(
+            inventory_overlay is not None
+            and inventory_overlay.value is True
+            and playable is not None
+            and playable.value is False
+            and inventory_overlay.observed_ns == playable.observed_ns
+            and inventory_overlay.source.startswith("safety:")
+            and playable.source.startswith("safety:")
+        )
+        if fast_inventory_interlock:
+            skill_id = "close_open_inventory"
+        else:
+            mode = blackboard.fact("scene.mode", min_confidence=0.9)
+            if mode is None or mode.value != "inventory":
+                return None
+            if not _scene_claim_is_fresh(blackboard):
+                # The mode belief may be a stale VLM hint. Without a matching
+                # current frame hash we must not preempt world play over it;
+                # an inventory recovery would otherwise freeze the agent in
+                # close/open loops while the world sits fully playable.
+                return None
+            skill_id = "close_open_inventory"
     if skill_id not in skills.specs:
         return None
     candidate = skills.get(skill_id)
@@ -766,7 +784,7 @@ class AgentRuntime:
         default=None,
         init=False,
     )
-    _pool: concurrent.futures.ThreadPoolExecutor = field(init=False)
+    _pool: SingleWorkerDaemonExecutor = field(init=False)
     _last_decision: CognitionDecision | None = field(default=None, init=False)
     _pending_operator_message_ids: tuple[str, ...] = field(default=(), init=False)
     _pending_operator_status_updates: dict[
@@ -813,9 +831,8 @@ class AgentRuntime:
             )
         if self.stale_frame_consecutive_limit < 1:
             raise ValueError("stale_frame_consecutive_limit must be positive")
-        self._pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="minecraft-ai-cognition",
+        self._pool = SingleWorkerDaemonExecutor(
+            thread_name="minecraft-ai-cognition",
         )
 
     def stop(self) -> None:
@@ -1118,10 +1135,23 @@ class AgentRuntime:
 
     def _route_observed_scene_recovery(self) -> None:
         """Preempt stale world work when a verified blocking scene event arrives."""
+        running = self.executor.run
         recovery = _observed_scene_recovery(self.skills, self.blackboard)
         if recovery is None:
             return
-        running = self.executor.run
+        if running is not None and running.outcome == SkillOutcome.RUNNING:
+            active_spec = self.skills.get(running.skill_id)
+            if (
+                recovery.skill_id == "close_open_inventory"
+                and active_spec.action_level == ActionLevel.GUI
+                and running.skill_id != "close_open_inventory"
+            ):
+                # An inventory/crafting option deliberately owns the GUI until
+                # its bounded verifier succeeds or fails. Treating that same
+                # observed inventory as an obstruction would immediately close
+                # the screen underneath it. Other safety events (notably death)
+                # still preempt the GUI owner normally.
+                return
         if (
             running is not None
             and running.outcome == SkillOutcome.RUNNING
@@ -1227,8 +1257,27 @@ class AgentRuntime:
 
     def _request_semantics_if_due(self, frame_id: int) -> None:
         # semantic_hz=0 is event-only active perception. Explicit questions from
-        # cognition still flow through _consume_cognition below.
-        if self.semantic_hz <= 0 or self.perception.active_vlm is None:
+        # cognition and bounded GUI transactions are still permitted events.
+        if self.perception.active_vlm is None:
+            return
+        if self.semantic_hz <= 0:
+            executor = getattr(self, "executor", None)
+            active = None if executor is None else executor.run
+            if active is None or active.skill_id != "craft_wood_planks":
+                return
+        else:
+            active = self.executor.run
+        skill_id = active.skill_id if active is not None else None
+        crafting_event = skill_id == "craft_wood_planks"
+        now = time.monotonic_ns()
+        if crafting_event and not self.executor.plank_crafting_semantics_ready(
+            self.blackboard,
+            now_ns=now,
+        ):
+            # Runtime scheduling precedes motor execution in each loop. Do not
+            # spend a 30s+ VLM call on the world frame immediately before the
+            # controller's inventory toggle; wait for a fresh fast overlay
+            # observation proving that this transaction opened a GUI.
             return
         if not _semantic_refresh_allowed(
             cognition_requested=self._cognition_requested,
@@ -1237,15 +1286,21 @@ class AgentRuntime:
             worker_available=self.perception.semantic_available(),
         ):
             return
-        now = time.monotonic_ns()
-        interval = int(1e9 / self.semantic_hz)
+        effective_hz = self.semantic_hz if self.semantic_hz > 0 else 0.5
+        interval = int(1e9 / effective_hz)
         if now - self._last_semantic_ns < interval:
             return
-        active = self.executor.run
-        skill_id = active.skill_id if active is not None else None
         question = self._semantic_question(skill_id)
         output_keys = list(
             (
+                "scene.mode",
+                "scene.playable",
+                "gui.mode",
+                "inventory.logs",
+                "inventory.planks",
+            )
+            if crafting_event
+            else (
                 "scene.mode",
                 "scene.playable",
                 "danger.immediate",
@@ -1270,7 +1325,7 @@ class AgentRuntime:
             question=question,
             skill_id=skill_id,
             frame_id=frame_id,
-            deadline_ms=_semantic_deadline_ms(self.semantic_hz),
+            deadline_ms=_semantic_deadline_ms(effective_hz),
             output_keys=tuple(dict.fromkeys(output_keys)),
         )
         if self.perception.request_semantics(query):
@@ -1320,6 +1375,13 @@ class AgentRuntime:
                 "walkable direction, HUD danger, open GUI, and new chat. Emit target.visible, "
                 "danger.immediate and normalized target.dx/target.dy when applicable."
             )
+        if skill_id == "craft_wood_planks":
+            return (
+                "Inspect only the current Bedrock inventory GUI. Report gui.mode, "
+                "inventory.logs, and inventory.planks from visible pixels. If a wood-planks "
+                "recipe is visibly craftable, localize its clickable tile as a GUI track and "
+                "label it exactly craftable_planks_recipe; otherwise do not emit that track."
+            )
         spec = self.skills.get(skill_id)
         return (
             f"For skill {spec.name!r}, determine its preconditions, success/failure signals, "
@@ -1349,6 +1411,17 @@ class AgentRuntime:
         )
 
     def _start_cognition_if_due(self) -> None:
+        executor = getattr(self, "executor", None)
+        active = None if executor is None else executor.run
+        if (
+            active is not None
+            and active.outcome == SkillOutcome.RUNNING
+            and active.skill_id == "close_open_inventory"
+        ):
+            # Inventory cleanup is a short verified safety transaction. Keep
+            # both new and already-running decisions from replacing it before
+            # the playable world has actually returned.
+            return
         if self._pending_decision is not None:
             if self._preempt_pending_cognition_for_operator():
                 # The replacement is a completed deterministic decision. Apply
@@ -1493,6 +1566,14 @@ class AgentRuntime:
         return True
 
     def _consume_cognition(self) -> None:
+        executor = getattr(self, "executor", None)
+        active = None if executor is None else executor.run
+        if (
+            active is not None
+            and active.outcome == SkillOutcome.RUNNING
+            and active.skill_id == "close_open_inventory"
+        ):
+            return
         future = self._pending_decision
         if future is None or not future.done():
             return
@@ -1520,6 +1601,8 @@ class AgentRuntime:
             # before any skill switch or acknowledgement is applied.
             self._pending_operator_message_ids = ()
             self._cognition_requested = True
+            return
+        if self._close_crafting_gui_before_world_decision(decision):
             return
         self._last_decision = decision
         self._adopt_plan_if_revised(decision)
@@ -1606,6 +1689,57 @@ class AgentRuntime:
             self._schedule_cognition_retry(now_ns=now)
         else:
             self._clear_cognition_retry()
+
+    def _close_crafting_gui_before_world_decision(
+        self,
+        decision: CognitionDecision,
+    ) -> bool:
+        """Finish a verified inventory close before adopting world control.
+
+        A completed decision was sampled while crafting owned the inventory.
+        Reusing that decision after the visual scene changes would be stale, so
+        discard it, close the GUI, and let the close terminal event request a
+        fresh decision from the restored world frame.
+        """
+        if decision.skill_id is None or decision.skill_id == "craft_wood_planks":
+            return False
+        running = self.executor.run
+        if (
+            running is None
+            or running.outcome != SkillOutcome.RUNNING
+            or running.skill_id != "craft_wood_planks"
+        ):
+            return False
+        requested = self.skills.get(decision.skill_id)
+        if requested.action_level == ActionLevel.GUI:
+            return False
+        cancelled = self.executor.cancel()
+        try:
+            if cancelled.action is not None:
+                self._send_motor(cancelled.action, execution=cancelled)
+        finally:
+            self._record_terminal_run(cancelled.run)
+        self._execution_revision += 1
+        recovery = _first_feasible_recovery(
+            self.skills,
+            cancelled.recovery_skills,
+            self.blackboard,
+        )
+        if recovery is not None:
+            self.executor.start(
+                recovery,
+                run_id=uuid.uuid4().hex,
+                context_key=cancelled.run.context_key,
+            )
+            # The recovery's terminal result is what requests fresh cognition.
+            self._cognition_requested = False
+        else:
+            # Fail closed if the configured recovery was removed or became
+            # infeasible; the next live scene-recovery pass can still route the
+            # specific fast inventory interlock.
+            self._cognition_requested = True
+        self._pending_operator_message_ids = ()
+        return True
 
     def _schedule_cognition_retry(self, *, now_ns: int) -> None:
         """Retry a failed/unfinished strategic decision without a hot loop."""

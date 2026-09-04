@@ -477,6 +477,8 @@ class BootstrapFastPerception:
         if not frame.bgra or frame.width <= 0 or frame.height <= 0:
             return ()
         now = time.monotonic_ns()
+        ui_overlay = bedrock_ui_chrome_present(frame)
+        inventory_overlay = ui_overlay and bedrock_inventory_overlay_present(frame)
         bootstrap_source = f"bootstrap:{self.model_id}:not-training-label"
         values: tuple[tuple[str, str | bool, float, int], ...] = (
             ("perception.bootstrap_active", True, 1.0, 500),
@@ -495,15 +497,6 @@ class BootstrapFastPerception:
                 500,
             ),
         )
-        if bedrock_ui_chrome_present(frame):
-            # A deterministic negative-only interlock is appropriate here: it
-            # never labels world semantics or training data, but it prevents a
-            # world policy from typing/moving inside Bedrock's full-screen UI.
-            values = (
-                *values,
-                ("scene.playable", False, 0.99, 250),
-                ("scene.ui_overlay", True, 0.99, 250),
-            )
         facts = [
             PerceptionFact(
                 key=key,
@@ -518,7 +511,6 @@ class BootstrapFastPerception:
         safety_source = "safety:bedrock-hud-v1:not-training-label"
         safety_values: tuple[tuple[str, str | int | float | bool], ...] = ()
         death_screen = bedrock_death_screen_present(frame)
-        ui_overlay = bedrock_ui_chrome_present(frame)
         if death_screen:
             safety_values = (
                 ("scene.playable", False),
@@ -526,10 +518,31 @@ class BootstrapFastPerception:
                 ("scene.mode", "death"),
                 ("scene.death", True),
             )
+        elif ui_overlay:
+            # This is a deterministic, negative-only actuator interlock. It
+            # does not name the screen or create a training label; it only
+            # establishes that world controls are unsafe on the current frame.
+            safety_values = (
+                ("scene.playable", False),
+                ("scene.ui_overlay", True),
+            )
+            if inventory_overlay:
+                safety_values = (*safety_values, ("scene.inventory_overlay", True))
         else:
+            in_world_hud = bedrock_in_world_hud_present(frame)
+            if in_world_hud:
+                # Unlike generic color/texture heuristics, Bedrock's calibrated
+                # survival/creative HUD is direct fast evidence that a GUI
+                # toggle returned to the playable world.
+                safety_values = (
+                    ("scene.playable", True),
+                    ("scene.ui_overlay", False),
+                    ("scene.mode", "world"),
+                )
             air_bubbles = bedrock_air_bubbles(frame)
             if air_bubbles is not None:
                 safety_values = (
+                    *safety_values,
                     ("player.air_visible", True),
                     ("player.air_bubbles", air_bubbles),
                     ("player.air_fraction", air_bubbles / 10.0),
@@ -538,12 +551,13 @@ class BootstrapFastPerception:
                     ("danger.immediate", True),
                     ("danger.drowning", True),
                 )
-            elif not ui_overlay:
+            else:
                 # In a playable HUD, disappearance of a previously visible air
                 # meter is the observable surface transition needed to terminate
                 # a learned water-escape option. Do not clear generic danger;
                 # another perception source may still observe a different hazard.
                 safety_values = (
+                    *safety_values,
                     ("player.air_visible", False),
                     ("player.submerged", False),
                     ("environment.underwater", False),
@@ -678,7 +692,7 @@ def frame_region_dhash(
 
 
 def bedrock_ui_chrome_present(frame: CapturedFrame) -> bool:
-    """Detect Bedrock's bright full-width top UI chrome as a motor interlock.
+    """Detect conservative Bedrock UI chrome as a motor interlock.
 
     This intentionally has no positive world classification and is never an
     eligible training label. It only blocks input during an obvious overlay.
@@ -697,7 +711,88 @@ def bedrock_ui_chrome_present(frame: CapturedFrame) -> bool:
             luma = 29 * int(blue) + 150 * int(green) + 77 * int(red)
             bright += int(luma > 180 * 256)
             sampled += 1
-    return sampled > 0 and bright / sampled >= 0.90
+    if sampled > 0 and bright / sampled >= 0.90:
+        return True
+    return bedrock_inventory_overlay_present(frame)
+
+
+def bedrock_inventory_overlay_present(frame: CapturedFrame) -> bool:
+    """Detect the centered neutral chrome of Bedrock's inventory screen.
+
+    The two-region conjunction was calibrated against retained raw Bedrock
+    frames on this deployment. Stable inventory frames had an upper light-gray
+    ratio of at least 0.448 and a header neutral-gray ratio of at least 0.687;
+    nearby world/death controls reached at most 0.232 in the upper region. The
+    looser thresholds retain an empirical margin while requiring both pieces of
+    axis-aligned chrome. This remains a negative-only safety signal: it does not
+    assert which inventory, tab, recipe, or item is visible.
+    """
+    if not frame.bgra or frame.width < 320 or frame.height < 180:
+        return False
+    pixels = _numpy_bgra(frame)
+    upper_light_ratio = _sampled_neutral_ratio(
+        frame,
+        x_start=0.10,
+        x_end=0.90,
+        y_start=0.12,
+        y_end=0.24,
+        luma_min=140,
+        luma_max=235,
+        pixels=pixels,
+    )
+    if upper_light_ratio < 0.40:
+        return False
+    header_neutral_ratio = _sampled_neutral_ratio(
+        frame,
+        x_start=0.10,
+        x_end=0.90,
+        y_start=0.20,
+        y_end=0.34,
+        luma_min=70,
+        luma_max=235,
+        pixels=pixels,
+    )
+    return header_neutral_ratio >= 0.65
+
+
+def _sampled_neutral_ratio(
+    frame: CapturedFrame,
+    *,
+    x_start: float,
+    x_end: float,
+    y_start: float,
+    y_end: float,
+    luma_min: int,
+    luma_max: int,
+    pixels: Any | None,
+) -> float:
+    """Measure neutral UI pixels on a bounded grid, with or without NumPy."""
+    x0, x1 = int(frame.width * x_start), int(frame.width * x_end)
+    y0, y1 = int(frame.height * y_start), int(frame.height * y_end)
+    x_step = max(1, (x1 - x0) // 256)
+    y_step = max(1, (y1 - y0) // 96)
+    if pixels is not None:
+        roi = pixels[y0:y1:y_step, x0:x1:x_step, :3].astype("int32")
+        blue, green, red = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
+        high = roi.max(axis=2)
+        low = roi.min(axis=2)
+        luma = (29 * blue + 150 * green + 77 * red) // 256
+        selected = (high - low <= 18) & (luma >= luma_min) & (luma <= luma_max)
+        return float(selected.mean()) if selected.size else 0.0
+    source = memoryview(frame.bgra)
+    matched = 0
+    sampled = 0
+    for y in range(y0, y1, y_step):
+        for x in range(x0, x1, x_step):
+            offset = (y * frame.width + x) * 4
+            blue, green, red = (int(value) for value in source[offset : offset + 3])
+            luma = (29 * blue + 150 * green + 77 * red) // 256
+            matched += int(
+                max(blue, green, red) - min(blue, green, red) <= 18
+                and luma_min <= luma <= luma_max
+            )
+            sampled += 1
+    return matched / sampled if sampled else 0.0
 
 
 def bedrock_survival_hud_present(frame: CapturedFrame) -> bool:

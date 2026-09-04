@@ -6,6 +6,9 @@ from typing import Any
 
 import pytest
 
+from minecraft_ai.mining_control import MiningLeaseGuard
+from minecraft_ai.motor import MotorIntent
+from minecraft_ai.perception import PerceptionBlackboard
 from minecraft_ai.platforms.bedrock_x11 import IsolatedX11InputBackend
 from minecraft_ai.safety import MotorAction, MotorLease, MotorRejected
 
@@ -53,6 +56,109 @@ def test_host_debug_keyboard_retains_window_targeted_xsend_event() -> None:
 
     assert targeted == [(38, True), (38, False)]
     assert fake_xtest.calls == []
+
+
+def test_absolute_cursor_maps_cropped_frame_coordinates_to_wine_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    translated: list[tuple[Any, int, int]] = []
+    warped: list[tuple[int, int]] = []
+    window = SimpleNamespace(get_geometry=lambda: SimpleNamespace(width=1928, height=1088))
+    root = SimpleNamespace(
+        translate_coords=lambda item, x, y: (
+            translated.append((item, x, y))
+            or SimpleNamespace(x=x + 100, y=y + 200)
+        ),
+        warp_pointer=lambda x, y: warped.append((x, y)),
+    )
+    display = SimpleNamespace(
+        create_resource_object=lambda _kind, _window_id: window,
+        screen=lambda: SimpleNamespace(root=root),
+        sync=lambda: None,
+    )
+    backend = object.__new__(IsolatedX11InputBackend)
+    backend._targeted = False
+    backend.target_window_id = 42
+    backend._input_window_id = 99
+    backend._display = display
+    monkeypatch.setattr(
+        "minecraft_ai.platforms.bedrock_x11._wine_content_rect",
+        lambda *_args: (4, 30, 1920, 1054),
+    )
+
+    backend._position_pointer_in_game(0.25, 0.25)
+
+    assert translated == [(window, 484, 293)]
+    assert warped == [(584, 493)]
+
+
+def test_atomic_gui_tap_leaves_bedrock_backend_and_guard_state_in_agreement() -> None:
+    backend = object.__new__(IsolatedX11InputBackend)
+    fake_xtest = _FakeXTest()
+    backend._targeted = False
+    backend._display = SimpleNamespace(sync=lambda: None)
+    backend._x = SimpleNamespace(
+        KeyPress=2,
+        KeyRelease=3,
+        ButtonPress=4,
+        ButtonRelease=5,
+    )
+    backend._xtest = fake_xtest
+    backend._relative_mouse = SimpleNamespace(move=lambda _x, _y: None)
+    backend._lease = MotorLease(
+        lease_id="lease",
+        session_id="session",
+        target_instance="bedrock:test",
+        backend_id=backend.backend_id,
+        expires_monotonic_ns=time.monotonic_ns() + 1_000_000_000,
+        allowed_actions=frozenset({"keyboard", "button", "mouse"}),
+        max_action_duration_ms=250,
+        first_sequence=0,
+    )
+    backend.target_window_id = 42
+    backend._input_window_id = 42
+    backend._host_monitor_binding = None
+    backend._input_permitted = lambda: True
+    backend._held_keys = set()
+    backend._held_buttons = set()
+    backend.probe_target = lambda: True  # type: ignore[method-assign]
+    backend._ensure_input_focus = lambda: None  # type: ignore[method-assign]
+    backend._park_pointer_in_game = lambda: None  # type: ignore[method-assign]
+    backend._position_pointer_in_game = lambda _x, _y: None  # type: ignore[method-assign]
+    backend._keycode = lambda _key: 26  # type: ignore[method-assign]
+
+    action = MotorAction(
+        sequence=1,
+        keys_down=("e",),
+        keys_up=("e",),
+        buttons_down=("right",),
+        buttons_up=("right",),
+        cursor_x=0.25,
+        cursor_y=0.25,
+        camera_semantics="cursor",
+    )
+    guard = MiningLeaseGuard()
+    decision = guard.inspect(
+        action,
+        PerceptionBlackboard(),
+        MotorIntent(
+            skill_id="craft_wood_planks",
+            mode="craft_planks",
+            episode_id="craft:one",
+        ),
+        now_ns=time.monotonic_ns(),
+    )
+
+    backend.apply(decision.action)
+
+    assert guard.held_keys == tuple(backend.held_keys) == ()
+    assert guard.held_buttons == tuple(backend.held_buttons) == ()
+    assert [event_type for _display, event_type, _detail in fake_xtest.calls] == [
+        backend._x.KeyPress,
+        backend._x.ButtonPress,
+        backend._x.KeyRelease,
+        backend._x.ButtonRelease,
+    ]
 
 
 def test_apply_rechecks_interlock_before_positive_events_but_keeps_releases() -> None:

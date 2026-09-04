@@ -688,6 +688,44 @@ class IsolatedX11InputBackend:
         except Exception:
             pass
 
+    def _position_pointer_in_game(self, cursor_x: float, cursor_y: float) -> None:
+        """Place the GUI cursor at one normalized captured-frame point.
+
+        World look remains relative-only.  This path exists for visually
+        grounded GUI controls whose exact current-frame region is known, and
+        is deliberately unavailable on the host-display debug route because a
+        root-pointer warp there would interfere with the operator's desktop.
+        The semantic track is normalized to the cropped Wine game drawable,
+        so reuse the capture rect rather than the surrounding Wine window.
+        """
+        if self._targeted:
+            raise IsolationError("absolute GUI cursor targets require an isolated X display")
+        try:
+            window_id = self.target_window_id or self._input_window_id
+            if window_id is None:
+                raise IsolationError("Minecraft input window is unavailable")
+            window = self._display.create_resource_object("window", window_id)
+            geometry = window.get_geometry()
+            width = int(geometry.width)
+            height = int(geometry.height)
+            if width <= 0 or height <= 0:
+                raise IsolationError("Minecraft input window has invalid geometry")
+            content_rect = _wine_content_rect(
+                self._display,
+                window_id,
+                width,
+                height,
+            ) or (0, 0, width, height)
+            x, y = _normalized_content_point(cursor_x, cursor_y, content_rect)
+            root = self._display.screen().root
+            coordinates = root.translate_coords(window, x, y)
+            root.warp_pointer(int(coordinates.x), int(coordinates.y))
+            self._display.sync()
+        except IsolationError:
+            raise
+        except Exception as exc:
+            raise IsolationError(f"cannot position isolated Minecraft GUI cursor: {exc}") from exc
+
     def _targeted_key(self, keycode: int, down: bool) -> None:
         """Deliver a key event directly to the Minecraft window (no focus needed)."""
         window = self._input_window()
@@ -797,16 +835,27 @@ class IsolatedX11InputBackend:
         # server. The host debug path retains window-directed keys, but is not
         # accepted by the autonomous CLI because its mouse events are global.
         try:
+            tap_keys = frozenset(action.keys_down).intersection(action.keys_up)
+            tap_buttons = frozenset(action.buttons_down).intersection(action.buttons_up)
             for key in action.keys_up:
+                if key in tap_keys:
+                    continue
                 self._send_key(self._keycode(key), down=False)
                 self._held_keys.discard(key.lower())
             for button in action.buttons_up:
+                if button in tap_buttons:
+                    continue
                 button_id = _BUTTONS.get(button.lower())
                 if button_id is None:
                     raise IsolationError(f"unsupported mouse button: {button!r}")
                 self._park_pointer_in_game()
                 self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
                 self._held_buttons.discard(button.lower())
+            absolute_cursor = action.cursor_x is not None and action.cursor_y is not None
+            if absolute_cursor:
+                self._require_positive_input_permitted()
+                assert action.cursor_x is not None and action.cursor_y is not None
+                self._position_pointer_in_game(action.cursor_x, action.cursor_y)
             if action.mouse_dx or action.mouse_dy:
                 relative_x, relative_y = _wine_relative_motion_delta(
                     action.mouse_dx,
@@ -826,10 +875,23 @@ class IsolatedX11InputBackend:
                 if button_id is None:
                     raise IsolationError(f"unsupported mouse button: {button!r}")
                 self._require_positive_input_permitted()
-                self._park_pointer_in_game()
+                if not absolute_cursor:
+                    self._park_pointer_in_game()
                 self._require_positive_input_permitted()
                 self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
                 self._held_buttons.add(button.lower())
+            # A token present in both down/up sets is an atomic tap.  Keep the
+            # release in the same accepted supervisor action so GUI clicks and
+            # inventory toggles cannot remain held if the next frame stalls.
+            for key in sorted(tap_keys):
+                self._send_key(self._keycode(key), down=False)
+                self._held_keys.discard(key.lower())
+            for button in sorted(tap_buttons):
+                button_id = _BUTTONS.get(button.lower())
+                if button_id is None:
+                    raise IsolationError(f"unsupported mouse button: {button!r}")
+                self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
+                self._held_buttons.discard(button.lower())
             self._display.sync()
         finally:
             pass
@@ -986,6 +1048,21 @@ def _wine_relative_motion_delta(
     large relative movements by the XTEST protocol.
     """
     return mouse_dx, mouse_dy
+
+
+def _normalized_content_point(
+    cursor_x: float,
+    cursor_y: float,
+    content_rect: tuple[int, int, int, int],
+) -> tuple[int, int]:
+    """Map normalized captured-frame coordinates into its parent X window."""
+    x, y, width, height = content_rect
+    if width <= 0 or height <= 0:
+        raise IsolationError("Minecraft content rectangle has invalid geometry")
+    return (
+        x + min(width - 1, max(0, int(round(cursor_x * (width - 1))))),
+        y + min(height - 1, max(0, int(round(cursor_y * (height - 1))))),
+    )
 
 
 def _wine_content_rect(
@@ -1295,6 +1372,12 @@ def _crop_bgra(
 ) -> bytes:
     x, y, width, height = rect
     source_stride = source_width * 4
+    if x == 0 and width == source_width:
+        # The live Wine content crop removes only the top/bottom decoration.
+        # Its rows are already contiguous, so one bounded slice avoids more
+        # than a thousand Python-level row copies on every captured frame.
+        start = y * source_stride
+        return source[start : start + height * source_stride]
     row_bytes = width * 4
     output = bytearray(row_bytes * height)
     source_view = memoryview(source)

@@ -1066,8 +1066,9 @@ def _grounded_response_schema(
         for item in evidence
         if item.region_kind in {EvidenceRegion.CHAT, EvidenceRegion.GUI}
     ]
-    tracks_enabled = bool(localized_evidence_ids) and (
-        not output_keys or any(key.startswith("target.") for key in output_keys)
+    tracks_enabled = bool(localized_evidence_ids) and _localized_tracks_requested(
+        output_keys,
+        evidence_regions,
     )
     chat_enabled = EvidenceRegion.CHAT in evidence_regions
 
@@ -1231,8 +1232,9 @@ def _grounded_response_grammar(
         for item in evidence
         if item.region_kind in {EvidenceRegion.CHAT, EvidenceRegion.GUI}
     )
-    tracks_enabled = bool(localized_ids) and (
-        not output_keys or any(key.startswith("target.") for key in output_keys)
+    tracks_enabled = bool(localized_ids) and _localized_tracks_requested(
+        output_keys,
+        evidence_regions,
     )
     chat_enabled = EvidenceRegion.CHAT in evidence_regions
 
@@ -1297,6 +1299,16 @@ def _grounded_response_grammar(
             "ws ::= [ \\t\\n]*",
         )
     )
+
+
+def _localized_tracks_requested(
+    output_keys: tuple[str, ...],
+    evidence_regions: set[EvidenceRegion],
+) -> bool:
+    """Permit tracks only for open, target, or explicitly GUI-scoped requests."""
+    if not output_keys or any(key.startswith("target.") for key in output_keys):
+        return True
+    return "gui.mode" in output_keys and EvidenceRegion.GUI in evidence_regions
 
 
 def _grounded_prompt(

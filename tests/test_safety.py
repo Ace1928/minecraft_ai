@@ -193,3 +193,28 @@ def test_action_model_rejects_unbounded_mouse_and_duration() -> None:
         MotorAction(sequence=0, duration_ms=1001)
     with pytest.raises(ValueError):
         MotorAction(sequence=0, camera_semantics="screen")
+
+
+def test_absolute_cursor_requires_a_complete_gui_only_contract() -> None:
+    action = MotorAction(
+        sequence=0,
+        cursor_x=0.25,
+        cursor_y=0.75,
+        camera_semantics="cursor",
+        buttons_down=("right",),
+        buttons_up=("right",),
+    )
+    assert action.action_kinds() == frozenset({"button", "mouse"})
+
+    with pytest.raises(ValueError, match="supplied together"):
+        MotorAction(sequence=0, cursor_x=0.25, camera_semantics="cursor")
+    with pytest.raises(ValueError, match="cursor semantics"):
+        MotorAction(sequence=0, cursor_x=0.25, cursor_y=0.75)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        MotorAction(
+            sequence=0,
+            cursor_x=0.25,
+            cursor_y=0.75,
+            mouse_dx=1,
+            camera_semantics="cursor",
+        )

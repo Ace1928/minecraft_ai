@@ -21,6 +21,7 @@ from minecraft_ai.perception_service import (
     SemanticObservation,
     bedrock_air_bubbles,
     bedrock_death_screen_present,
+    bedrock_inventory_overlay_present,
     bedrock_survival_hud_present,
     bedrock_ui_chrome_present,
     frame_dhash,
@@ -175,6 +176,52 @@ class _EmptyStructuredVisionModel:
         )
 
 
+class _CraftConstrainedVisionModel:
+    model_id = "craft-constrained-test-vlm"
+
+    def __init__(self) -> None:
+        self.schema: dict[str, object] | None = None
+        self.grammar = ""
+
+    def inspect(self, prompt: str, *, image_bytes: bytes, mime_type: str) -> ModelResponse:
+        raise AssertionError((prompt, image_bytes, mime_type))
+
+    def inspect_constrained(
+        self,
+        prompt: str,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        name: str,
+        schema: dict[str, object],
+        grammar: str,
+    ) -> ModelResponse:
+        assert "craftable_planks_recipe" in prompt
+        assert image_bytes.startswith(b"\x89PNG")
+        assert mime_type == "image/png"
+        assert name == "minecraft_grounded_perception"
+        self.schema = schema
+        self.grammar = grammar
+        return ModelResponse(
+            text=(
+                '{"uncertainty":0.1,"prose_summary":"","claims":['
+                '{"key":"scene.mode","status":"observed","value":"gui",'
+                '"confidence":0.99,"evidence_ids":["frame-1:gui"],"reason":null},'
+                '{"key":"gui.mode","status":"observed","value":"inventory",'
+                '"confidence":0.99,"evidence_ids":["frame-1:gui"],"reason":null},'
+                '{"key":"inventory.logs","status":"observed","value":2,'
+                '"confidence":0.95,"evidence_ids":["frame-1:gui"],"reason":null},'
+                '{"key":"inventory.planks","status":"observed","value":0,'
+                '"confidence":0.95,"evidence_ids":["frame-1:gui"],"reason":null}],'
+                '"tracks":[{"label":"craftable_planks_recipe","confidence":0.95,'
+                '"evidence_id":"frame-1:gui","x":0.2,"y":0.2,'
+                '"width":0.1,"height":0.1}],"chat":[]}'
+            ),
+            model=self.model_id,
+            latency_ms=33_000.0,
+        )
+
+
 def _frame(pixels: bytes, *, width: int = 9, height: int = 8) -> CapturedFrame:
     return CapturedFrame(
         frame_id=1,
@@ -222,7 +269,54 @@ def test_bedrock_ui_chrome_is_a_negative_only_motor_interlock() -> None:
     assert bedrock_ui_chrome_present(frame)
     facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
     assert facts["scene.playable"].value is False
-    assert facts["scene.playable"].source.startswith("bootstrap:")
+    assert facts["scene.playable"].source.startswith("safety:")
+    assert "scene.inventory_overlay" not in facts
+
+
+def test_bedrock_inventory_chrome_is_a_negative_only_motor_interlock() -> None:
+    width, height = 640, 360
+    pixels = bytearray(bytes((50, 80, 45, 255)) * width * height)
+    for y in range(int(height * 0.12), int(height * 0.21)):
+        for x in range(int(width * 0.10), int(width * 0.90)):
+            offset = (y * width + x) * 4
+            pixels[offset : offset + 4] = bytes((190, 190, 190, 255))
+    for y in range(int(height * 0.20), int(height * 0.34)):
+        for x in range(int(width * 0.10), int(width * 0.90)):
+            offset = (y * width + x) * 4
+            pixels[offset : offset + 4] = bytes((110, 110, 110, 255))
+    frame = _frame(bytes(pixels), width=width, height=height)
+
+    assert bedrock_inventory_overlay_present(frame)
+    assert bedrock_ui_chrome_present(frame)
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["scene.ui_overlay"].value is True
+    assert facts["scene.playable"].value is False
+    assert facts["scene.inventory_overlay"].value is True
+    assert facts["scene.ui_overlay"].source.startswith("safety:")
+    assert facts["scene.inventory_overlay"].source.endswith(":not-training-label")
+    assert "scene.mode" not in facts
+
+
+def test_bedrock_inventory_chrome_requires_both_calibrated_regions() -> None:
+    width, height = 640, 360
+    base = bytes((50, 80, 45, 255)) * width * height
+    upper_only = bytearray(base)
+    header_only = bytearray(base)
+    for y in range(int(height * 0.12), int(height * 0.20)):
+        for x in range(int(width * 0.10), int(width * 0.90)):
+            offset = (y * width + x) * 4
+            upper_only[offset : offset + 4] = bytes((190, 190, 190, 255))
+    for y in range(int(height * 0.20), int(height * 0.34)):
+        for x in range(int(width * 0.10), int(width * 0.90)):
+            offset = (y * width + x) * 4
+            header_only[offset : offset + 4] = bytes((110, 110, 110, 255))
+
+    assert not bedrock_inventory_overlay_present(
+        _frame(bytes(upper_only), width=width, height=height)
+    )
+    assert not bedrock_inventory_overlay_present(
+        _frame(bytes(header_only), width=width, height=height)
+    )
 
 
 def test_complete_survival_hud_is_required_for_camera_calibration() -> None:
@@ -237,7 +331,12 @@ def test_complete_survival_hud_is_required_for_camera_calibration() -> None:
             offset = (y * width + x) * 4
             pixels[offset : offset + 4] = bytes((140, 140, 140, 255))
 
-    assert bedrock_survival_hud_present(_frame(bytes(pixels), width=width, height=height))
+    world_frame = _frame(bytes(pixels), width=width, height=height)
+    assert bedrock_survival_hud_present(world_frame)
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(world_frame)}
+    assert facts["scene.mode"].value == "world"
+    assert facts["scene.playable"].value is True
+    assert facts["scene.playable"].source.startswith("safety:")
     assert not bedrock_survival_hud_present(
         _frame(bytes((20, 20, 20, 255)) * width * height, width=width, height=height)
     )
@@ -382,6 +481,46 @@ def test_active_vlm_encodes_only_regions_capable_of_proving_typed_request() -> N
     )
     assert "untrusted question text" in model.prompt
     assert '"inventory.logs"' in model.prompt
+
+
+def test_craft_gui_query_allows_grounded_track_in_schema_grammar_and_harness() -> None:
+    model = _CraftConstrainedVisionModel()
+    worker = ActiveVLMWorker(model, PerceptionBlackboard(), "bedrock:test")
+    frame = _frame(b"\0" * (9 * 8 * 4))
+
+    observation, latency_ms = worker._inspect(
+        SemanticJob(
+            query=ActivePerceptionQuery(
+                query_id="q-craft-planks",
+                question=(
+                    "Inspect the inventory and label a visible craftable recipe exactly "
+                    "craftable_planks_recipe."
+                ),
+                frame_id=1,
+                output_keys=(
+                    "scene.mode",
+                    "scene.playable",
+                    "gui.mode",
+                    "inventory.logs",
+                    "inventory.planks",
+                ),
+            ),
+            frame=frame,
+            frame_dhash=frame_dhash(frame),
+        )
+    )
+
+    assert model.schema is not None
+    properties = model.schema["properties"]
+    assert isinstance(properties, dict)
+    tracks = properties["tracks"]
+    assert isinstance(tracks, dict)
+    assert tracks["maxItems"] == 8
+    assert 'tracks ::= "[" ws (track' in model.grammar
+    assert observation.tracks[0].label == "craftable_planks_recipe"
+    assert observation.tracks[0].evidence_id == "frame-1:gui"
+    assert observation.canonical_facts()["inventory.logs"] == 2
+    assert latency_ms == 33_000.0
 
 
 def test_active_vlm_repairs_schema_once_and_still_rejects_unsupported_claims() -> None:

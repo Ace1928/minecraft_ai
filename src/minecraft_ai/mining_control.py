@@ -231,9 +231,11 @@ class MiningLeaseGuard:
     ) -> MiningGuardDecision:
         held_keys = set(self._held_keys)
         held_buttons = set(self._held_buttons)
-        next_keys = (held_keys - set(action.keys_up)) | set(action.keys_down)
-        next_buttons = (held_buttons - set(action.buttons_up)) | set(
-            action.buttons_down
+        # Input backends apply positive events before matching releases, so a
+        # token present in both sets is an atomic tap and must end released.
+        next_keys = (held_keys | set(action.keys_down)) - set(action.keys_up)
+        next_buttons = (held_buttons | set(action.buttons_down)) - set(
+            action.buttons_up
         )
         release_keys = tuple(
             sorted(held_keys | set(action.keys_down) | set(action.keys_up))
@@ -257,9 +259,11 @@ class MiningLeaseGuard:
             or (set(action.buttons_down) - {"left"})
             or (set(action.buttons_up) - {"left"})
         )
+        # Do not let an atomic tap evade mining's interaction interlock merely
+        # because its final held-state is empty.
         conflicting_input = bool(
-            next_buttons - {"left"}
-            or next_keys - _LOCOMOTION_KEYS - _HOTBAR_KEYS
+            (next_buttons | set(action.buttons_down)) - {"left"}
+            or (next_keys | set(action.keys_down)) - _LOCOMOTION_KEYS - _HOTBAR_KEYS
         )
         lease = self._lease
         if lease is None:
@@ -300,7 +304,7 @@ class MiningLeaseGuard:
 
         policy_action = action
         action = _quiesce_active_lease_action(action, held_keys=held_keys)
-        next_keys = (held_keys - set(action.keys_up)) | set(action.keys_down)
+        next_keys = (held_keys | set(action.keys_down)) - set(action.keys_up)
         buttons_up = tuple(button for button in action.buttons_up if button != "left")
         buttons_down = action.buttons_down
         if lease.override_active:
@@ -309,7 +313,7 @@ class MiningLeaseGuard:
         lease.override_active = lease.override_active or suppressed_release
         synthetic = lease.override_active or action != policy_action
         self._held_keys = next_keys
-        self._held_buttons = (held_buttons - set(buttons_up)) | set(buttons_down)
+        self._held_buttons = (held_buttons | set(buttons_down)) - set(buttons_up)
         if buttons_up == action.buttons_up and buttons_down == action.buttons_down:
             return MiningGuardDecision(action, synthetic=synthetic)
         return MiningGuardDecision(
@@ -614,10 +618,10 @@ class MiningLeaseGuard:
         )
 
     def _remember_emitted(self, action: MotorAction) -> None:
-        self._held_keys.difference_update(action.keys_up)
         self._held_keys.update(action.keys_down)
-        self._held_buttons.difference_update(action.buttons_up)
+        self._held_keys.difference_update(action.keys_up)
         self._held_buttons.update(action.buttons_down)
+        self._held_buttons.difference_update(action.buttons_up)
 
     def _continuation_interlock(
         self,

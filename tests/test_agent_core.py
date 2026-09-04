@@ -358,6 +358,97 @@ def test_learned_inventory_scene_routes_to_learned_inventory_toggle() -> None:
     assert recovery.policy_ref == "close_inventory"
 
 
+def test_fast_inventory_interlock_routes_close_without_waiting_for_vlm() -> None:
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:inventory-fast",
+            width=1280,
+            height=720,
+            facts=(
+                PerceptionFact(
+                    key="scene.inventory_overlay",
+                    value=True,
+                    confidence=0.995,
+                    observed_ns=now,
+                    source="safety:bedrock-hud-v1:not-training-label",
+                    expires_after_ms=250,
+                ),
+                PerceptionFact(
+                    key="scene.playable",
+                    value=False,
+                    confidence=0.995,
+                    observed_ns=now,
+                    source="safety:bedrock-hud-v1:not-training-label",
+                    expires_after_ms=250,
+                ),
+            ),
+        )
+    )
+
+    recovery = _observed_scene_recovery(build_bootstrap_skill_library(), board)
+
+    assert recovery is not None
+    assert recovery.skill_id == "close_open_inventory"
+
+
+def test_intentional_crafting_gui_ownership_suppresses_auto_close() -> None:
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:inventory",
+            width=1280,
+            height=720,
+            facts=(
+                PerceptionFact(
+                    key="scene.mode",
+                    value="inventory",
+                    confidence=0.9,
+                    observed_ns=now,
+                    source="learned:steve1:mineclip-scene:not-training-label",
+                ),
+                PerceptionFact(
+                    key="scene.observation_dhash",
+                    value="0000000000000000",
+                    confidence=1.0,
+                    observed_ns=now,
+                    source="bootstrap:safety",
+                ),
+                PerceptionFact(
+                    key="frame.dhash",
+                    value="0000000000000000",
+                    confidence=1.0,
+                    observed_ns=now,
+                    source="bootstrap:safety",
+                ),
+            ),
+        )
+    )
+    skills = build_bootstrap_skill_library()
+    executor = SkillExecutor(BootstrapMotorPolicy())
+    executor.start(
+        skills.get("craft_wood_planks"),
+        run_id="craft:owns-gui",
+        now_ns=now,
+    )
+    runtime = object.__new__(AgentRuntime)
+    runtime.blackboard = board
+    runtime.skills = skills
+    runtime.executor = executor
+
+    runtime._route_observed_scene_recovery()
+
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.run_id == "craft:owns-gui"
+    assert runtime.executor.run.outcome == SkillOutcome.RUNNING
+
+
 def test_stale_inventory_scene_does_not_preempt_world_play() -> None:
     now = time.monotonic_ns()
     board = PerceptionBlackboard()
@@ -1761,6 +1852,38 @@ def test_same_skill_cognition_takes_ownership_from_disposable_keepalive() -> Non
     assert runtime.executor.run.run_id != "keepalive-run"
     assert runtime.executor.run.context_key == "default"
     assert runtime.executor.instruction == "Explore toward open ground."
+
+
+def test_world_decision_closes_owned_crafting_gui_before_execution() -> None:
+    decision = CognitionDecision(
+        skill_id="explore_forward",
+        instruction="Explore toward open ground.",
+    )
+    runtime = _runtime_with_completed_decision(decision)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime.executor.start(
+        runtime.skills.get("craft_wood_planks"),
+        run_id="craft:preempted",
+        context_key="operator:craft",
+    )
+    sent: list[ExecutionTick] = []
+    terminal: list[SkillRun] = []
+    runtime._send_motor = (  # type: ignore[method-assign]
+        lambda _action, *, execution: sent.append(execution)
+    )
+    runtime._record_terminal_run = terminal.append  # type: ignore[method-assign]
+
+    runtime._consume_cognition()
+
+    assert terminal and terminal[0].run_id == "craft:preempted"
+    assert terminal[0].outcome == SkillOutcome.CANCELLED
+    assert sent and sent[0].recovery_skills == ("close_open_inventory",)
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.skill_id == "close_open_inventory"
+    assert runtime.executor.run.context_key == "operator:craft"
+    assert runtime._last_decision is None
+    assert runtime._cognition_requested is False
 
 
 def _runtime_with_completed_decision(
