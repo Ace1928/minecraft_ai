@@ -540,9 +540,19 @@ class Supervisor:
                     conn, _ = server.accept()
                 except TimeoutError:
                     continue
-                with conn:
-                    conn.settimeout(1.0)
-                    self._handle_connection(conn)
+                # Handle each command on its own daemon thread. The motor loop
+                # floods motor-action commands at 20 Hz; servicing them serially
+                # in this accept loop starved the heartbeat's renew, so the lease
+                # lapsed and the watchdog expired it. Motor/lease state is
+                # protected by the supervisor lock, so concurrent handling is
+                # safe: the renew, motor-action, and status planes interleave.
+                conn.settimeout(1.0)
+                threading.Thread(
+                    target=self._handle_connection,
+                    args=(conn,),
+                    name="minecraft-ai-cmd",
+                    daemon=True,
+                ).start()
         finally:
             self.motor.revoke("supervisor-exit")
             try:
@@ -623,7 +633,15 @@ class Supervisor:
                 raise RuntimeError(f"unknown command: {command}")
             _send_json_line(conn, {"ok": True, "result": result})
         except Exception as exc:
-            _send_json_line(conn, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+            try:
+                _send_json_line(conn, {"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+            except Exception:
+                pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def _persist_status(self) -> None:
         # Pure in-process Supervisor instances (including unit tests) do not own
