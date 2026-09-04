@@ -1025,6 +1025,24 @@ class HighLevelController:
                         context,
                         blocked_run,
                     )
+            if (
+                decision.skill_id is None
+                and decision.request_replan
+                and not decision.ask_perception
+                and decision.research_query is None
+            ):
+                # A valid top-level abstention bypasses the repair path. It
+                # still needs new evidence before another slow model call;
+                # otherwise null/x=true/q=[] can repeat forever on one scene.
+                candidates = repair_bounds.requested_skill_ids or tuple(
+                    run.skill_id
+                    for run in context.recent_skill_runs
+                    if run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}
+                )
+                if candidates:
+                    decision = decision.model_copy(update={
+                        "ask_perception": self._prerequisite_perception_keys(candidates[0]),
+                    })
             self.metrics.last_error = None
             return decision
         except Exception as exc:
@@ -1399,21 +1417,8 @@ class HighLevelController:
         repaired = self._apply_decision_authority(repaired, blackboard, context)
         if repaired.skill_id is None and repaired.request_replan:
             if not repaired.ask_perception:
-                # A failed repair needs new evidence, not another identical
-                # model call. Reuse the failed option's concrete prerequisite
-                # keys; locomotion options without prerequisites need terrain.
-                prerequisite_keys = tuple(
-                    condition.key for condition in self.skills.get(failed_skill).preconditions
-                )
-                # Internal run witnesses (such as collection authorization)
-                # are not visual claims and must never be requested of a VLM.
-                keys = tuple(
-                    key
-                    for prerequisite in prerequisite_keys
-                    for key in resolve_grounded_output_keys((), prerequisite)
-                ) or ("obstacle.ahead",)
                 repaired = repaired.model_copy(
-                    update={"ask_perception": tuple(dict.fromkeys(keys))[:2]}
+                    update={"ask_perception": self._prerequisite_perception_keys(failed_skill)}
                 )
             self.metrics.last_error = None
             return _enforce_repair_bounds(repaired, repair_bounds)
@@ -1434,6 +1439,16 @@ class HighLevelController:
                 ),
             }
         )
+
+    def _prerequisite_perception_keys(self, skill_id: str | None) -> tuple[str, ...]:
+        """Ask for canonical visual prerequisites, never internal run witnesses."""
+        spec = None if skill_id is None else self.skills.specs.get(skill_id)
+        keys = tuple(
+            key
+            for condition in (() if spec is None else spec.preconditions)
+            for key in resolve_grounded_output_keys((), condition.key)
+        ) or ("obstacle.ahead",)
+        return tuple(dict.fromkeys(keys))[:2]
 
     def _complete(
         self,

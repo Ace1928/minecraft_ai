@@ -1260,6 +1260,65 @@ def test_operator_null_action_cannot_acknowledge_instruction_as_executed() -> No
     assert decision.skill_id is None
     assert decision.request_replan is True
     assert decision.chosen_goal_id == "operator:move-now"
+    assert decision.ask_perception == ("obstacle.ahead",)
+
+
+@pytest.mark.parametrize(
+    ("instruction", "failed_skill", "expected_keys"),
+    (
+        ("break the blocks in front of you", None, ("target.visible", "target.mineable")),
+        (None, "mine_visible_block", ("target.visible", "target.mineable")),
+        (None, "collect_recent_drop", ("obstacle.ahead",)),
+        (None, None, ()),
+    ),
+)
+def test_top_level_empty_replan_requests_visual_evidence_without_another_model_call(
+    monkeypatch: pytest.MonkeyPatch,
+    instruction: str | None,
+    failed_skill: str | None,
+    expected_keys: tuple[str, ...],
+) -> None:
+    context = _context()
+    if instruction is not None:
+        context.operator_messages = (OperatorMessage(
+            message_id="current", created_ns=2, text=instruction,
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),)
+    if failed_skill is not None:
+        context.recent_skill_runs = (SkillRun(
+            run_id="failed", skill_id=failed_skill, started_ns=1, ended_ns=2,
+            outcome=SkillOutcome.FAILED,
+        ),)
+    controller = HighLevelController(_IdleCapturingModel(), build_bootstrap_skill_library())
+    calls: list[object] = []
+
+    def complete(messages: object, **_kwargs: object) -> CognitionDecision:
+        calls.append(messages)
+        return CognitionDecision(request_replan=True)
+
+    monkeypatch.setattr(controller, "_complete", complete)
+    decision = controller.decide(_board(), context)
+
+    assert len(calls) == 1
+    assert decision.skill_id is None
+    assert decision.request_replan is True
+    assert decision.ask_perception == expected_keys
+    if instruction is not None:
+        assert decision.chosen_goal_id == "operator:current"
+
+
+def test_top_level_research_request_does_not_buy_unrelated_visual_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = HighLevelController(_IdleCapturingModel(), build_bootstrap_skill_library())
+    monkeypatch.setattr(controller, "_complete", lambda *_args, **_kwargs: CognitionDecision(
+        request_replan=True, research_query="Minecraft oak plank recipe",
+    ))
+
+    decision = controller.decide(_board(), _context())
+
+    assert decision.ask_perception == ()
+    assert decision.research_query == "Minecraft oak plank recipe"
 
 
 @pytest.mark.parametrize(
