@@ -443,6 +443,40 @@ def test_grounded_router_merges_temporally_filtered_target_feedback() -> None:
     assert after_two_misses is not None and after_two_misses.value is False
 
 
+def test_grounded_feedback_survives_cpu_latency_then_expires_at_bounded_ttl() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _TargetFeedbackPolicy("rocket", key="a")
+    router = GroundedPolicyRouter(primary, grounded)
+    board = _tracked_board(age_ms=10_000)
+    router.act(
+        board,
+        MotorIntent(
+            skill_id="mine_visible_block",
+            mode="mine",
+            episode_id="mine-1",
+            action_level=ActionLevel.GROUNDED,
+        ),
+        sequence=1,
+    )
+    arrival_ns = time.monotonic_ns()
+    observed_ns = arrival_ns - 1_700_000_000
+    grounded.observation = GroundedTargetObservation(
+        observed_ns=observed_ns,
+        probability=0.95,
+        point_yx=(0.5, 0.5),
+        bbox_xyxy=(0.4, 0.2, 0.6, 0.8),
+        model_version="rocket-test",
+    )
+
+    assert router.merge_perception(board)
+    visible = board.fact("target.visible", now_ns=arrival_ns)
+    assert visible is not None and visible.value is True
+    assert visible.observed_ns == observed_ns
+    assert visible.expires_after_ms == 5_000
+    assert board.fact("target.visible", now_ns=observed_ns + 4_999_000_000) is not None
+    assert board.fact("target.visible", now_ns=observed_ns + 5_001_000_000) is None
+
+
 def test_grounded_router_keeps_small_learned_target_box_outside_near_range() -> None:
     primary = _RoutingPolicy("steve", key="w")
     grounded = _TargetFeedbackPolicy("rocket", key="a")

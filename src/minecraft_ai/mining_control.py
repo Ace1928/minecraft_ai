@@ -13,6 +13,9 @@ from .skills import SkillFailureCode
 _MINING_MODES = frozenset({"mine", "gather", "gather_wood", "break"})
 _LOCOMOTION_KEYS = frozenset({"w", "a", "s", "d", "space"})
 _HOTBAR_KEYS = frozenset("123456789")
+_OPERATOR_AIM_GAIN = 40.0
+_OPERATOR_AIM_MAX_STEP = 12
+_OPERATOR_AIM_INITIAL_FRAME_GRACE_MS = 250
 _EMPTY_ITEMS = frozenset({"air", "empty", "empty_slot", "hand", "none"})
 _UNVERIFIED_ITEM = "unverified_item"
 _WOOD_SPECIES = frozenset(
@@ -168,6 +171,7 @@ class _PendingMiningAcquisition:
     motion_seen: bool = False
     settling: bool = False
     settle_after_ns: int = 0
+    last_aim_observation_ns: int = 0
 
 
 @dataclass(frozen=True)
@@ -449,6 +453,34 @@ class MiningLeaseGuard:
                 force_release_buttons=release_buttons,
             )
 
+        # The semantic body does not consume ROCKET's target coordinates and
+        # ROCKET's own body action is intentionally discarded. During an exact
+        # operator mining acquisition, use each new localization once to nudge
+        # only the camera. Locomotion and attack remain suppressed, and a later
+        # newer, centered observation must still pass the normal target/tool
+        # gates before attack can start.
+        aim_track = _operator_aim_track(
+            blackboard,
+            intent,
+            pending=pending,
+            now_ns=now_ns,
+            min_confidence=self.min_confidence,
+            max_track_age_ms=self.max_track_age_ms,
+        )
+        if aim_track is not None and not _contains_crosshair(aim_track):
+            aimed = _aim_at_operator_track(
+                action,
+                aim_track,
+                held_keys=held_keys,
+            )
+            pending.motion_seen = True
+            pending.settling = True
+            pending.settle_after_ns = now_ns
+            pending.last_aim_observation_ns = aim_track.last_seen_ns
+            self._last_targeting_change_ns = now_ns
+            self._remember_emitted(aimed)
+            return MiningGuardDecision(aimed, synthetic=aimed != policy_action)
+
         if pending.settling:
             quiesced = _quiesce_pending_action(action, held_keys=held_keys)
             visual = _visual_hash(blackboard, now_ns=now_ns)
@@ -676,6 +708,40 @@ def _quiesce_pending_action(
     )
 
 
+def _aim_at_operator_track(
+    action: MotorAction,
+    track: Track,
+    *,
+    held_keys: set[str],
+) -> MotorAction:
+    """Emit one bounded camera-only correction toward an exact operator track."""
+    quiesced = _quiesce_pending_action(action, held_keys=held_keys)
+    region = track.region
+    center_x = region.x + region.width / 2.0
+    center_y = region.y + region.height / 2.0
+    horizontal_error = (
+        0.0 if region.x <= 0.5 <= region.x + region.width else center_x - 0.5
+    )
+    vertical_error = (
+        0.0 if region.y <= 0.5 <= region.y + region.height else center_y - 0.5
+    )
+    return quiesced.model_copy(
+        update={
+            "mouse_dx": _bounded_operator_aim_step(horizontal_error),
+            "mouse_dy": _bounded_operator_aim_step(vertical_error),
+        }
+    )
+
+
+def _bounded_operator_aim_step(error: float) -> int:
+    if error == 0.0:
+        return 0
+    step = round(error * _OPERATOR_AIM_GAIN)
+    if step == 0:
+        step = 1 if error > 0.0 else -1
+    return max(-_OPERATOR_AIM_MAX_STEP, min(_OPERATOR_AIM_MAX_STEP, step))
+
+
 def _press_left(action: MotorAction) -> MotorAction:
     return action.model_copy(
         update={
@@ -736,15 +802,33 @@ def _explicit_operator_mining_authorized(
     min_confidence: float,
 ) -> bool:
     """Authorize only the exact operator-marked target for this mining intent."""
+    return (
+        _explicit_operator_mining_track(
+            blackboard,
+            intent,
+            now_ns=now_ns,
+            min_confidence=min_confidence,
+        )
+        is not None
+    )
+
+
+def _explicit_operator_mining_track(
+    blackboard: PerceptionBlackboard,
+    intent: MotorIntent,
+    *,
+    now_ns: int,
+    min_confidence: float,
+) -> Track | None:
     if (
         intent.skill_id != "mine_visible_block"
         or intent.mode.casefold() != "mine"
         or intent.target_label is None
     ):
-        return False
+        return None
     latest = blackboard.latest()
     if latest is None:
-        return False
+        return None
 
     track_id: str | None = None
     reference = blackboard.fact(
@@ -781,7 +865,7 @@ def _explicit_operator_mining_authorized(
         if candidate:
             track_id = candidate
     if track_id is None:
-        return False
+        return None
 
     track = next((item for item in latest.tracks if item.track_id == track_id), None)
     if (
@@ -790,14 +874,64 @@ def _explicit_operator_mining_authorized(
         or track.confidence < min_confidence
         or (intent.target_track_id is not None and intent.target_track_id != track_id)
     ):
-        return False
+        return None
     kind_name = _normalize_name(track.label)
     rule = _block_rule(kind_name)
-    return bool(
-        rule is not None
-        and rule.family != _BlockFamily.UNBREAKABLE
-        and _requested_target_matches(intent.target_label, kind_name, rule)
+    if (
+        rule is None
+        or rule.family == _BlockFamily.UNBREAKABLE
+        or not _requested_target_matches(intent.target_label, kind_name, rule)
+    ):
+        return None
+    return track
+
+
+def _operator_aim_track(
+    blackboard: PerceptionBlackboard,
+    intent: MotorIntent,
+    *,
+    pending: _PendingMiningAcquisition,
+    now_ns: int,
+    min_confidence: float,
+    max_track_age_ms: int,
+) -> Track | None:
+    """Return one new ROCKET localization of the exact operator mining target."""
+    track = _explicit_operator_mining_track(
+        blackboard,
+        intent,
+        now_ns=now_ns,
+        min_confidence=min_confidence,
     )
+    if track is None or not _track_fresh(
+        track,
+        now_ns=now_ns,
+        max_track_age_ms=max_track_age_ms,
+    ):
+        return None
+    tracking_source = track.attributes.get("tracking_source")
+    probability = track.attributes.get("target_exists_probability")
+    if (
+        not isinstance(tracking_source, str)
+        or not _rocket_source(tracking_source)
+        or not isinstance(probability, (int, float))
+        or isinstance(probability, bool)
+        or float(probability) < min_confidence
+        or track.last_seen_ns <= pending.last_aim_observation_ns
+    ):
+        return None
+
+    # Never replay an observation captured before the most recent synthetic
+    # nudge or body-settle boundary. The first observation may precede skill
+    # admission only by one capture tick, matching the live request path.
+    if pending.settling:
+        evidence_after_ns = pending.settle_after_ns
+    else:
+        evidence_after_ns = (
+            pending.started_ns - _OPERATOR_AIM_INITIAL_FRAME_GRACE_MS * 1_000_000
+        )
+    if track.last_seen_ns <= evidence_after_ns:
+        return None
+    return track
 
 
 def _verified_target(

@@ -1244,7 +1244,10 @@ class GroundedPolicyRouter:
                 confidence=confidence,
                 observed_ns=observation.observed_ns,
                 source=source,
-                expires_after_ms=min(1500, self.max_track_age_ms),
+                # CPU ROCKET inference is routinely slower than 1.5 seconds.
+                # Keep the request-frame timestamp (causal truth), but allow a
+                # bounded post-arrival window that can survive that latency.
+                expires_after_ms=min(5_000, self.max_track_age_ms),
             )
             for key, value, confidence in fact_values
         )

@@ -85,6 +85,7 @@ def _mining_board(
     track_label: str | None = None,
     track_attributes: dict[str, str | int | float | bool] | None = None,
     track_seen_ns: int | None = None,
+    track_region: ScreenRegion | None = None,
     target_source: str = "vlm:test",
     scene_source: str = "vlm:test",
     crosshair_hash: str | None = _HASH_A,
@@ -142,7 +143,8 @@ def _mining_board(
                     track_id=track_id,
                     label=track_label or kind,
                     confidence=1.0,
-                    region=ScreenRegion(x=0.4, y=0.35, width=0.2, height=0.3),
+                    region=track_region
+                    or ScreenRegion(x=0.4, y=0.35, width=0.2, height=0.3),
                     first_seen_ns=track_seen_ns or now_ns,
                     last_seen_ns=track_seen_ns or now_ns,
                     attributes=track_attributes or {},
@@ -241,6 +243,132 @@ def test_operator_marked_target_can_acquire_without_policy_attack() -> None:
     assert started.run.outcome == SkillOutcome.RUNNING
     assert started.action is not None and started.action.buttons_down == ("left",)
     assert started.action_origin == ActionOrigin.SYNTHETIC
+
+
+def test_operator_mining_aims_once_per_new_track_then_attacks_only_when_centered() -> None:
+    now = time.monotonic_ns()
+    policy = _ScriptedPolicy(
+        MotorAction(
+            sequence=0,
+            keys_down=("w",),
+            buttons_down=("left",),
+            mouse_dx=77,
+        ),
+        MotorAction(sequence=0),
+        MotorAction(sequence=0),
+    )
+    executor = _executor(
+        policy,
+        now_ns=now,
+        skill_id="mine_visible_block",
+        parameters={"target": "dirt"},
+    )
+    tracked_attributes: dict[str, str | int | float | bool] = {
+        "source": "operator",
+        "tracking_source": _ROCKET_SOURCE,
+        "target_exists_probability": 0.96,
+    }
+
+    off_center = _mining_board(
+        now_ns=now,
+        kind="dirt",
+        item=None,
+        track_attributes=tracked_attributes,
+        track_seen_ns=now - 25_000_000,
+        track_region=ScreenRegion(x=0.20, y=0.30, width=0.10, height=0.50),
+        target_source=_ROCKET_SOURCE,
+        include_selected_slot=False,
+        extra_facts=(
+            _fact(
+                "target.reference_available",
+                True,
+                now_ns=now,
+                source="operator:cross-view-reference:target:one",
+            ),
+        ),
+    )
+    aimed = executor.tick(off_center, sequence=1, now_ns=now)
+    repeated = executor.tick(off_center, sequence=2, now_ns=now + 50_000_000)
+    centered = _mining_board(
+        now_ns=now + 100_000_000,
+        kind="dirt",
+        item=None,
+        track_attributes=tracked_attributes,
+        track_seen_ns=now + 100_000_000,
+        target_source=_ROCKET_SOURCE,
+        include_selected_slot=False,
+        extra_facts=(
+            _fact(
+                "target.reference_available",
+                True,
+                now_ns=now + 100_000_000,
+                source="operator:cross-view-reference:target:one",
+            ),
+        ),
+    )
+    started = executor.tick(centered, sequence=3, now_ns=now + 100_000_000)
+
+    assert aimed.action is not None
+    assert aimed.action.keys_down == ()
+    assert aimed.action.keys_up == ("w",)
+    assert aimed.action.buttons_down == ()
+    assert aimed.action.mouse_dx == -10
+    assert aimed.action.mouse_dy == 0
+    assert aimed.action_origin == ActionOrigin.SYNTHETIC
+    assert repeated.action is not None
+    assert repeated.action.mouse_dx == repeated.action.mouse_dy == 0
+    assert "left" not in repeated.action.buttons_down
+    assert started.action is not None and started.action.buttons_down == ("left",)
+    assert started.action.mouse_dx == started.action.mouse_dy == 0
+    assert sum(
+        tick.action is not None and "left" in tick.action.buttons_down
+        for tick in (aimed, repeated, started)
+    ) == 1
+
+
+def test_operator_aim_requires_matching_fresh_reference_and_mining_skill() -> None:
+    now = time.monotonic_ns()
+    tracked = _mining_board(
+        now_ns=now,
+        kind="dirt",
+        item=None,
+        track_attributes={
+            "source": "operator",
+            "tracking_source": _ROCKET_SOURCE,
+            "target_exists_probability": 0.99,
+        },
+        track_region=ScreenRegion(x=0.05, y=0.30, width=0.10, height=0.50),
+        target_source=_ROCKET_SOURCE,
+        include_selected_slot=False,
+        extra_facts=(
+            _fact(
+                "target.reference_available",
+                True,
+                now_ns=now,
+                source="operator:cross-view-reference:target:two",
+            ),
+        ),
+    )
+    operator_executor = _executor(
+        _ScriptedPolicy(MotorAction(sequence=0)),
+        now_ns=now,
+        skill_id="mine_visible_block",
+        parameters={"target": "dirt"},
+    )
+    generic_executor = _executor(
+        _ScriptedPolicy(MotorAction(sequence=0)),
+        now_ns=now,
+    )
+
+    mismatched = operator_executor.tick(tracked, sequence=1, now_ns=now)
+    generic = generic_executor.tick(tracked, sequence=1, now_ns=now)
+
+    assert mismatched.action is not None
+    assert mismatched.action.mouse_dx == mismatched.action.mouse_dy == 0
+    assert "left" not in mismatched.action.buttons_down
+    assert generic.action is not None
+    assert generic.action.mouse_dx == generic.action.mouse_dy == 0
+    assert "left" not in generic.action.buttons_down
 
 
 def test_generic_no_policy_attack_does_not_use_operator_reference() -> None:
