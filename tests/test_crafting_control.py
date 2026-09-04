@@ -253,7 +253,9 @@ def _craft_semantic_runtime(
 
 
 def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes() -> None:
-    now = time.monotonic_ns()
+    # Exercise long controller deadlines without publishing evidence from the
+    # future relative to PerceptionBlackboard.latest()'s real monotonic clock.
+    now = time.monotonic_ns() - 141 * _SECOND
     board = _board(now)
     executor = SkillExecutor(_UnusedPolicy())
     executor.start(

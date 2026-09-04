@@ -1202,6 +1202,16 @@ class GroundedPolicyRouter:
         )
         if target is None:
             return False
+        if (
+            target.attributes.get("source") == "crosshair-block-probe"
+            or target.attributes.get("sampling_aperture") is True
+        ):
+            # Recovery sampling apertures are not object tracks. Their VLM
+            # source and absolute-color binding must remain exclusive through
+            # MiningLeaseGuard admission, so consume but never promote ROCKET
+            # localization onto this transaction-owned track.
+            self._last_grounded_feedback_ns = observation.observed_ns
+            return False
         raw_confidence = max(0.0, min(1.0, observation.probability))
         alpha = self.target_confidence_alpha
         self._grounded_confidence = (
@@ -1319,6 +1329,8 @@ class GroundedPolicyRouter:
             track
             for track in latest.tracks
             if track.confidence >= self.min_track_confidence
+            and track.attributes.get("source") != "crosshair-block-probe"
+            and track.attributes.get("sampling_aperture") is not True
             and (intent.target_track_id is None or track.track_id == intent.target_track_id)
             and (
                 intent.target_label is None

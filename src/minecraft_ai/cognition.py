@@ -25,6 +25,9 @@ from .social import (
 from .wiki import WikiEvidence
 
 
+_WOOD_INVENTORY_AUDIT_SKILLS = frozenset({"craft_wood_planks", "open_inventory"})
+
+
 class CognitionDecision(BaseModel):
     """High-level output with explicit, non-interchangeable communication channels.
 
@@ -114,12 +117,13 @@ class CognitionContext:
 
 
 def planks_retry_requires_wood(context: CognitionContext) -> bool:
-    """A fresh explicit craft command permits one audit, not a permanent bypass."""
+    """A fresh explicit wood-audit command permits one attempt, not a permanent bypass."""
     if not context.planks_retry_requires_wood:
         return False
     active = next(
         (
-            message for message in context.operator_messages
+            message
+            for message in context.operator_messages
             if message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
         ),
         None,
@@ -127,7 +131,7 @@ def planks_retry_requires_wood(context: CognitionContext) -> bool:
     if (
         active is not None
         and active.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
-        and "craft_wood_planks" in _operator_requested_skill_ids(active.text)
+        and _WOOD_INVENTORY_AUDIT_SKILLS.intersection(_operator_requested_skill_ids(active.text))
     ):
         return False
     return True
@@ -560,7 +564,10 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
         add("respawn_after_death")
     if re.search(r"\b(?:close|exit|leave) (?:the )?(?:inventory|menu)\b", normalized):
         add("close_open_inventory")
-    elif re.search(r"\bopen (?:the )?inventory\b", normalized):
+    elif re.search(
+        r"\b(?:open|inspect|check|audit|view) (?:the )?inventory\b",
+        normalized,
+    ):
         add("open_inventory")
     if re.search(r"\b(?:click|activate|press)\b.*\b(?:button|control|menu)\b", normalized):
         add("activate_visible_gui_control")
@@ -951,9 +958,13 @@ class HighLevelController:
                 ),
             )
             decision = self._complete(messages, repair_bounds=repair_bounds)
+            decision = _bound_skill_parameters(
+                self._apply_decision_authority(decision, blackboard, context),
+                self.skills,
+                required_constraints=dict(repair_bounds.required_action_constraints),
+            )
             if repair_bounds.requested_skill_ids:
                 decision = _enforce_repair_bounds(decision, repair_bounds)
-            decision = self._apply_decision_authority(decision, blackboard, context)
             if decision.skill_id is not None and decision.skill_id not in self.skills.specs:
                 return self._repair_infeasible(
                     decision,
@@ -963,12 +974,17 @@ class HighLevelController:
                 )
             if decision.skill_id is not None:
                 selected = self.skills.get(decision.skill_id)
-                if selected.skill_id == "craft_wood_planks" and planks_retry_requires_wood(context):
+                if selected.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS and planks_retry_requires_wood(
+                    context
+                ):
                     return self._repair_infeasible(
                         decision,
                         blackboard,
                         context,
-                        reason="planks retry needs positive log evidence after inventory had none",
+                        reason=(
+                            "wood inventory audit needs positive log evidence after inventory "
+                            "had none"
+                        ),
                     )
                 if not initiation_satisfied(selected, blackboard):
                     missing = tuple(
@@ -1179,7 +1195,7 @@ class HighLevelController:
         }
         for skill in self.skills.specs.values():
             if (
-                skill.skill_id == "craft_wood_planks"
+                skill.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
                 and context is not None
                 and planks_retry_requires_wood(context)
             ):
@@ -1267,7 +1283,10 @@ class HighLevelController:
                 key=lambda candidate: candidate.skill_id,
             )
             if initiation_satisfied(skill, blackboard)
-            and not (skill.skill_id == "craft_wood_planks" and planks_retry_requires_wood(context))
+            and not (
+                skill.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
+                and planks_retry_requires_wood(context)
+            )
             and (allowed_skill_ids is None or skill.skill_id in allowed_skill_ids)
         )
         constraints = (
@@ -1340,8 +1359,12 @@ class HighLevelController:
         feasible = sorted(
             skill.skill_id
             for skill in self.skills.specs.values()
-            if skill.skill_id not in blocked_skill_ids and initiation_satisfied(skill, blackboard)
-            and not (skill.skill_id == "craft_wood_planks" and planks_retry_requires_wood(context))
+            if skill.skill_id not in blocked_skill_ids
+            and initiation_satisfied(skill, blackboard)
+            and not (
+                skill.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
+                and planks_retry_requires_wood(context)
+            )
         )
         self.metrics.repairs += 1
         self.metrics.retry_repairs += 1
@@ -1462,7 +1485,10 @@ class HighLevelController:
             skill.skill_id
             for skill in self.skills.specs.values()
             if initiation_satisfied(skill, blackboard)
-            and not (skill.skill_id == "craft_wood_planks" and planks_retry_requires_wood(context))
+            and not (
+                skill.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
+                and planks_retry_requires_wood(context)
+            )
         )
         self.metrics.repairs += 1
         repair_bounds = self._decision_repair_bounds(
@@ -1606,6 +1632,24 @@ def _enforce_repair_bounds(
             "skill_parameters": parameters,
         }
     )
+
+
+def _bound_skill_parameters(
+    decision: CognitionDecision,
+    skills: SkillLibrary,
+    *,
+    required_constraints: dict[str, str | int | float | bool],
+) -> CognitionDecision:
+    """Keep model bindings inside the selected option's parameter contract."""
+
+    if decision.skill_id is None or decision.skill_id not in skills.specs:
+        return decision
+    permitted = set(skills.get(decision.skill_id).parameters) | set(required_constraints)
+    parameters = {
+        key: value for key, value in decision.skill_parameters.items() if key in permitted
+    }
+    parameters.update(required_constraints)
+    return decision.model_copy(update={"skill_parameters": parameters})
 
 
 def _parse_decision(text: str) -> CognitionDecision:

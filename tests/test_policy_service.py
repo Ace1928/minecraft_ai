@@ -443,6 +443,57 @@ def test_grounded_router_merges_temporally_filtered_target_feedback() -> None:
     assert after_two_misses is not None and after_two_misses.value is False
 
 
+def test_grounded_router_never_promotes_crosshair_sampling_aperture() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _TargetFeedbackPolicy("rocket", key="a")
+    router = GroundedPolicyRouter(primary, grounded)
+    board = _tracked_board()
+    latest = board.latest()
+    assert latest is not None
+    now = time.monotonic_ns()
+    probe = Track(
+        track_id="crosshair-probe:q1",
+        label="dirt",
+        confidence=0.95,
+        region=ScreenRegion(x=0.499, y=0.499, width=0.002, height=0.002),
+        first_seen_ns=now,
+        last_seen_ns=now,
+        attributes={
+            "source": "crosshair-block-probe",
+            "tracking_source": "vlm:test:q1",
+            "sampling_aperture": True,
+            "crosshair_rgb_grid": "00" * (16 * 16 * 3),
+        },
+    )
+    assert board.upsert_semantic_track(instance_id=latest.instance_id, track=probe)
+    intent = MotorIntent(
+        skill_id="mine_visible_block",
+        mode="mine",
+        episode_id="mine-q1",
+        action_level=ActionLevel.GROUNDED,
+        target_track_id=probe.track_id,
+        target_label="dirt",
+    )
+    router.act(board, intent, sequence=1)
+    assert grounded.calls == 0
+    assert router.status()["grounding_active"] is False
+    observed_ns = time.monotonic_ns()
+    grounded.observation = GroundedTargetObservation(
+        observed_ns=observed_ns,
+        probability=0.99,
+        point_yx=(0.5, 0.5),
+        bbox_xyxy=(0.4, 0.4, 0.6, 0.6),
+        model_version="rocket-test",
+    )
+
+    assert router.merge_perception(board) is False
+    retained = next(
+        track for track in board.latest().tracks if track.track_id == probe.track_id
+    )
+    assert retained == probe
+    assert board.fact("target.tracking_confidence", now_ns=observed_ns) is None
+
+
 def test_grounded_router_polls_rocket_after_releasing_only_the_body() -> None:
     primary = _RoutingPolicy("steve", key="w")
     grounded = _TargetFeedbackPolicy("rocket", key="a")

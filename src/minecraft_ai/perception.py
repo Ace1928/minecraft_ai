@@ -29,6 +29,13 @@ class EvidenceRegion(StrEnum):
     GUI = "gui"
 
 
+class PerceptionQueryMode(StrEnum):
+    """Typed VLM routes; free-form question text never selects a safety contract."""
+
+    GROUNDED = "grounded"
+    CROSSHAIR_BLOCK = "crosshair_block"
+
+
 class PerceptionEvidence(BaseModel):
     """Content-addressed reference to the exact pixels supporting a claim.
 
@@ -95,7 +102,8 @@ class PerceptionFact(BaseModel):
 
     def fresh(self, now_ns: int | None = None) -> bool:
         now = time.monotonic_ns() if now_ns is None else now_ns
-        return now - self.observed_ns <= self.expires_after_ms * 1_000_000
+        age_ns = now - self.observed_ns
+        return 0 <= age_ns <= self.expires_after_ms * 1_000_000
 
 
 class FrameState(BaseModel):
@@ -271,6 +279,23 @@ class PerceptionBlackboard:
             self._semantic_tracks = retained
             return removed
 
+    def remove_semantic_facts(
+        self,
+        keys: tuple[str, ...],
+        *,
+        expected_source: str,
+    ) -> tuple[str, ...]:
+        """Remove only transaction-owned facts without touching newer producers."""
+
+        removed: list[str] = []
+        with self._lock:
+            for key in keys:
+                fact = self._facts.get(key)
+                if fact is not None and fact.source == expected_source:
+                    del self._facts[key]
+                    removed.append(key)
+        return tuple(removed)
+
     def _merge_facts_locked(self, facts: tuple[PerceptionFact, ...]) -> None:
         for fact in facts:
             existing = self._facts.get(fact.key)
@@ -350,6 +375,7 @@ class ActivePerceptionQuery(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     query_id: str
+    mode: PerceptionQueryMode = PerceptionQueryMode.GROUNDED
     question: str = Field(min_length=1, max_length=1024)
     skill_id: str | None = None
     frame_id: int = Field(ge=0)

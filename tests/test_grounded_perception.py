@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import time
+from dataclasses import replace
 
 import pytest
 from PIL import Image
@@ -23,10 +24,17 @@ from minecraft_ai.grounded_perception import (
     validate_grounded_response,
     _CROSSHAIR_PROBE_KEYS,
     _CompactCrosshairResponse,
+    _build_crosshair_block_evidence,
     _build_crosshair_evidence,
+    _crosshair_block_grammar,
     _crosshair_probe_requested,
     _crosshair_grammar,
+    _expand_crosshair_block_response,
     _expand_crosshair_response,
+    crosshair_block_crop_dimensions,
+    crosshair_block_region,
+    crosshair_block_rgb_grid,
+    crosshair_block_rgb_grid_distance,
 )
 from minecraft_ai.mining_control import is_hand_safe_soft_block
 from minecraft_ai.models import ModelResponse
@@ -154,6 +162,130 @@ def _compact_answer(*, block: str = "mossy_cobblestone") -> dict[str, object]:
     }
 
 
+def test_dedicated_crosshair_block_probe_is_one_exact_crop_and_two_fields() -> None:
+    class _Model:
+        model_id = "strict-crosshair-model"
+
+        def inspect(self, prompt: str, *, image_bytes: bytes, mime_type: str) -> ModelResponse:
+            raise AssertionError("native constrained path required")
+
+        def inspect_constrained(
+            self,
+            prompt: str,
+            *,
+            image_bytes: bytes,
+            mime_type: str,
+            name: str,
+            schema: dict[str, object],
+            grammar: str,
+        ) -> ModelResponse:
+            self.prompt = prompt
+            self.image = image_bytes
+            self.name = name
+            self.schema = schema
+            self.grammar = grammar
+            return ModelResponse(
+                text='{"block":"dirt","confidence":0.85}',
+                model=self.model_id,
+                latency_ms=4,
+            )
+
+    model = _Model()
+    frame = _frame(width=801, height=803)
+    result = GroundedPerceptionHarness(model).inspect_crosshair_block_detailed(
+        frame,
+        frame_id=19,
+    )
+    assert result.report.observed_values() == {"recovery.crosshair.block": "dirt"}
+    assert result.report.confidence_by_key() == {"recovery.crosshair.block": 0.85}
+    assert result.report.tracks == ()
+    assert len(result.report.evidence) == 1
+    evidence = result.report.evidence[0]
+    assert evidence.evidence_id == "frame-19:crosshair-block"
+    assert evidence.frame_id == 19
+    assert evidence.captured_ns == frame.captured_ns
+    assert evidence.crop_width == evidence.crop_height == 511
+    with Image.open(io.BytesIO(model.image)) as image:
+        assert image.size == (511, 511)
+    assert model.name == "minecraft_crosshair_block"
+    assert set(model.schema["required"]) == {"block", "confidence"}
+    assert "danger" not in model.prompt
+    assert "mineable" not in model.prompt
+    assert "box" not in model.prompt
+    assert "dx" not in model.prompt
+    assert '"\\\"block\\\""' in model.grammar
+
+
+@pytest.mark.parametrize(
+    "wire",
+    (
+        '{"block":"unknown","confidence":0.9}',
+        '{"block":null,"confidence":0.9}',
+        '{"block":"dirt","confidence":null}',
+        '{"block":"dirt","confidence":0}',
+    ),
+)
+def test_dedicated_crosshair_block_abstentions_emit_no_fact(wire: str) -> None:
+    evidence = _build_crosshair_block_evidence(_frame(), frame_id=7).evidence[0]
+    assert _expand_crosshair_block_response(wire, evidence).claims == ()
+
+
+def test_dedicated_crosshair_block_hard_negative_remains_explicit() -> None:
+    evidence = _build_crosshair_block_evidence(_frame(), frame_id=7).evidence[0]
+    response = _expand_crosshair_block_response(
+        '{"block":"mossy_cobblestone","confidence":0.91}', evidence
+    )
+    assert response.claims[0].value == "mossy_cobblestone"
+    assert not is_hand_safe_soft_block(str(response.claims[0].value))
+
+
+@pytest.mark.parametrize(
+    "wire",
+    (
+        '{"block":"dirt","confidence":0.9,"danger":false}',
+        '{"block":"dirt","block":"stone","confidence":0.9}',
+        '{"block":"diamond_block","confidence":0.9}',
+        '{"block":"dirt","confidence":"0.9"}',
+    ),
+)
+def test_dedicated_crosshair_block_invalid_wire_fails_without_repair(wire: str) -> None:
+    evidence = _build_crosshair_block_evidence(_frame(), frame_id=7).evidence[0]
+    with pytest.raises((ValidationError, ValueError)):
+        _expand_crosshair_block_response(wire, evidence)
+
+
+def test_crosshair_rgb_signature_detects_equal_luma_center_color_swap() -> None:
+    width = height = 512
+    gray = bytearray(bytes((100, 100, 100, 255)) * width * height)
+    cyan = bytearray(gray)
+    for y in range(232, 281):
+        for x in range(232, 281):
+            offset = (y * width + x) * 4
+            cyan[offset : offset + 4] = bytes((200, 132, 0, 255))
+    gray_frame = CapturedFrame(
+        frame_id=1, captured_ns=1, width=width, height=height, bgra=bytes(gray)
+    )
+    cyan_frame = replace(gray_frame, captured_ns=2, bgra=bytes(cyan))
+    assert crosshair_block_rgb_grid_distance(
+        crosshair_block_rgb_grid(gray_frame),
+        crosshair_block_rgb_grid(cyan_frame),
+    ) > 1
+    grammar = _crosshair_block_grammar()
+    assert 'probability ::= "0"' in grammar
+
+
+@pytest.mark.parametrize(("width", "height"), ((1280, 720), (65, 64), (64, 65)))
+def test_crosshair_crop_is_exactly_centered_in_source_pixels(width: int, height: int) -> None:
+    region = crosshair_block_region(width, height)
+    crop_width, crop_height = crosshair_block_crop_dimensions(width, height)
+    x0 = round(region.x * width)
+    y0 = round(region.y * height)
+    assert 2 * x0 + crop_width == width
+    assert 2 * y0 + crop_height == height
+    assert round(region.width * width) == crop_width
+    assert round(region.height * height) == crop_height
+
+
 def test_crosshair_crop_preserves_exact_original_pixel_provenance() -> None:
     frame = _frame(width=800, height=800)
     segmented = _build_crosshair_evidence(frame, frame_id=7)
@@ -272,11 +404,11 @@ def test_compact_crosshair_does_not_clip_invalid_box_into_a_target(box: list[obj
     assert "target.kind" not in report.observed_values()
 
 
-def test_compact_crosshair_boundary_check_uses_actual_odd_frame_crop_origin() -> None:
+def test_compact_crosshair_boundary_check_uses_exact_centered_crop_origin() -> None:
     evidence = _build_crosshair_evidence(_frame(width=801, height=803), frame_id=7).evidence
     center = evidence[1].region
     crosshair_x = (0.5 - center.x) / center.width
-    assert crosshair_x != 0.5
+    assert crosshair_x == 0.5
     wire = _compact_answer(block="dirt")
     wire["box"] = [crosshair_x, 0.4, 0.2, 0.2]
     assert _expand_crosshair_response(json.dumps(wire), evidence).tracks == ()

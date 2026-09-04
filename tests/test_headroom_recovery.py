@@ -9,6 +9,13 @@ import pytest
 
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.execution import ExecutionTick, SkillExecutor
+from minecraft_ai.grounded_perception import (
+    CROSSHAIR_BLOCK_FAST_SOURCE,
+    crosshair_block_crop_dimensions,
+    crosshair_block_pixel_sha256,
+    crosshair_block_region,
+    crosshair_block_rgb_grid,
+)
 from minecraft_ai.memory import MemoryStore
 from minecraft_ai.motor import BootstrapMotorPolicy
 from minecraft_ai.outcome_verifier import (
@@ -19,13 +26,16 @@ from minecraft_ai.outcome_verifier import (
 )
 from minecraft_ai.perception import (
     ActivePerceptionQuery,
+    EvidenceRegion,
     FrameState,
     PerceptionBlackboard,
+    PerceptionEvidence,
     PerceptionFact,
+    PerceptionQueryMode,
     ScreenRegion,
     Track,
 )
-from minecraft_ai.perception_service import frame_dhash
+from minecraft_ai.perception_service import crosshair_block_dhash, frame_dhash
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.runtime import (
     AgentRuntime,
@@ -43,6 +53,7 @@ from minecraft_ai.skills import SkillFailureCode, SkillOutcome, SkillRun
 
 _HASH_A = "0000000000000000"
 _HASH_FAR = "ffffffffffffffff"
+_ROCKET_SOURCE = "learned:learned:minestudio-rocket2:test:aux-localization:not-training-label"
 
 
 def _stall_result(run_id: str = "obstacle-stall") -> ExecutionTick:
@@ -75,78 +86,174 @@ def _stall_result(run_id: str = "obstacle-stall") -> ExecutionTick:
 def _publish_headroom_answer(
     board: PerceptionBlackboard,
     recovery: _HeadroomRecovery,
+    frame: CapturedFrame,
     *,
     kind: str = "dirt",
-    dx: float = 0.0,
-    track_x: float = 0.4,
-    mixed_key: str | None = None,
-    current_hash: str = _HASH_A,
+    confidence: float = 0.95,
+    block_source: str | None = None,
+    crop_hash: str | None = None,
+    evidence_region: ScreenRegion | None = None,
+    evidence_sha: str | None = None,
+    observed_ns: int | None = None,
 ) -> None:
-    assert recovery.query_id is not None
-    now = max(time.monotonic_ns(), recovery.query_started_ns + 1)
-    source = f"vlm:test:{recovery.query_id}"
-    values: dict[str, str | int | float | bool] = {
-        "scene.mode": "world",
-        "scene.playable": True,
-        "danger.immediate": False,
-        "target.visible": True,
-        "target.kind": kind,
-        "target.mineable": True,
-        "target.dx": dx,
-        "target.dy": 0.0,
-        "scene.observation_dhash": recovery.query_frame_dhash or _HASH_A,
-        "frame.dhash": current_hash,
-    }
-    facts = tuple(
+    assert recovery.query_id is not None and recovery.query_source is not None
+    assert recovery.query_frame_id is not None
+    now = observed_ns or max(time.monotonic_ns(), recovery.query_started_ns + 1)
+    source = recovery.query_source
+    evidence_id = f"frame-{recovery.query_frame_id}:crosshair-block"
+    crop_width, crop_height = crosshair_block_crop_dimensions(frame.width, frame.height)
+    facts = (
         PerceptionFact(
-            key=key,
-            value=value,
-            confidence=1.0,
+            key="recovery.crosshair.block",
+            value=kind,
+            confidence=confidence,
             observed_ns=now,
-            source=("vlm:test:other-query" if key == mixed_key else source),
+            source=block_source or source,
             expires_after_ms=60_000,
-        )
-        for key, value in values.items()
-        if key != "frame.dhash"
-    ) + (
+            evidence_refs=(evidence_id,),
+        ),
         PerceptionFact(
-            key="frame.dhash",
-            value=current_hash,
+            key="recovery.crosshair.frame_dhash",
+            value=recovery.query_frame_dhash or _HASH_A,
             confidence=1.0,
             observed_ns=now,
-            source="bootstrap:frame",
+            source=source,
+            expires_after_ms=60_000,
+        ),
+        PerceptionFact(
+            key="recovery.crosshair.observation_dhash",
+            value=crop_hash or recovery.query_crosshair_dhash or _HASH_A,
+            confidence=1.0,
+            observed_ns=now,
+            source=source,
             expires_after_ms=60_000,
         ),
     )
     board.merge_semantics(
         instance_id="bedrock:headroom",
         facts=facts,
-        tracks=(
-            Track(
-                track_id=f"vlm:{recovery.query_id}:0",
-                label=kind,
-                confidence=0.95,
-                region=ScreenRegion(x=track_x, y=0.4, width=0.2, height=0.2),
-                first_seen_ns=now,
-                last_seen_ns=now,
+        evidence=(
+            PerceptionEvidence(
+                evidence_id=evidence_id,
+                frame_id=recovery.query_frame_id,
+                captured_ns=recovery.query_captured_ns or frame.captured_ns,
+                region_kind=EvidenceRegion.WORLD,
+                region=evidence_region or crosshair_block_region(frame.width, frame.height),
+                pixel_sha256=evidence_sha or recovery.query_pixel_sha256 or "0" * 64,
+                crop_width=crop_width,
+                crop_height=crop_height,
             ),
         ),
     )
 
 
-def _board(*, captured_ns: int | None = None) -> PerceptionBlackboard:
-    now = time.monotonic_ns() if captured_ns is None else captured_ns
-    board = PerceptionBlackboard()
-    board.publish(
-        FrameState(
-            frame_id=4,
-            captured_ns=now,
-            instance_id="bedrock:headroom",
-            width=8,
-            height=8,
+def _pixels(width: int, height: int, *, changed: bool = False) -> bytes:
+    return bytes(
+        channel
+        for y in range(height)
+        for x in range(width)
+        for channel in (
+            ((x * 5 + y * 3 + (91 if changed else 0)) % 256),
+            ((x * 2 + y * 7 + (37 if changed else 0)) % 256),
+            ((x * 11 + y + (173 if changed else 0)) % 256),
+            255,
         )
     )
+
+
+def _capture(
+    *,
+    frame_id: int = 41,
+    captured_ns: int | None = None,
+    changed: bool = False,
+) -> CapturedFrame:
+    width = height = 64
+    return CapturedFrame(
+        frame_id=frame_id,
+        captured_ns=time.monotonic_ns() if captured_ns is None else captured_ns,
+        width=width,
+        height=height,
+        bgra=_pixels(width, height, changed=changed),
+    )
+
+
+def _publish_frame(board: PerceptionBlackboard, frame: CapturedFrame) -> None:
+    observed_ns = max(time.monotonic_ns(), frame.captured_ns)
+    board.publish(
+        FrameState(
+            frame_id=frame.frame_id,
+            captured_ns=frame.captured_ns,
+            instance_id="bedrock:headroom",
+            width=frame.width,
+            height=frame.height,
+        )
+    )
+    board.merge_semantics(
+        instance_id="bedrock:headroom",
+        facts=(
+            PerceptionFact(
+                key="scene.playable", value=True, confidence=1.0,
+                observed_ns=observed_ns,
+                source="safety:bedrock-hud-v1:not-training-label",
+                expires_after_ms=60_000,
+            ),
+            PerceptionFact(
+                key="scene.mode", value="world", confidence=1.0,
+                observed_ns=observed_ns,
+                source="safety:bedrock-hud-v1:not-training-label",
+                expires_after_ms=60_000,
+            ),
+            PerceptionFact(
+                key="frame.dhash", value=frame_dhash(frame), confidence=1.0,
+                observed_ns=observed_ns, source=CROSSHAIR_BLOCK_FAST_SOURCE,
+                expires_after_ms=60_000,
+            ),
+            PerceptionFact(
+                key="frame.crosshair_block_dhash", value=crosshair_block_dhash(frame),
+                confidence=1.0, observed_ns=observed_ns,
+                source=CROSSHAIR_BLOCK_FAST_SOURCE,
+                expires_after_ms=60_000,
+            ),
+            PerceptionFact(
+                key="frame.crosshair_block_rgb_grid", value=crosshair_block_rgb_grid(frame),
+                confidence=1.0, observed_ns=observed_ns,
+                source=CROSSHAIR_BLOCK_FAST_SOURCE,
+                expires_after_ms=60_000,
+            ),
+            PerceptionFact(
+                key="frame.crosshair_dhash", value=_HASH_A, confidence=1.0,
+                observed_ns=observed_ns, source="bootstrap:frame",
+                expires_after_ms=60_000,
+            ),
+        ),
+    )
+
+
+def _board(frame: CapturedFrame | None = None) -> PerceptionBlackboard:
+    frame = frame or _capture()
+    board = PerceptionBlackboard()
+    _publish_frame(board, frame)
     return board
+
+
+def _recovery_for_frame(frame: CapturedFrame, *, query_id: str = "query-one") -> _HeadroomRecovery:
+    return _HeadroomRecovery(
+        context_key="explore-keepalive",
+        traversal_parameters={},
+        deadline_ns=time.monotonic_ns() + 60_000_000_000,
+        phase="grounding",
+        query_id=query_id,
+        query_started_ns=time.monotonic_ns() - 1_000,
+        query_frame_dhash=frame_dhash(frame),
+        query_crosshair_dhash=crosshair_block_dhash(frame),
+        query_frame_id=frame.frame_id,
+        query_captured_ns=frame.captured_ns,
+        query_frame_width=frame.width,
+        query_frame_height=frame.height,
+        query_pixel_sha256=crosshair_block_pixel_sha256(frame),
+        query_rgb_grid=crosshair_block_rgb_grid(frame),
+        query_source=f"vlm:test:{query_id}",
+    )
 
 
 def test_headroom_trigger_requires_exact_verified_obstacle_stall() -> None:
@@ -174,67 +281,73 @@ def test_headroom_deadline_respects_serialized_vlm_timeout_budget() -> None:
     assert _headroom_deadline_ns(_Worker(), now_ns=now) == now + 180_000_000_000
 
 
-@pytest.mark.parametrize(
-    ("kind", "dx", "track_x", "mixed_key", "current_hash"),
-    (
-        ("stone", 0.0, 0.4, None, _HASH_A),
-        ("dirt", 0.2, 0.4, None, _HASH_A),
-        ("dirt", 0.0, 0.7, None, _HASH_A),
-        ("dirt", 0.0, 0.4, "target.mineable", _HASH_A),
-        ("dirt", 0.0, 0.4, None, _HASH_FAR),
-    ),
-)
-def test_headroom_target_abstains_on_unsafe_or_incoherent_evidence(
-    kind: str,
-    dx: float,
-    track_x: float,
-    mixed_key: str | None,
-    current_hash: str,
-) -> None:
-    board = _board()
-    recovery = _HeadroomRecovery(
-        context_key="explore-keepalive",
-        traversal_parameters={},
-        deadline_ns=time.monotonic_ns() + 60_000_000_000,
-        phase="grounding",
-        query_id="query-one",
-        query_started_ns=time.monotonic_ns() - 1_000,
-        query_frame_dhash=_HASH_A,
-    )
-    _publish_headroom_answer(
-        board,
-        recovery,
-        kind=kind,
-        dx=dx,
-        track_x=track_x,
-        mixed_key=mixed_key,
-        current_hash=current_hash,
+@pytest.mark.parametrize("kind", ("stone", "bedrock", "oak_log", "unknown"))
+def test_headroom_target_abstains_on_hard_or_unknown_exact_center_block(kind: str) -> None:
+    frame = _capture()
+    board = _board(frame)
+    recovery = _recovery_for_frame(frame)
+    _publish_headroom_answer(board, recovery, frame, kind=kind)
+
+    assert (
+        _headroom_clear_target(
+            board, recovery, now_ns=time.monotonic_ns(), current_frame=frame
+        )
+        is None
     )
 
-    assert _headroom_clear_target(board, recovery, now_ns=time.monotonic_ns()) is None
+
+@pytest.mark.parametrize("defect", ("source", "crop_hash", "region", "pixel_sha", "future"))
+def test_headroom_target_abstains_on_stale_or_incoherent_provenance(defect: str) -> None:
+    frame = _capture()
+    board = _board(frame)
+    recovery = _recovery_for_frame(frame)
+    kwargs: dict[str, object] = {}
+    if defect == "source":
+        kwargs["block_source"] = "vlm:test:another-query"
+    elif defect == "crop_hash":
+        kwargs["crop_hash"] = _HASH_FAR
+    elif defect == "region":
+        kwargs["evidence_region"] = ScreenRegion(x=0, y=0, width=0.5, height=0.5)
+    elif defect == "pixel_sha":
+        kwargs["evidence_sha"] = "f" * 64
+    else:
+        kwargs["observed_ns"] = time.monotonic_ns() + 60_000_000_000
+    _publish_headroom_answer(board, recovery, frame, **kwargs)  # type: ignore[arg-type]
+
+    assert (
+        _headroom_clear_target(
+            board, recovery, now_ns=time.monotonic_ns(), current_frame=frame
+        )
+        is None
+    )
 
 
 def test_headroom_target_requires_post_request_evidence() -> None:
-    board = _board()
-    recovery = _HeadroomRecovery(
-        context_key="explore-keepalive",
-        traversal_parameters={},
-        deadline_ns=time.monotonic_ns() + 60_000_000_000,
-        phase="grounding",
-        query_id="query-one",
-        query_started_ns=time.monotonic_ns() - 1_000,
-        query_frame_dhash=_HASH_A,
-    )
-    _publish_headroom_answer(board, recovery)
-    assert _headroom_clear_target(board, recovery, now_ns=time.monotonic_ns()) is not None
+    frame = _capture()
+    board = _board(frame)
+    recovery = _recovery_for_frame(frame)
+    _publish_headroom_answer(board, recovery, frame)
+    assert _headroom_clear_target(
+        board, recovery, now_ns=time.monotonic_ns(), current_frame=frame
+    ) is not None
 
     recovery.query_started_ns = time.monotonic_ns() + 1
-    assert _headroom_clear_target(board, recovery, now_ns=time.monotonic_ns()) is None
+    assert _headroom_clear_target(
+        board, recovery, now_ns=time.monotonic_ns(), current_frame=frame
+    ) is None
 
 
 class _Perception:
     def __init__(self, captured: CapturedFrame) -> None:
-        self.active_vlm = object()
+        class _Model:
+            model_id = "test"
+            timeout_s = 30.0
+
+        class _Worker:
+            model = _Model()
+
+        self.active_vlm = _Worker()
+        self.instance_id = "bedrock:headroom"
         self.last_capture = captured
         self.available = True
         self.requests: list[tuple[ActivePerceptionQuery, CapturedFrame | None]] = []
@@ -252,31 +365,11 @@ class _Perception:
         return True
 
 
-def _runtime_for_probe() -> tuple[AgentRuntime, _Perception, list[MotorAction]]:
-    now = time.monotonic_ns()
-    pixels = bytes(range(64)) * 4
-    captured = CapturedFrame(
-        # Capture-source IDs and blackboard IDs are independent in production.
-        frame_id=41,
-        captured_ns=now,
-        width=8,
-        height=8,
-        bgra=pixels,
-    )
-    board = _board(captured_ns=now)
-    board.merge_semantics(
-        instance_id="bedrock:headroom",
-        facts=(
-            PerceptionFact(
-                key="frame.dhash",
-                value=frame_dhash(captured),
-                confidence=1.0,
-                observed_ns=time.monotonic_ns(),
-                source="bootstrap:frame",
-                expires_after_ms=60_000,
-            ),
-        ),
-    )
+def _runtime_for_probe(
+    captured: CapturedFrame | None = None,
+) -> tuple[AgentRuntime, _Perception, list[MotorAction]]:
+    captured = captured or _capture()
+    board = _board(captured)
     perception = _Perception(captured)
     runtime = object.__new__(AgentRuntime)
     runtime.blackboard = board
@@ -325,76 +418,29 @@ def test_verified_stall_requests_one_event_query_at_zero_semantic_hz_then_mines(
     previous = runtime.blackboard.raw_latest()
     assert previous is not None
     next_ns = max(time.monotonic_ns(), previous.captured_ns + 1)
-    next_capture = CapturedFrame(42, next_ns, 8, 8, perception.last_capture.bgra)
+    next_capture = replace(perception.last_capture, frame_id=42, captured_ns=next_ns)
     perception.last_capture = next_capture
-    runtime.blackboard.publish(
-        FrameState(
-            frame_id=5,
-            captured_ns=next_ns,
-            instance_id="bedrock:headroom",
-            width=8,
-            height=8,
-        )
-    )
+    _publish_frame(runtime.blackboard, next_capture)
     runtime._advance_headroom_recovery()
     assert recovery.phase == "settle"
     assert perception.requests == []
 
     changed_ns = max(time.monotonic_ns(), next_ns + 1)
-    changed_capture = CapturedFrame(
-        43,
-        changed_ns,
-        8,
-        8,
-        bytes(reversed(range(64))) * 4,
-    )
+    changed_capture = _capture(frame_id=43, captured_ns=changed_ns, changed=True)
     perception.last_capture = changed_capture
-    runtime.blackboard.publish(
-        FrameState(
-            frame_id=6,
-            captured_ns=changed_ns,
-            instance_id="bedrock:headroom",
-            width=8,
-            height=8,
-        )
-    )
-    runtime.blackboard.merge_semantics(
-        instance_id="bedrock:headroom",
-        facts=(
-            PerceptionFact(
-                key="frame.dhash",
-                value=frame_dhash(changed_capture),
-                confidence=1.0,
-                observed_ns=changed_ns,
-                source="bootstrap:frame",
-                expires_after_ms=60_000,
-            ),
-        ),
-    )
+    _publish_frame(runtime.blackboard, changed_capture)
     runtime._advance_headroom_recovery()
     assert recovery.phase == "grounding"
     assert len(perception.requests) == 1
     query = perception.requests[0][0]
+    assert query.mode == PerceptionQueryMode.CROSSHAIR_BLOCK
     assert query.skill_id == "mine_visible_block"
-    assert query.output_keys == (
-        "scene.mode",
-        "scene.playable",
-        "danger.immediate",
-        "target.visible",
-        "target.kind",
-        "target.mineable",
-        "target.dx",
-        "target.dy",
-    )
+    assert query.output_keys == ()
 
     runtime._advance_headroom_recovery()
     assert len(perception.requests) == 1
 
-    _publish_headroom_answer(
-        runtime.blackboard,
-        recovery,
-        current_hash=recovery.query_frame_dhash or _HASH_A,
-    )
+    _publish_headroom_answer(runtime.blackboard, recovery, changed_capture)
     perception.available = True
     runtime._advance_headroom_recovery()
 
@@ -404,8 +450,314 @@ def test_verified_stall_requests_one_event_query_at_zero_semantic_hz_then_mines(
     assert runtime.executor.run.skill_id == "mine_visible_block"
     assert runtime.executor.parameters == {
         "target": "dirt",
-        "target_track_id": f"vlm:{recovery.query_id}:0",
+        "target_track_id": f"crosshair-probe:{recovery.query_id}",
     }
+
+    first = runtime.executor.tick(
+        runtime.blackboard,
+        sequence=10,
+        now_ns=time.monotonic_ns(),
+    )
+    assert first.action is not None
+    assert "left" not in first.action.buttons_down
+    assert "w" in first.action.keys_down
+
+    post_motion = replace(
+        changed_capture,
+        frame_id=44,
+        captured_ns=time.monotonic_ns(),
+    )
+    perception.last_capture = post_motion
+    _publish_frame(runtime.blackboard, post_motion)
+    settling = runtime.executor.tick(
+        runtime.blackboard,
+        sequence=11,
+        now_ns=time.monotonic_ns(),
+    )
+    assert settling.action is not None
+    assert "left" not in settling.action.buttons_down
+    assert "w" in settling.action.keys_up
+
+    settled = replace(
+        changed_capture,
+        frame_id=45,
+        captured_ns=time.monotonic_ns(),
+    )
+    perception.last_capture = settled
+    _publish_frame(runtime.blackboard, settled)
+    started = runtime.executor.tick(
+        runtime.blackboard,
+        sequence=12,
+        now_ns=time.monotonic_ns(),
+    )
+    assert started.action is not None
+    assert started.action.buttons_down == ("left",)
+
+
+def test_crosshair_color_swap_after_acquisition_motion_never_starts_attack() -> None:
+    width = height = 64
+    first = CapturedFrame(
+        frame_id=51,
+        captured_ns=time.monotonic_ns(),
+        width=width,
+        height=height,
+        bgra=bytes((100, 100, 100, 255)) * width * height,
+    )
+    runtime, perception, _ = _runtime_for_probe(first)
+    recovery = _recovery_for_frame(first, query_id="swap-query")
+    runtime._headroom_recovery = recovery
+    _publish_headroom_answer(runtime.blackboard, recovery, first)
+    target = _headroom_clear_target(
+        runtime.blackboard,
+        recovery,
+        now_ns=time.monotonic_ns(),
+        current_frame=first,
+    )
+    assert target is not None
+    track_id = runtime._materialize_headroom_target(recovery, target)
+    assert track_id is not None
+    recovery.phase = "mining"
+    recovery.mining_run_id = "swap-mining"
+    runtime.executor.start(
+        runtime.skills.get("mine_visible_block"),
+        run_id="swap-mining",
+        context_key=recovery.context_key,
+        parameters={"target": "dirt", "target_track_id": track_id},
+    )
+
+    moving = runtime.executor.tick(
+        runtime.blackboard,
+        sequence=20,
+        now_ns=time.monotonic_ns(),
+    )
+    assert moving.action is not None and "w" in moving.action.keys_down
+    assert "left" not in moving.action.buttons_down
+
+    swapped = CapturedFrame(
+        frame_id=52,
+        captured_ns=time.monotonic_ns(),
+        width=width,
+        height=height,
+        # Equal-luma-ish colors retain the flat-image dHash while changing
+        # the target's absolute color signature around the crosshair.
+        bgra=bytes((200, 132, 0, 255)) * width * height,
+    )
+    assert crosshair_block_dhash(first) == crosshair_block_dhash(swapped)
+    perception.last_capture = swapped
+    _publish_frame(runtime.blackboard, swapped)
+    after_swap = runtime.executor.tick(
+        runtime.blackboard,
+        sequence=21,
+        now_ns=time.monotonic_ns(),
+    )
+    assert after_swap.action is not None
+    assert "left" not in after_swap.action.buttons_down
+
+    # Even if the normal grounded router later emits fresh positive ROCKET
+    # observations, this synthetic aperture must never be promoted into the
+    # generic ROCKET authorization route and bypass its RGB mismatch.
+    for sequence in (22, 23, 24):
+        observed_ns = time.monotonic_ns()
+        newer_swap = replace(
+            swapped,
+            frame_id=swapped.frame_id + sequence,
+            captured_ns=observed_ns,
+        )
+        perception.last_capture = newer_swap
+        _publish_frame(runtime.blackboard, newer_swap)
+        latest = runtime.blackboard.latest()
+        assert latest is not None
+        probe = next(track for track in latest.tracks if track.track_id == track_id)
+        attributes = dict(probe.attributes)
+        attributes["tracking_source"] = _ROCKET_SOURCE
+        assert runtime.blackboard.upsert_semantic_track(
+            instance_id="bedrock:headroom",
+            track=probe.model_copy(
+                update={
+                    "last_seen_ns": observed_ns,
+                    "attributes": attributes,
+                }
+            ),
+        )
+        runtime.blackboard.merge_semantics(
+            instance_id="bedrock:headroom",
+            facts=(
+                PerceptionFact(
+                    key="target.visible", value=True, confidence=0.99,
+                    observed_ns=observed_ns, source=_ROCKET_SOURCE,
+                    expires_after_ms=5_000,
+                ),
+                PerceptionFact(
+                    key="target.kind", value="dirt", confidence=0.99,
+                    observed_ns=observed_ns, source=_ROCKET_SOURCE,
+                    expires_after_ms=5_000,
+                ),
+            ),
+        )
+        routed = runtime.executor.tick(
+            runtime.blackboard,
+            sequence=sequence,
+            now_ns=time.monotonic_ns(),
+        )
+        assert routed.action is not None
+        assert "left" not in routed.action.buttons_down
+
+
+@pytest.mark.parametrize("kind", ("stone", "unknown"))
+def test_hard_or_unknown_answer_abstains_after_exactly_one_query(kind: str) -> None:
+    runtime, perception, sent = _runtime_for_probe()
+    runtime._headroom_recovery = _HeadroomRecovery(
+        context_key="explore-keepalive",
+        traversal_parameters={},
+        deadline_ns=time.monotonic_ns() + 60_000_000_000,
+        phase="request",
+    )
+    runtime._advance_headroom_recovery()
+    recovery = runtime._headroom_recovery
+    assert recovery is not None and recovery.phase == "grounding"
+    assert len(perception.requests) == 1
+    assert perception.last_capture is not None
+    _publish_headroom_answer(
+        runtime.blackboard,
+        recovery,
+        perception.last_capture,
+        kind=kind,
+    )
+    perception.available = True
+
+    runtime._advance_headroom_recovery()
+    runtime._advance_headroom_recovery()
+
+    assert runtime._headroom_recovery is None
+    assert len(perception.requests) == 1
+    assert runtime.executor.run is None
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    "spoofed_key",
+    ("frame.crosshair_block_dhash", "frame.crosshair_block_rgb_grid"),
+)
+def test_headroom_target_rejects_spoofed_fast_source(spoofed_key: str) -> None:
+    frame = _capture()
+    board = _board(frame)
+    recovery = _recovery_for_frame(frame)
+    _publish_headroom_answer(board, recovery, frame)
+    canonical = board.fact(spoofed_key, now_ns=time.monotonic_ns())
+    assert canonical is not None
+    board.merge_semantics(
+        instance_id="bedrock:headroom",
+        facts=(
+            canonical.model_copy(
+                update={
+                    "observed_ns": time.monotonic_ns(),
+                    "source": "bootstrap:lookalike:not-training-label",
+                }
+            ),
+        ),
+    )
+
+    assert _headroom_clear_target(
+        board,
+        recovery,
+        now_ns=time.monotonic_ns(),
+        current_frame=frame,
+    ) is None
+
+
+@pytest.mark.parametrize("state", ("missing", "spoofed", "stale"))
+def test_headroom_requires_current_canonical_full_frame_safety(state: str) -> None:
+    runtime, _, _ = _runtime_for_probe()
+    runtime.blackboard.remove_semantic_facts(
+        ("scene.playable", "scene.mode"),
+        expected_source="safety:bedrock-hud-v1:not-training-label",
+    )
+    if state == "spoofed":
+        now = time.monotonic_ns()
+        runtime.blackboard.merge_semantics(
+            instance_id="bedrock:headroom",
+            facts=(
+                PerceptionFact(
+                    key="scene.playable", value=True, confidence=1.0,
+                    observed_ns=now, source="safety:bedrock-hud-v1:spoof",
+                    expires_after_ms=60_000,
+                ),
+                PerceptionFact(
+                    key="scene.mode", value="world", confidence=1.0,
+                    observed_ns=now, source="safety:bedrock-hud-v1:spoof",
+                    expires_after_ms=60_000,
+                ),
+            ),
+        )
+    elif state == "stale":
+        old = time.monotonic_ns() - 1_000_000_000
+        runtime.blackboard.merge_semantics(
+            instance_id="bedrock:headroom",
+            facts=(
+                PerceptionFact(
+                    key="scene.playable", value=True, confidence=1.0,
+                    observed_ns=old,
+                    source="safety:bedrock-hud-v1:not-training-label",
+                    expires_after_ms=60_000,
+                ),
+                PerceptionFact(
+                    key="scene.mode", value="world", confidence=1.0,
+                    observed_ns=old,
+                    source="safety:bedrock-hud-v1:not-training-label",
+                    expires_after_ms=60_000,
+                ),
+            ),
+        )
+    assert runtime._headroom_scene_is_safe() is False
+
+
+def test_headroom_target_upsert_preserves_peer_tracks_and_cleanup_is_transaction_local() -> None:
+    runtime, perception, _ = _runtime_for_probe()
+    assert perception.last_capture is not None
+    frame = perception.last_capture
+    recovery = _recovery_for_frame(frame, query_id="peer-query")
+    runtime._headroom_recovery = recovery
+    peer = Track(
+        track_id="rocket:peer",
+        label="oak_log",
+        confidence=0.9,
+        region=ScreenRegion(x=0.1, y=0.1, width=0.2, height=0.3),
+        first_seen_ns=time.monotonic_ns(),
+        last_seen_ns=time.monotonic_ns(),
+        attributes={"source": "rocket"},
+    )
+    assert runtime.blackboard.upsert_semantic_track(
+        instance_id="bedrock:headroom", track=peer
+    )
+    _publish_headroom_answer(runtime.blackboard, recovery, frame)
+    target = _headroom_clear_target(
+        runtime.blackboard,
+        recovery,
+        now_ns=time.monotonic_ns(),
+        current_frame=frame,
+    )
+    assert target is not None
+    track_id = runtime._materialize_headroom_target(recovery, target)
+    assert track_id is not None
+    assert {track.track_id for track in runtime.blackboard.latest().tracks} == {
+        "rocket:peer",
+        track_id,
+    }
+
+    runtime._clear_headroom_recovery(recovery)
+
+    latest = runtime.blackboard.latest()
+    assert latest is not None
+    assert {track.track_id for track in latest.tracks} == {"rocket:peer"}
+    for key in (
+        "recovery.crosshair.block",
+        "recovery.crosshair.frame_dhash",
+        "recovery.crosshair.observation_dhash",
+        "target.visible",
+        "target.kind",
+        "target.reference_available",
+    ):
+        assert runtime.blackboard.fact(key, now_ns=time.monotonic_ns()) is None
 
 
 def test_unsafe_stall_preserves_ordinary_recovery_route() -> None:
@@ -730,6 +1082,7 @@ def test_operator_authority_cancels_running_headroom_child() -> None:
         mining_run_id="clear-one",
     )
     runtime._pending_decision = Future()
+    runtime._pending_decision.set_result(object())
     runtime._queued_operator_message_waiting = lambda: True  # type: ignore[method-assign]
     runtime._preempt_pending_cognition_for_operator = lambda: False  # type: ignore[method-assign]
     recorded: list[SkillRun] = []
@@ -739,6 +1092,11 @@ def test_operator_authority_cancels_running_headroom_child() -> None:
     )
     runtime._send_motor = lambda action, **_kwargs: sent.append(action)  # type: ignore[method-assign]
 
+    runtime._consume_cognition()
+    assert runtime._headroom_recovery is not None
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.outcome == SkillOutcome.RUNNING
+
     runtime._start_cognition_if_due()
 
     assert runtime._headroom_recovery is None
@@ -747,20 +1105,32 @@ def test_operator_authority_cancels_running_headroom_child() -> None:
 
 
 def test_death_scene_preempts_running_headroom_child() -> None:
-    runtime, _, _ = _runtime_for_probe()
+    runtime, perception, _ = _runtime_for_probe()
+    assert perception.last_capture is not None
+    recovery = _recovery_for_frame(perception.last_capture, query_id="death-query")
+    runtime._headroom_recovery = recovery
+    _publish_headroom_answer(
+        runtime.blackboard,
+        recovery,
+        perception.last_capture,
+    )
+    target = _headroom_clear_target(
+        runtime.blackboard,
+        recovery,
+        now_ns=time.monotonic_ns(),
+        current_frame=perception.last_capture,
+    )
+    assert target is not None
+    track_id = runtime._materialize_headroom_target(recovery, target)
+    assert track_id is not None
     runtime.executor.start(
         runtime.skills.get("mine_visible_block"),
         run_id="clear-one",
         context_key="explore-keepalive",
-        parameters={"target": "dirt"},
+        parameters={"target": "dirt", "target_track_id": track_id},
     )
-    runtime._headroom_recovery = _HeadroomRecovery(
-        context_key="explore-keepalive",
-        traversal_parameters={},
-        deadline_ns=time.monotonic_ns() + 60_000_000_000,
-        phase="mining",
-        mining_run_id="clear-one",
-    )
+    recovery.phase = "mining"
+    recovery.mining_run_id = "clear-one"
     now = time.monotonic_ns()
     runtime.blackboard.merge_semantics(
         instance_id="bedrock:headroom",
@@ -789,3 +1159,13 @@ def test_death_scene_preempts_running_headroom_child() -> None:
     assert sent
     assert runtime.executor.run is not None
     assert runtime.executor.run.skill_id == "respawn_after_death"
+    assert all(track.track_id != track_id for track in runtime.blackboard.latest().tracks)
+    for key in (
+        "recovery.crosshair.block",
+        "recovery.crosshair.frame_dhash",
+        "recovery.crosshair.observation_dhash",
+        "target.visible",
+        "target.kind",
+        "target.reference_available",
+    ):
+        assert runtime.blackboard.fact(key, now_ns=time.monotonic_ns()) is None

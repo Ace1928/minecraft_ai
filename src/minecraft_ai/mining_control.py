@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .motor import MotorIntent
+from .grounded_perception import CROSSHAIR_BLOCK_FAST_SOURCE, crosshair_block_rgb_grid_distance
 from .perception import PerceptionBlackboard, PerceptionFact, Track
 from .safety import MotorAction
 from .skills import SkillFailureCode
@@ -1023,24 +1024,55 @@ def _verified_target(
         kind_fact=kind_fact,
         now_ns=now_ns,
     )
-    current_grounding = rocket_current or operator_current
+    crosshair_probe_current = _fresh_crosshair_probe_target(
+        blackboard,
+        track,
+        visible=visible,
+        kind_fact=kind_fact,
+        now_ns=now_ns,
+        max_track_age_ms=max_track_age_ms,
+    )
+    current_grounding = rocket_current or operator_current or crosshair_probe_current
     mineable_is_bound = bool(
         mineable is not None
         and mineable.source == visible.source
         and (kind_fact is None or kind_fact.source == visible.source)
     )
     latest_frame = blackboard.raw_latest()
-    if evidence_after_ns and (
-        latest_frame is None
-        or latest_frame.captured_ns <= evidence_after_ns
-        or visible.observed_ns <= evidence_after_ns
-        or (rocket_current and track.last_seen_ns <= evidence_after_ns)
-        or (
-            operator_current
-            and (kind_fact is None or kind_fact.observed_ns <= evidence_after_ns)
-        )
-    ):
-        return SkillFailureCode.MINING_TARGET_UNVERIFIED
+    if evidence_after_ns:
+        post_motion_grounding = False
+        if crosshair_probe_current:
+            current_crop_hash = blackboard.fact(
+                "frame.crosshair_block_dhash",
+                min_confidence=1.0,
+                now_ns=now_ns,
+            )
+            current_crop_grid = blackboard.fact(
+                "frame.crosshair_block_rgb_grid",
+                min_confidence=1.0,
+                now_ns=now_ns,
+            )
+            post_motion_grounding = bool(
+                current_crop_hash is not None
+                and current_crop_grid is not None
+                and current_crop_hash.observed_ns > evidence_after_ns
+                and current_crop_grid.observed_ns > evidence_after_ns
+            )
+        else:
+            post_motion_grounding = bool(
+                visible.observed_ns > evidence_after_ns
+                and (not rocket_current or track.last_seen_ns > evidence_after_ns)
+                and (
+                    not operator_current
+                    or (kind_fact is not None and kind_fact.observed_ns > evidence_after_ns)
+                )
+            )
+        if (
+            latest_frame is None
+            or latest_frame.captured_ns <= evidence_after_ns
+            or not post_motion_grounding
+        ):
+            return SkillFailureCode.MINING_TARGET_UNVERIFIED
     if current_grounding:
         # ROCKET localizes the current pixels. Prefer its bound track label over
         # a potentially older global VLM fact when establishing this lease. The
@@ -1338,6 +1370,14 @@ def _fresh_rocket_target(
     two agreeing, bounded-age signals are sufficient to omit the slower VLM's
     scene hash for a block whose exact ontology is safe to mine by hand.
     """
+    if (
+        track.attributes.get("source") == "crosshair-block-probe"
+        or track.attributes.get("sampling_aperture") is True
+    ):
+        # This synthetic one-pixel aperture is authorized only by the exact
+        # crop classifier plus its current dHash/RGB binding. Never reinterpret
+        # it as a generic ROCKET track if a policy router observes the target.
+        return False
     tracking_source = track.attributes.get("tracking_source")
     return bool(
         visible.value is True
@@ -1373,6 +1413,84 @@ def _fresh_operator_target(
         and 0 <= now_ns - kind_fact.observed_ns <= 500_000_000
         and _normalize_name(kind_fact.value) == _normalize_name(track.label)
     )
+
+
+def _fresh_crosshair_probe_target(
+    blackboard: PerceptionBlackboard,
+    track: Track,
+    *,
+    visible: PerceptionFact,
+    kind_fact: PerceptionFact | None,
+    now_ns: int,
+    max_track_age_ms: int,
+) -> bool:
+    """Verify the runtime-owned sampling aperture from one dedicated crop query."""
+
+    source = track.attributes.get("tracking_source")
+    expected_grid = track.attributes.get("crosshair_rgb_grid")
+    query_prefix = "crosshair-probe:"
+    if (
+        track.attributes.get("source") != "crosshair-block-probe"
+        or track.attributes.get("sampling_aperture") is not True
+        or not isinstance(source, str)
+        or not isinstance(expected_grid, str)
+        or not source.startswith("vlm:")
+        or not track.track_id.startswith(query_prefix)
+        or not source.endswith(f":{track.track_id.removeprefix(query_prefix)}")
+        or visible.value is not True
+        or visible.source != source
+        or kind_fact is None
+        or not isinstance(kind_fact.value, str)
+        or kind_fact.source != source
+        or _normalize_name(kind_fact.value) != _normalize_name(track.label)
+        or visible.evidence_refs != track.evidence_refs
+        or kind_fact.evidence_refs != track.evidence_refs
+        or len(track.evidence_refs) != 1
+        or visible.observed_ns != kind_fact.observed_ns
+        or visible.observed_ns != track.last_seen_ns
+        or not 0 <= now_ns - track.last_seen_ns <= max_track_age_ms * 1_000_000
+        or not track_contains_crosshair(track)
+    ):
+        return False
+    observed = blackboard.fact(
+        "recovery.crosshair.observation_dhash",
+        min_confidence=1.0,
+        now_ns=now_ns,
+    )
+    current = blackboard.fact(
+        "frame.crosshair_block_dhash",
+        min_confidence=1.0,
+        now_ns=now_ns,
+    )
+    current_grid = blackboard.fact(
+        "frame.crosshair_block_rgb_grid",
+        min_confidence=1.0,
+        now_ns=now_ns,
+    )
+    latest = blackboard.raw_latest()
+    if (
+        observed is None
+        or current is None
+        or current_grid is None
+        or latest is None
+        or observed.source != source
+        or observed.observed_ns != track.last_seen_ns
+        or not isinstance(observed.value, str)
+        or not isinstance(current.value, str)
+        or not isinstance(current_grid.value, str)
+        or current.source != CROSSHAIR_BLOCK_FAST_SOURCE
+        or current_grid.source != CROSSHAIR_BLOCK_FAST_SOURCE
+        or not latest.captured_ns <= current.observed_ns <= now_ns
+        or not latest.captured_ns <= current_grid.observed_ns <= now_ns
+    ):
+        return False
+    try:
+        return bool(
+            _hash_distance(observed.value, current.value) <= 2
+            and crosshair_block_rgb_grid_distance(expected_grid, current_grid.value) <= 1.0
+        )
+    except ValueError:
+        return False
 
 
 def is_rocket_source(source: str) -> bool:

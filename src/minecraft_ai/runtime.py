@@ -24,12 +24,19 @@ from .crafting_control import PlankCraftPhase
 from .daemon_executor import SingleWorkerDaemonExecutor
 from .episodes import RuntimeEvent, RuntimeEventKind
 from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
-from .grounded_perception import resolve_grounded_output_keys
+from .grounded_perception import (
+    CROSSHAIR_BLOCK_FAST_SOURCE,
+    crosshair_block_crop_dimensions,
+    crosshair_block_pixel_sha256,
+    crosshair_block_region,
+    crosshair_block_rgb_grid,
+    crosshair_block_rgb_grid_distance,
+    resolve_grounded_output_keys,
+)
 from .memory import MemoryKind, MemoryRecord, MemoryStore
 from .mining_control import (
     is_hand_safe_soft_block,
     normalize_block_kind,
-    track_contains_crosshair,
 )
 from .models import local_model_inference_available
 from .motor import MotorIntent
@@ -39,15 +46,20 @@ from .perception import (
     EvidenceRegion,
     PerceptionBlackboard,
     PerceptionFact,
+    PerceptionQueryMode,
+    ScreenRegion,
     Track,
 )
 from .perception_service import (
+    BEDROCK_HUD_SAFETY_SOURCE,
     BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
     RealtimePerceptionService,
+    crosshair_block_dhash,
     frame_dhash,
     perceptual_hash_distance,
 )
 from .planning import Goal
+from .platforms.bedrock_x11 import CapturedFrame
 from .roles import RoleProfile
 from .safety import MotorAction
 from .skills import (
@@ -77,6 +89,7 @@ _BOUNDED_KEEPALIVE_SKILL_IDS = frozenset(
 _ATOMIC_SKILL_IDS = frozenset(
     {"open_inventory", "close_open_inventory", "collect_recent_drop"}
 )
+_WOOD_INVENTORY_AUDIT_SKILLS = frozenset({"craft_wood_planks", "open_inventory"})
 _RECORDED_RUN_ID_LIMIT = 4_096
 _COGNITION_RETRY_BASE_NS = 2_000_000_000
 _COGNITION_RETRY_MAX_NS = 30_000_000_000
@@ -85,17 +98,6 @@ _CRAFT_SEMANTIC_LATENCY_MARGIN = 1.25
 _CRAFT_SEMANTIC_MAX_REQUIRED_BUDGET_MS = 60_000
 _PLANKS_NO_LOGS_REASON = "crafting-no-logs-observed-in-inventory"
 _PLANKS_RETRY_CLEAR_MEMORY = "working:planks-retry-positive-log-evidence"
-_HEADROOM_QUERY_OUTPUT_KEYS = (
-    "scene.mode",
-    "scene.playable",
-    "danger.immediate",
-    "target.visible",
-    "target.kind",
-    "target.mineable",
-    "target.dx",
-    "target.dy",
-)
-_HEADROOM_CENTER_TOLERANCE = 0.15
 # Positive Bedrock pitch moves the open-sky crosshair toward the near terrain
 # lip that commonly causes this verified wedge. This is one bounded look-down
 # adjustment, not a scan; the next capture must confirm that the view changed.
@@ -128,14 +130,26 @@ class _HeadroomRecovery:
     query_id: str | None = None
     query_started_ns: int = 0
     query_frame_dhash: str | None = None
+    query_crosshair_dhash: str | None = None
+    query_frame_id: int | None = None
+    query_captured_ns: int | None = None
+    query_frame_width: int | None = None
+    query_frame_height: int | None = None
+    query_pixel_sha256: str | None = None
+    query_rgb_grid: str | None = None
+    query_source: str | None = None
     mining_run_id: str | None = None
     retry_run_id: str | None = None
+    target_track_id: str | None = None
 
 
 @dataclass(frozen=True)
 class _HeadroomTarget:
     kind: str
-    track_id: str
+    source: str
+    evidence_id: str
+    confidence: float
+    observed_ns: int
 
 
 def _headroom_deadline_ns(active_vlm: object, *, now_ns: int) -> int:
@@ -170,6 +184,32 @@ def _expected_keepalive_expiry(run: SkillRun) -> bool:
         and run.context_key == _EXPLORE_KEEPALIVE_CONTEXT
         and run.skill_id in _BOUNDED_KEEPALIVE_SKILL_IDS
     )
+
+
+def _plan_step_requests_inventory_transition(skill_id: str, step: str) -> bool:
+    """Require an explicit GUI plan node before its transition can consume progress."""
+
+    normalized = " ".join(step.casefold().replace("_", " ").replace("-", " ").split())
+    if skill_id == "open_inventory":
+        prefixes = {
+            "open inventory", "open the inventory", "inspect inventory",
+            "inspect the inventory", "check inventory", "check the inventory",
+            "audit inventory", "audit the inventory", "view inventory", "view the inventory",
+        }
+        return any(
+            normalized == prefix or normalized.startswith(f"{prefix} ")
+            for prefix in prefixes
+        )
+    if skill_id == "close_open_inventory":
+        prefixes = {
+            "close inventory", "close the inventory", "exit inventory",
+            "exit the inventory", "leave inventory", "leave the inventory",
+        }
+        return any(
+            normalized == prefix or normalized.startswith(f"{prefix} ")
+            for prefix in prefixes
+        )
+    return True
 
 
 def _verified_log_break(verification: OutcomeVerification | None) -> bool:
@@ -272,104 +312,119 @@ def _headroom_clear_target(
     recovery: _HeadroomRecovery,
     *,
     now_ns: int,
+    current_frame: CapturedFrame | None,
 ) -> _HeadroomTarget | None:
-    """Resolve one exact, current, soft block from the recovery's own VLM query."""
+    """Resolve one current, query-owned, hand-safe center classification."""
 
     query_id = recovery.query_id
-    requested_hash = recovery.query_frame_dhash
-    if query_id is None or requested_hash is None:
+    requested_crop_hash = recovery.query_crosshair_dhash
+    frame_id = recovery.query_frame_id
+    captured_ns = recovery.query_captured_ns
+    if (
+        query_id is None
+        or requested_crop_hash is None
+        or recovery.query_frame_dhash is None
+        or frame_id is None
+        or captured_ns is None
+        or recovery.query_frame_width is None
+        or recovery.query_frame_height is None
+        or recovery.query_pixel_sha256 is None
+        or recovery.query_rgb_grid is None
+        or recovery.query_source is None
+    ):
         return None
-
-    required_keys = (
-        "scene.mode",
-        "scene.playable",
-        "danger.immediate",
-        "target.visible",
-        "target.kind",
-        "target.mineable",
-        "target.dx",
-        "target.dy",
-        "scene.observation_dhash",
+    block = blackboard.fact("recovery.crosshair.block", min_confidence=0.70, now_ns=now_ns)
+    crop_hash = blackboard.fact(
+        "recovery.crosshair.observation_dhash", min_confidence=1.0, now_ns=now_ns
     )
-    facts = {
-        key: blackboard.fact(key, min_confidence=0.70, now_ns=now_ns)
-        for key in required_keys
-    }
-    if any(fact is None for fact in facts.values()):
+    source_hash = blackboard.fact(
+        "recovery.crosshair.frame_dhash", min_confidence=1.0, now_ns=now_ns
+    )
+    current_hash = blackboard.fact(
+        "frame.crosshair_block_dhash", min_confidence=1.0, now_ns=now_ns
+    )
+    current_grid = blackboard.fact(
+        "frame.crosshair_block_rgb_grid", min_confidence=1.0, now_ns=now_ns
+    )
+    facts = (block, crop_hash, source_hash)
+    if any(fact is None for fact in facts) or current_hash is None or current_grid is None:
         return None
-    observed = tuple(fact for fact in facts.values() if fact is not None)
-    source = observed[0].source
-    observed_ns = observed[0].observed_ns
+    assert block is not None and crop_hash is not None and source_hash is not None
+    source = block.source
+    observed_ns = block.observed_ns
+    evidence_id = f"frame-{frame_id}:crosshair-block"
     if (
-        not source.startswith("vlm:")
-        or not source.endswith(f":{query_id}")
-        or any(fact.source != source for fact in observed)
-        or any(fact.observed_ns != observed_ns for fact in observed)
+        source != recovery.query_source
+        or any(fact is None or fact.source != source for fact in facts)
+        or any(fact is None or fact.observed_ns != observed_ns for fact in facts)
         or observed_ns <= recovery.query_started_ns
+        or observed_ns > now_ns
+        or block.evidence_refs != (evidence_id,)
+        or not isinstance(block.value, str)
+        or crop_hash.value != requested_crop_hash
+        or source_hash.value != recovery.query_frame_dhash
+        or not isinstance(current_hash.value, str)
+        or not isinstance(current_grid.value, str)
     ):
         return None
-
-    mode = facts["scene.mode"]
-    playable = facts["scene.playable"]
-    danger = facts["danger.immediate"]
-    visible = facts["target.visible"]
-    kind = facts["target.kind"]
-    mineable = facts["target.mineable"]
-    dx = facts["target.dx"]
-    dy = facts["target.dy"]
-    scene_hash = facts["scene.observation_dhash"]
-    assert mode is not None
-    assert playable is not None
-    assert danger is not None
-    assert visible is not None
-    assert kind is not None
-    assert mineable is not None
-    assert dx is not None
-    assert dy is not None
-    assert scene_hash is not None
+    normalized_kind = normalize_block_kind(block.value)
+    if not is_hand_safe_soft_block(normalized_kind):
+        return None
+    latest = blackboard.latest()
+    raw_latest = blackboard.raw_latest()
     if (
-        mode.value != "world"
-        or playable.value is not True
-        or danger.value is not False
-        or visible.value is not True
-        or mineable.value is not True
-        or not isinstance(kind.value, str)
-        or not is_hand_safe_soft_block(kind.value)
-        or not isinstance(dx.value, (int, float))
-        or isinstance(dx.value, bool)
-        or not isinstance(dy.value, (int, float))
-        or isinstance(dy.value, bool)
-        or abs(float(dx.value)) > _HEADROOM_CENTER_TOLERANCE
-        or abs(float(dy.value)) > _HEADROOM_CENTER_TOLERANCE
-        or scene_hash.value != requested_hash
+        latest is None
+        or raw_latest is None
+        or current_frame is None
+        or current_frame.captured_ns != raw_latest.captured_ns
+        or current_hash.source != CROSSHAIR_BLOCK_FAST_SOURCE
+        or current_grid.source != CROSSHAIR_BLOCK_FAST_SOURCE
+        or not raw_latest.captured_ns <= current_hash.observed_ns <= now_ns
+        or not raw_latest.captured_ns <= current_grid.observed_ns <= now_ns
     ):
         return None
-
-    current_hash = blackboard.fact("frame.dhash", min_confidence=1.0, now_ns=now_ns)
-    if current_hash is None or not isinstance(current_hash.value, str):
+    evidence = tuple(item for item in latest.evidence if item.evidence_id == evidence_id)
+    expected_region = crosshair_block_region(
+        recovery.query_frame_width,
+        recovery.query_frame_height,
+    )
+    expected_crop_width, expected_crop_height = crosshair_block_crop_dimensions(
+        recovery.query_frame_width,
+        recovery.query_frame_height,
+    )
+    if (
+        len(evidence) != 1
+        or evidence[0].frame_id != frame_id
+        or evidence[0].captured_ns != captured_ns
+        or evidence[0].region_kind != EvidenceRegion.WORLD
+        or evidence[0].region != expected_region
+        or evidence[0].crop_width != expected_crop_width
+        or evidence[0].crop_height != expected_crop_height
+        or evidence[0].pixel_sha256 != recovery.query_pixel_sha256
+    ):
+        return None
+    if (
+        current_frame.width != recovery.query_frame_width
+        or current_frame.height != recovery.query_frame_height
+    ):
         return None
     try:
-        if perceptual_hash_distance(requested_hash, current_hash.value) > 6:
+        if perceptual_hash_distance(requested_crop_hash, current_hash.value) > 2:
             return None
     except ValueError:
         return None
-
-    latest = blackboard.latest()
-    if latest is None:
+    if crosshair_block_rgb_grid_distance(
+        recovery.query_rgb_grid,
+        current_grid.value,
+    ) > 1.0:
         return None
-    normalized_kind = normalize_block_kind(kind.value)
-    candidates = tuple(
-        track
-        for track in latest.tracks
-        if track.track_id.startswith(f"vlm:{query_id}:")
-        and track.confidence >= 0.70
-        and track.last_seen_ns == observed_ns
-        and normalize_block_kind(track.label) == normalized_kind
-        and track_contains_crosshair(track)
+    return _HeadroomTarget(
+        kind=normalized_kind,
+        source=source,
+        evidence_id=evidence_id,
+        confidence=block.confidence,
+        observed_ns=observed_ns,
     )
-    if len(candidates) != 1:
-        return None
-    return _HeadroomTarget(kind=normalized_kind, track_id=candidates[0].track_id)
 
 
 def _semantic_deadline_ms(semantic_hz: float) -> int:
@@ -1320,6 +1375,12 @@ class AgentRuntime:
 
         active = self.executor.run
         if active is None or active.outcome != SkillOutcome.RUNNING:
+            # Reorientation and the one semantic query require stable pixels.
+            # Keep the motor idle while this transaction owns the scene; its
+            # mining/retry children appear as normal active runs below.
+            if getattr(self, "_headroom_recovery", None) is not None:
+                self._flush_pending_skill_stats()
+                return
             # Never idle the player while cognition is in flight: keep a
             # precondition-free exploration option running so motor keeps
             # emitting movement. Cognition switches skills when it returns.
@@ -1478,7 +1539,7 @@ class AgentRuntime:
                 recovery_skills=(),
                 outcome_verification=None,
             )
-        self._headroom_recovery = None
+        self._clear_headroom_recovery(recovery)
         self._traversal_escalation_pending = True
         self._cognition_requested = True
         return expired, True
@@ -1489,6 +1550,7 @@ class AgentRuntime:
         recovery = getattr(self, "_headroom_recovery", None)
         if recovery is not None and self._is_headroom_child_result(result):
             if recovery.phase == "mining":
+                self._remove_headroom_target(recovery)
                 if _verified_block_break(result):
                     retry_id = uuid.uuid4().hex
                     recovery.phase = "retry"
@@ -1501,7 +1563,7 @@ class AgentRuntime:
                         complete_on_locomotion_progress=True,
                     )
                 else:
-                    self._headroom_recovery = None
+                    self._clear_headroom_recovery(recovery)
                     self._note_terminal_for_cognition(
                         result.run,
                         recovery_started=False,
@@ -1509,7 +1571,7 @@ class AgentRuntime:
                 return True
 
             retry_succeeded = _verified_headroom_retry(result, recovery)
-            self._headroom_recovery = None
+            self._clear_headroom_recovery(recovery)
             if retry_succeeded:
                 self._traversal_escalation_pending = False
             else:
@@ -1568,19 +1630,34 @@ class AgentRuntime:
                         self._send_motor(cancelled.action, execution=cancelled)
                 finally:
                     self._record_terminal_run(cancelled.run, advance_plan=False)
-            self._headroom_recovery = None
+            self._clear_headroom_recovery(recovery)
+            self._traversal_escalation_pending = True
+            self._cognition_requested = True
+            return
+        if not self._headroom_scene_is_safe():
+            running = self.executor.run
+            child_run_ids = {recovery.mining_run_id, recovery.retry_run_id}
+            if (
+                running is not None
+                and running.outcome == SkillOutcome.RUNNING
+                and running.run_id in child_run_ids
+            ):
+                cancelled = self.executor.cancel()
+                try:
+                    if cancelled.action is not None:
+                        self._send_motor(cancelled.action, execution=cancelled)
+                finally:
+                    self._record_terminal_run(cancelled.run, advance_plan=False)
+            self._clear_headroom_recovery(recovery)
             self._traversal_escalation_pending = True
             self._cognition_requested = True
             return
         if recovery.phase in {"mining", "retry"}:
             return
-        if not self._headroom_scene_is_safe():
-            self._headroom_recovery = None
-            return
 
         running = self.executor.run
         if running is not None and running.outcome == SkillOutcome.RUNNING:
-            self._headroom_recovery = None
+            self._clear_headroom_recovery(recovery)
             return
 
         if recovery.phase == "reorient":
@@ -1591,7 +1668,7 @@ class AgentRuntime:
                 or captured is None
                 or captured.captured_ns != latest.captured_ns
             ):
-                self._headroom_recovery = None
+                self._clear_headroom_recovery(recovery)
                 return
             recovery.pre_reorient_dhash = frame_dhash(captured)
             self._send_motor(
@@ -1613,7 +1690,7 @@ class AgentRuntime:
                 recovery.settle_deadline_ns is None
                 or now_ns >= recovery.settle_deadline_ns
             ):
-                self._headroom_recovery = None
+                self._clear_headroom_recovery(recovery)
                 self._traversal_escalation_pending = True
                 self._cognition_requested = True
                 return
@@ -1637,7 +1714,7 @@ class AgentRuntime:
                     > 0
                 )
             except ValueError:
-                self._headroom_recovery = None
+                self._clear_headroom_recovery(recovery)
                 return
             if not visibly_reoriented:
                 return
@@ -1645,39 +1722,49 @@ class AgentRuntime:
 
         if recovery.phase == "request":
             if self.perception.active_vlm is None:
-                self._headroom_recovery = None
+                self._clear_headroom_recovery(recovery)
                 return
             if not self.perception.semantic_available():
                 return
             captured = self.perception.last_capture
             latest = self.blackboard.raw_latest()
-            if captured is None or latest is None:
-                self._headroom_recovery = None
+            if (
+                captured is None
+                or latest is None
+                or captured.captured_ns != latest.captured_ns
+            ):
+                self._clear_headroom_recovery(recovery)
                 return
             query_id = uuid.uuid4().hex
             query_started_ns = time.monotonic_ns()
             query_frame_dhash = frame_dhash(captured)
+            query_crosshair_dhash = crosshair_block_dhash(captured)
+            query_pixel_sha256 = crosshair_block_pixel_sha256(captured)
+            query_rgb_grid = crosshair_block_rgb_grid(captured)
+            model_id = self.perception.active_vlm.model.model_id
             query = ActivePerceptionQuery(
                 query_id=query_id,
-                question=(
-                    "Inspect only the single block exactly under the world crosshair that may "
-                    "be preventing forward or upward movement. Ground that exact block with one "
-                    "bounding box and report its canonical Minecraft block identifier, whether "
-                    "it is visibly mineable, world/playable scene state, immediate danger, and "
-                    "target dx/dy. Do not select an adjacent block and do not infer hidden state."
-                ),
+                mode=PerceptionQueryMode.CROSSHAIR_BLOCK,
+                question="Classify only the block exactly under the world crosshair.",
                 skill_id="mine_visible_block",
                 frame_id=latest.frame_id,
                 deadline_ms=10_000,
-                output_keys=_HEADROOM_QUERY_OUTPUT_KEYS,
             )
             if not self.perception.request_semantics(query, frame=captured):
-                self._headroom_recovery = None
+                self._clear_headroom_recovery(recovery)
                 return
             recovery.phase = "grounding"
             recovery.query_id = query_id
             recovery.query_started_ns = query_started_ns
             recovery.query_frame_dhash = query_frame_dhash
+            recovery.query_crosshair_dhash = query_crosshair_dhash
+            recovery.query_frame_id = latest.frame_id
+            recovery.query_captured_ns = captured.captured_ns
+            recovery.query_frame_width = captured.width
+            recovery.query_frame_height = captured.height
+            recovery.query_pixel_sha256 = query_pixel_sha256
+            recovery.query_rgb_grid = query_rgb_grid
+            recovery.query_source = f"vlm:{model_id}:{query_id}"
             self.metrics.semantic_requests += 1
             return
 
@@ -1685,9 +1772,16 @@ class AgentRuntime:
             self.blackboard,
             recovery,
             now_ns=time.monotonic_ns(),
+            current_frame=self.perception.last_capture,
         )
         if target is not None:
             run_id = uuid.uuid4().hex
+            track_id = self._materialize_headroom_target(recovery, target)
+            if track_id is None:
+                self._clear_headroom_recovery(recovery)
+                self._traversal_escalation_pending = True
+                self._cognition_requested = True
+                return
             recovery.phase = "mining"
             recovery.mining_run_id = run_id
             self.executor.start(
@@ -1696,7 +1790,7 @@ class AgentRuntime:
                 context_key=recovery.context_key,
                 parameters={
                     "target": target.kind,
-                    "target_track_id": target.track_id,
+                    "target_track_id": track_id,
                 },
                 instruction=(
                     "Mine only the grounded soft block under the crosshair until it breaks."
@@ -1708,10 +1802,13 @@ class AgentRuntime:
         # failure. An available worker with no exact accepted answer means this
         # single query abstained; never ask again or improvise another target.
         if self.perception.semantic_available():
-            self._headroom_recovery = None
+            self._clear_headroom_recovery(recovery)
 
     def _headroom_scene_is_safe(self) -> bool:
         now_ns = time.monotonic_ns()
+        latest = self.blackboard.raw_latest()
+        if latest is None:
+            return False
         unsafe_truths = ("danger.immediate", "scene.death", "scene.ui_overlay")
         if any(
             (fact := self.blackboard.fact(key, min_confidence=0.65, now_ns=now_ns))
@@ -1721,7 +1818,120 @@ class AgentRuntime:
         ):
             return False
         playable = self.blackboard.fact("scene.playable", min_confidence=0.65, now_ns=now_ns)
-        return playable is None or playable.value is not False
+        mode = self.blackboard.fact("scene.mode", min_confidence=0.65, now_ns=now_ns)
+        return bool(
+            playable is not None
+            and mode is not None
+            and playable.value is True
+            and mode.value == "world"
+            and playable.source == mode.source
+            and playable.source == BEDROCK_HUD_SAFETY_SOURCE
+            and latest.captured_ns <= playable.observed_ns <= now_ns
+            and latest.captured_ns <= mode.observed_ns <= now_ns
+        )
+
+    def _materialize_headroom_target(
+        self,
+        recovery: _HeadroomRecovery,
+        target: _HeadroomTarget,
+    ) -> str | None:
+        """Bind an accepted classifier sample for the existing mining guard."""
+
+        latest = self.blackboard.raw_latest()
+        if latest is None or recovery.query_id is None:
+            return None
+        track_id = f"crosshair-probe:{recovery.query_id}"
+        aperture_width = 1.0 / latest.width
+        aperture_height = 1.0 / latest.height
+        track = Track(
+            track_id=track_id,
+            label=target.kind,
+            confidence=target.confidence,
+            region=ScreenRegion(
+                x=0.5 - aperture_width / 2,
+                y=0.5 - aperture_height / 2,
+                width=aperture_width,
+                height=aperture_height,
+            ),
+            first_seen_ns=target.observed_ns,
+            last_seen_ns=target.observed_ns,
+            attributes={
+                "source": "crosshair-block-probe",
+                "tracking_source": target.source,
+                "sampling_aperture": True,
+                "crosshair_rgb_grid": recovery.query_rgb_grid or "",
+            },
+            evidence_refs=(target.evidence_id,),
+        )
+        facts = tuple(
+            PerceptionFact(
+                key=key,
+                value=value,
+                confidence=target.confidence,
+                observed_ns=target.observed_ns,
+                source=target.source,
+                expires_after_ms=15_000,
+                evidence_refs=(target.evidence_id,),
+            )
+            for key, value in (
+                ("target.visible", True),
+                ("target.kind", target.kind),
+                ("target.reference_available", True),
+            )
+        )
+        if not self.blackboard.merge_semantics(
+            instance_id=self.perception.instance_id,
+            facts=facts,
+        ):
+            return None
+        if not self.blackboard.upsert_semantic_track(
+            instance_id=self.perception.instance_id,
+            track=track,
+        ):
+            self.blackboard.remove_semantic_facts(
+                ("target.visible", "target.kind", "target.reference_available"),
+                expected_source=target.source,
+            )
+            return None
+        recovery.target_track_id = track_id
+        current = self.blackboard.latest()
+        if current is None or not any(item.track_id == track_id for item in current.tracks):
+            self._remove_headroom_target(recovery)
+            self.blackboard.remove_semantic_facts(
+                ("target.visible", "target.kind", "target.reference_available"),
+                expected_source=target.source,
+            )
+            return None
+        return track_id
+
+    def _remove_headroom_target(self, recovery: _HeadroomRecovery) -> None:
+        if recovery.target_track_id is not None:
+            self.blackboard.remove_semantic_track(recovery.target_track_id)
+            recovery.target_track_id = None
+        if recovery.query_source is not None:
+            self.blackboard.remove_semantic_facts(
+                ("target.visible", "target.kind", "target.reference_available"),
+                expected_source=recovery.query_source,
+            )
+
+    def _clear_headroom_recovery(self, recovery: _HeadroomRecovery) -> None:
+        """End one transaction and remove any temporary classifier binding."""
+
+        self._remove_headroom_target(recovery)
+        if recovery.query_source is not None:
+            self.blackboard.remove_semantic_facts(
+                (
+                    "recovery.crosshair.block",
+                    "recovery.crosshair.frame_dhash",
+                    "recovery.crosshair.observation_dhash",
+                    "target.visible",
+                    "target.kind",
+                    "target.reference_available",
+                ),
+                expected_source=recovery.query_source,
+            )
+        if getattr(self, "_headroom_recovery", None) is recovery:
+            self._headroom_recovery = None
 
     def _explore_keep_alive(self) -> SkillSpec | None:
         """Pick a precondition-free option to keep motor busy while cognition decides.
@@ -1798,7 +2008,9 @@ class AgentRuntime:
         # Death and modal UI recovery outrank the optional terrain-clear
         # transaction at every phase. The normal cancellation path below owns
         # releasing any active mining/traversal inputs.
-        self._headroom_recovery = None
+        headroom = getattr(self, "_headroom_recovery", None)
+        if headroom is not None:
+            self._clear_headroom_recovery(headroom)
         if running is not None and running.outcome == SkillOutcome.RUNNING:
             active_spec = self.skills.get(running.skill_id)
             if (
@@ -2170,7 +2382,7 @@ class AgentRuntime:
             # operator fast path or model decision takes ownership.
             running = self.executor.run
             child_run_ids = {headroom.mining_run_id, headroom.retry_run_id}
-            self._headroom_recovery = None
+            self._clear_headroom_recovery(headroom)
             if (
                 running is not None
                 and running.outcome == SkillOutcome.RUNNING
@@ -2365,6 +2577,13 @@ class AgentRuntime:
         return True
 
     def _consume_cognition(self) -> None:
+        if getattr(self, "_headroom_recovery", None) is not None:
+            # A decision completed against pre-recovery pixels cannot take the
+            # executor while the bounded recovery owns a stable scene. In the
+            # normal tick order, _start_cognition_if_due runs next and gives a
+            # queued operator message authority to clear/release this owner
+            # before any completed decision can be consumed.
+            return
         executor = getattr(self, "executor", None)
         active = None if executor is None else executor.run
         if (
@@ -2402,7 +2621,7 @@ class AgentRuntime:
             self._cognition_requested = True
             return
         if (
-            decision.skill_id == "craft_wood_planks"
+            decision.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
             and self._planks_retry_requires_wood()
             and planks_retry_requires_wood(self._cognition_context())
         ):
@@ -2584,17 +2803,19 @@ class AgentRuntime:
     def _advance_plan_on_step_complete(self, run: SkillRun) -> None:
         """Mark one persistent plan step done after a skill succeeds.
 
-        Steps are short free-form plans from the high-level VLM, so we cannot
-        reliably attribute a success to a specific step string. Instead we treat
-        a completed skill as consuming the current step position and advance the
-        plan index, preserving ordering while remaining permissive. The goal of
-        the last accepted decision is used only as a sanity gate so an off-plan
-        success (e.g. an operator-message task that overrides the standing plan)
-        does not silently eat plan progress.
+        Most steps are short free-form plans, so a completed world skill consumes
+        the current position permissively. Modal inventory transitions are a
+        narrow exception: opening or closing a GUI is often prerequisite cleanup,
+        and advances only an explicit matching GUI step. The last decision's goal
+        remains a sanity gate so an off-plan operator task cannot eat plan progress.
         """
         if not self._plan_steps:
             return
         if self._plan_index >= len(self._plan_steps):
+            return
+        if not _plan_step_requests_inventory_transition(
+            run.skill_id, self._plan_steps[self._plan_index]
+        ):
             return
         if self._last_decision is not None:
             decision_goal = self._last_decision.chosen_goal_id

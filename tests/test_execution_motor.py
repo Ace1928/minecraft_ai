@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from minecraft_ai.action_levels import ActionLevel
@@ -88,9 +86,12 @@ def _fact(
         key=key,
         value=value,
         confidence=confidence,
-        observed_ns=time.monotonic_ns(),
+        # Most executor tests use a deterministic 100ns frame and 200ns tick.
+        # Keep their default facts in that same clock domain; future-dated
+        # facts are correctly rejected by the production freshness contract.
+        observed_ns=100,
         source="test",
-        expires_after_ms=1_000_000,
+        expires_after_ms=1_000_000_000,
     )
 
 

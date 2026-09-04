@@ -1755,6 +1755,42 @@ def test_unfinished_crafting_recovery_close_does_not_consume_plan_step(
         assert runtime._plan_index == 1
 
 
+def test_inventory_transitions_only_consume_explicit_inventory_plan_steps(
+    tmp_path: Path,
+) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime_for_learning(database)
+        runtime.skills = build_bootstrap_skill_library()
+        runtime._plan_steps = ("gather_nearby_wood",)
+        runtime._plan_goal_id = "wood"
+        runtime._last_decision = CognitionDecision(chosen_goal_id="wood")
+        opened = SkillRun(
+            run_id="unrelated-open",
+            skill_id="open_inventory",
+            context_key="wood",
+            started_ns=1,
+            ended_ns=2,
+            outcome=SkillOutcome.SUCCEEDED,
+        )
+        closed = SkillRun(
+            run_id="unrelated-close",
+            skill_id="close_open_inventory",
+            context_key="scene-recovery",
+            started_ns=2,
+            ended_ns=3,
+            outcome=SkillOutcome.SUCCEEDED,
+        )
+        runtime._record_terminal_run(opened)
+        runtime._record_terminal_run(closed)
+        assert runtime._plan_index == 0
+
+        runtime._plan_steps = ("check_inventory_for_logs", "close inventory after audit")
+        runtime._record_terminal_run(opened.model_copy(update={"run_id": "planned-open"}))
+        assert runtime._plan_index == 1
+        runtime._record_terminal_run(closed.model_copy(update={"run_id": "planned-close"}))
+        assert runtime._plan_index == 2
+
+
 def test_planks_retry_guard_survives_restart_and_positive_evidence_expiry(tmp_path: Path) -> None:
     path = tmp_path / "state.sqlite3"
     with StateDatabase(path) as database:
@@ -1909,6 +1945,11 @@ def test_planks_retry_positive_global_count_requires_its_gui_evidence(
     "status,text,blocked",
     [
         (OperatorMessageStatus.QUEUED, "Craft planks once.", False),
+        (OperatorMessageStatus.QUEUED, "Open the inventory once.", False),
+        (OperatorMessageStatus.QUEUED, "Check the inventory for logs.", False),
+        (OperatorMessageStatus.QUEUED, "Inspect the inventory for logs.", False),
+        (OperatorMessageStatus.QUEUED, "Audit the inventory for logs.", False),
+        (OperatorMessageStatus.QUEUED, "View the inventory for logs.", False),
         (OperatorMessageStatus.DELIVERED, "Craft planks once.", False),
         (OperatorMessageStatus.ACKNOWLEDGED, "Craft planks once.", True),
         (OperatorMessageStatus.QUEUED, "Explore nearby.", True),
@@ -1955,7 +1996,7 @@ def test_planks_retry_override_selects_same_directive_as_operator_fast_path() ->
     assert planks_retry_requires_wood(context) is True
 
 
-def test_cognition_excludes_missing_wood_retry_but_reenables_after_repair() -> None:
+def test_cognition_excludes_missing_wood_audit_but_reenables_after_repair() -> None:
     skills = build_bootstrap_skill_library()
     failed = SkillRun(
         run_id="previous-craft", skill_id="craft_wood_planks", started_ns=1, ended_ns=2,
@@ -1969,25 +2010,65 @@ def test_cognition_excludes_missing_wood_retry_but_reenables_after_repair() -> N
     )
     controller = HighLevelController(_OperatorFastPathOnlyModel(), skills)
     board = PerceptionBlackboard()
-    assert "craft_wood_planks" not in {
+    blocked_payloads = {
         entry["skill_id"] for entry in controller._feasible_skill_payloads(
-            board, query_text="craft planks", context=context
+            board, query_text="open inventory and craft planks", context=context
         )
     }
-    assert "craft_wood_planks" not in {
+    assert {"craft_wood_planks", "open_inventory"}.isdisjoint(blocked_payloads)
+    blocked_bounds = {
         skill for skill, _ in controller._decision_repair_bounds(board, context).allowed_skills
     }
+    assert {"craft_wood_planks", "open_inventory"}.isdisjoint(blocked_bounds)
     context.planks_retry_requires_wood = False
     context.recent_skill_runs = (failed,)
     assert controller._blocking_skill_run(
         CognitionDecision(skill_id="craft_wood_planks"), context
     ) is None
     assert "craft_wood_planks" not in controller._recently_blocked_skill_ids(context)
-    assert "craft_wood_planks" in {
+    repaired_payloads = {
         entry["skill_id"] for entry in controller._feasible_skill_payloads(
-            board, query_text="craft planks", context=context
+            board, query_text="open inventory and craft planks", context=context
         )
     }
+    assert {"craft_wood_planks", "open_inventory"} <= repaired_payloads
+
+
+def test_cognition_strips_cross_skill_action_constraints_from_gather_wood() -> None:
+    class _Model:
+        model_id = "cross-skill-parameter-model"
+
+        def complete(self, _messages: tuple[ModelMessage, ...]) -> ModelResponse:
+            return ModelResponse(
+                model=self.model_id,
+                latency_ms=1,
+                text=(
+                    '{"r":"gather wood","g":"wood","s":"gather_nearby_wood",'
+                    '"p":{"wood_kind":"logs","minimum_logs":3,"allow_attack":false,'
+                    '"allow_use":false,"allow_jump":false},"o":null,"c":null,"x":false,'
+                    '"q":[],"w":null,"d":"mine nearby logs","n":["gather_nearby_wood"]}'
+                ),
+            )
+
+    skills = build_bootstrap_skill_library()
+    context = CognitionContext(
+        role=get_role("generalist"),
+        goals=(),
+        memories=(),
+        promises=(),
+        wiki=(),
+        current_plan=("gather_nearby_wood",),
+    )
+    decision = HighLevelController(_Model(), skills).decide(PerceptionBlackboard(), context)
+    assert decision.skill_id == "gather_nearby_wood"
+    assert decision.skill_parameters == {"wood_kind": "logs", "minimum_logs": 3}
+    executor = SkillExecutor(BootstrapMotorPolicy())
+    executor.start(
+        skills.get(decision.skill_id),
+        run_id="gather-with-attack",
+        parameters=decision.skill_parameters,
+    )
+    assert executor.policy_parameters["allow_attack"] is True
 
 
 def test_bootstrap_cognition_does_not_retry_blocked_crafting_plan() -> None:
@@ -1998,6 +2079,28 @@ def test_bootstrap_cognition_does_not_retry_blocked_crafting_plan() -> None:
     fallback = BootstrapCognitionPolicy(build_bootstrap_skill_library())
     for _ in range(2):
         assert fallback.decide(PerceptionBlackboard(), context).skill_id == "explore_forward"
+
+
+def test_runtime_rejects_repeated_inventory_audit_without_new_wood() -> None:
+    runtime = _runtime_with_completed_decision(
+        CognitionDecision(skill_id="open_inventory", chosen_goal_id="wood")
+    )
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime._planks_retry_requires_wood = lambda: True  # type: ignore[method-assign]
+    runtime._cognition_context = lambda: CognitionContext(  # type: ignore[method-assign]
+        role=get_role("generalist"),
+        goals=(),
+        memories=(),
+        promises=(),
+        wiki=(),
+        planks_retry_requires_wood=True,
+    )
+
+    runtime._consume_cognition()
+
+    assert runtime.executor.run is None
+    assert runtime._cognition_requested is True
 
 
 def test_collection_success_persists_resource_event_and_advances_plan_once(tmp_path: Path) -> None:

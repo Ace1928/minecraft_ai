@@ -19,6 +19,7 @@ from .platforms.bedrock_x11 import CapturedFrame
 
 
 JsonScalar = bool | int | float | str
+CROSSHAIR_BLOCK_FAST_SOURCE = "bootstrap:bootstrap-rgb-v1:not-training-label"
 
 
 class ClaimStatus(StrEnum):
@@ -98,6 +99,20 @@ _BlockName = Literal[
     "dirt", "grass_block", "stone", "cobblestone", "mossy_cobblestone",
     "oak_log", "spruce_log", "unknown",
 ]
+_CROSSHAIR_BLOCK_NAMES = (
+    "dirt", "coarse_dirt", "grass_block", "gravel", "sand", "red_sand", "clay",
+    "mud", "muddy_mangrove_roots", "mycelium", "podzol", "snow_block", "soul_sand",
+    "soul_soil", "stone", "cobblestone", "mossy_cobblestone", "andesite", "granite",
+    "diorite", "deepslate", "bedrock", "oak_log", "spruce_log", "oak_planks",
+    "leaves", "water", "unknown",
+)
+_CrosshairBlockName = Literal[
+    "dirt", "coarse_dirt", "grass_block", "gravel", "sand", "red_sand", "clay",
+    "mud", "muddy_mangrove_roots", "mycelium", "podzol", "snow_block", "soul_sand",
+    "soul_soil", "stone", "cobblestone", "mossy_cobblestone", "andesite", "granite",
+    "diorite", "deepslate", "bedrock", "oak_log", "spruce_log", "oak_planks",
+    "leaves", "water", "unknown",
+]
 _CROSSHAIR_PROBE_KEYS = (
     "scene.mode", "scene.playable", "danger.immediate", "target.visible",
     "target.kind", "target.mineable", "target.dx", "target.dy",
@@ -118,6 +133,15 @@ class _CompactCrosshairResponse(BaseModel):
     dx: _Offset | None
     dy: _Offset | None
     box: tuple[_Probability, _Probability, _Probability, _Probability] | None
+    confidence: _Probability | None
+
+
+class _CrosshairBlockResponse(BaseModel):
+    """Recovery-local wire: classification only, with aggressive abstention."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    block: _CrosshairBlockName | None
     confidence: _Probability | None
 
 
@@ -335,6 +359,178 @@ class SegmentedFrameBuilder:
         )
 
 
+def _crosshair_block_bounds(width: int, height: int) -> tuple[int, int, int, int]:
+    if width <= 0 or height <= 0:
+        raise ValueError("crosshair crop requires positive frame dimensions")
+    side = max(1, min(512, width, math.floor(height * 0.68)))
+    crop_width = side - int(side > 1 and side % 2 != width % 2)
+    crop_height = side - int(side > 1 and side % 2 != height % 2)
+    x0 = (width - crop_width) // 2
+    y0 = (height - crop_height) // 2
+    return x0, y0, x0 + crop_width, y0 + crop_height
+
+
+def crosshair_block_crop_dimensions(width: int, height: int) -> tuple[int, int]:
+    """Return source-pixel dimensions for the exactly centered recovery crop."""
+
+    x0, y0, x1, y1 = _crosshair_block_bounds(width, height)
+    return x1 - x0, y1 - y0
+
+
+def crosshair_block_region(width: int, height: int) -> ScreenRegion:
+    """Return the exact centered source crop shared by capture and freshness checks."""
+
+    x0, y0, x1, y1 = _crosshair_block_bounds(width, height)
+    return ScreenRegion(
+        x=x0 / width,
+        y=y0 / height,
+        width=(x1 - x0) / width,
+        height=(y1 - y0) / height,
+    )
+
+
+def _build_crosshair_block_evidence(
+    frame: CapturedFrame,
+    *,
+    frame_id: int,
+) -> SegmentedFrameEvidence:
+    """Build one unscaled center crop and its exact captured-pixel provenance."""
+
+    image_module = importlib.import_module("PIL.Image")
+    source = image_module.frombytes(
+        "RGBA", (frame.width, frame.height), frame.bgra, "raw", "BGRA"
+    ).convert("RGB")
+    region = crosshair_block_region(frame.width, frame.height)
+    bounds = _crosshair_block_bounds(frame.width, frame.height)
+    crop = source.crop(bounds)
+    evidence = PerceptionEvidence(
+        evidence_id=f"frame-{frame_id}:crosshair-block",
+        frame_id=frame_id,
+        captured_ns=frame.captured_ns,
+        region_kind=EvidenceRegion.WORLD,
+        region=region,
+        pixel_sha256=hashlib.sha256(crop.tobytes()).hexdigest(),
+        crop_width=crop.width,
+        crop_height=crop.height,
+    )
+    buffer = io.BytesIO()
+    crop.save(buffer, format="PNG", optimize=False)
+    return SegmentedFrameEvidence(frame_id, buffer.getvalue(), (evidence,))
+
+
+def crosshair_block_pixel_sha256(frame: CapturedFrame) -> str:
+    """Hash exact RGB pixels from the recovery crop, preserving absolute color."""
+
+    image_module = importlib.import_module("PIL.Image")
+    source = image_module.frombytes(
+        "RGBA", (frame.width, frame.height), frame.bgra, "raw", "BGRA"
+    ).convert("RGB")
+    crop = source.crop(_crosshair_block_bounds(frame.width, frame.height))
+    return hashlib.sha256(crop.tobytes()).hexdigest()
+
+
+def crosshair_block_rgb_grid(frame: CapturedFrame) -> str:
+    """Return a local RGB grid while excluding only fixed crosshair strokes."""
+
+    left, top, right, bottom = _crosshair_block_bounds(frame.width, frame.height)
+    crop_width = right - left
+    crop_height = bottom - top
+    aperture_side = min(128, crop_width, crop_height)
+    aperture_x = (crop_width - aperture_side) // 2
+    aperture_y = (crop_height - aperture_side) // 2
+    try:
+        numpy = importlib.import_module("numpy")
+    except ImportError:
+        numpy = None
+    if numpy is not None and aperture_side >= 16 and aperture_side % 16 == 0:
+        source = numpy.frombuffer(frame.bgra, dtype=numpy.uint8).reshape(
+            frame.height,
+            frame.width,
+            4,
+        )
+        patch = source[
+            top + aperture_y : top + aperture_y + aperture_side,
+            left + aperture_x : left + aperture_x + aperture_side,
+            2::-1,
+        ].astype(numpy.uint32)
+        coordinates = numpy.arange(aperture_side, dtype=numpy.float32) + 0.5
+        absolute_x = coordinates + aperture_x
+        absolute_y = coordinates + aperture_y
+        center_x = crop_width / 2
+        center_y = crop_height / 2
+        crosshair_mask = (
+            (numpy.abs(absolute_x[None, :] - center_x) <= 3)
+            & (numpy.abs(absolute_y[:, None] - center_y) <= 20)
+        ) | (
+            (numpy.abs(absolute_y[:, None] - center_y) <= 3)
+            & (numpy.abs(absolute_x[None, :] - center_x) <= 20)
+        )
+        cell_side = aperture_side // 16
+        cells = patch.reshape(16, cell_side, 16, cell_side, 3)
+        included = (~crosshair_mask).reshape(16, cell_side, 16, cell_side)
+        included_sums = (cells * included[..., None]).sum(axis=(1, 3))
+        included_counts = included.sum(axis=(1, 3))
+        all_sums = cells.sum(axis=(1, 3))
+        empty = included_counts == 0
+        included_sums[empty] = all_sums[empty]
+        included_counts[empty] = cell_side * cell_side
+        grid = numpy.rint(included_sums / included_counts[..., None]).astype(numpy.uint8)
+        return bytes(grid).hex()
+
+    image_module = importlib.import_module("PIL.Image")
+    source_image = image_module.frombytes(
+        "RGBA", (frame.width, frame.height), frame.bgra, "raw", "BGRA"
+    ).convert("RGB")
+    crop = source_image.crop((left, top, right, bottom))
+    pixels = crop.load()
+    grid = bytearray()
+    center_x = crop.width / 2
+    center_y = crop.height / 2
+    for row in range(16):
+        y0 = aperture_y + math.floor(row * aperture_side / 16)
+        y1 = aperture_y + math.floor((row + 1) * aperture_side / 16)
+        for column in range(16):
+            x0 = aperture_x + math.floor(column * aperture_side / 16)
+            x1 = aperture_x + math.floor((column + 1) * aperture_side / 16)
+            samples = [
+                pixels[x, y]
+                for y in range(y0, max(y0 + 1, y1))
+                for x in range(x0, max(x0 + 1, x1))
+                if not (
+                    (abs((x + 0.5) - center_x) <= 3 and abs((y + 0.5) - center_y) <= 20)
+                    or (
+                        abs((y + 0.5) - center_y) <= 3
+                        and abs((x + 0.5) - center_x) <= 20
+                    )
+                )
+            ]
+            # Tiny synthetic frames can place a whole grid cell under a stroke;
+            # retain that cell instead of producing an undefined signature.
+            if not samples:
+                samples = [
+                    pixels[x, y]
+                    for y in range(y0, max(y0 + 1, y1))
+                    for x in range(x0, max(x0 + 1, x1))
+                ]
+            for channel in range(3):
+                grid.append(round(sum(pixel[channel] for pixel in samples) / len(samples)))
+    return grid.hex()
+
+
+def crosshair_block_rgb_grid_distance(first: str, second: str) -> float:
+    """Return mean absolute RGB error outside the fixed crosshair mask."""
+
+    try:
+        left = bytes.fromhex(first)
+        right = bytes.fromhex(second)
+    except ValueError:
+        return float("inf")
+    if len(left) != 16 * 16 * 3 or len(right) != len(left):
+        return float("inf")
+    difference = sum(abs(a - b) for a, b in zip(left, right, strict=True))
+    return difference / len(left)
+
+
 def _build_crosshair_evidence(frame: CapturedFrame, *, frame_id: int) -> SegmentedFrameEvidence:
     """Keep one world overview beside a near-native center crop, with exact provenance."""
 
@@ -345,13 +541,8 @@ def _build_crosshair_evidence(frame: CapturedFrame, *, frame_id: int) -> Segment
     ).convert("RGB")
     # A centered square no larger than 512 source pixels, wholly inside WORLD.
     # The height bound leaves the original-frame crosshair at the crop center.
-    side = max(1, min(512, frame.width, math.floor(frame.height * 0.68)))
-    x0 = (frame.width - side) // 2
-    y0 = (frame.height - side) // 2
-    center_region = ScreenRegion(
-        x=x0 / frame.width, y=y0 / frame.height,
-        width=side / frame.width, height=side / frame.height,
-    )
+    center_region = crosshair_block_region(frame.width, frame.height)
+    x0, y0, x1, y1 = _crosshair_block_bounds(frame.width, frame.height)
     definitions = (
         ("world", "W: world overview", _REGIONS[0].region),
         ("crosshair", "C: crosshair close-up", center_region),
@@ -361,7 +552,7 @@ def _build_crosshair_evidence(frame: CapturedFrame, *, frame_id: int) -> Segment
     evidence: list[PerceptionEvidence] = []
     for index, (suffix, title, region) in enumerate(definitions):
         bounds = (
-            (x0, y0, x0 + side, y0 + side)
+            (x0, y0, x1, y1)
             if suffix == "crosshair"
             else _pixel_bounds(region, frame.width, frame.height)
         )
@@ -463,6 +654,62 @@ def _expand_crosshair_response(
     )
 
 
+def _expand_crosshair_block_response(
+    text: str,
+    evidence: PerceptionEvidence,
+) -> GroundedVLMResponse:
+    """Translate one explicit center-block class without inventing other facts."""
+
+    encoded = _strip_code_fence(text)
+    response = _CrosshairBlockResponse.model_validate_json(encoded)
+    json.loads(encoded, object_pairs_hook=_unique_crosshair_object)
+    if (
+        response.block is None
+        or response.block == "unknown"
+        or response.confidence is None
+        or response.confidence <= 0
+    ):
+        return GroundedVLMResponse(uncertainty=1.0)
+    return GroundedVLMResponse(
+        uncertainty=1.0 - response.confidence,
+        claims=(
+            GroundedClaim(
+                key="recovery.crosshair.block",
+                status=ClaimStatus.OBSERVED,
+                value=response.block,
+                confidence=response.confidence,
+                evidence_ids=(evidence.evidence_id,),
+            ),
+        ),
+    )
+
+
+def _crosshair_block_prompt() -> str:
+    choices = ",".join(_CROSSHAIR_BLOCK_NAMES)
+    return (
+        "Classify only the Minecraft block directly behind the white crosshair at the exact "
+        "center of this single crop. Return JSON with exactly block and confidence. block is "
+        f"one of {choices} or null. If the crosshair touches a boundary, the image is dark or "
+        "ambiguous, or the exact identity is uncertain, use unknown. Never choose an adjacent "
+        "easier block. confidence is a conservative 0..1 number or null. No prose."
+    )
+
+
+def _crosshair_block_grammar() -> str:
+    names = " | ".join(json.dumps(json.dumps(value)) for value in _CROSSHAIR_BLOCK_NAMES)
+    return "\n".join(
+        (
+            'root ::= "{" ws "\\\"block\\\"" ws ":" ws block ws "," ws '
+            '"\\\"confidence\\\"" ws ":" ws confidence ws "}" ws',
+            'block ::= "null" | block-name',
+            f"block-name ::= {names}",
+            'confidence ::= "null" | probability',
+            'probability ::= "0" ("." [0-9]+)? | "1" ("." "0"+)?',
+            "ws ::= [ \\t\\n]*",
+        )
+    )
+
+
 def _crosshair_prompt() -> str:
     return (
         "Minecraft: W is the left world overview; C is the right crosshair close-up. "
@@ -536,6 +783,52 @@ class GroundedPerceptionHarness:
     model: _VisionModel
     frame_builder: SegmentedFrameBuilder = SegmentedFrameBuilder()
     compact_crosshair_probe: bool = False
+
+    def inspect_crosshair_block_detailed(
+        self,
+        frame: CapturedFrame,
+        *,
+        frame_id: int,
+    ) -> GroundedPerceptionInspection:
+        """Run one recovery-local center classification with no schema-repair call."""
+
+        segmented = _build_crosshair_block_evidence(frame, frame_id=frame_id)
+        prompt = _crosshair_block_prompt()
+        schema = _CrosshairBlockResponse.model_json_schema()
+        grammar = _crosshair_block_grammar()
+        constrained = getattr(self.model, "inspect_constrained", None)
+        structured = getattr(self.model, "inspect_structured", None)
+        if callable(constrained):
+            response = constrained(
+                prompt,
+                image_bytes=segmented.composite_png,
+                mime_type="image/png",
+                name="minecraft_crosshair_block",
+                schema=schema,
+                grammar=grammar,
+            )
+        elif callable(structured):
+            response = structured(
+                prompt,
+                image_bytes=segmented.composite_png,
+                mime_type="image/png",
+                name="minecraft_crosshair_block",
+                schema=schema,
+            )
+        else:
+            response = self.model.inspect(
+                prompt,
+                image_bytes=segmented.composite_png,
+                mime_type="image/png",
+            )
+        raw = _expand_crosshair_block_response(response.text, segmented.evidence[0])
+        report = validate_grounded_response(
+            raw,
+            frame_id=frame_id,
+            evidence=segmented.evidence,
+            requested_keys=("recovery.crosshair.block",),
+        )
+        return GroundedPerceptionInspection(report=report, latency_ms=response.latency_ms)
 
     def inspect(
         self,
@@ -707,6 +1000,11 @@ _GUI = frozenset({EvidenceRegion.GUI})
 _SCENE = frozenset({EvidenceRegion.WORLD, EvidenceRegion.HUD, EvidenceRegion.GUI})
 
 _CLAIM_RULES: dict[str, _ClaimRule] = {
+    "recovery.crosshair.block": _ClaimRule(
+        (str,),
+        _WORLD,
+        choices=frozenset(_CROSSHAIR_BLOCK_NAMES) - {"unknown"},
+    ),
     "scene.mode": _ClaimRule(
         (str,),
         _SCENE,

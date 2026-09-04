@@ -16,6 +16,7 @@ from minecraft_ai.perception import (
     FrameState,
     PerceptionBlackboard,
     PerceptionFact,
+    PerceptionQueryMode,
     ScreenRegion,
     Track,
 )
@@ -34,6 +35,7 @@ from minecraft_ai.perception_service import (
     bedrock_inventory_slot_observation,
     bedrock_survival_hud_present,
     bedrock_ui_chrome_present,
+    crosshair_block_dhash,
     frame_dhash,
     perceptual_hash_distance,
 )
@@ -892,6 +894,123 @@ def test_active_vlm_prefers_strict_structured_vision_contract() -> None:
     assert observation.rejection_count == 0
     assert not observation.prose_rejected
     assert latency_ms == 12.0
+
+
+def test_active_vlm_typed_crosshair_route_publishes_only_recovery_local_facts() -> None:
+    class _Model:
+        model_id = "crosshair-test-vlm"
+
+        def inspect(self, prompt: str, *, image_bytes: bytes, mime_type: str) -> ModelResponse:
+            raise AssertionError("constrained route required")
+
+        def inspect_constrained(
+            self,
+            prompt: str,
+            *,
+            image_bytes: bytes,
+            mime_type: str,
+            name: str,
+            schema: dict[str, object],
+            grammar: str,
+        ) -> ModelResponse:
+            assert name == "minecraft_crosshair_block"
+            assert set(schema["required"]) == {"block", "confidence"}
+            assert "scene" not in prompt
+            assert image_bytes.startswith(b"\x89PNG")
+            return ModelResponse(
+                text='{"block":"dirt","confidence":0.9}',
+                model=self.model_id,
+                latency_ms=3,
+            )
+
+    frame = _frame(b"\0" * (800 * 600 * 4), width=800, height=600)
+    crop_hash = crosshair_block_dhash(frame)
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(frame_id=1, captured_ns=frame.captured_ns, instance_id="bedrock:test",
+                   width=800, height=600)
+    )
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(
+            PerceptionFact(
+                key="frame.crosshair_block_dhash", value=crop_hash, confidence=1,
+                observed_ns=time.monotonic_ns(), source="bootstrap:test", expires_after_ms=500,
+            ),
+        ),
+    )
+    model = _Model()
+    worker = ActiveVLMWorker(model, board, "bedrock:test")
+    job = SemanticJob(
+        query=ActivePerceptionQuery(
+            query_id="q-center", mode=PerceptionQueryMode.CROSSHAIR_BLOCK,
+            question="this text does not select routing", frame_id=1,
+        ),
+        frame=frame,
+        frame_dhash=frame_dhash(frame),
+        crosshair_block_dhash=crop_hash,
+    )
+    observation, _ = worker._inspect(job)
+    worker._publish(job, observation)
+
+    published = {
+        key for key, fact in board.fresh_facts().items()
+        if fact.source == "vlm:crosshair-test-vlm:q-center"
+    }
+    assert published == {
+        "recovery.crosshair.block",
+        "recovery.crosshair.frame_dhash",
+        "recovery.crosshair.observation_dhash",
+    }
+    assert board.fact("target.visible") is None
+    assert board.fact("target.kind") is None
+    assert board.fact("scene.summary") is None
+    assert board.fact("perception.uncertainty") is None
+    assert board.latest() is not None and board.latest().tracks == ()
+
+
+def test_crosshair_result_rejects_changed_or_missing_exact_crop_hash() -> None:
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(frame_id=2, captured_ns=2, instance_id="bedrock:test", width=9, height=8)
+    )
+    worker = ActiveVLMWorker(_UnusedVisionModel(), board, "bedrock:test")
+    job = SemanticJob(
+        query=ActivePerceptionQuery(
+            query_id="q-stale", mode=PerceptionQueryMode.CROSSHAIR_BLOCK,
+            question="center", frame_id=1,
+        ),
+        frame=_frame(b"\0" * (9 * 8 * 4)),
+        frame_dhash="0" * 16,
+        crosshair_block_dhash="0" * 16,
+    )
+    observation = SemanticObservation(
+        facts={"recovery.crosshair.block": "dirt"},
+        confidences={"recovery.crosshair.block": 0.9},
+    )
+    worker._publish(job, observation)
+    assert board.fact("recovery.crosshair.block") is None
+    assert worker.metrics.stale_rejections == 1
+
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(PerceptionFact(
+            key="frame.crosshair_block_dhash", value="f" * 16, confidence=1,
+            observed_ns=time.monotonic_ns(), source="bootstrap:test", expires_after_ms=500,
+        ),),
+    )
+    worker._publish(job, observation)
+    assert board.fact("recovery.crosshair.block") is None
+    assert worker.metrics.stale_rejections == 2
+
+
+def test_perception_fact_future_timestamp_is_not_fresh() -> None:
+    fact = PerceptionFact(
+        key="future", value=True, confidence=1, observed_ns=200,
+        source="test", expires_after_ms=1000,
+    )
+    assert fact.fresh(now_ns=199) is False
+    assert fact.fresh(now_ns=200) is True
 
 
 def test_active_vlm_encodes_only_regions_capable_of_proving_typed_request() -> None:

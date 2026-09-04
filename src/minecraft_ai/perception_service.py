@@ -11,9 +11,12 @@ from typing import Any, Literal, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from .grounded_perception import (
+    CROSSHAIR_BLOCK_FAST_SOURCE,
     GroundedPerceptionHarness,
     GroundedPerceptionRepairError,
     GroundedPerceptionReport,
+    crosshair_block_region,
+    crosshair_block_rgb_grid,
 )
 from .models import VisionLanguageModel
 from .perception import (
@@ -23,6 +26,7 @@ from .perception import (
     PerceptionBlackboard,
     PerceptionEvidence,
     PerceptionFact,
+    PerceptionQueryMode,
     ScreenRegion,
     Track,
 )
@@ -57,6 +61,7 @@ BEDROCK_INVENTORY_ZERO_SOURCE = (
 BEDROCK_HOTBAR_LOG_COUNT_SOURCE = (
     "deterministic:bedrock-1.26.45.1-classic-hud-hotbar-oak-logs-v2:not-training-label"
 )
+BEDROCK_HUD_SAFETY_SOURCE = "safety:bedrock-hud-v1:not-training-label"
 
 
 @dataclass(frozen=True)
@@ -81,6 +86,7 @@ class SemanticTrack(BaseModel):
     width: float = Field(gt=0.0, le=1.0)
     height: float = Field(gt=0.0, le=1.0)
     evidence_id: str | None = Field(default=None, max_length=256)
+    attributes: dict[str, str | int | float | bool] = Field(default_factory=dict)
 
 
 class SemanticObservation(BaseModel):
@@ -232,6 +238,7 @@ class SemanticJob:
     frame: CapturedFrame
     frame_dhash: str
     ui_dhash: str = ""
+    crosshair_block_dhash: str = ""
 
 
 @dataclass
@@ -345,12 +352,19 @@ class ActiveVLMWorker:
 
     def _inspect(self, job: SemanticJob) -> tuple[SemanticObservation, float]:
         try:
-            result = GroundedPerceptionHarness(self.model).inspect_detailed(
-                job.frame,
-                frame_id=job.query.frame_id,
-                question=job.query.question,
-                output_keys=job.query.output_keys,
-            )
+            harness = GroundedPerceptionHarness(self.model)
+            if job.query.mode == PerceptionQueryMode.CROSSHAIR_BLOCK:
+                result = harness.inspect_crosshair_block_detailed(
+                    job.frame,
+                    frame_id=job.query.frame_id,
+                )
+            else:
+                result = harness.inspect_detailed(
+                    job.frame,
+                    frame_id=job.query.frame_id,
+                    question=job.query.question,
+                    output_keys=job.query.output_keys,
+                )
         except GroundedPerceptionRepairError:
             self.metrics.schema_repair_attempts += 1
             self.metrics.schema_repair_failures += 1
@@ -387,6 +401,20 @@ class ActiveVLMWorker:
             if job.ui_dhash and current_ui_hash is not None
             else None
         )
+        current_crosshair_hash_fact = self.blackboard.fact(
+            "frame.crosshair_block_dhash", min_confidence=1.0
+        )
+        current_crosshair_hash = (
+            current_crosshair_hash_fact.value
+            if current_crosshair_hash_fact is not None
+            and isinstance(current_crosshair_hash_fact.value, str)
+            else None
+        )
+        crosshair_hash_distance = (
+            perceptual_hash_distance(job.crosshair_block_dhash, current_crosshair_hash)
+            if job.crosshair_block_dhash and current_crosshair_hash is not None
+            else None
+        )
         self.metrics.last_frame_age = frame_age
         self.metrics.last_hash_distance = hash_distance
         # Slow semantics remain valid for an unchanged static GUI or view. A
@@ -395,6 +423,7 @@ class ActiveVLMWorker:
             job.query.skill_id == "craft_wood_planks"
             or any(key.startswith("inventory.") for key in job.query.output_keys)
         )
+        crosshair_block_scoped = job.query.mode == PerceptionQueryMode.CROSSHAIR_BLOCK
         overlay = self.blackboard.fact(
             "scene.inventory_overlay",
             min_confidence=0.99,
@@ -406,7 +435,12 @@ class ActiveVLMWorker:
         )
         stale = bool(
             (
-                inventory_scoped
+                crosshair_block_scoped
+                and (crosshair_hash_distance is None or crosshair_hash_distance > 2)
+            )
+            or (
+                not crosshair_block_scoped
+                and inventory_scoped
                 and (
                     hash_distance is None
                     or hash_distance > 6
@@ -414,7 +448,8 @@ class ActiveVLMWorker:
                 )
             )
             or (
-                not inventory_scoped
+                not crosshair_block_scoped
+                and not inventory_scoped
                 and frame_age > 120
                 and (
                     hash_distance is None
@@ -427,26 +462,46 @@ class ActiveVLMWorker:
             self.metrics.stale_rejections += 1
             return
         now = time.monotonic_ns()
+        source = f"vlm:{self.model.model_id}:{job.query.query_id}"
+        fact_values = (
+            {
+                key: value
+                for key, value in observation.facts.items()
+                if key == "recovery.crosshair.block"
+            }
+            if crosshair_block_scoped
+            else observation.canonical_facts()
+        )
         facts = tuple(
             PerceptionFact(
                 key=key,
                 value=value,
                 confidence=max(0.0, min(1.0, observation.confidences.get(key, 0.7))),
                 observed_ns=now,
-                source=f"vlm:{self.model.model_id}:{job.query.query_id}",
+                source=source,
                 expires_after_ms=max(15_000, job.query.deadline_ms * 3),
                 evidence_refs=observation.evidence_refs.get(key, ()),
             )
-            for key, value in observation.canonical_facts().items()
-        ) + (
+            for key, value in fact_values.items()
+        )
+        hash_values = (
+            (
+                ("recovery.crosshair.frame_dhash", job.frame_dhash),
+                ("recovery.crosshair.observation_dhash", job.crosshair_block_dhash),
+            )
+            if crosshair_block_scoped
+            else (("scene.observation_dhash", job.frame_dhash),)
+        )
+        facts += tuple(
             PerceptionFact(
-                key="scene.observation_dhash",
-                value=job.frame_dhash,
+                key=key,
+                value=value,
                 confidence=1.0,
                 observed_ns=now,
-                source=f"vlm:{self.model.model_id}:{job.query.query_id}",
+                source=source,
                 expires_after_ms=120_000,
-            ),
+            )
+            for key, value in hash_values
         )
         tracks = tuple(
             Track(
@@ -462,6 +517,7 @@ class ActiveVLMWorker:
                 first_seen_ns=now,
                 last_seen_ns=now,
                 evidence_refs=() if item.evidence_id is None else (item.evidence_id,),
+                attributes=item.attributes,
             )
             for index, item in enumerate(observation.tracks)
         )
@@ -534,7 +590,11 @@ class BootstrapFastPerception:
         now = time.monotonic_ns()
         inventory_overlay = bedrock_inventory_overlay_present(frame)
         ui_overlay = inventory_overlay or _bedrock_top_ui_chrome_present(frame)
-        bootstrap_source = f"bootstrap:{self.model_id}:not-training-label"
+        bootstrap_source = (
+            CROSSHAIR_BLOCK_FAST_SOURCE
+            if self.model_id == "bootstrap-rgb-v1"
+            else f"bootstrap:{self.model_id}:not-training-label"
+        )
         values: tuple[tuple[str, str | bool, float, int], ...] = (
             ("perception.bootstrap_active", True, 1.0, 500),
             ("frame.dhash", frame_dhash(frame), 1.0, 500),
@@ -563,6 +623,18 @@ class BootstrapFastPerception:
                 1.0,
                 500,
             ),
+            (
+                "frame.crosshair_block_dhash",
+                crosshair_block_dhash(frame),
+                1.0,
+                500,
+            ),
+            (
+                "frame.crosshair_block_rgb_grid",
+                crosshair_block_rgb_grid(frame),
+                1.0,
+                500,
+            ),
         )
         facts = [
             PerceptionFact(
@@ -575,7 +647,7 @@ class BootstrapFastPerception:
             )
             for key, value, confidence, expires_after_ms in values
         ]
-        safety_source = "safety:bedrock-hud-v1:not-training-label"
+        safety_source = BEDROCK_HUD_SAFETY_SOURCE
         safety_values: tuple[tuple[str, str | int | float | bool], ...] = ()
         death_screen = bedrock_death_screen_present(frame)
         in_world_hud = False
@@ -745,6 +817,7 @@ class RealtimePerceptionService:
                 frame=selected,
                 frame_dhash=frame_dhash(selected),
                 ui_dhash=frame_region_dhash(selected, y_start=0.0, y_end=0.18),
+                crosshair_block_dhash=crosshair_block_dhash(selected),
             )
         )
 
@@ -768,6 +841,19 @@ class RealtimePerceptionService:
 def frame_dhash(frame: CapturedFrame) -> str:
     """Return a compact image-similarity signal without assigning semantics."""
     return frame_region_dhash(frame, y_start=0.0, y_end=1.0)
+
+
+def crosshair_block_dhash(frame: CapturedFrame) -> str:
+    """Hash the exact recovery classifier crop, allowing unrelated world animation."""
+
+    region = crosshair_block_region(frame.width, frame.height)
+    return frame_region_dhash(
+        frame,
+        x_start=region.x,
+        x_end=region.x + region.width,
+        y_start=region.y,
+        y_end=region.y + region.height,
+    )
 
 
 def frame_region_dhash(
