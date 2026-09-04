@@ -472,7 +472,9 @@ def test_grounded_router_polls_rocket_after_releasing_only_the_body() -> None:
         model_version="rocket-test",
     )
     assert router.poll_perception(board, mine)
-    second_ns = time.monotonic_ns()
+    # Windows runners can return the same monotonic timestamp for adjacent
+    # calls. This test needs a distinct observation, not wall-clock progress.
+    second_ns = first_ns + 1
     grounded.observation = GroundedTargetObservation(
         observed_ns=second_ns,
         probability=0.03,
