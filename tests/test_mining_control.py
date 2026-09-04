@@ -159,16 +159,19 @@ def _executor(
     *,
     now_ns: int,
     mode: str = "mine",
+    skill_id: str = "mine_test",
+    parameters: dict[str, str | int | float | bool] | None = None,
 ) -> SkillExecutor:
     executor = SkillExecutor(policy)
     executor.start(
         SkillSpec(
-            skill_id="mine_test",
+            skill_id=skill_id,
             name="Mine test block",
             policy_ref=mode,
             recovery_skills=("reacquire_target",),
         ),
         run_id="episode:one",
+        parameters=parameters,
         now_ns=now_ns - 1,
     )
     return executor
@@ -185,6 +188,146 @@ def test_guard_never_starts_attack_when_policy_did_not() -> None:
     assert tick.action is not None
     assert "left" not in tick.action.buttons_down
     assert tick.action_origin == ActionOrigin.POLICY
+
+
+def test_operator_marked_target_can_acquire_without_policy_attack() -> None:
+    now = time.monotonic_ns()
+    policy = _ScriptedPolicy(MotorAction(sequence=0), MotorAction(sequence=0))
+    executor = _executor(
+        policy,
+        now_ns=now,
+        skill_id="mine_visible_block",
+        parameters={"target": "dirt"},
+    )
+    reference_only = _mining_board(
+        now_ns=now,
+        kind="dirt",
+        item=None,
+        track_attributes={"source": "operator"},
+        track_seen_ns=now - 60_000_000_000,
+        include_visible=False,
+        include_kind=False,
+        include_mineable=False,
+        include_selected_slot=False,
+        extra_facts=(
+            _fact(
+                "target.reference_available",
+                True,
+                now_ns=now,
+                source="operator:cross-view-reference:target:one",
+            ),
+        ),
+    )
+
+    waiting = executor.tick(reference_only, sequence=1, now_ns=now)
+    started = executor.tick(
+        _mining_board(
+            now_ns=now + 100_000_000,
+            kind="dirt",
+            item=None,
+            track_attributes={"source": "operator"},
+            track_seen_ns=now - 60_000_000_000,
+            target_source="operator:explicit-grounding:target:one",
+            scene_hash=None,
+            include_mineable=False,
+            include_selected_slot=False,
+        ),
+        sequence=2,
+        now_ns=now + 100_000_000,
+    )
+
+    assert waiting.run.outcome == SkillOutcome.RUNNING
+    assert waiting.action is not None and "left" not in waiting.action.buttons_down
+    assert started.run.outcome == SkillOutcome.RUNNING
+    assert started.action is not None and started.action.buttons_down == ("left",)
+    assert started.action_origin == ActionOrigin.SYNTHETIC
+
+
+def test_generic_no_policy_attack_does_not_use_operator_reference() -> None:
+    now = time.monotonic_ns()
+    policy = _ScriptedPolicy(MotorAction(sequence=0), MotorAction(sequence=0))
+    executor = _executor(
+        policy,
+        now_ns=now,
+        skill_id="mine_visible_block",
+    )
+    marked = _mining_board(
+        now_ns=now,
+        kind="dirt",
+        track_attributes={"source": "operator"},
+        include_visible=False,
+        include_kind=False,
+        include_mineable=False,
+        include_selected_slot=False,
+        extra_facts=(
+            _fact(
+                "target.reference_available",
+                True,
+                now_ns=now,
+                source="operator:cross-view-reference:target:one",
+            ),
+        ),
+    )
+
+    first = executor.tick(marked, sequence=1, now_ns=now)
+    second = executor.tick(
+        _mining_board(now_ns=now + 100_000_000, kind="dirt", item=None),
+        sequence=2,
+        now_ns=now + 100_000_000,
+    )
+
+    assert first.action is not None and "left" not in first.action.buttons_down
+    assert second.action is not None and "left" not in second.action.buttons_down
+
+
+@pytest.mark.parametrize(
+    ("reference_source", "track_source", "reference_age_ms"),
+    [
+        ("operator:cross-view-reference:target:two", "operator", 0),
+        ("operator:cross-view-reference:target:one", "learned:rocket", 0),
+        ("operator:cross-view-reference:target:one", "operator", 600),
+    ],
+)
+def test_invalid_operator_reference_never_authorizes_no_policy_attack(
+    reference_source: str,
+    track_source: str,
+    reference_age_ms: int,
+) -> None:
+    now = time.monotonic_ns()
+    policy = _ScriptedPolicy(MotorAction(sequence=0), MotorAction(sequence=0))
+    executor = _executor(
+        policy,
+        now_ns=now,
+        skill_id="mine_visible_block",
+        parameters={"target": "dirt"},
+    )
+    invalid_reference = _mining_board(
+        now_ns=now,
+        kind="dirt",
+        track_attributes={"source": track_source},
+        include_visible=False,
+        include_kind=False,
+        include_mineable=False,
+        include_selected_slot=False,
+        extra_facts=(
+            _fact(
+                "target.reference_available",
+                True,
+                now_ns=now - reference_age_ms * 1_000_000,
+                source=reference_source,
+            ),
+        ),
+    )
+
+    first = executor.tick(invalid_reference, sequence=1, now_ns=now)
+    second = executor.tick(
+        _mining_board(now_ns=now + 100_000_000, kind="dirt", item=None),
+        sequence=2,
+        now_ns=now + 100_000_000,
+    )
+
+    assert first.action is not None and "left" not in first.action.buttons_down
+    assert second.action is not None and "left" not in second.action.buttons_down
 
 
 def test_explicit_operator_reference_can_initiate_guarded_mining() -> None:

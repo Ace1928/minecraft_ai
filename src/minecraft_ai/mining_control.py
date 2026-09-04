@@ -334,7 +334,19 @@ class MiningLeaseGuard:
     ) -> MiningGuardDecision:
         mode = intent.mode.casefold()
         pending = self._pending
-        if pending is None and (mode not in _MINING_MODES or "left" not in action.buttons_down):
+        operator_authorized = _explicit_operator_mining_authorized(
+            blackboard,
+            intent,
+            now_ns=now_ns,
+            min_confidence=self.min_confidence,
+        )
+        if pending is None and (
+            mode not in _MINING_MODES
+            or (
+                "left" not in action.buttons_down
+                and not operator_authorized
+            )
+        ):
             if targeting_changed:
                 self._last_targeting_change_ns = now_ns
             self._held_keys = next_keys
@@ -714,6 +726,78 @@ def _prelease_semantic_failure(
     if rule.family != _BlockFamily.LOG:
         return SkillFailureCode.MINING_TARGET_MISMATCH
     return None
+
+
+def _explicit_operator_mining_authorized(
+    blackboard: PerceptionBlackboard,
+    intent: MotorIntent,
+    *,
+    now_ns: int,
+    min_confidence: float,
+) -> bool:
+    """Authorize only the exact operator-marked target for this mining intent."""
+    if (
+        intent.skill_id != "mine_visible_block"
+        or intent.mode.casefold() != "mine"
+        or intent.target_label is None
+    ):
+        return False
+    latest = blackboard.latest()
+    if latest is None:
+        return False
+
+    track_id: str | None = None
+    reference = blackboard.fact(
+        "target.reference_available",
+        min_confidence=min_confidence,
+        now_ns=now_ns,
+    )
+    reference_prefix = "operator:cross-view-reference:"
+    if (
+        reference is not None
+        and reference.value is True
+        and reference.source.startswith(reference_prefix)
+        and 0 <= now_ns - reference.observed_ns <= 500_000_000
+    ):
+        candidate = reference.source.removeprefix(reference_prefix)
+        if candidate:
+            track_id = candidate
+
+    visible = blackboard.fact("target.visible", min_confidence=min_confidence, now_ns=now_ns)
+    kind = blackboard.fact("target.kind", min_confidence=min_confidence, now_ns=now_ns)
+    explicit_prefix = "operator:explicit-grounding:"
+    if (
+        track_id is None
+        and visible is not None
+        and kind is not None
+        and visible.value is True
+        and isinstance(kind.value, str)
+        and visible.source == kind.source
+        and visible.source.startswith(explicit_prefix)
+        and 0 <= now_ns - visible.observed_ns <= 500_000_000
+        and 0 <= now_ns - kind.observed_ns <= 500_000_000
+    ):
+        candidate = visible.source.removeprefix(explicit_prefix)
+        if candidate:
+            track_id = candidate
+    if track_id is None:
+        return False
+
+    track = next((item for item in latest.tracks if item.track_id == track_id), None)
+    if (
+        track is None
+        or track.attributes.get("source") != "operator"
+        or track.confidence < min_confidence
+        or (intent.target_track_id is not None and intent.target_track_id != track_id)
+    ):
+        return False
+    kind_name = _normalize_name(track.label)
+    rule = _block_rule(kind_name)
+    return bool(
+        rule is not None
+        and rule.family != _BlockFamily.UNBREAKABLE
+        and _requested_target_matches(intent.target_label, kind_name, rule)
+    )
 
 
 def _verified_target(
