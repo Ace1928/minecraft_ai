@@ -14,8 +14,8 @@ from minecraft_ai.perception import (
     Track,
 )
 from minecraft_ai.roles import get_role
-from minecraft_ai.social import OperatorMessage, OperatorMessageStatus
-from minecraft_ai.skills import SkillOutcome, SkillRun
+from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
+from minecraft_ai.skills import SkillLibrary, SkillOutcome, SkillRun
 
 
 class _ShelterSelectingModel:
@@ -150,8 +150,16 @@ class _WireCapturingModel(_ShelterSelectingModel):
 class _GrammarCapturingModel:
     model_id = "grammar-contract-test"
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        skill_id: str = "explore_forward",
+        chosen_goal_id: str = "operator:move-now",
+    ) -> None:
         self.grammar = ""
+        self.messages: tuple[ModelMessage, ...] = ()
+        self.skill_id = skill_id
+        self.chosen_goal_id = chosen_goal_id
 
     def complete_constrained(
         self,
@@ -161,14 +169,15 @@ class _GrammarCapturingModel:
         schema: dict[str, object],
         grammar: str,
     ) -> ModelResponse:
-        del messages, name, schema
+        del name, schema
+        self.messages = messages
         self.grammar = grammar
         return ModelResponse(
             text=json.dumps(
                 {
                     "r": "Follow the direct movement instruction",
-                    "g": "operator:move-now",
-                    "s": "explore_forward",
+                    "g": self.chosen_goal_id,
+                    "s": self.skill_id,
                     "p": {},
                     "o": None,
                     "c": None,
@@ -618,9 +627,148 @@ def test_direct_operator_action_uses_sampler_grammar_that_requires_a_skill() -> 
     )
     assert '"null"' not in skill_rule
     assert "explore_forward" in skill_rule
+    assert "traverse_level_ground" in skill_rule
+    assert "gather_nearby_wood" not in skill_rule
+    assert "open_inventory" not in skill_rule
     assert '"null"' not in authority_rule
     assert "operator:move-now" in authority_rule
     assert decision.skill_id == "explore_forward"
+
+
+def test_negated_question_and_unsupported_actions_keep_null_available() -> None:
+    cases = (
+        ("Do not move.", OperatorMessageKind.INSTRUCTION),
+        ("Can you tell me how to craft a pickaxe?", OperatorMessageKind.INSTRUCTION),
+        ("Move forward.", OperatorMessageKind.QUESTION),
+        ("Eat food now.", OperatorMessageKind.INSTRUCTION),
+    )
+    for text, kind in cases:
+        message = OperatorMessage(
+            message_id="move-now",
+            created_ns=2,
+            text=text,
+            kind=kind,
+            status=OperatorMessageStatus.DELIVERED,
+        )
+        context = _context()
+        context.operator_messages = (message,)
+        model = _GrammarCapturingModel()
+        controller = HighLevelController(model, build_bootstrap_skill_library())
+
+        controller.decide(_board(), context)
+
+        skill_rule = next(
+            line for line in model.grammar.splitlines() if line.startswith("skill ::=")
+        )
+        assert '"null"' in skill_rule, text
+
+
+def test_unavailable_requested_skill_allows_only_null() -> None:
+    message = OperatorMessage(
+        message_id="move-now",
+        created_ns=2,
+        text="Mine the stone in front of you.",
+        status=OperatorMessageStatus.DELIVERED,
+    )
+    context = _context()
+    context.operator_messages = (message,)
+    model = _GrammarCapturingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    decision = controller.decide(_board(), context)
+
+    skill_rule = next(line for line in model.grammar.splitlines() if line.startswith("skill ::="))
+    assert skill_rule == 'skill ::= "null"'
+    assert decision.skill_id is None
+    assert decision.request_replan is True
+
+
+def test_danger_defers_operator_authority_without_acknowledging_completion() -> None:
+    now = time.monotonic_ns()
+    danger = PerceptionFact(
+        key="danger.immediate",
+        value=True,
+        confidence=0.95,
+        observed_ns=now,
+        source="test",
+        expires_after_ms=10_000,
+    )
+    message = OperatorMessage(
+        message_id="danger-command",
+        created_ns=2,
+        text="Move forward through safe open terrain.",
+        status=OperatorMessageStatus.DELIVERED,
+    )
+    context = _context()
+    context.operator_messages = (message,)
+    model = _GrammarCapturingModel(
+        skill_id="retreat_from_danger",
+        chosen_goal_id="operator:danger-command",
+    )
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    decision = controller.decide(_board(danger), context)
+
+    payload = json.loads(model.messages[1].content)
+    assert payload["active_operator_message"] is None
+    assert len(model.messages) == 2
+    assert decision.skill_id == "retreat_from_danger"
+    assert decision.chosen_goal_id is None
+    assert decision.request_replan is True
+    assert decision.say is None
+
+
+def test_skill_shortlist_uses_unseen_prior_and_penalizes_repeated_failure() -> None:
+    bootstrap = build_bootstrap_skill_library()
+    library = SkillLibrary()
+    library.register(bootstrap.get("explore_forward"))
+    library.register(bootstrap.get("reacquire_target"))
+    timeout = SkillRun(
+        run_id="timeout",
+        skill_id="explore_forward",
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.TIMED_OUT,
+        failure_reason="skill-timeout",
+    )
+    for index in range(6):
+        library.record(timeout.model_copy(update={"run_id": f"timeout-{index}"}))
+    controller = HighLevelController(_GrammarCapturingModel(), library)
+
+    payloads = controller._feasible_skill_payloads(_board())
+
+    assert [payload["skill_id"] for payload in payloads] == [
+        "reacquire_target",
+        "explore_forward",
+    ]
+    assert payloads[0]["competence"] == 0.5
+    assert payloads[1]["competence"] == 0.0
+
+
+def test_skill_shortlist_reserves_matching_and_safety_options() -> None:
+    bootstrap = build_bootstrap_skill_library()
+    controller = HighLevelController(_GrammarCapturingModel(), bootstrap)
+
+    movement = controller._feasible_skill_payloads(
+        _board(),
+        query_text="Move forward through open terrain.",
+    )
+    assert [payload["skill_id"] for payload in movement[:2]] == [
+        "explore_forward",
+        "traverse_level_ground",
+    ]
+
+    now = time.monotonic_ns()
+    danger = PerceptionFact(
+        key="danger.immediate",
+        value=True,
+        confidence=0.95,
+        observed_ns=now,
+        source="test",
+        expires_after_ms=10_000,
+    )
+    safety = controller._feasible_skill_payloads(_board(danger))
+    assert [payload["skill_id"] for payload in safety] == ["retreat_from_danger"]
 
 
 def test_fresh_operator_directive_owns_idle_replan_decision() -> None:

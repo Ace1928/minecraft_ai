@@ -132,7 +132,7 @@ class _DecisionRepairBounds:
     allowed_skills: tuple[tuple[str, tuple[str, ...]], ...]
     authority_goal_id: str | None = None
     required_action_constraints: tuple[tuple[str, bool], ...] = ()
-    skill_required: bool = False
+    requested_skill_ids: tuple[str, ...] = ()
 
     def prompt_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -143,8 +143,9 @@ class _DecisionRepairBounds:
         }
         if self.authority_goal_id is not None:
             payload["authority_goal_id"] = self.authority_goal_id
-        if self.skill_required:
+        if self.requested_skill_ids:
             payload["skill_required"] = True
+            payload["requested_skill_ids"] = self.requested_skill_ids
         return payload
 
 
@@ -161,9 +162,15 @@ def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
     def literal(value: str) -> str:
         return json.dumps(json.dumps(value, ensure_ascii=True))
 
-    skill_ids = tuple(dict.fromkeys(skill_id for skill_id, _ in bounds.allowed_skills))
+    allowed_skill_ids = tuple(dict.fromkeys(skill_id for skill_id, _ in bounds.allowed_skills))
+    requested_skill_ids = tuple(
+        skill_id
+        for skill_id in dict.fromkeys(bounds.requested_skill_ids)
+        if skill_id in allowed_skill_ids
+    )
+    skill_ids = requested_skill_ids if bounds.requested_skill_ids else allowed_skill_ids
     skill_alternatives = tuple(literal(skill_id) for skill_id in skill_ids)
-    if not bounds.skill_required or not skill_alternatives:
+    if not requested_skill_ids:
         skill_alternatives = (*skill_alternatives, '"null"')
     skill_rule = " | ".join(skill_alternatives)
     parameter_names = tuple(
@@ -296,22 +303,95 @@ def _explicit_action_constraints(text: str) -> dict[str, bool]:
     return constraints
 
 
-def _operator_requests_world_action(text: str) -> bool:
-    """Recognize explicit Minecraft action directives for fail-closed decoding.
+def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
+    """Map an affirmative, concrete directive to compatible learned options.
 
-    This does not choose an option.  It only prevents a constrained decoder
-    from turning a direct physical command into a silent no-op when at least
-    one independently feasible skill exists.
+    The mapping is intentionally conservative.  Its result may narrow a
+    sampler grammar, so unsupported, negated, and interrogative language must
+    retain the safe ``null`` decision instead of forcing an unrelated action.
     """
 
-    return bool(
-        re.search(
-            r"\b(?:approach|attack|break|build|chop|click|collect|craft|dig|eat|"
-            r"escape|explore|fight|fly|gather|harvest|head|jump|mine|move|open|"
-            r"place|respawn|run|swim|traverse|use|walk)\b",
-            text.casefold(),
-        )
-    )
+    normalized = " ".join(text.casefold().split())
+    if not normalized:
+        return ()
+    if "?" in normalized or re.match(
+        r"^(?:can|could|did|do|does|how|is|may|should|tell|what|when|where|which|"
+        r"who|why|will|would)\b",
+        normalized,
+    ):
+        return ()
+    if re.search(
+        r"\b(?:avoid|do\s+not|don't|never|no\s+longer|refrain|stop|without)\b",
+        normalized,
+    ):
+        return ()
+
+    requested: list[str] = []
+
+    def add(skill_id: str) -> None:
+        if skill_id not in requested:
+            requested.append(skill_id)
+
+    if re.search(r"\b(?:respawn|come back to life)\b", normalized):
+        add("respawn_after_death")
+    if re.search(r"\b(?:close|exit|leave) (?:the )?(?:inventory|menu)\b", normalized):
+        add("close_open_inventory")
+    elif re.search(r"\bopen (?:the )?inventory\b", normalized):
+        add("open_inventory")
+    if re.search(r"\b(?:click|activate|press)\b.*\b(?:button|control|menu)\b", normalized):
+        add("activate_visible_gui_control")
+    if re.search(r"\b(?:swim|surface|escape)\b.*\b(?:water|underwater|submersion)\b", normalized):
+        add("escape_submersion")
+    if re.search(r"\b(?:back away|escape|flee|retreat)\b", normalized):
+        add("retreat_from_danger")
+    if re.search(r"\b(?:attack|fight|kill)\b", normalized):
+        add("attack_visible_hostile")
+    if re.search(
+        r"\b(?:gather|collect|chop|harvest|mine)\b.*\b(?:log|logs|tree|wood)\b", normalized
+    ):
+        add("gather_nearby_wood")
+    elif re.search(r"\b(?:break|dig|mine)\b", normalized):
+        add("mine_visible_block")
+    if re.search(r"\bcraft\b.*\b(?:plank|planks)\b", normalized):
+        add("craft_wood_planks")
+    if re.search(r"\bcraft\b.*\bcrafting table\b", normalized):
+        add("craft_crafting_table")
+    if re.search(r"\bcraft\b.*\b(?:chest|chests|storage)\b", normalized):
+        add("craft_storage_units")
+    if re.search(
+        r"\b(?:deposit|store)\b.*\b(?:chest|inventory|material|materials|storage)\b", normalized
+    ):
+        add("deposit_in_storage")
+    if re.search(r"\bbuild\b.*\bworkshop\b", normalized):
+        add("build_workshop_shell")
+    if re.search(r"\bbuild\b.*\b(?:shelter|hut|house)\b", normalized):
+        add("establish_basic_shelter")
+    if re.search(r"\bplace\b.*\bblock\b", normalized):
+        add("place_block")
+    if re.search(r"\b(?:approach|go to|head to|move toward|walk to)\b", normalized):
+        add("approach_visible_target")
+    if re.search(r"\b(?:find|locate|reacquire)\b.*\b(?:target|tree|block|object)\b", normalized):
+        add("reacquire_target")
+    if re.search(r"\b(?:jump|climb|cross)\b.*\b(?:ledge|obstacle|rise|step)\b", normalized):
+        add("traverse_visible_obstacle")
+    if re.search(r"\bexplore\b", normalized):
+        add("explore_forward")
+    if re.search(
+        r"\b(?:move|run|traverse|walk)\b.*\b(?:ahead|forward|ground|terrain)\b", normalized
+    ):
+        add("explore_forward")
+        add("traverse_level_ground")
+    if re.search(r"\b(?:interact with|use)\b.*\b(?:object|target)\b", normalized):
+        add("use_target")
+    return tuple(requested)
+
+
+def _urgent_safety_required(blackboard: PerceptionBlackboard) -> bool:
+    for key in ("danger.immediate", "environment.underwater", "scene.death"):
+        fact = blackboard.fact(key, min_confidence=0.7)
+        if fact is not None and bool(fact.value):
+            return True
+    return False
 
 
 class BootstrapCognitionPolicy:
@@ -419,7 +499,9 @@ class HighLevelController:
         try:
             latest = blackboard.latest()
             active_operator = (
-                None if not context.operator_messages else context.operator_messages[0]
+                None
+                if _urgent_safety_required(blackboard) or not context.operator_messages
+                else context.operator_messages[0]
             )
             planning_query = (
                 active_operator.text
@@ -494,8 +576,8 @@ class HighLevelController:
                     _operator_prompt_payload(message) for message in context.operator_messages[:2]
                 ],
                 "active_operator_message": None
-                if not context.operator_messages
-                else _operator_prompt_payload(context.operator_messages[0]),
+                if active_operator is None
+                else _operator_prompt_payload(active_operator),
                 "wiki_evidence": [item.model_dump(mode="json") for item in context.wiki[:4]],
                 "recent_skill_runs": [
                     {
@@ -599,7 +681,7 @@ class HighLevelController:
                 ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
                 *(
                     ()
-                    if not context.operator_messages
+                    if active_operator is None
                     else (
                         ModelMessage(
                             role="user",
@@ -607,7 +689,7 @@ class HighLevelController:
                                 "ACTIVE OPERATOR DIRECTIVE (highest authority; follow this "
                                 "literal current request and do not substitute an older task): "
                                 + json.dumps(
-                                    _operator_prompt_payload(context.operator_messages[0]),
+                                    _operator_prompt_payload(active_operator),
                                     separators=(",", ":"),
                                 )
                             ),
@@ -616,6 +698,8 @@ class HighLevelController:
                 ),
             )
             decision = self._complete(messages, repair_bounds=repair_bounds)
+            if repair_bounds.requested_skill_ids:
+                decision = _enforce_repair_bounds(decision, repair_bounds)
             decision = self._apply_decision_authority(decision, blackboard, context)
             if decision.skill_id is not None and decision.skill_id not in self.skills.specs:
                 return self._repair_infeasible(
@@ -686,6 +770,16 @@ class HighLevelController:
         blackboard: PerceptionBlackboard,
         context: CognitionContext,
     ) -> CognitionDecision:
+        if _urgent_safety_required(blackboard):
+            operator_goal_ids = {
+                f"operator:{message.message_id}" for message in context.operator_messages
+            }
+            updates: dict[str, object] = {"say": None}
+            if context.operator_messages:
+                updates["request_replan"] = True
+            if decision.chosen_goal_id in operator_goal_ids:
+                updates["chosen_goal_id"] = None
+            return decision.model_copy(update=updates)
         active = next(
             (
                 message
@@ -694,13 +788,7 @@ class HighLevelController:
             ),
             None,
         )
-        danger = blackboard.fact("danger.immediate", min_confidence=0.7)
-        if danger is not None and bool(danger.value):
-            active = None
         if active is None:
-            return decision
-        danger = blackboard.fact("danger.immediate", min_confidence=0.7)
-        if danger is not None and bool(danger.value):
             return decision
         parameters = dict(decision.skill_parameters)
         if decision.skill_id is not None and decision.skill_id in self.skills.specs:
@@ -747,7 +835,7 @@ class HighLevelController:
         *,
         query_text: str = "",
     ) -> list[dict[str, object]]:
-        ranked: list[tuple[int, float, float, dict[str, object]]] = []
+        ranked: list[tuple[int, float, float, str, dict[str, object]]] = []
         stop_words = {
             "and",
             "are",
@@ -775,7 +863,12 @@ class HighLevelController:
             return tokens
 
         query_tokens = planning_tokens(query_text)
-        safety_skills = {"escape_submersion", "retreat_from_danger"}
+        requested_skill_ids = set(_operator_requested_skill_ids(query_text))
+        safety_skills = {
+            "escape_submersion",
+            "respawn_after_death",
+            "retreat_from_danger",
+        }
         for skill in self.skills.specs.values():
             if not initiation_satisfied(skill, blackboard):
                 continue
@@ -785,7 +878,9 @@ class HighLevelController:
             overlap = 4 * len(query_tokens & identity_tokens) + len(
                 query_tokens & description_tokens
             )
-            competence = self.skills.contextual_score(skill.skill_id)
+            competence = 0.5 if stats is None else self.skills.contextual_score(skill.skill_id)
+            failure_penalty = 0.0 if stats is None else min(0.45, 0.08 * stats.consecutive_failures)
+            ranking_score = max(0.0, competence - failure_penalty)
             payload = {
                 "skill_id": skill.skill_id,
                 "description": skill.description[:180],
@@ -799,7 +894,7 @@ class HighLevelController:
                     for condition in skill.success_conditions[:3]
                 ],
                 "effects": list(skill.expected_effects[:3]),
-                "competence": round(competence, 3),
+                "competence": round(ranking_score, 3),
                 "evaluation": {
                     "attempts": 0 if stats is None else stats.attempts,
                     "successes": 0 if stats is None else stats.successes,
@@ -808,16 +903,28 @@ class HighLevelController:
                     "consecutive_failures": 0 if stats is None else stats.consecutive_failures,
                 },
             }
+            if skill.skill_id in safety_skills:
+                rank_group = 0
+            elif skill.skill_id in requested_skill_ids:
+                rank_group = 1
+            elif overlap > 0:
+                rank_group = 2
+            else:
+                rank_group = 3
             ranked.append(
                 (
-                    0 if skill.skill_id in safety_skills else 1,
+                    rank_group,
                     -float(overlap),
-                    -competence,
+                    -ranking_score,
+                    skill.skill_id,
                     payload,
                 )
             )
-        ranked.sort(key=lambda item: (item[0], item[1], item[2], str(item[3]["skill_id"])))
-        return [item[3] for item in ranked[:8]]
+        ranked.sort(key=lambda item: item[:4])
+        safety = [item[4] for item in ranked if item[0] == 0]
+        if safety and _urgent_safety_required(blackboard):
+            return safety[:8]
+        return [item[4] for item in ranked[:8]]
 
     def _decision_repair_bounds(
         self,
@@ -826,14 +933,17 @@ class HighLevelController:
         *,
         allowed_skill_ids: set[str] | None = None,
     ) -> _DecisionRepairBounds:
-        active = next(
-            (
-                message
-                for message in context.operator_messages
-                if message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
-            ),
-            None,
-        )
+        active = None
+        if not _urgent_safety_required(blackboard):
+            active = next(
+                (
+                    message
+                    for message in context.operator_messages
+                    if message.kind
+                    in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+                ),
+                None,
+            )
         allowed_skills = tuple(
             (skill.skill_id, tuple(skill.parameters))
             for skill in sorted(
@@ -846,15 +956,12 @@ class HighLevelController:
         constraints = (
             () if active is None else tuple(_explicit_action_constraints(active.text).items())
         )
+        requested_skill_ids = () if active is None else _operator_requested_skill_ids(active.text)
         return _DecisionRepairBounds(
             allowed_skills=allowed_skills,
             authority_goal_id=None if active is None else f"operator:{active.message_id}",
             required_action_constraints=constraints,
-            skill_required=(
-                active is not None
-                and bool(allowed_skills)
-                and _operator_requests_world_action(active.text)
-            ),
+            requested_skill_ids=requested_skill_ids,
         )
 
     def _blocking_skill_run(
@@ -1134,13 +1241,21 @@ def _enforce_repair_bounds(
     bounds: _DecisionRepairBounds,
 ) -> CognitionDecision:
     allowed_parameters = dict(bounds.allowed_skills)
+    requested_skills = {
+        skill_id for skill_id in bounds.requested_skill_ids if skill_id in allowed_parameters
+    }
     required_constraints: dict[str, str | int | float | bool] = dict(
         bounds.required_action_constraints
     )
     goal_id = bounds.authority_goal_id or decision.chosen_goal_id
-    if decision.skill_id is not None and decision.skill_id not in allowed_parameters:
+    violates_requested_skill = bool(bounds.requested_skill_ids) and (
+        decision.skill_id not in requested_skills
+    )
+    if (
+        decision.skill_id is not None and decision.skill_id not in allowed_parameters
+    ) or violates_requested_skill:
         return CognitionDecision(
-            reasoning_summary="Repaired decision violated the allowed option bounds.",
+            reasoning_summary="Decision violated the allowed option bounds.",
             chosen_goal_id=goal_id,
             skill_parameters=required_constraints,
             request_replan=True,
