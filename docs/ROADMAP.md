@@ -11,6 +11,8 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Agent-only reload: live game, GPU server, input calibration and supervisor preserved.
 - [x] Exact traversal-stall recovery transaction implemented and tested. Live reorientation/query ran, but the initial VLM answer abstained; escape is not yet demonstrated.
 - [x] Version-pinned oak hotbar counts 0–16 and pre-break-to-post-collection exact +1 verification implemented. Hotbar evidence is not a whole-inventory count; unknown items, including spruce logs, abstain.
+- [x] Failed crafting cleanup is plan-neutral; a verified no-logs failure persists a retry prerequisite until new positive wood evidence or one fresh explicit retry. This is permission to re-audit, not a retained inventory count.
+- [x] Experimental compact crosshair-query format fits the existing output budget, preserves crop provenance, and bounds numeric output. It is not promoted to live use: pinned daylight/dark-dirt probes still produced wrong block identities. Recognition accuracy and autonomous escape remain separate live gates below.
 - [ ] Make the focused crosshair probe produce useful, correctly grounded live answers within the small model's output budget.
 - [ ] Demonstrate autonomous soft-block clearance and escape from the observed dirt pocket.
 - [ ] Demonstrate three consecutive verified log acquisitions without manual intervention or game restart; extend item recognition only from calibrated evidence if the local tree variant requires it.

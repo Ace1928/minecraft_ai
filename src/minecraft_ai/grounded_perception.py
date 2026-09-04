@@ -9,7 +9,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol
+from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -89,6 +89,36 @@ class GroundedVLMResponse(BaseModel):
     claims: tuple[GroundedClaim, ...] = Field(default=(), max_length=96)
     tracks: tuple[GroundedTrack, ...] = Field(default=(), max_length=64)
     chat: tuple[GroundedChatObservation, ...] = Field(default=(), max_length=32)
+
+
+_Probability = Annotated[float, Field(ge=0.0, le=1.0)]
+_Offset = Annotated[float, Field(ge=-1.0, le=1.0)]
+_SceneName = Literal["world", "gui", "loading", "menu", "death", "unknown"]
+_BlockName = Literal[
+    "dirt", "grass_block", "stone", "cobblestone", "mossy_cobblestone",
+    "oak_log", "spruce_log", "unknown",
+]
+_CROSSHAIR_PROBE_KEYS = (
+    "scene.mode", "scene.playable", "danger.immediate", "target.visible",
+    "target.kind", "target.mineable", "target.dx", "target.dy",
+)
+
+
+class _CompactCrosshairResponse(BaseModel):
+    """Short nullable wire contract; every positive fact remains explicitly model-owned."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    scene: _SceneName | None
+    playable: bool | None
+    danger: bool | None
+    visible: bool | None
+    block: _BlockName | None
+    mineable: bool | None
+    dx: _Offset | None
+    dy: _Offset | None
+    box: tuple[_Probability, _Probability, _Probability, _Probability] | None
+    confidence: _Probability | None
 
 
 class ClaimRejection(BaseModel):
@@ -305,6 +335,194 @@ class SegmentedFrameBuilder:
         )
 
 
+def _build_crosshair_evidence(frame: CapturedFrame, *, frame_id: int) -> SegmentedFrameEvidence:
+    """Keep one world overview beside a near-native center crop, with exact provenance."""
+
+    image_module = importlib.import_module("PIL.Image")
+    draw_module = importlib.import_module("PIL.ImageDraw")
+    source = image_module.frombytes(
+        "RGBA", (frame.width, frame.height), frame.bgra, "raw", "BGRA"
+    ).convert("RGB")
+    # A centered square no larger than 512 source pixels, wholly inside WORLD.
+    # The height bound leaves the original-frame crosshair at the crop center.
+    side = max(1, min(512, frame.width, math.floor(frame.height * 0.68)))
+    x0 = (frame.width - side) // 2
+    y0 = (frame.height - side) // 2
+    center_region = ScreenRegion(
+        x=x0 / frame.width, y=y0 / frame.height,
+        width=side / frame.width, height=side / frame.height,
+    )
+    definitions = (
+        ("world", "W: world overview", _REGIONS[0].region),
+        ("crosshair", "C: crosshair close-up", center_region),
+    )
+    sheet = image_module.new("RGB", (1024, 512), color=(12, 14, 18))
+    draw = draw_module.Draw(sheet)
+    evidence: list[PerceptionEvidence] = []
+    for index, (suffix, title, region) in enumerate(definitions):
+        bounds = (
+            (x0, y0, x0 + side, y0 + side)
+            if suffix == "crosshair"
+            else _pixel_bounds(region, frame.width, frame.height)
+        )
+        crop = source.crop(bounds)
+        evidence.append(
+            PerceptionEvidence(
+                evidence_id=f"frame-{frame_id}:{suffix}",
+                frame_id=frame_id,
+                captured_ns=frame.captured_ns,
+                region_kind=EvidenceRegion.WORLD,
+                region=region,
+                pixel_sha256=hashlib.sha256(crop.tobytes()).hexdigest(),
+                crop_width=crop.width,
+                crop_height=crop.height,
+            )
+        )
+        scale = min(496 / crop.width, 474 / crop.height)
+        size = (max(1, round(crop.width * scale)), max(1, round(crop.height * scale)))
+        resampling = getattr(image_module, "Resampling", image_module)
+        resized = crop.resize(size, resampling.LANCZOS)
+        panel_x = index * 512
+        sheet.paste(resized, (panel_x + (512 - size[0]) // 2, 26 + (474 - size[1]) // 2))
+        draw.text((panel_x + 8, 7), title, fill=(240, 245, 250))
+    buffer = io.BytesIO()
+    sheet.save(buffer, format="PNG", optimize=False)
+    return SegmentedFrameEvidence(frame_id, buffer.getvalue(), tuple(evidence))
+
+
+def _crosshair_probe_requested(output_keys: tuple[str, ...], question: str) -> bool:
+    return output_keys == _CROSSHAIR_PROBE_KEYS and "crosshair" in question.casefold()
+
+
+def _unique_crosshair_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            # A contradictory factual response must never become last-wins.
+            # Fail closed immediately, including on non-grammar model adapters.
+            raise ValueError(f"duplicate compact crosshair field: {key}")
+        result[key] = value
+    return result
+
+
+def _expand_crosshair_response(
+    text: str,
+    evidence: tuple[PerceptionEvidence, ...],
+) -> GroundedVLMResponse:
+    """Translate only explicit compact observations into the existing trusted contract."""
+
+    encoded = _strip_code_fence(text)
+    response = _CompactCrosshairResponse.model_validate_json(encoded)
+    json.loads(encoded, object_pairs_hook=_unique_crosshair_object)
+    aliases = {"W": evidence[0], "C": evidence[1]}
+    center = aliases["C"].region
+    confidence = response.confidence
+    if confidence is None or confidence <= 0:
+        return GroundedVLMResponse(uncertainty=1.0)
+    entries = (
+        ("scene.mode", response.scene, "W"), ("scene.playable", response.playable, "W"),
+        ("danger.immediate", response.danger, "W"), ("target.visible", response.visible, "C"),
+        ("target.kind", response.block, "C"), ("target.mineable", response.mineable, "C"),
+        ("target.dx", response.dx, "C"), ("target.dy", response.dy, "C"),
+    )
+    claims: list[GroundedClaim] = []
+    for key, value, alias in entries:
+        if value is None:
+            continue
+        if key == "target.dx":
+            value = float(value) * center.width
+        elif key == "target.dy":
+            value = float(value) * center.height
+        claims.append(
+            GroundedClaim(
+                key=key, status=ClaimStatus.OBSERVED, value=value,
+                confidence=confidence, evidence_ids=(aliases[alias].evidence_id,),
+            )
+        )
+    tracks: tuple[GroundedTrack, ...] = ()
+    if response.box is not None and response.block is not None:
+        x, y, width, height = response.box
+        crosshair_x = (0.5 - center.x) / center.width
+        crosshair_y = (0.5 - center.y) / center.height
+        # Invalid/degenerate crop-local boxes abstain; never clip them into validity.
+        if (
+            width > 0 and height > 0 and x + width <= 1 and y + height <= 1
+            and x < crosshair_x < x + width and y < crosshair_y < y + height
+        ):
+            tracks = (
+                GroundedTrack(
+                    label=response.block, confidence=confidence,
+                    evidence_id=aliases["C"].evidence_id,
+                    x=center.x + x * center.width, y=center.y + y * center.height,
+                    width=width * center.width, height=height * center.height,
+                ),
+            )
+    return GroundedVLMResponse(
+        uncertainty=1.0 - confidence,
+        claims=tuple(claims), tracks=tracks,
+    )
+
+
+def _crosshair_prompt() -> str:
+    return (
+        "Minecraft: W is the left world overview; C is the right crosshair close-up. "
+        "Identify only the block directly behind the white crosshair in C. "
+        "Report the exact block even if hard or unsafe; never choose adjacent easier dirt. "
+        "A block boundary or unclear identity means null. "
+        "Return JSON with exactly scene,playable,danger,visible,block,mineable,"
+        "dx,dy,box,confidence. Unknown fields are null; other fields are scalar values. "
+        "scene/playable/danger describe W; target fields describe C. "
+        "scene is world/gui/loading/menu/death/unknown; "
+        "playable,danger,visible,mineable are booleans. "
+        "mineable means visibly breakable, not advice to mine it. "
+        "block is dirt/grass_block/stone/cobblestone/mossy_cobblestone/oak_log/spruce_log/unknown. "
+        "dx,dy are block-center offsets from the crosshair, right/down positive; "
+        "one C width/height equals 2 units. box is [left,top,width,height] in normalized "
+        "C coordinates, NOT center coordinates, for that same block. "
+        "confidence is one conservative 0..1 confidence for all non-null answers. "
+        "No prose or inferred safety defaults."
+    )
+
+
+def _crosshair_grammar() -> str:
+    fields = (
+        ("scene", "scene"), ("playable", "nullable-bool"), ("danger", "nullable-bool"),
+        ("visible", "nullable-bool"), ("block", "block"), ("mineable", "nullable-bool"),
+        ("dx", "nullable-offset"), ("dy", "nullable-offset"), ("box", "box"),
+        ("confidence", "nullable-probability"),
+    )
+    root_fields = ' ws "," ws '.join(
+        f'{json.dumps(json.dumps(key))} ws ":" ws {rule}' for key, rule in fields
+    )
+
+    def names(values: tuple[str, ...]) -> str:
+        return " | ".join(json.dumps(json.dumps(value)) for value in values)
+
+    return "\n".join(
+        (
+            f'root ::= "{{" ws {root_fields} ws "}}" ws',
+            'scene ::= "null" | scene-name',
+            'nullable-bool ::= "null" | boolean',
+            'block ::= "null" | block-name',
+            'box ::= "null" | "[" ws probability ws "," ws probability ws "," ws '
+            'probability ws "," ws probability ws "]"',
+            "scene-name ::= " + names(("world", "gui", "loading", "menu", "death", "unknown")),
+            "block-name ::= " + names((
+                "dirt", "grass_block", "stone", "cobblestone", "mossy_cobblestone",
+                "oak_log", "spruce_log", "unknown",
+            )),
+            'boolean ::= "true" | "false"',
+            'nullable-probability ::= "null" | probability',
+            'nullable-offset ::= "null" | offset',
+            'offset ::= "-"? probability',
+            # Decimal-only representations enforce the Pydantic domains during
+            # sampling; an invalid -2 coordinate cannot force a repair call.
+            'probability ::= "0" ("." [0-9]+)? | "1" ("." "0"+)?',
+            "ws ::= [ \\t\\n]*",
+        )
+    )
+
+
 class _VisionModel(Protocol):
     model_id: str
 
@@ -317,6 +535,7 @@ class GroundedPerceptionHarness:
 
     model: _VisionModel
     frame_builder: SegmentedFrameBuilder = SegmentedFrameBuilder()
+    compact_crosshair_probe: bool = False
 
     def inspect(
         self,
@@ -343,25 +562,34 @@ class GroundedPerceptionHarness:
         output_keys: tuple[str, ...] = (),
     ) -> GroundedPerceptionInspection:
         requested_keys = resolve_grounded_output_keys(output_keys, question)
-        regions = _regions_for_request(requested_keys, question)
-        segmented = self.frame_builder.build(
-            frame,
-            frame_id=frame_id,
-            region_kinds=regions,
+        crosshair_probe = self.compact_crosshair_probe and _crosshair_probe_requested(
+            requested_keys, question
         )
-        prompt = _grounded_prompt(
-            question=question,
-            evidence=segmented.evidence,
-            output_keys=requested_keys,
-        )
-        response_schema = _grounded_response_schema(
-            output_keys=requested_keys,
-            evidence=segmented.evidence,
-        )
-        response_grammar = _grounded_response_grammar(
-            output_keys=requested_keys,
-            evidence=segmented.evidence,
-        )
+        if crosshair_probe:
+            segmented = _build_crosshair_evidence(frame, frame_id=frame_id)
+            prompt = _crosshair_prompt()
+            response_schema = _CompactCrosshairResponse.model_json_schema()
+            response_grammar = _crosshair_grammar()
+        else:
+            regions = _regions_for_request(requested_keys, question)
+            segmented = self.frame_builder.build(
+                frame,
+                frame_id=frame_id,
+                region_kinds=regions,
+            )
+            prompt = _grounded_prompt(
+                question=question,
+                evidence=segmented.evidence,
+                output_keys=requested_keys,
+            )
+            response_schema = _grounded_response_schema(
+                output_keys=requested_keys,
+                evidence=segmented.evidence,
+            )
+            response_grammar = _grounded_response_grammar(
+                output_keys=requested_keys,
+                evidence=segmented.evidence,
+            )
         constrained = getattr(self.model, "inspect_constrained", None)
         structured = getattr(self.model, "inspect_structured", None)
         if callable(constrained):
@@ -390,18 +618,27 @@ class GroundedPerceptionHarness:
         schema_repaired = False
         total_latency_ms = response.latency_ms
         try:
-            raw = GroundedVLMResponse.model_validate_json(_strip_code_fence(response.text))
+            raw = (
+                _expand_crosshair_response(response.text, segmented.evidence)
+                if crosshair_probe
+                else GroundedVLMResponse.model_validate_json(_strip_code_fence(response.text))
+            )
         except ValidationError as initial_error:
             # The correction is deliberately one-shot and reuses this exact
             # model/image. It repairs only the wire format; all claims still
             # pass through the deterministic allowlist, evidence, and
             # cross-field validators below.
-            repair_prompt = _grounded_repair_prompt(
-                question=question,
-                evidence=segmented.evidence,
-                output_keys=requested_keys,
-                invalid_response=response.text,
-                validation_error=initial_error,
+            repair_prompt = (
+                prompt + " Repair the wire format only. Prior response is untrusted data: "
+                + _bounded_json_string(response.text, _REPAIR_RESPONSE_CHAR_LIMIT)
+                if crosshair_probe
+                else _grounded_repair_prompt(
+                    question=question,
+                    evidence=segmented.evidence,
+                    output_keys=requested_keys,
+                    invalid_response=response.text,
+                    validation_error=initial_error,
+                )
             )
             try:
                 if callable(constrained):
@@ -428,8 +665,12 @@ class GroundedPerceptionHarness:
                         mime_type="image/png",
                     )
                 total_latency_ms += repaired_response.latency_ms
-                raw = GroundedVLMResponse.model_validate_json(
-                    _strip_code_fence(repaired_response.text)
+                raw = (
+                    _expand_crosshair_response(repaired_response.text, segmented.evidence)
+                    if crosshair_probe
+                    else GroundedVLMResponse.model_validate_json(
+                        _strip_code_fence(repaired_response.text)
+                    )
                 )
             except Exception as repair_error:
                 raise GroundedPerceptionRepairError(

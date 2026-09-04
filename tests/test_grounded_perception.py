@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import io
+import hashlib
+import json
+import re
 import time
 
 import pytest
 from PIL import Image
+from pydantic import ValidationError
 
 from minecraft_ai.grounded_perception import (
     ClaimStatus,
     GroundedClaim,
+    GroundedPerceptionHarness,
     GroundedPerceptionReport,
     GroundedTrack,
     GroundedVLMResponse,
@@ -16,7 +21,15 @@ from minecraft_ai.grounded_perception import (
     SegmentedFrameBuilder,
     resolve_grounded_output_keys,
     validate_grounded_response,
+    _CROSSHAIR_PROBE_KEYS,
+    _CompactCrosshairResponse,
+    _build_crosshair_evidence,
+    _crosshair_probe_requested,
+    _crosshair_grammar,
+    _expand_crosshair_response,
 )
+from minecraft_ai.mining_control import is_hand_safe_soft_block
+from minecraft_ai.models import ModelResponse
 from minecraft_ai.perception import (
     EvidenceRegion,
     FrameState,
@@ -124,6 +137,253 @@ def test_single_region_sheet_has_no_unused_second_panel() -> None:
 
     with Image.open(io.BytesIO(segmented.composite_png)) as image:
         assert image.size == (512, 288)
+
+
+def _compact_answer(*, block: str = "mossy_cobblestone") -> dict[str, object]:
+    return {
+        "scene": "world",
+        "playable": True,
+        "danger": False,
+        "visible": True,
+        "block": block,
+        "mineable": True,
+        "dx": 0.0,
+        "dy": 0.0,
+        "box": [0.4, 0.4, 0.2, 0.2],
+        "confidence": 0.85,
+    }
+
+
+def test_crosshair_crop_preserves_exact_original_pixel_provenance() -> None:
+    frame = _frame(width=800, height=800)
+    segmented = _build_crosshair_evidence(frame, frame_id=7)
+    world, center = segmented.evidence
+    assert world.region_kind == center.region_kind == EvidenceRegion.WORLD
+    assert world.evidence_id == "frame-7:world"
+    assert center.evidence_id == "frame-7:crosshair"
+    assert center.region == ScreenRegion(x=0.18, y=0.18, width=0.64, height=0.64)
+    assert center.crop_width == center.crop_height == 512
+    source = Image.frombytes("RGBA", (800, 800), frame.bgra, "raw", "BGRA").convert("RGB")
+    assert center.pixel_sha256 == hashlib.sha256(
+        source.crop((144, 144, 656, 656)).tobytes()
+    ).hexdigest()
+    with Image.open(io.BytesIO(segmented.composite_png)) as image:
+        assert image.size == (1024, 512)
+
+
+def test_compact_crosshair_negative_remains_exact_unsafe_block() -> None:
+    evidence = _build_crosshair_evidence(_frame(width=800, height=800), frame_id=7).evidence
+    compact = _compact_answer()
+    compact["dx"] = 0.1
+    compact["dy"] = -0.1
+    expanded = _expand_crosshair_response(json.dumps(compact), evidence)
+    report = validate_grounded_response(
+        expanded, frame_id=7, evidence=evidence, requested_keys=_CROSSHAIR_PROBE_KEYS
+    )
+
+    values = report.observed_values()
+    assert values["target.kind"] == "mossy_cobblestone"
+    assert is_hand_safe_soft_block(str(values["target.kind"])) is False
+    assert values["target.dx"] == pytest.approx(0.064)
+    assert values["target.dy"] == pytest.approx(-0.064)
+    assert report.confidence_by_key()["target.kind"] == 0.85
+    assert report.evidence_by_key()["target.kind"] == ("frame-7:crosshair",)
+    assert report.evidence_by_key()["danger.immediate"] == ("frame-7:world",)
+    assert report.tracks[0].label == "mossy_cobblestone"
+    assert report.tracks[0].x == pytest.approx(0.436)
+    assert report.tracks[0].y == pytest.approx(0.436)
+    assert report.tracks[0].width == pytest.approx(0.128)
+    assert report.tracks[0].height == pytest.approx(0.128)
+    assert report.tracks[0].confidence == 0.85
+    assert not report.rejections
+
+
+def test_compact_crosshair_nulls_never_create_positive_or_safety_defaults() -> None:
+    evidence = _build_crosshair_evidence(_frame(), frame_id=7).evidence
+    wire = {key: None for key in _compact_answer()}
+    raw = _expand_crosshair_response(json.dumps(wire), evidence)
+    report = validate_grounded_response(
+        raw, frame_id=7, evidence=evidence, requested_keys=_CROSSHAIR_PROBE_KEYS
+    )
+    assert report.observed_values() == {}
+    assert report.tracks == ()
+    assert report.uncertainty == 1.0
+
+
+def test_compact_crosshair_explicit_dirt_keeps_all_eight_observations() -> None:
+    evidence = _build_crosshair_evidence(_frame(), frame_id=7).evidence
+    raw = _expand_crosshair_response(json.dumps(_compact_answer(block="dirt")), evidence)
+    report = validate_grounded_response(
+        raw, frame_id=7, evidence=evidence, requested_keys=_CROSSHAIR_PROBE_KEYS
+    )
+    values = report.observed_values()
+    assert set(values) == set(_CROSSHAIR_PROBE_KEYS)
+    assert values["target.kind"] == "dirt"
+    assert is_hand_safe_soft_block(str(values["target.kind"])) is True
+    assert values["target.dx"] == values["target.dy"] == 0
+    assert all(value == 0.85 for value in report.confidence_by_key().values())
+    assert report.tracks[0].label == "dirt"
+    assert not report.rejections
+
+
+@pytest.mark.parametrize("confidence", (None, 0.0))
+def test_compact_crosshair_requires_explicit_positive_shared_confidence(
+    confidence: float | None,
+) -> None:
+    evidence = _build_crosshair_evidence(_frame(), frame_id=7).evidence
+    wire = _compact_answer(block="dirt")
+    wire["confidence"] = confidence
+    raw = _expand_crosshair_response(json.dumps(wire), evidence)
+    assert raw.claims == raw.tracks == ()
+    assert raw.uncertainty == 1
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    (
+        ("danger", 0),
+        ("playable", 1),
+        ("confidence", 1.5),
+        ("dx", "0"),
+    ),
+)
+def test_compact_crosshair_rejects_wrong_types_and_confidence(
+    key: str, value: object
+) -> None:
+    wire = _compact_answer()
+    wire[key] = value
+    with pytest.raises(ValidationError):
+        _CompactCrosshairResponse.model_validate_json(json.dumps(wire))
+
+
+@pytest.mark.parametrize(
+    "box", ([0.9, 0.4, 0.2, 0.2], [0.4, 0.4, 0, 0.2], [0.5, 0.5, 0.2, 0.2])
+)
+def test_compact_crosshair_does_not_clip_invalid_box_into_a_target(box: list[object]) -> None:
+    evidence = _build_crosshair_evidence(_frame(), frame_id=7).evidence
+    wire = _compact_answer(block="dirt")
+    wire["box"] = box
+    raw = _expand_crosshair_response(json.dumps(wire), evidence)
+    report = validate_grounded_response(
+        raw, frame_id=7, evidence=evidence, requested_keys=_CROSSHAIR_PROBE_KEYS
+    )
+    assert report.tracks == ()
+    assert "target.visible" not in report.observed_values()
+    assert "target.kind" not in report.observed_values()
+
+
+def test_compact_crosshair_boundary_check_uses_actual_odd_frame_crop_origin() -> None:
+    evidence = _build_crosshair_evidence(_frame(width=801, height=803), frame_id=7).evidence
+    center = evidence[1].region
+    crosshair_x = (0.5 - center.x) / center.width
+    assert crosshair_x != 0.5
+    wire = _compact_answer(block="dirt")
+    wire["box"] = [crosshair_x, 0.4, 0.2, 0.2]
+    assert _expand_crosshair_response(json.dumps(wire), evidence).tracks == ()
+
+
+def test_compact_crosshair_duplicate_safety_field_fails_closed() -> None:
+    evidence = _build_crosshair_evidence(_frame(), frame_id=7).evidence
+    wire = json.dumps(_compact_answer()).replace(
+        '"danger": false', '"danger": true, "danger": false'
+    )
+    with pytest.raises(ValueError, match="duplicate compact crosshair field: danger"):
+        _expand_crosshair_response(wire, evidence)
+
+
+def test_exact_crosshair_harness_uses_compact_nullable_contract() -> None:
+    class _Model:
+        model_id = "test-compact"
+
+        def inspect(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            raise AssertionError("compact probe should prefer enforced grammar")
+
+        def inspect_constrained(self, prompt: str, **kwargs: object) -> ModelResponse:
+            self.prompt = prompt
+            self.schema = kwargs["schema"]
+            self.grammar = kwargs["grammar"]
+            self.image = kwargs["image_bytes"]
+            return ModelResponse(
+                text=json.dumps(_compact_answer()), model=self.model_id, latency_ms=1
+            )
+
+    model = _Model()
+    inspection = GroundedPerceptionHarness(model, compact_crosshair_probe=True).inspect_detailed(
+        _frame(), frame_id=7, question="Inspect only the crosshair block.",
+        output_keys=_CROSSHAIR_PROBE_KEYS,
+    )
+    assert inspection.report.observed_values()["target.kind"] == "mossy_cobblestone"
+    assert not inspection.schema_repaired
+    assert "never choose adjacent easier dirt" in model.prompt
+    assert "safe empty result" not in model.prompt
+    assert isinstance(model.grammar, str) and '"\\\"mossy_cobblestone\\\""' in model.grammar
+    assert isinstance(model.schema, dict)
+    assert set(model.schema["required"]) == set(_compact_answer())
+    assert all("default" not in field for field in model.schema["properties"].values())
+    # Complete compact wire stays well below the old 1,141-char / 343-token answer.
+    assert len(json.dumps(_compact_answer(), separators=(",", ":"))) < 250
+    assert _crosshair_probe_requested(_CROSSHAIR_PROBE_KEYS, "Inspect crosshair") is True
+    assert _crosshair_probe_requested(_CROSSHAIR_PROBE_KEYS, "Find a tree") is False
+
+
+def test_crosshair_harness_defaults_to_production_grounded_contract() -> None:
+    class _Model:
+        model_id = "test-production-default"
+
+        def inspect(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            raise AssertionError("grounded queries should prefer enforced grammar")
+
+        def inspect_constrained(self, prompt: str, **kwargs: object) -> ModelResponse:
+            self.schema = kwargs["schema"]
+            return ModelResponse(
+                text=GroundedVLMResponse(uncertainty=1.0).model_dump_json(),
+                model=self.model_id,
+                latency_ms=1,
+            )
+
+    model = _Model()
+    inspection = GroundedPerceptionHarness(model).inspect_detailed(
+        _frame(), frame_id=7, question="Inspect only the crosshair block.",
+        output_keys=_CROSSHAIR_PROBE_KEYS,
+    )
+    assert isinstance(model.schema, dict)
+    assert "claims" in model.schema["properties"]
+    assert "block" not in model.schema["properties"]
+    assert all(item.evidence_id != "frame-7:crosshair" for item in inspection.report.evidence)
+    assert inspection.report.observed_values() == {}
+    assert not inspection.schema_repaired
+
+
+@pytest.mark.parametrize(
+    ("text", "probability_ok", "offset_ok"),
+    (
+        ("0", True, True), ("1", True, True), ("0.5", True, True),
+        ("0.999999", True, True), ("1.000", True, True),
+        ("-0", False, True), ("-0.9", False, True), ("-1.000", False, True),
+        ("-2", False, False), ("2", False, False), ("1.001", False, False),
+        ("-1.001", False, False), ("00", False, False), ("0.", False, False),
+        ("1e9", False, False), ("NaN", False, False), ("+0.5", False, False),
+    ),
+)
+def test_compact_crosshair_grammar_numeric_domains(
+    text: str, probability_ok: bool, offset_ok: bool,
+) -> None:
+    rules = dict(line.split(" ::= ", 1) for line in _crosshair_grammar().splitlines())
+    # These two GBNF rules use only literals, regex-compatible groups/classes,
+    # and one reference. Evaluate that regular subset directly without a model.
+    probability = re.sub(
+        r'"([^"]*)"', lambda match: re.escape(match[1]), rules["probability"]
+    ).replace(" ", "")
+    offset = re.sub(
+        r'"([^"]*)"', lambda match: re.escape(match[1]), rules["offset"]
+    ).replace(" ", "").replace("probability", f"({probability})")
+    assert bool(re.fullmatch(probability, text)) is probability_ok
+    assert bool(re.fullmatch(offset, text)) is offset_ok
+    assert rules["nullable-probability"] == '"null" | probability'
+    assert rules["nullable-offset"] == '"null" | offset'
+    assert rules["box"].count("probability") == 4
+    assert rules["root"].count("nullable-offset") == 2
+    assert rules["root"].count("nullable-probability") == 1
 
 
 def test_grounded_output_keys_use_only_literal_supported_contract_tokens() -> None:
