@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from collections import deque
 from concurrent.futures import Future
@@ -18,7 +19,7 @@ from minecraft_ai.grounded_perception import (
     crosshair_block_rgb_grid,
 )
 from minecraft_ai.memory import MemoryStore
-from minecraft_ai.motor import BootstrapMotorPolicy
+from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.outcome_verifier import (
     OutcomeKind,
     OutcomeSignal,
@@ -44,7 +45,9 @@ from minecraft_ai.runtime import (
     _HeadroomRecovery,
     _headroom_clear_target,
     _headroom_deadline_ns,
+    _headroom_reorient_mouse_dy,
     _headroom_retry_advances_plan,
+    _restore_policy_world_camera,
     _verified_headroom_retry,
     _verified_obstacle_stall,
 )
@@ -287,6 +290,55 @@ def test_headroom_deadline_respects_serialized_vlm_timeout_budget() -> None:
     assert _headroom_deadline_ns(_Worker(), now_ns=now) == now + 180_000_000_000
 
 
+def test_headroom_reorientation_targets_absolute_calibrated_pitch() -> None:
+    class _Policy:
+        def __init__(self, pitch: int) -> None:
+            self.pitch = pitch
+
+        def status(self) -> dict[str, object]:
+            return {"world_camera": {"estimated_pitch_units": self.pitch}}
+
+        def restore_world_camera_state(self, *, estimated_pitch_units: int) -> None:
+            self.pitch = estimated_pitch_units
+
+    upward = _Policy(-251)
+    chunks: list[int] = []
+    while delta := _headroom_reorient_mouse_dy(upward.pitch):
+        chunks.append(delta)
+        _restore_policy_world_camera(upward, pitch_units=upward.pitch + delta)
+    assert chunks == [96, 96, 96, 59]
+    assert upward.pitch == 96
+
+    assert _headroom_reorient_mouse_dy(-2_000) == 96
+    assert _headroom_reorient_mouse_dy(2_000) == -96
+    assert _headroom_reorient_mouse_dy(96) == 0
+    assert _headroom_reorient_mouse_dy(65) == 0
+    assert _headroom_reorient_mouse_dy(128) == 0
+
+
+def test_headroom_authoritative_pitch_requires_calibrated_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = object.__new__(AgentRuntime)
+    response: dict[str, object] = {
+        "world_camera": {
+            "estimated_pitch_units": -251,
+            "origin_calibrated": True,
+        }
+    }
+    monkeypatch.setattr(
+        "minecraft_ai.runtime.send_command",
+        lambda command: response if command == "status" else {},
+    )
+    assert runtime._authoritative_world_camera_pitch_units() == -251
+
+    response["world_camera"] = {
+        "estimated_pitch_units": -251,
+        "origin_calibrated": False,
+    }
+    assert runtime._authoritative_world_camera_pitch_units() is None
+
+
 @pytest.mark.parametrize("kind", ("stone", "bedrock", "oak_log", "unknown"))
 def test_headroom_target_abstains_on_hard_or_unknown_exact_center_block(kind: str) -> None:
     frame = _capture()
@@ -371,6 +423,23 @@ class _Perception:
         return True
 
 
+class _QuietMotorPolicy:
+    policy_id = "quiet-test-policy"
+
+    def act(
+        self,
+        blackboard: PerceptionBlackboard,
+        intent: MotorIntent,
+        *,
+        sequence: int,
+    ) -> MotorAction:
+        del blackboard, intent
+        return MotorAction(sequence=sequence)
+
+    def reset(self) -> MotorAction:
+        return MotorAction(sequence=0)
+
+
 def _runtime_for_probe(
     captured: CapturedFrame | None = None,
 ) -> tuple[AgentRuntime, _Perception, list[MotorAction]]:
@@ -391,14 +460,18 @@ def _runtime_for_probe(
     runtime._pending_decision = None
     runtime._sequence = 0
     runtime.lease_id = "test-lease"
+    runtime._stop = threading.Event()
+    pitch = {"value": 0}
     sent: list[MotorAction] = []
 
     def _send(action: MotorAction, **_kwargs: object) -> None:
         sent.append(action)
+        pitch["value"] += action.mouse_dy
         runtime._sequence += 1
 
     runtime._send_motor = _send  # type: ignore[method-assign]
     runtime._quiesce_headroom_inputs = lambda: True  # type: ignore[method-assign]
+    runtime._authoritative_world_camera_pitch_units = lambda: pitch["value"]  # type: ignore[method-assign]
     return runtime, perception, sent
 
 
@@ -414,6 +487,9 @@ def test_verified_stall_requests_one_event_query_at_zero_semantic_hz_then_mines(
     assert recovery.phase == "reorient"
     assert perception.requests == []
 
+    runtime._advance_headroom_recovery()
+    assert recovery.phase == "reorient"
+    assert len(sent) == 1
     runtime._advance_headroom_recovery()
     assert recovery.phase == "settle"
     assert len(sent) == 1
@@ -527,6 +603,111 @@ def test_verified_stall_requests_one_event_query_at_zero_semantic_hz_then_mines(
     assert started.action.buttons_down == ("left",)
 
 
+def test_headroom_already_near_target_pitch_settles_without_camera_overshoot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_strict_monotonic_clock(monkeypatch)
+    runtime, perception, sent = _runtime_for_probe()
+    runtime._authoritative_world_camera_pitch_units = lambda: 96  # type: ignore[method-assign]
+    assert runtime._route_headroom_terminal(_stall_result()) is True
+    recovery = runtime._headroom_recovery
+    assert recovery is not None
+
+    runtime._advance_headroom_recovery()
+    assert recovery.phase == "settle"
+    assert sent == []
+
+    for frame_id in (42, 43, 44):
+        settled = replace(
+            perception.last_capture,
+            frame_id=frame_id,
+            captured_ns=time.monotonic_ns(),
+        )
+        perception.last_capture = settled
+        _publish_frame(runtime.blackboard, settled)
+        runtime._advance_headroom_recovery()
+
+    assert recovery.phase == "grounding"
+    assert len(perception.requests) == 1
+
+
+def test_current_crosshair_probe_can_initiate_mining_without_learned_attack() -> None:
+    frame = _capture()
+    runtime, _, _ = _runtime_for_probe(frame)
+    recovery = _recovery_for_frame(frame, query_id="quiet-policy-query")
+    runtime._headroom_recovery = recovery
+    _publish_headroom_answer(runtime.blackboard, recovery, frame)
+    target = _headroom_clear_target(
+        runtime.blackboard,
+        recovery,
+        now_ns=time.monotonic_ns(),
+        current_frame=frame,
+    )
+    assert target is not None
+    track_id = runtime._materialize_headroom_target(recovery, target)
+    assert track_id is not None
+    runtime.executor = SkillExecutor(_QuietMotorPolicy())
+    runtime.executor.start(
+        runtime.skills.get("mine_visible_block"),
+        run_id="quiet-probe-mining",
+        context_key="explore-keepalive",
+        parameters={"target": "dirt", "target_track_id": track_id},
+    )
+
+    started = runtime.executor.tick(
+        runtime.blackboard,
+        sequence=1,
+        now_ns=time.monotonic_ns(),
+    )
+
+    assert started.run.outcome == SkillOutcome.RUNNING
+    assert started.action is not None
+    assert started.action.buttons_down == ("left",)
+
+
+def test_changed_crosshair_probe_never_initiates_quiet_policy_attack() -> None:
+    frame = _capture()
+    runtime, perception, _ = _runtime_for_probe(frame)
+    recovery = _recovery_for_frame(frame, query_id="quiet-stale-query")
+    runtime._headroom_recovery = recovery
+    _publish_headroom_answer(runtime.blackboard, recovery, frame)
+    target = _headroom_clear_target(
+        runtime.blackboard,
+        recovery,
+        now_ns=time.monotonic_ns(),
+        current_frame=frame,
+    )
+    assert target is not None
+    track_id = runtime._materialize_headroom_target(recovery, target)
+    assert track_id is not None
+    runtime.executor = SkillExecutor(_QuietMotorPolicy())
+    runtime.executor.start(
+        runtime.skills.get("mine_visible_block"),
+        run_id="quiet-stale-mining",
+        context_key="explore-keepalive",
+        parameters={"target": "dirt", "target_track_id": track_id},
+    )
+    changed = CapturedFrame(
+        frame_id=frame.frame_id + 1,
+        captured_ns=time.monotonic_ns(),
+        width=frame.width,
+        height=frame.height,
+        bgra=bytes((12, 34, 56, 255)) * frame.width * frame.height,
+    )
+    perception.last_capture = changed
+    _publish_frame(runtime.blackboard, changed)
+
+    waiting = runtime.executor.tick(
+        runtime.blackboard,
+        sequence=1,
+        now_ns=time.monotonic_ns(),
+    )
+
+    assert waiting.run.outcome == SkillOutcome.RUNNING
+    assert waiting.action is not None
+    assert "left" not in waiting.action.buttons_down
+
+
 def test_verified_stall_abstains_when_inputs_cannot_be_quiesced() -> None:
     runtime, perception, sent = _runtime_for_probe()
     runtime._quiesce_headroom_inputs = lambda: False  # type: ignore[method-assign]
@@ -550,6 +731,7 @@ def test_headroom_waits_for_shared_model_lane_before_capturing_query(
     assert runtime._route_headroom_terminal(_stall_result()) is True
     recovery = runtime._headroom_recovery
     assert recovery is not None
+    runtime._advance_headroom_recovery()
     runtime._advance_headroom_recovery()
 
     for frame_id in (43, 44, 45):
@@ -580,6 +762,7 @@ def test_headroom_settle_drift_restarts_stable_successor_count(
     assert runtime._route_headroom_terminal(_stall_result()) is True
     recovery = runtime._headroom_recovery
     assert recovery is not None
+    runtime._advance_headroom_recovery()
     runtime._advance_headroom_recovery()
 
     baseline = _capture(

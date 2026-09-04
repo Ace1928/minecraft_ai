@@ -98,10 +98,12 @@ _CRAFT_SEMANTIC_LATENCY_MARGIN = 1.25
 _CRAFT_SEMANTIC_MAX_REQUIRED_BUDGET_MS = 60_000
 _PLANKS_NO_LOGS_REASON = "crafting-no-logs-observed-in-inventory"
 _PLANKS_RETRY_CLEAR_MEMORY = "working:planks-retry-positive-log-evidence"
-# Positive Bedrock pitch moves the open-sky crosshair toward the near terrain
-# lip that commonly causes this verified wedge. This is one bounded look-down
-# adjustment, not a scan; the next capture must confirm that the view changed.
-_HEADROOM_REORIENT_MOUSE_DY = 96
+# Positive Bedrock pitch looks down. Recovery aims at a small absolute
+# downward pitch from the calibrated horizon instead of adding a fixed nudge
+# to whatever extreme pose the learned controller left behind.
+_HEADROOM_REORIENT_TARGET_PITCH_UNITS = 96
+_HEADROOM_REORIENT_TARGET_TOLERANCE_UNITS = 32
+_HEADROOM_REORIENT_MAX_ABS_DY = 96
 _HEADROOM_MIN_TIMEOUT_S = 60.0
 _HEADROOM_TIMEOUT_MULTIPLIER = 5.0
 _HEADROOM_TIMEOUT_MARGIN_S = 5.0
@@ -126,6 +128,7 @@ class _HeadroomRecovery:
     deadline_ns: int
     phase: str = "reorient"
     reoriented_frame_id: int | None = None
+    reorientation_moved: bool = False
     pre_reorient_dhash: str | None = None
     settle_deadline_ns: int | None = None
     settle_frame_id: int | None = None
@@ -181,6 +184,27 @@ def _headroom_deadline_ns(active_vlm: object, *, now_ns: int) -> int:
         _HEADROOM_TRANSACTION_MAX_S,
     )
     return now_ns + int(budget_s * 1_000_000_000)
+
+
+def _headroom_reorient_mouse_dy(current_pitch_units: int) -> int:
+    """Return one bounded delta toward the calibrated near-ground pose."""
+
+    delta = _HEADROOM_REORIENT_TARGET_PITCH_UNITS - current_pitch_units
+    if abs(delta) <= _HEADROOM_REORIENT_TARGET_TOLERANCE_UNITS:
+        return 0
+    return max(
+        -_HEADROOM_REORIENT_MAX_ABS_DY,
+        min(_HEADROOM_REORIENT_MAX_ABS_DY, delta),
+    )
+
+
+def _restore_policy_world_camera(policy: object, *, pitch_units: int) -> None:
+    """Synchronize learned routes after a runtime-owned physical camera action."""
+
+    restore = getattr(policy, "restore_world_camera_state", None)
+    if not callable(restore):
+        return
+    restore(estimated_pitch_units=pitch_units)
 
 
 def _expected_keepalive_expiry(run: SkillRun) -> bool:
@@ -1632,6 +1656,25 @@ class AgentRuntime:
             return False
         return result.get("released") is True and result.get("lease_active") is True
 
+    def _authoritative_world_camera_pitch_units(self) -> int | None:
+        """Read the calibrated physical pitch accumulator from the supervisor."""
+
+        try:
+            status = send_command("status")
+        except Exception:
+            return None
+        world_camera = status.get("world_camera")
+        if not isinstance(world_camera, dict):
+            return None
+        pitch = world_camera.get("estimated_pitch_units")
+        if (
+            world_camera.get("origin_calibrated") is not True
+            or not isinstance(pitch, int)
+            or isinstance(pitch, bool)
+        ):
+            return None
+        return pitch
+
     def _advance_headroom_recovery(self) -> None:
         """Request one exact grounding, then run one guarded clear and traversal retry."""
 
@@ -1697,14 +1740,30 @@ class AgentRuntime:
             ):
                 self._clear_headroom_recovery(recovery)
                 return
-            recovery.pre_reorient_dhash = frame_dhash(captured)
-            self._send_motor(
-                MotorAction(
-                    sequence=self._sequence,
-                    mouse_dy=_HEADROOM_REORIENT_MOUSE_DY,
-                    camera_semantics="world",
+            if recovery.pre_reorient_dhash is None:
+                recovery.pre_reorient_dhash = frame_dhash(captured)
+            current_pitch = self._authoritative_world_camera_pitch_units()
+            if current_pitch is None:
+                self._clear_headroom_recovery(recovery)
+                return
+            reorient_mouse_dy = _headroom_reorient_mouse_dy(current_pitch)
+            if reorient_mouse_dy:
+                recovery.reorientation_moved = True
+                self._send_motor(
+                    MotorAction(
+                        sequence=self._sequence,
+                        mouse_dy=reorient_mouse_dy,
+                        camera_semantics="world",
+                    )
                 )
-            )
+                if self._stop.is_set():
+                    self._clear_headroom_recovery(recovery)
+                    return
+                _restore_policy_world_camera(
+                    self.executor.policy,
+                    pitch_units=current_pitch + reorient_mouse_dy,
+                )
+                return
             recovery.phase = "settle"
             recovery.reoriented_frame_id = latest.frame_id
             recovery.settle_deadline_ns = (
@@ -1743,7 +1802,7 @@ class AgentRuntime:
             except ValueError:
                 self._clear_headroom_recovery(recovery)
                 return
-            if not visibly_reoriented:
+            if recovery.reorientation_moved and not visibly_reoriented:
                 recovery.settle_frame_id = None
                 recovery.settle_crosshair_dhash = None
                 recovery.settle_rgb_grid = None

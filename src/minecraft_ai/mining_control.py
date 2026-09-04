@@ -353,11 +353,19 @@ class MiningLeaseGuard:
             now_ns=now_ns,
             min_confidence=self.min_confidence,
         )
+        crosshair_probe_authorized = _crosshair_probe_mining_authorized(
+            blackboard,
+            intent,
+            now_ns=now_ns,
+            min_confidence=self.min_confidence,
+            max_track_age_ms=self.max_track_age_ms,
+        )
         if pending is None and (
             mode not in _MINING_MODES
             or (
                 "left" not in action.buttons_down
                 and not operator_authorized
+                and not crosshair_probe_authorized
             )
         ):
             if targeting_changed:
@@ -836,6 +844,36 @@ def _explicit_operator_mining_authorized(
         )
         is not None
     )
+
+
+def _crosshair_probe_mining_authorized(
+    blackboard: PerceptionBlackboard,
+    intent: MotorIntent,
+    *,
+    now_ns: int,
+    min_confidence: float,
+    max_track_age_ms: int,
+) -> bool:
+    """Admit only a currently verified runtime-owned crosshair mining target."""
+
+    track_id = intent.target_track_id
+    if (
+        intent.skill_id != "mine_visible_block"
+        or intent.mode.casefold() != "mine"
+        or not isinstance(track_id, str)
+        or not track_id.startswith("crosshair-probe:")
+    ):
+        return False
+    target = _verified_target(
+        blackboard,
+        intent,
+        now_ns=now_ns,
+        min_confidence=min_confidence,
+        max_track_age_ms=max_track_age_ms,
+        require_scene_match=True,
+        evidence_after_ns=0,
+    )
+    return isinstance(target, _VerifiedTarget) and target.track_id == track_id
 
 
 def _explicit_operator_mining_track(
