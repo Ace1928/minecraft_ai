@@ -1233,19 +1233,32 @@ def test_pending_attack_failure_releases_emitted_locomotion() -> None:
     assert "left" in stopped.action.buttons_up
 
 
-def test_attack_start_rejects_simultaneous_shift_and_releases_both() -> None:
+@pytest.mark.parametrize("modifier", ["ctrl", "shift"])
+def test_attack_start_quiesces_locomotion_modifier_before_mining(
+    modifier: str,
+) -> None:
     now = time.monotonic_ns()
     policy = _ScriptedPolicy(
-        MotorAction(sequence=0, keys_down=("shift",), buttons_down=("left",))
+        MotorAction(sequence=0, keys_down=(modifier,), buttons_down=("left",)),
+        MotorAction(sequence=0),
     )
     executor = _executor(policy, now_ns=now)
 
-    stopped = executor.tick(_mining_board(now_ns=now), sequence=1, now_ns=now)
+    approaching = executor.tick(_mining_board(now_ns=now), sequence=1, now_ns=now)
+    settling = executor.tick(
+        _mining_board(now_ns=now + 100_000_000),
+        sequence=2,
+        now_ns=now + 100_000_000,
+    )
 
-    assert stopped.run.failure_code == SkillFailureCode.MINING_CONFLICTING_INPUT
-    assert stopped.action is not None
-    assert "left" in stopped.action.buttons_up
-    assert "shift" in stopped.action.keys_up
+    assert approaching.run.outcome == SkillOutcome.RUNNING
+    assert approaching.action is not None
+    assert approaching.action.keys_down == (modifier,)
+    assert "left" not in approaching.action.buttons_down
+    assert settling.run.outcome == SkillOutcome.RUNNING
+    assert settling.action is not None
+    assert modifier in settling.action.keys_up
+    assert "left" not in settling.action.buttons_down
 
 
 def test_attack_start_rejects_right_button_held_from_prior_tick() -> None:

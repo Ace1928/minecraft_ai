@@ -107,6 +107,7 @@ _HEADROOM_TIMEOUT_MULTIPLIER = 5.0
 _HEADROOM_TIMEOUT_MARGIN_S = 5.0
 _HEADROOM_TRANSACTION_MAX_S = 180.0
 _HEADROOM_SETTLE_TIMEOUT_NS = 2_000_000_000
+_HEADROOM_STABLE_SUCCESSOR_FRAMES = 2
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,10 @@ class _HeadroomRecovery:
     reoriented_frame_id: int | None = None
     pre_reorient_dhash: str | None = None
     settle_deadline_ns: int | None = None
+    settle_frame_id: int | None = None
+    settle_crosshair_dhash: str | None = None
+    settle_rgb_grid: str | None = None
+    settle_stable_successors: int = 0
     query_id: str | None = None
     query_started_ns: int = 0
     query_frame_dhash: str | None = None
@@ -1601,6 +1606,11 @@ class AgentRuntime:
             # Retain the ordinary declared recovery route (especially immediate
             # danger retreat) when the optional visual transaction cannot start.
             return False
+        if not self._quiesce_headroom_inputs():
+            # A classifier request is only meaningful when the avatar and
+            # camera are actually still. Never infer from a scene whose held
+            # input state could not be authoritatively released.
+            return False
         self._note_terminal_for_cognition(result.run, recovery_started=True)
         if getattr(self, "_headroom_recovery", None) is None:
             now_ns = time.monotonic_ns()
@@ -1612,6 +1622,15 @@ class AgentRuntime:
                 deadline_ns=_headroom_deadline_ns(active_vlm, now_ns=now_ns),
             )
         return True
+
+    def _quiesce_headroom_inputs(self) -> bool:
+        """Release every held input while preserving this runtime's live lease."""
+
+        try:
+            result = send_command("release-inputs", lease_id=self.lease_id)
+        except Exception:
+            return False
+        return result.get("released") is True and result.get("lease_active") is True
 
     def _advance_headroom_recovery(self) -> None:
         """Request one exact grounding, then run one guarded clear and traversal retry."""
@@ -1725,6 +1744,50 @@ class AgentRuntime:
                 self._clear_headroom_recovery(recovery)
                 return
             if not visibly_reoriented:
+                recovery.settle_frame_id = None
+                recovery.settle_crosshair_dhash = None
+                recovery.settle_rgb_grid = None
+                recovery.settle_stable_successors = 0
+                return
+            current_crosshair_dhash = crosshair_block_dhash(captured)
+            current_rgb_grid = crosshair_block_rgb_grid(captured)
+            if (
+                recovery.settle_frame_id is None
+                or recovery.settle_crosshair_dhash is None
+                or recovery.settle_rgb_grid is None
+            ):
+                # The first visibly changed frame is the settle baseline, not
+                # proof that sprint FOV, head bob, falling, or mouse easing has
+                # stopped.
+                recovery.settle_frame_id = latest.frame_id
+                recovery.settle_crosshair_dhash = current_crosshair_dhash
+                recovery.settle_rgb_grid = current_rgb_grid
+                recovery.settle_stable_successors = 0
+                return
+            if latest.frame_id <= recovery.settle_frame_id:
+                return
+            try:
+                crosshair_stable = perceptual_hash_distance(
+                    recovery.settle_crosshair_dhash,
+                    current_crosshair_dhash,
+                ) <= 2
+            except ValueError:
+                crosshair_stable = False
+            rgb_stable = (
+                crosshair_block_rgb_grid_distance(
+                    recovery.settle_rgb_grid,
+                    current_rgb_grid,
+                )
+                <= 1.0
+            )
+            recovery.settle_frame_id = latest.frame_id
+            recovery.settle_crosshair_dhash = current_crosshair_dhash
+            recovery.settle_rgb_grid = current_rgb_grid
+            if not crosshair_stable or not rgb_stable:
+                recovery.settle_stable_successors = 0
+                return
+            recovery.settle_stable_successors += 1
+            if recovery.settle_stable_successors < _HEADROOM_STABLE_SUCCESSOR_FRAMES:
                 return
             recovery.phase = "request"
 
@@ -1732,7 +1795,10 @@ class AgentRuntime:
             if self.perception.active_vlm is None:
                 self._clear_headroom_recovery(recovery)
                 return
-            if not self.perception.semantic_available():
+            if (
+                not self.perception.semantic_available()
+                or not local_model_inference_available()
+            ):
                 return
             captured = self.perception.last_capture
             latest = self.blackboard.raw_latest()

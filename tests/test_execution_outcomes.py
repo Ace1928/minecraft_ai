@@ -751,7 +751,15 @@ def test_traversal_stall_fails_early_with_typed_evidence_and_full_release(
     assert stopped.run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
     assert stopped.run.failure_reason == SkillFailureCode.LOCOMOTION_STALLED.value
     assert stopped.action is not None
-    assert set(stopped.action.keys_up) == {"w", "a", "s", "d", "space"}
+    assert set(stopped.action.keys_up) == {
+        "w",
+        "a",
+        "s",
+        "d",
+        "ctrl",
+        "shift",
+        "space",
+    }
     assert stopped.outcome_verification is not None
     assert stopped.outcome_verification.signal.value == "locomotion_stalled"
     assert stopped.recovery_skills == spec.recovery_skills

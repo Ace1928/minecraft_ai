@@ -252,6 +252,7 @@ class ActiveVLMMetrics:
     last_latency_ms: float = 0.0
     last_frame_age: int = 0
     last_hash_distance: int | None = None
+    last_crosshair_hash_distance: int | None = None
     last_error: str | None = None
     last_fact_keys: tuple[str, ...] = ()
     claim_rejections: int = 0
@@ -417,6 +418,7 @@ class ActiveVLMWorker:
         )
         self.metrics.last_frame_age = frame_age
         self.metrics.last_hash_distance = hash_distance
+        self.metrics.last_crosshair_hash_distance = crosshair_hash_distance
         # Slow semantics remain valid for an unchanged static GUI or view. A
         # numerically old result from a changed scene must not control tactics.
         inventory_scoped = bool(
@@ -556,6 +558,7 @@ class ActiveVLMWorker:
             "last_latency_ms": round(self.metrics.last_latency_ms, 3),
             "last_frame_age": self.metrics.last_frame_age,
             "last_hash_distance": self.metrics.last_hash_distance,
+            "last_crosshair_hash_distance": self.metrics.last_crosshair_hash_distance,
             "last_error": self.metrics.last_error,
             "last_fact_keys": list(self.metrics.last_fact_keys),
             "claim_rejections": self.metrics.claim_rejections,

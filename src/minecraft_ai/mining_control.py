@@ -12,7 +12,7 @@ from .skills import SkillFailureCode
 
 
 _MINING_MODES = frozenset({"mine", "gather", "gather_wood", "break"})
-_LOCOMOTION_KEYS = frozenset({"w", "a", "s", "d", "space"})
+_LOCOMOTION_KEYS = frozenset({"w", "a", "s", "d", "ctrl", "shift", "space"})
 _HOTBAR_KEYS = frozenset("123456789")
 _OPERATOR_AIM_GAIN = 40.0
 _OPERATOR_AIM_MAX_STEP = 12

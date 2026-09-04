@@ -72,7 +72,7 @@ _MINING_SUCCESS_OVERRIDABLE_FAILURES = frozenset(
 _TRAVERSAL_SKILL_IDS = frozenset(
     {"explore_forward", "traverse_level_ground", "traverse_visible_obstacle"}
 )
-_LOCOMOTION_RELEASE_KEYS = ("a", "d", "s", "space", "w")
+_LOCOMOTION_RELEASE_KEYS = ("a", "ctrl", "d", "s", "shift", "space", "w")
 _REACQUIRE_MIN_CONFIDENCE = 0.65
 
 

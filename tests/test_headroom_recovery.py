@@ -390,6 +390,7 @@ def _runtime_for_probe(
     runtime._cognition_requested = False
     runtime._pending_decision = None
     runtime._sequence = 0
+    runtime.lease_id = "test-lease"
     sent: list[MotorAction] = []
 
     def _send(action: MotorAction, **_kwargs: object) -> None:
@@ -397,6 +398,7 @@ def _runtime_for_probe(
         runtime._sequence += 1
 
     runtime._send_motor = _send  # type: ignore[method-assign]
+    runtime._quiesce_headroom_inputs = lambda: True  # type: ignore[method-assign]
     return runtime, perception, sent
 
 
@@ -439,6 +441,28 @@ def test_verified_stall_requests_one_event_query_at_zero_semantic_hz_then_mines(
     perception.last_capture = changed_capture
     _publish_frame(runtime.blackboard, changed_capture)
     runtime._advance_headroom_recovery()
+    assert recovery.phase == "settle"
+    assert perception.requests == []
+
+    stable_one = replace(
+        changed_capture,
+        frame_id=44,
+        captured_ns=max(time.monotonic_ns(), changed_capture.captured_ns + 1),
+    )
+    perception.last_capture = stable_one
+    _publish_frame(runtime.blackboard, stable_one)
+    runtime._advance_headroom_recovery()
+    assert recovery.phase == "settle"
+    assert perception.requests == []
+
+    stable_two = replace(
+        changed_capture,
+        frame_id=45,
+        captured_ns=max(time.monotonic_ns(), stable_one.captured_ns + 1),
+    )
+    perception.last_capture = stable_two
+    _publish_frame(runtime.blackboard, stable_two)
+    runtime._advance_headroom_recovery()
     assert recovery.phase == "grounding"
     assert len(perception.requests) == 1
     query = perception.requests[0][0]
@@ -449,7 +473,7 @@ def test_verified_stall_requests_one_event_query_at_zero_semantic_hz_then_mines(
     runtime._advance_headroom_recovery()
     assert len(perception.requests) == 1
 
-    _publish_headroom_answer(runtime.blackboard, recovery, changed_capture)
+    _publish_headroom_answer(runtime.blackboard, recovery, stable_two)
     perception.available = True
     runtime._advance_headroom_recovery()
 
@@ -472,8 +496,8 @@ def test_verified_stall_requests_one_event_query_at_zero_semantic_hz_then_mines(
     assert "w" in first.action.keys_down
 
     post_motion = replace(
-        changed_capture,
-        frame_id=44,
+        stable_two,
+        frame_id=46,
         captured_ns=time.monotonic_ns(),
     )
     perception.last_capture = post_motion
@@ -488,8 +512,8 @@ def test_verified_stall_requests_one_event_query_at_zero_semantic_hz_then_mines(
     assert "w" in settling.action.keys_up
 
     settled = replace(
-        changed_capture,
-        frame_id=45,
+        stable_two,
+        frame_id=47,
         captured_ns=time.monotonic_ns(),
     )
     perception.last_capture = settled
@@ -501,6 +525,108 @@ def test_verified_stall_requests_one_event_query_at_zero_semantic_hz_then_mines(
     )
     assert started.action is not None
     assert started.action.buttons_down == ("left",)
+
+
+def test_verified_stall_abstains_when_inputs_cannot_be_quiesced() -> None:
+    runtime, perception, sent = _runtime_for_probe()
+    runtime._quiesce_headroom_inputs = lambda: False  # type: ignore[method-assign]
+
+    assert runtime._route_headroom_terminal(_stall_result()) is False
+    assert runtime._headroom_recovery is None
+    assert perception.requests == []
+    assert sent == []
+
+
+def test_headroom_waits_for_shared_model_lane_before_capturing_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_strict_monotonic_clock(monkeypatch)
+    model_available = False
+    monkeypatch.setattr(
+        "minecraft_ai.runtime.local_model_inference_available",
+        lambda: model_available,
+    )
+    runtime, perception, _ = _runtime_for_probe()
+    assert runtime._route_headroom_terminal(_stall_result()) is True
+    recovery = runtime._headroom_recovery
+    assert recovery is not None
+    runtime._advance_headroom_recovery()
+
+    for frame_id in (43, 44, 45):
+        captured = _capture(
+            frame_id=frame_id,
+            captured_ns=time.monotonic_ns(),
+            changed=True,
+        )
+        perception.last_capture = captured
+        _publish_frame(runtime.blackboard, captured)
+        runtime._advance_headroom_recovery()
+
+    assert recovery.phase == "request"
+    assert perception.requests == []
+
+    model_available = True
+    runtime._advance_headroom_recovery()
+    assert recovery.phase == "grounding"
+    assert len(perception.requests) == 1
+    assert perception.requests[0][1] is perception.last_capture
+
+
+def test_headroom_settle_drift_restarts_stable_successor_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_strict_monotonic_clock(monkeypatch)
+    runtime, perception, _ = _runtime_for_probe()
+    assert runtime._route_headroom_terminal(_stall_result()) is True
+    recovery = runtime._headroom_recovery
+    assert recovery is not None
+    runtime._advance_headroom_recovery()
+
+    baseline = _capture(
+        frame_id=43,
+        captured_ns=time.monotonic_ns(),
+        changed=True,
+    )
+    perception.last_capture = baseline
+    _publish_frame(runtime.blackboard, baseline)
+    runtime._advance_headroom_recovery()
+
+    stable_one = replace(
+        baseline,
+        frame_id=44,
+        captured_ns=time.monotonic_ns(),
+    )
+    perception.last_capture = stable_one
+    _publish_frame(runtime.blackboard, stable_one)
+    runtime._advance_headroom_recovery()
+    assert recovery.settle_stable_successors == 1
+
+    drifted = CapturedFrame(
+        frame_id=45,
+        captured_ns=time.monotonic_ns(),
+        width=baseline.width,
+        height=baseline.height,
+        bgra=bytes((12, 34, 56, 255)) * baseline.width * baseline.height,
+    )
+    perception.last_capture = drifted
+    _publish_frame(runtime.blackboard, drifted)
+    runtime._advance_headroom_recovery()
+    assert recovery.phase == "settle"
+    assert recovery.settle_stable_successors == 0
+    assert perception.requests == []
+
+    for frame_id in (46, 47):
+        stable = replace(
+            drifted,
+            frame_id=frame_id,
+            captured_ns=time.monotonic_ns(),
+        )
+        perception.last_capture = stable
+        _publish_frame(runtime.blackboard, stable)
+        runtime._advance_headroom_recovery()
+
+    assert recovery.phase == "grounding"
+    assert len(perception.requests) == 1
 
 
 def test_crosshair_color_swap_after_acquisition_motion_never_starts_attack(

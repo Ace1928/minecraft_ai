@@ -1004,6 +1004,49 @@ def test_crosshair_result_rejects_changed_or_missing_exact_crop_hash() -> None:
     assert worker.metrics.stale_rejections == 2
 
 
+def test_crosshair_publish_reports_local_drift_separately_from_full_frame_drift() -> None:
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=2,
+            captured_ns=2,
+            instance_id="bedrock:test",
+            width=9,
+            height=8,
+            facts=(
+                _hash_fact("f" * 16),
+                _hash_fact("0" * 15 + "1", key="frame.crosshair_block_dhash"),
+            ),
+        )
+    )
+    worker = ActiveVLMWorker(_UnusedVisionModel(), board, "bedrock:test")
+    job = SemanticJob(
+        query=ActivePerceptionQuery(
+            query_id="q-local-drift",
+            mode=PerceptionQueryMode.CROSSHAIR_BLOCK,
+            question="center",
+            frame_id=1,
+        ),
+        frame=_frame(b"\0" * (9 * 8 * 4)),
+        frame_dhash="0" * 16,
+        crosshair_block_dhash="0" * 16,
+    )
+
+    worker._publish(
+        job,
+        SemanticObservation(
+            facts={"recovery.crosshair.block": "dirt"},
+            confidences={"recovery.crosshair.block": 0.9},
+        ),
+    )
+
+    assert board.fact("recovery.crosshair.block") is not None
+    assert worker.metrics.last_hash_distance == 64
+    assert worker.metrics.last_crosshair_hash_distance == 1
+    assert worker.status()["last_hash_distance"] == 64
+    assert worker.status()["last_crosshair_hash_distance"] == 1
+
+
 def test_perception_fact_future_timestamp_is_not_fresh() -> None:
     fact = PerceptionFact(
         key="future", value=True, confidence=1, observed_ns=200,

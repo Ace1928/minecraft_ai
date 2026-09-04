@@ -295,6 +295,21 @@ def test_collect_recent_drop_is_bounded_and_disables_interactions() -> None:
     assert terminal.run.failure_reason == "resource.pickup_unverified"
 
 
+def test_collection_terminal_release_includes_locomotion_modifiers() -> None:
+    executor = SkillExecutor(_IntentCapturePolicy())
+    executor.start(
+        build_bootstrap_skill_library().get("collect_recent_drop"),
+        run_id="collect-terminal-release",
+        now_ns=100,
+    )
+
+    terminal = executor.tick(_board(), sequence=1, now_ns=5_000_000_101)
+
+    assert terminal.run.outcome == SkillOutcome.FAILED
+    assert terminal.action is not None
+    assert {"ctrl", "shift"} <= set(terminal.action.keys_up)
+
+
 @pytest.mark.parametrize("before,after", [(0, 1), (6, 7), (8, 9), (9, 10), (15, 16)])
 def test_collect_recent_drop_requires_stable_post_action_log_increment(
     before: int, after: int
