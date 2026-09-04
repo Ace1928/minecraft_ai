@@ -382,26 +382,6 @@ class MiningLeaseGuard:
                 force_release_buttons=release_buttons,
             )
 
-        # A learned release is authoritative: it cancels a remembered attack
-        # request before the guard has ever emitted the press. Hard safety
-        # conflicts above still win when release is bundled with another action.
-        if "left" in action.buttons_up:
-            self._pending = None
-            cancelled = action.model_copy(
-                update={
-                    "buttons_down": tuple(
-                        button for button in action.buttons_down if button != "left"
-                    )
-                }
-            )
-            if targeting_changed:
-                self._last_targeting_change_ns = now_ns
-            self._remember_emitted(cancelled)
-            return MiningGuardDecision(
-                cancelled,
-                synthetic=cancelled != action,
-            )
-
         if pending is None:
             pending = _PendingMiningAcquisition(
                 episode_id=intent.episode_id or "",
@@ -416,6 +396,20 @@ class MiningLeaseGuard:
                 force_release_left=True,
                 force_release_keys=release_keys,
                 force_release_buttons=release_buttons,
+            )
+
+        # STEVE/VPT represents attack as a short pulse. Once a safe mining
+        # acquisition has latched that pulse, its ordinary zero-order release
+        # must not erase the request while asynchronous grounding catches up.
+        # The bounded timeout and all hard interlocks above remain authoritative.
+        policy_action = action
+        if "left" in action.buttons_up:
+            action = action.model_copy(
+                update={
+                    "buttons_up": tuple(
+                        button for button in action.buttons_up if button != "left"
+                    )
+                }
             )
 
         target = _verified_target(
@@ -463,7 +457,7 @@ class MiningLeaseGuard:
                 self._remember_emitted(started)
                 return MiningGuardDecision(started, synthetic=True)
             self._remember_emitted(quiesced)
-            return MiningGuardDecision(quiesced, synthetic=quiesced != action)
+            return MiningGuardDecision(quiesced, synthetic=quiesced != policy_action)
 
         has_current_motion = bool(
             action.mouse_dx
@@ -494,7 +488,7 @@ class MiningLeaseGuard:
                 now_ns=now_ns,
             )
             self._remember_emitted(started)
-            return MiningGuardDecision(started, synthetic=started != action)
+            return MiningGuardDecision(started, synthetic=started != policy_action)
 
         # The first combined attack/approach or attack/aim action may proceed,
         # but only with attack removed. Once grounding is current, quiesce any
@@ -505,14 +499,14 @@ class MiningLeaseGuard:
             quiesced = _quiesce_pending_action(action, held_keys=held_keys)
             self._last_targeting_change_ns = now_ns
             self._remember_emitted(quiesced)
-            return MiningGuardDecision(quiesced, synthetic=quiesced != action)
+            return MiningGuardDecision(quiesced, synthetic=quiesced != policy_action)
         if isinstance(target, _VerifiedTarget) and held_locomotion:
             pending.settling = True
             pending.settle_after_ns = now_ns
             quiesced = _quiesce_pending_action(action, held_keys=held_keys)
             self._last_targeting_change_ns = now_ns
             self._remember_emitted(quiesced)
-            return MiningGuardDecision(quiesced, synthetic=quiesced != action)
+            return MiningGuardDecision(quiesced, synthetic=quiesced != policy_action)
         if (
             pending.motion_seen
             and now_ns - pending.started_ns
@@ -523,13 +517,13 @@ class MiningLeaseGuard:
             quiesced = _quiesce_pending_action(action, held_keys=held_keys)
             self._last_targeting_change_ns = now_ns
             self._remember_emitted(quiesced)
-            return MiningGuardDecision(quiesced, synthetic=quiesced != action)
+            return MiningGuardDecision(quiesced, synthetic=quiesced != policy_action)
 
         waiting = _suppress_left_press(action)
         if targeting_changed:
             self._last_targeting_change_ns = now_ns
         self._remember_emitted(waiting)
-        return MiningGuardDecision(waiting, synthetic=waiting != action)
+        return MiningGuardDecision(waiting, synthetic=waiting != policy_action)
 
     def _prelease_hard_failure(
         self,

@@ -255,10 +255,11 @@ def test_unverified_reference_waits_then_synthesizes_attack_after_grounding() ->
     assert started.action_origin == ActionOrigin.SYNTHETIC
 
 
-def test_explicit_left_release_cancels_pending_attack_request() -> None:
+def test_attack_pulse_survives_releases_until_fresh_grounding_then_presses_once() -> None:
     now = time.monotonic_ns()
     policy = _ScriptedPolicy(
-        MotorAction(sequence=0, buttons_down=("left",)),
+        MotorAction(sequence=0, buttons_down=("left",), mouse_dx=3),
+        MotorAction(sequence=0, buttons_up=("left",)),
         MotorAction(sequence=0, buttons_up=("left",)),
         MotorAction(sequence=0),
     )
@@ -271,21 +272,47 @@ def test_explicit_left_release_cancels_pending_attack_request() -> None:
         include_selected_slot=False,
     )
 
-    executor.tick(unavailable, sequence=1, now_ns=now)
-    cancelled = executor.tick(
-        unavailable,
+    aiming = executor.tick(unavailable, sequence=1, now_ns=now)
+    first_release = executor.tick(
+        _mining_board(
+            now_ns=now + 100_000_000,
+            include_visible=False,
+            include_kind=False,
+            include_mineable=False,
+            include_selected_slot=False,
+        ),
         sequence=2,
         now_ns=now + 100_000_000,
     )
-    later = executor.tick(
-        _mining_board(now_ns=now + 200_000_000, kind="dirt", item=None),
+    settling_release = executor.tick(
+        _mining_board(
+            now_ns=now + 800_000_000,
+            include_visible=False,
+            include_kind=False,
+            include_mineable=False,
+            include_selected_slot=False,
+        ),
         sequence=3,
-        now_ns=now + 200_000_000,
+        now_ns=now + 800_000_000,
+    )
+    started = executor.tick(
+        _mining_board(now_ns=now + 900_000_000, kind="dirt", item=None),
+        sequence=4,
+        now_ns=now + 900_000_000,
     )
 
-    assert cancelled.run.outcome == SkillOutcome.RUNNING
-    assert cancelled.action is not None and "left" in cancelled.action.buttons_up
-    assert later.action is not None and "left" not in later.action.buttons_down
+    accepted = (aiming, first_release, settling_release, started)
+    assert all(tick.run.outcome == SkillOutcome.RUNNING for tick in accepted)
+    assert sum(
+        tick.action is not None and "left" in tick.action.buttons_down
+        for tick in accepted
+    ) == 1
+    assert all(
+        tick.action is not None and "left" not in tick.action.buttons_up
+        for tick in accepted
+    )
+    assert started.action is not None and started.action.buttons_down == ("left",)
+    assert started.action_origin == ActionOrigin.SYNTHETIC
 
 
 def test_pending_attack_has_typed_wall_clock_timeout_and_forced_release() -> None:
