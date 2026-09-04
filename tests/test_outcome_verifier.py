@@ -65,23 +65,30 @@ def _publish_hashes(
     frame_hash: str,
     crosshair_hash: str | None = None,
     ui_hash: str | None = None,
+    luma_grid: str | None = None,
 ) -> None:
-    board.merge_semantics(
-        instance_id="bedrock:test",
-        facts=(
-            _fact("frame.dhash", frame_hash, observed_ns=observed_ns),
-            _fact(
-                "frame.crosshair_dhash",
-                frame_hash if crosshair_hash is None else crosshair_hash,
-                observed_ns=observed_ns,
-            ),
-            _fact(
-                "frame.ui_dhash",
-                frame_hash if ui_hash is None else ui_hash,
-                observed_ns=observed_ns,
-            ),
+    facts = [
+        _fact("frame.dhash", frame_hash, observed_ns=observed_ns),
+        _fact(
+            "frame.crosshair_dhash",
+            frame_hash if crosshair_hash is None else crosshair_hash,
+            observed_ns=observed_ns,
         ),
-    )
+        _fact(
+            "frame.ui_dhash",
+            frame_hash if ui_hash is None else ui_hash,
+            observed_ns=observed_ns,
+        ),
+    ]
+    if luma_grid is not None:
+        facts.append(
+            _fact(
+                "frame.crosshair_luma_grid",
+                luma_grid,
+                observed_ns=observed_ns,
+            )
+        )
+    board.merge_semantics(instance_id="bedrock:test", facts=tuple(facts))
 
 
 def _publish_target(
@@ -351,6 +358,162 @@ def test_incomplete_damage_cycle_cannot_verify_same_material_replacement() -> No
             crosshair_hash=replacement,
         )
         _publish_target(board, settled_ns, visible=True, exists_probability=0.98)
+        verdict = verifier.observe(board, now_ns=settled_ns)
+
+    assert verdict.status != OutcomeStatus.SUCCEEDED
+    assert verdict.signal != OutcomeSignal.BLOCK_BROKEN
+
+
+def test_complete_damage_cycle_and_stable_luma_replacement_verify_break() -> None:
+    now = time.monotonic_ns()
+    # Exact hashes and 8x8 luma grids retained from a Bedrock dirt break that
+    # the prior dHash-only verifier misclassified as lease expiry.
+    baseline_hash = "9d98adaa69927ab3"
+    baseline_luma = (
+        "3e372a36382e392b495445393b3433375f585b755555585e6855646c6450515a"
+        "516b65694c50614b53515225202263524d63592826296348564a522e2b356a55"
+    )
+    board = _board(now, frame_hash=baseline_hash)
+    _publish_hashes(
+        board,
+        now,
+        frame_hash=baseline_hash,
+        crosshair_hash=baseline_hash,
+        luma_grid=baseline_luma,
+    )
+    _publish_target(board, now, visible=True)
+    verifier = TemporalOutcomeVerifier()
+    verifier.begin("mine-luma-replacement", OutcomeKind.MINING, board, now_ns=now)
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=1, buttons_down=("left",)),
+        now_ns=now,
+    )
+
+    damage_samples = (
+        (
+            "ad98a9d665ca7ab3",
+            "3f372a35382d372a4c5343373a332f385b575c226444535c6653615d70474c59"
+            "4f6865633868614851505329596562544c63592d1f2d62425449503d493f6853",
+        ),
+        (
+            "0da8a9ca2dba7ab3",
+            "3e372935372d372b4a52423f332e30375a575a305b57575c665263336d384b5a"
+            "506862646151616152505241515261394c615b66292c453555474f302f414d4a",
+        ),
+        (
+            "8d98a9ae35ba7ab3",
+            "3e362a35382c38294b53433a362f31375a575c2f2c2b555d665362392a364d5a"
+            "5069645233386049525152271f2d63534c615b2e272e60465647513137396953",
+        ),
+        (
+            "8dd829ae2dba7ab3",
+            "3e372a35382d372a4953423c38312f375b575b2f2e63585d6854643435324d5a"
+            "506964353739654d52505231223239454b63582c28413437544950332e5f5449",
+        ),
+        (
+            "8db8a9be1dba7ab3",
+            "3d372b36382d382a4a53433b383030385b575c2e2d47575d6752633b29314d5a"
+            "5369652d553460495550522a262c65534b62592b4f316247554950312d396a54",
+        ),
+    )
+    for index, (crosshair_hash, luma_grid) in enumerate(damage_samples, start=1):
+        sample_ns = now + (400 + index * 100) * 1_000_000
+        _publish_hashes(
+            board,
+            sample_ns,
+            frame_hash=crosshair_hash,
+            crosshair_hash=crosshair_hash,
+            luma_grid=luma_grid,
+        )
+        verifier.observe(board, now_ns=sample_ns)
+
+    release_ns = now + 1_100_000_000
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=2, buttons_up=("left",)),
+        now_ns=release_ns,
+    )
+    settled_samples = (
+        (
+            "8db8a9be1dba7ab3",
+            "3d372b36382d382a4a53433b383030385b575c2e2d47575d6752633b29314d5a"
+            "5369652d553460495550522a262c65534b62592b4f316247554950312d396a54",
+        ),
+        (
+            "8d98a9be1d9a7ab3",
+            "3e372b36382d382b4c54443e382f30375c575d2c2e3e585e6753623232314e5d"
+            "516b652e3135614a534f5327252e64544d635931282b6243564951312d396a54",
+        ),
+        (
+            "9d98a9be2dba7ab3",
+            "3f372b37392d392b4c54433b383133375d595d2f2e2e575f695565362e324e5b"
+            "516b662c3636624854535428222f66554c635b2c292c6545574b52322e3a6c55",
+        ),
+    )
+    for index, (settled_hash, luma_grid) in enumerate(settled_samples):
+        settled_ns = now + (1_400 + index * 100) * 1_000_000
+        _publish_hashes(
+            board,
+            settled_ns,
+            frame_hash=settled_hash,
+            crosshair_hash=settled_hash,
+            luma_grid=luma_grid,
+        )
+        verdict = verifier.observe(board, now_ns=settled_ns)
+
+    assert verdict.status == OutcomeStatus.SUCCEEDED
+    assert verdict.signal == OutcomeSignal.BLOCK_BROKEN
+    assert verdict.confidence == 0.84
+    assert "frame.crosshair_luma_grid" in verdict.evidence_keys
+    assert "stable changed luma grid" in verdict.reason
+
+
+def test_complete_damage_cycle_whose_luma_clears_is_not_a_break() -> None:
+    now = time.monotonic_ns()
+    baseline_hash = "402420a0a2a22454"
+    baseline_luma = "64" * 64
+    board = _board(now, frame_hash=baseline_hash)
+    _publish_hashes(board, now, frame_hash=baseline_hash, luma_grid=baseline_luma)
+    _publish_target(board, now, visible=True)
+    verifier = TemporalOutcomeVerifier()
+    verifier.begin("mine-luma-cleared", OutcomeKind.MINING, board, now_ns=now)
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=1, buttons_down=("left",)),
+        now_ns=now,
+    )
+    damage_hashes = (
+        "558c64a4a2a22050",
+        "4a2a26a6a2a26050",
+        "a34326a6a2b17874",
+        "5d5a5e942c513530",
+        "6b6d6a972e553d38",
+    )
+    for index, crosshair_hash in enumerate(damage_hashes, start=1):
+        sample_ns = now + (400 + index * 100) * 1_000_000
+        _publish_hashes(
+            board,
+            sample_ns,
+            frame_hash=crosshair_hash,
+            crosshair_hash=crosshair_hash,
+            luma_grid="70" * 64,
+        )
+        verifier.observe(board, now_ns=sample_ns)
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=2, buttons_up=("left",)),
+        now_ns=now + 1_100_000_000,
+    )
+    for index in range(3):
+        settled_ns = now + (1_400 + index * 100) * 1_000_000
+        _publish_hashes(
+            board,
+            settled_ns,
+            frame_hash=baseline_hash,
+            crosshair_hash=baseline_hash,
+            luma_grid=baseline_luma,
+        )
         verdict = verifier.observe(board, now_ns=settled_ns)
 
     assert verdict.status != OutcomeStatus.SUCCEEDED

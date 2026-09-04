@@ -1842,8 +1842,24 @@ def test_bootstrap_crosshair_hash_ignores_unrelated_pixels_and_tracks_center() -
         assert isinstance(value, str)
         return value
 
+    def crosshair_luma(pixels: bytes | bytearray) -> str:
+        frame = CapturedFrame(
+            frame_id=1,
+            captured_ns=1,
+            width=width,
+            height=height,
+            bgra=bytes(pixels),
+        )
+        facts = {fact.key: fact.value for fact in BootstrapFastPerception().infer(frame)}
+        value = facts["frame.crosshair_luma_grid"]
+        assert isinstance(value, str)
+        assert len(value) == 128
+        return value
+
     assert crosshair_hash(baseline) == crosshair_hash(outside)
     assert crosshair_hash(baseline) != crosshair_hash(center)
+    assert crosshair_luma(baseline) == crosshair_luma(outside)
+    assert crosshair_luma(baseline) != crosshair_luma(center)
 
 
 def test_typed_mining_failure_reaches_event_and_memory_metadata() -> None:

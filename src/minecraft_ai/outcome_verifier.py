@@ -72,6 +72,10 @@ class OutcomeVerifierConfig:
     mining_target_loss_samples: int = 2
     mining_damage_phase_samples: int = 5
     mining_peak_damage_distance: int = 24
+    mining_luma_change_mae: float = 6.0
+    mining_luma_stable_mae: float = 3.25
+    mining_luma_pixel_delta: int = 12
+    mining_luma_changed_fraction: float = 0.12
     mining_stall_ms: int = 1_500
     traversal_change_distance: int = 6
     traversal_crosshair_change_distance: int = 4
@@ -96,6 +100,9 @@ class OutcomeVerifierConfig:
             self.mining_target_loss_samples,
             self.mining_damage_phase_samples,
             self.mining_peak_damage_distance,
+            self.mining_luma_change_mae,
+            self.mining_luma_stable_mae,
+            self.mining_luma_pixel_delta,
             self.mining_stall_ms,
             self.traversal_change_distance,
             self.traversal_crosshair_change_distance,
@@ -108,11 +115,14 @@ class OutcomeVerifierConfig:
         )
         if any(value < 1 for value in thresholds):
             raise ValueError("outcome verifier thresholds must be positive")
+        if not 0.0 < self.mining_luma_changed_fraction <= 1.0:
+            raise ValueError("mining_luma_changed_fraction must be in 0..1")
 
 
 @dataclass
 class _MiningState:
     baseline_hash: str | None
+    baseline_luma: bytes | None
     target_was_visible: bool
     target_source: str | None
     target_track_id: str | None
@@ -120,12 +130,15 @@ class _MiningState:
     trusted_transition_source: str | None
     last_hash: str | None
     last_hash_ns: int = -1
+    last_luma_ns: int = -1
     last_change_ns: int = 0
     samples: int = 0
     candidate_hash: str | None = None
     candidate_samples: int = 0
     damage_phase_hashes: list[str] = field(default_factory=list)
     peak_damage_distance: int = 0
+    luma_candidate: bytes | None = None
+    luma_candidate_samples: int = 0
     target_fact_ns: int = -1
     target_loss_samples: int = 0
     target_loss_source: str | None = None
@@ -218,12 +231,14 @@ class TemporalOutcomeVerifier:
                 min_confidence=self.config.min_fact_confidence,
             )
             crosshair = _hash_observation(blackboard, "frame.crosshair_dhash", now)
+            luma = _luma_observation(blackboard, "frame.crosshair_luma_grid", now)
             target_binding = _target_binding(
                 blackboard,
                 target,
             )
             self._state = _MiningState(
                 baseline_hash=None if crosshair is None else crosshair[0],
+                baseline_luma=None if luma is None else luma[0],
                 target_was_visible=target_binding is not None,
                 target_source=None if target_binding is None else target_binding[0],
                 target_track_id=None if target_binding is None else target_binding[1],
@@ -231,6 +246,7 @@ class TemporalOutcomeVerifier:
                 trusted_transition_source=trusted_transition_source,
                 last_hash=None if crosshair is None else crosshair[0],
                 last_hash_ns=-1 if crosshair is None else crosshair[1],
+                last_luma_ns=-1 if luma is None else luma[1],
                 last_change_ns=now,
             )
         elif kind == OutcomeKind.TRAVERSAL:
@@ -325,8 +341,11 @@ class TemporalOutcomeVerifier:
             state.invalidated = True
         if delta.attack_released:
             state.attack_released_ns = now_ns
+            state.luma_candidate = None
+            state.luma_candidate_samples = 0
 
         changed = _update_mining_hash(state, blackboard, self.config, now_ns)
+        _update_mining_luma(state, blackboard, self.config, now_ns)
         _update_target_loss(state, blackboard, self.config, now_ns)
         assert state.attack_started_ns is not None
         attack_end = state.attack_released_ns or now_ns
@@ -367,11 +386,20 @@ class TemporalOutcomeVerifier:
             )
             and replacement_target is not None
         )
+        settled_luma_damage_cycle = bool(
+            release_settled
+            and state.target_was_visible
+            and len(state.damage_phase_hashes) >= self.config.mining_damage_phase_samples
+            and state.peak_damage_distance >= self.config.mining_change_distance
+            and state.luma_candidate_samples >= self.config.mining_stable_samples
+        )
         if (
             not state.invalidated
             and attack_ms >= self.config.mining_min_attack_ms
-            and stable_change
-            and (strong or settled_target_loss or settled_damage_cycle)
+            and (
+                (stable_change and (strong or settled_target_loss or settled_damage_cycle))
+                or settled_luma_damage_cycle
+            )
         ):
             evidence = (
                 "frame.crosshair_dhash",
@@ -401,12 +429,23 @@ class TemporalOutcomeVerifier:
                     if settled_damage_cycle and replacement_target is not None
                     else ()
                 ),
+                *(
+                    (
+                        "frame.crosshair_luma_grid",
+                        f"target.track_id={state.target_track_id}",
+                        f"target.binding_source={state.target_source}",
+                    )
+                    if settled_luma_damage_cycle
+                    else ()
+                ),
             )
             return self._result(
                 OutcomeStatus.SUCCEEDED,
                 OutcomeSignal.BLOCK_BROKEN,
                 now_ns,
-                0.98 if strong else (0.92 if settled_target_loss else 0.88),
+                0.98
+                if strong
+                else (0.92 if settled_target_loss else (0.88 if settled_damage_cycle else 0.84)),
                 (
                     "stationary sustained attack produced an explicit bound break observation"
                     if strong
@@ -414,9 +453,14 @@ class TemporalOutcomeVerifier:
                         "stationary sustained attack produced stable replacement pixels and "
                         "two consecutive exact-bound low target-existence observations"
                         if settled_target_loss
-                        else "stationary sustained attack traversed multiple damage phases, "
-                        "settled on stable replacement pixels, and the exact-bound observer "
-                        "found another matching target behind them"
+                        else (
+                            "stationary sustained attack traversed multiple damage phases, "
+                            "settled on stable replacement pixels, and the exact-bound observer "
+                            "found another matching target behind them"
+                            if settled_damage_cycle
+                            else "stationary sustained attack traversed multiple damage phases "
+                            "and settled on a stable changed luma grid after release"
+                        )
                     )
                 ),
                 evidence,
@@ -685,6 +729,10 @@ def _refresh_mining_baseline(
         state.baseline_hash = crosshair[0]
         state.last_hash = crosshair[0]
         state.last_hash_ns = crosshair[1]
+    luma = _luma_observation(blackboard, "frame.crosshair_luma_grid", now_ns)
+    if luma is not None:
+        state.baseline_luma = luma[0]
+        state.last_luma_ns = luma[1]
     target = _semantic_fact(
         blackboard,
         "target.visible",
@@ -748,6 +796,48 @@ def _update_mining_hash(
         state.candidate_hash = current
         state.candidate_samples = 1
     return changed
+
+
+def _update_mining_luma(
+    state: _MiningState,
+    blackboard: PerceptionBlackboard,
+    config: OutcomeVerifierConfig,
+    now_ns: int,
+) -> None:
+    observation = _luma_observation(blackboard, "frame.crosshair_luma_grid", now_ns)
+    if observation is None or observation[1] <= state.last_luma_ns:
+        return
+    current, observed_ns = observation
+    state.last_luma_ns = observed_ns
+    if state.baseline_luma is None or state.attack_released_ns is None:
+        return
+    if (
+        now_ns - state.attack_released_ns
+        < config.mining_post_release_settle_ms * 1_000_000
+    ):
+        return
+    deltas = tuple(
+        abs(left - right) for left, right in zip(state.baseline_luma, current, strict=True)
+    )
+    mean_change = sum(deltas) / len(deltas)
+    changed_fraction = sum(
+        delta >= config.mining_luma_pixel_delta for delta in deltas
+    ) / len(deltas)
+    changed = bool(
+        mean_change >= config.mining_luma_change_mae
+        and changed_fraction >= config.mining_luma_changed_fraction
+    )
+    if not changed:
+        state.luma_candidate = None
+        state.luma_candidate_samples = 0
+    elif (
+        state.luma_candidate is not None
+        and _luma_distance(state.luma_candidate, current) <= config.mining_luma_stable_mae
+    ):
+        state.luma_candidate_samples += 1
+    else:
+        state.luma_candidate = current
+        state.luma_candidate_samples = 1
 
 
 def _update_target_loss(
@@ -870,6 +960,27 @@ def _hash_observation(
     except ValueError:
         return None
     return fact.value, fact.observed_ns
+
+
+def _luma_observation(
+    blackboard: PerceptionBlackboard,
+    key: str,
+    now_ns: int,
+) -> tuple[bytes, int] | None:
+    fact = blackboard.fact(key, min_confidence=1.0, now_ns=now_ns)
+    if fact is None or not isinstance(fact.value, str) or len(fact.value) != 128:
+        return None
+    try:
+        value = bytes.fromhex(fact.value)
+    except ValueError:
+        return None
+    return value, fact.observed_ns
+
+
+def _luma_distance(left: bytes, right: bytes) -> float:
+    if len(left) != len(right) or not left:
+        return float("inf")
+    return sum(abs(a - b) for a, b in zip(left, right, strict=True)) / len(left)
 
 
 def _hash_value(blackboard: PerceptionBlackboard, key: str, now_ns: int) -> str | None:

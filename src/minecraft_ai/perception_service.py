@@ -496,6 +496,18 @@ class BootstrapFastPerception:
                 1.0,
                 500,
             ),
+            (
+                "frame.crosshair_luma_grid",
+                frame_region_luma_grid(
+                    frame,
+                    x_start=0.38,
+                    x_end=0.62,
+                    y_start=0.34,
+                    y_end=0.66,
+                ),
+                1.0,
+                500,
+            ),
         )
         facts = [
             PerceptionFact(
@@ -689,6 +701,40 @@ def frame_region_dhash(
                 bit <<= 1
             previous = luma
     return f"{comparisons:016x}"
+
+
+def frame_region_luma_grid(
+    frame: CapturedFrame,
+    *,
+    x_start: float = 0.0,
+    x_end: float = 1.0,
+    y_start: float,
+    y_end: float,
+) -> str:
+    """Return an 8x8 absolute-luma grid for one normalized frame region.
+
+    dHash intentionally discards absolute brightness.  This companion signal
+    lets temporal outcome checks distinguish a crack animation that clears
+    back to the same block from stable replacement pixels after a block break.
+    """
+    if not frame.bgra or frame.width < 1 or frame.height < 1:
+        return "0" * 128
+    if not 0.0 <= x_start < x_end <= 1.0 or not 0.0 <= y_start < y_end <= 1.0:
+        raise ValueError("normalized luma rectangle must satisfy 0 <= start < end <= 1")
+    source = memoryview(frame.bgra)
+    samples = bytearray()
+    for row in range(8):
+        normalized_y = y_start + (row + 0.5) * (y_end - y_start) / 8
+        y = min(frame.height - 1, int(normalized_y * frame.height))
+        for column in range(8):
+            normalized_x = x_start + (column + 0.5) * (x_end - x_start) / 8
+            x = min(frame.width - 1, int(normalized_x * frame.width))
+            offset = (y * frame.width + x) * 4
+            blue, green, red = source[offset : offset + 3]
+            samples.append(
+                (29 * int(blue) + 150 * int(green) + 77 * int(red) + 128) // 256
+            )
+    return samples.hex()
 
 
 def bedrock_ui_chrome_present(frame: CapturedFrame) -> bool:
