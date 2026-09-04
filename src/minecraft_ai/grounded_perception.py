@@ -720,6 +720,11 @@ def _request_allowlist(requested_keys: tuple[str, ...]) -> frozenset[str] | None
         return None
     allowed = set(_BASELINE_KEYS)
     allowed.update(requested_keys)
+    if _inventory_gui_request(requested_keys):
+        # A bounded crafting transaction asks for exact visible counts and one
+        # GUI mode. Expanding that to all inventory categories and 27 hotbar
+        # fields dilutes both the model prompt and constrained output grammar.
+        return frozenset(allowed)
     if any(key.startswith("target.") for key in requested_keys):
         allowed.update(key for key in _CLAIM_RULES if key.startswith("target."))
     if any(key.startswith(("inventory.", "hotbar.")) for key in requested_keys):
@@ -1015,6 +1020,10 @@ def _regions_for_request(
     # explicit contract without guessing intent from natural language.
     if not output_keys:
         return tuple(EvidenceRegion)
+    if _inventory_gui_request(output_keys):
+        # The open inventory panel contains every pixel needed by this narrow
+        # transaction, including the recipe tile and complete item grid.
+        return (EvidenceRegion.GUI,)
     selected: set[EvidenceRegion] = set()
     lowered = question.lower()
     for key in output_keys:
@@ -1024,6 +1033,12 @@ def _regions_for_request(
     if "chat" in lowered or "message" in lowered or "player said" in lowered:
         selected.add(EvidenceRegion.CHAT)
     return tuple(kind for kind in EvidenceRegion if kind in selected)
+
+
+def _inventory_gui_request(output_keys: tuple[str, ...]) -> bool:
+    return "gui.mode" in output_keys and any(
+        key.startswith("inventory.") for key in output_keys
+    )
 
 
 def _grounded_response_schema(
@@ -1325,6 +1340,13 @@ def _grounded_prompt(
     )
     requested = ", ".join(output_keys) if output_keys else "all contract keys visibly supported"
     claim_shape = _safe_unknown_claim_example(output_keys)
+    inventory_zero_rule = (
+        "Only when the complete inventory grid is visibly present in the cited GUI panel, "
+        "report inventory.logs=0 or inventory.planks=0 when no matching stack is visible; "
+        "otherwise abstain from those counts. "
+        if any(key in {"inventory.logs", "inventory.planks"} for key in output_keys)
+        else ""
+    )
     return (
         "Inspect the current Minecraft Bedrock panels and return JSON only. Root keys are "
         "exactly uncertainty, prose_summary, claims, tracks, chat; a safe empty result is "
@@ -1337,6 +1359,7 @@ def _grounded_prompt(
         "Emit at most one claim per requested key and omit unsupported or unobserved claims; "
         "the verifier records omissions as unknown. Set status=observed only for directly visible "
         "pixels with a non-null scalar value, positive confidence, and relevant evidence_ids. "
+        f"{inventory_zero_rule}"
         "If emitted, status=unknown or abstain requires value=null, confidence=0, and "
         "evidence_ids=[]. Never infer hidden inventory, seed, coordinates, biome, identity, "
         "recipes, or history. Inventory needs hotbar/GUI evidence; HUD values need HUD; targets "

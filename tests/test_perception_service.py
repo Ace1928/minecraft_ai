@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import io
 import time
 
 import pytest
+from PIL import Image
 
 from minecraft_ai.grounded_perception import GroundedPerceptionRepairError
 from minecraft_ai.models import ModelResponse
 from minecraft_ai.perception import (
     ActivePerceptionQuery,
+    EvidenceRegion,
     FrameState,
     PerceptionBlackboard,
     PerceptionFact,
@@ -182,6 +185,8 @@ class _CraftConstrainedVisionModel:
     def __init__(self) -> None:
         self.schema: dict[str, object] | None = None
         self.grammar = ""
+        self.image_size: tuple[int, int] | None = None
+        self.prompt = ""
 
     def inspect(self, prompt: str, *, image_bytes: bytes, mime_type: str) -> ModelResponse:
         raise AssertionError((prompt, image_bytes, mime_type))
@@ -202,6 +207,9 @@ class _CraftConstrainedVisionModel:
         assert name == "minecraft_grounded_perception"
         self.schema = schema
         self.grammar = grammar
+        self.prompt = prompt
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            self.image_size = image.size
         return ModelResponse(
             text=(
                 '{"uncertainty":0.1,"prose_summary":"","claims":['
@@ -537,12 +545,32 @@ def test_craft_gui_query_allows_grounded_track_in_schema_grammar_and_harness() -
     )
 
     assert model.schema is not None
+    assert model.image_size == (512, 288)
+    assert {item.region_kind for item in observation.evidence} == {EvidenceRegion.GUI}
     properties = model.schema["properties"]
     assert isinstance(properties, dict)
     tracks = properties["tracks"]
     assert isinstance(tracks, dict)
     assert tracks["maxItems"] == 8
+    claims = properties["claims"]
+    assert isinstance(claims, dict)
+    claim_items = claims["items"]
+    assert isinstance(claim_items, dict)
+    claim_properties = claim_items["properties"]
+    assert isinstance(claim_properties, dict)
+    claim_key = claim_properties["key"]
+    assert isinstance(claim_key, dict)
+    assert set(claim_key["enum"]) == {
+        "scene.mode",
+        "scene.playable",
+        "gui.mode",
+        "inventory.logs",
+        "inventory.planks",
+    }
+    assert not any(str(key).startswith("hotbar.slot.") for key in claim_key["enum"])
     assert 'tracks ::= "[" ws (track' in model.grammar
+    assert "complete inventory grid is visibly present" in model.prompt
+    assert "inventory.logs=0" in model.prompt
     assert observation.tracks[0].label == "craftable_planks_recipe"
     assert observation.tracks[0].evidence_id == "frame-1:gui"
     assert observation.canonical_facts()["inventory.logs"] == 2
@@ -764,6 +792,106 @@ def test_slow_vlm_result_is_rejected_after_ui_band_changes() -> None:
     )
 
     assert board.fact("scene.mode") is None
+    assert worker.metrics.stale_rejections == 1
+
+
+def test_slow_inventory_result_ignores_volatile_ui_band_while_overlay_remains() -> None:
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=500,
+            captured_ns=500,
+            instance_id="bedrock:test",
+            width=9,
+            height=8,
+            facts=(
+                _hash_fact("000000000000000f"),
+                _hash_fact("00000000000000ff", key="frame.ui_dhash"),
+                PerceptionFact(
+                    key="scene.inventory_overlay",
+                    value=True,
+                    confidence=0.995,
+                    observed_ns=time.monotonic_ns(),
+                    source="safety:bedrock-hud-v1:not-training-label",
+                    expires_after_ms=250,
+                ),
+            ),
+        )
+    )
+    worker = ActiveVLMWorker(_UnusedVisionModel(), board, "bedrock:test")
+    job = SemanticJob(
+        query=ActivePerceptionQuery(
+            query_id="q-inventory",
+            question="inspect inventory",
+            skill_id="craft_wood_planks",
+            frame_id=1,
+            output_keys=("gui.mode", "inventory.logs", "inventory.planks"),
+        ),
+        frame=_frame(b"\0" * (9 * 8 * 4)),
+        frame_dhash="0000000000000000",
+        ui_dhash="0000000000000000",
+    )
+
+    worker._publish(
+        job,
+        SemanticObservation(
+            scene_mode="gui",
+            scene_playable=False,
+            uncertainty=0.1,
+            scene_summary="Inventory",
+            facts={"gui.mode": "inventory", "inventory.logs": 0, "inventory.planks": 0},
+            confidences={"gui.mode": 0.99, "inventory.logs": 0.99, "inventory.planks": 0.99},
+        ),
+    )
+
+    assert board.fact("gui.mode") is not None
+    assert board.fact("inventory.logs") is not None
+    assert worker.metrics.last_hash_distance == 4
+    assert worker.metrics.stale_rejections == 0
+
+
+def test_slow_inventory_result_is_rejected_after_overlay_closes() -> None:
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=500,
+            captured_ns=500,
+            instance_id="bedrock:test",
+            width=9,
+            height=8,
+            facts=(
+                _hash_fact("000000000000000f"),
+                _hash_fact("00000000000000ff", key="frame.ui_dhash"),
+            ),
+        )
+    )
+    worker = ActiveVLMWorker(_UnusedVisionModel(), board, "bedrock:test")
+    job = SemanticJob(
+        query=ActivePerceptionQuery(
+            query_id="q-closed-inventory",
+            question="inspect inventory",
+            skill_id="craft_wood_planks",
+            frame_id=1,
+            output_keys=("gui.mode", "inventory.logs", "inventory.planks"),
+        ),
+        frame=_frame(b"\0" * (9 * 8 * 4)),
+        frame_dhash="0000000000000000",
+        ui_dhash="0000000000000000",
+    )
+
+    worker._publish(
+        job,
+        SemanticObservation(
+            scene_mode="gui",
+            scene_playable=False,
+            uncertainty=0.1,
+            scene_summary="Old inventory",
+            facts={"gui.mode": "inventory", "inventory.logs": 0, "inventory.planks": 0},
+        ),
+    )
+
+    assert board.fact("gui.mode") is None
+    assert board.fact("inventory.logs") is None
     assert worker.metrics.stale_rejections == 1
 
 

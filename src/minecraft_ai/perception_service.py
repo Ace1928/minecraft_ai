@@ -370,11 +370,39 @@ class ActiveVLMWorker:
         self.metrics.last_hash_distance = hash_distance
         # Slow semantics remain valid for an unchanged static GUI or view. A
         # numerically old result from a changed scene must not control tactics.
-        if frame_age > 120 and (
-            hash_distance is None
-            or hash_distance > 6
-            or (ui_hash_distance is not None and ui_hash_distance > 3)
-        ):
+        inventory_scoped = bool(
+            job.query.skill_id == "craft_wood_planks"
+            or any(key.startswith("inventory.") for key in job.query.output_keys)
+        )
+        overlay = self.blackboard.fact(
+            "scene.inventory_overlay",
+            min_confidence=0.99,
+        )
+        inventory_still_visible = bool(
+            overlay is not None
+            and overlay.value is True
+            and overlay.source.startswith("safety:bedrock-hud-v1:")
+        )
+        stale = bool(
+            (
+                inventory_scoped
+                and (
+                    hash_distance is None
+                    or hash_distance > 6
+                    or not inventory_still_visible
+                )
+            )
+            or (
+                not inventory_scoped
+                and frame_age > 120
+                and (
+                    hash_distance is None
+                    or hash_distance > 6
+                    or (ui_hash_distance is not None and ui_hash_distance > 3)
+                )
+            )
+        )
+        if stale:
             self.metrics.stale_rejections += 1
             return
         now = time.monotonic_ns()
