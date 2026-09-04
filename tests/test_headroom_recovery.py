@@ -4,6 +4,7 @@ import time
 from collections import deque
 from concurrent.futures import Future
 from dataclasses import replace
+from itertools import count
 
 import pytest
 
@@ -54,6 +55,11 @@ from minecraft_ai.skills import SkillFailureCode, SkillOutcome, SkillRun
 _HASH_A = "0000000000000000"
 _HASH_FAR = "ffffffffffffffff"
 _ROCKET_SOURCE = "learned:learned:minestudio-rocket2:test:aux-localization:not-training-label"
+
+
+def _install_strict_monotonic_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    timestamps = count(start=time.monotonic_ns(), step=1_000_000)
+    monkeypatch.setattr(time, "monotonic_ns", lambda: next(timestamps))
 
 
 def _stall_result(run_id: str = "obstacle-stall") -> ExecutionTick:
@@ -394,7 +400,10 @@ def _runtime_for_probe(
     return runtime, perception, sent
 
 
-def test_verified_stall_requests_one_event_query_at_zero_semantic_hz_then_mines() -> None:
+def test_verified_stall_requests_one_event_query_at_zero_semantic_hz_then_mines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_strict_monotonic_clock(monkeypatch)
     runtime, perception, sent = _runtime_for_probe()
 
     assert runtime._route_headroom_terminal(_stall_result()) is True
@@ -494,7 +503,10 @@ def test_verified_stall_requests_one_event_query_at_zero_semantic_hz_then_mines(
     assert started.action.buttons_down == ("left",)
 
 
-def test_crosshair_color_swap_after_acquisition_motion_never_starts_attack() -> None:
+def test_crosshair_color_swap_after_acquisition_motion_never_starts_attack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_strict_monotonic_clock(monkeypatch)
     width = height = 64
     first = CapturedFrame(
         frame_id=51,

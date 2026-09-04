@@ -183,6 +183,7 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     escape = skills.get("escape_submersion")
     open_inventory = skills.get("open_inventory")
     close_inventory = skills.get("close_open_inventory")
+    activate_gui = skills.get("activate_visible_gui_control")
     exploration = skills.get("explore_forward")
     level_ground = skills.get("traverse_level_ground")
     obstacle = skills.get("traverse_visible_obstacle")
@@ -241,6 +242,9 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert close_inventory.action_level == ActionLevel.GUI
     assert close_inventory.policy_instruction == "close inventory"
     assert close_inventory.success_conditions[0].key == "scene.playable"
+    assert activate_gui.version == 3
+    assert activate_gui.preconditions[0].key == "scene.ui_overlay"
+    assert activate_gui.preconditions[0].operator == "truthy"
 
     reacquire = skills.get("reacquire_target")
     assert reacquire.policy_ref == "navigate"

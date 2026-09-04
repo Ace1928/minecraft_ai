@@ -1353,12 +1353,17 @@ def test_player_chat_authorizes_world_chat_reply() -> None:
     from minecraft_ai.perception import ChatLine, FrameState, PerceptionBlackboard
     from minecraft_ai.runtime import _authorized_game_chat
 
-    now = time.monotonic_ns()
+    captured_ns = time.monotonic_ns()
+    # Keep observations at or behind the real monotonic clock.  A synthetic
+    # ``captured_ns + 100`` can still be in the future on coarse Windows clocks,
+    # and PerceptionFact correctly treats future observations as not fresh.
+    player_message_ns = captured_ns - 2
+    already_replied_ns = captured_ns - 1
     board = PerceptionBlackboard()
     board.publish(
         FrameState(
             frame_id=1,
-            captured_ns=now,
+            captured_ns=captured_ns,
             instance_id="bedrock:world",
             width=1280,
             height=720,
@@ -1366,7 +1371,7 @@ def test_player_chat_authorizes_world_chat_reply() -> None:
                 ChatLine(
                     speaker="Steve",
                     text="how do I craft a chest?",
-                    observed_ns=now,
+                    observed_ns=player_message_ns,
                     confidence=0.95,
                 ),
             ),
@@ -1379,7 +1384,7 @@ def test_player_chat_authorizes_world_chat_reply() -> None:
                 key="social.player_message",
                 value="Steve:how do I craft a chest?",
                 confidence=0.95,
-                observed_ns=now,
+                observed_ns=player_message_ns,
                 source="grounded:player-chat",
                 expires_after_ms=30_000,
             ),
@@ -1390,10 +1395,15 @@ def test_player_chat_authorizes_world_chat_reply() -> None:
     assert _authorized_game_chat(decision, board) == "Planks x8 gives a chest."
     # Re-answer is blocked after the reply timestamp advances.
     assert (
-        _authorized_game_chat(decision, board, already_replied_ns=now + 1)
+        _authorized_game_chat(
+            decision,
+            board,
+            already_replied_ns=already_replied_ns,
+        )
         is None
     )
     # A new player line (newer observation) authorizes again.
+    next_player_message_ns = time.monotonic_ns()
     board.merge_semantics(
         instance_id="bedrock:world",
         facts=(
@@ -1401,14 +1411,18 @@ def test_player_chat_authorizes_world_chat_reply() -> None:
                 key="social.player_message",
                 value="Steve:wiki cheats?",
                 confidence=0.95,
-                observed_ns=now + 100,
+                observed_ns=next_player_message_ns,
                 source="grounded:player-chat",
                 expires_after_ms=30_000,
             ),
         ),
     )
     assert (
-        _authorized_game_chat(decision, board, already_replied_ns=now + 1)
+        _authorized_game_chat(
+            decision,
+            board,
+            already_replied_ns=already_replied_ns,
+        )
         == "Planks x8 gives a chest."
     )
 
@@ -1479,6 +1493,24 @@ def test_persistent_plan_adoption_and_advancement() -> None:
     runtime._last_decision = CognitionDecision(chosen_goal_id="operator:abc")
     runtime._advance_plan_on_step_complete(_run("navigate"))
     assert runtime._plan_index == 0
+
+
+def test_generic_gui_success_cannot_consume_world_plan_step() -> None:
+    from minecraft_ai.runtime import AgentRuntime
+
+    runtime = object.__new__(AgentRuntime)
+    runtime._plan_steps = ("gather_nearby_wood",)
+    runtime._plan_goal_id = "progression:wood"
+    runtime._plan_index = 0
+    runtime._plan_step_completed_ns = 0
+    runtime._last_decision = CognitionDecision(chosen_goal_id="progression:wood")
+
+    runtime._advance_plan_on_step_complete(_run("activate_visible_gui_control"))
+    assert runtime._plan_index == 0
+
+    runtime._plan_steps = ("click the Play button",)
+    runtime._advance_plan_on_step_complete(_run("activate_visible_gui_control"))
+    assert runtime._plan_index == 1
 
 
 def test_new_concrete_operator_command_retires_stale_operator_plan() -> None:
@@ -2858,7 +2890,9 @@ def _runtime_with_inflight_operator_cognition(
                     key="danger.immediate",
                     value=True,
                     confidence=1.0,
-                    observed_ns=now + 2,
+                    # Use an observed clock reading rather than predicting the
+                    # next tick; Windows may return ``now`` for several calls.
+                    observed_ns=time.monotonic_ns(),
                     source="test",
                     expires_after_ms=10_000,
                 ),

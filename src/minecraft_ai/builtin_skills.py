@@ -332,7 +332,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="activate_visible_gui_control",
-            version=2,
+            version=3,
             name="Activate visible GUI control",
             description=(
                 "Use the explicitly grounded visible GUI control, verify the resulting screen "
@@ -340,6 +340,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             ),
             stage=SkillStage.EXPERIMENTAL,
             parameters=("control",),
+            preconditions=(SkillCondition(key="scene.ui_overlay", operator="truthy"),),
             success_conditions=(SkillCondition(key="scene.playable", operator="truthy"),),
             expected_effects=("gui_transition",),
             max_duration_ms=10_000,

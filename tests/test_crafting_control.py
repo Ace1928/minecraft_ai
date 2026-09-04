@@ -252,10 +252,12 @@ def _craft_semantic_runtime(
     return runtime
 
 
-def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes() -> None:
-    # Exercise long controller deadlines without publishing evidence from the
-    # future relative to PerceptionBlackboard.latest()'s real monotonic clock.
-    now = time.monotonic_ns() - 141 * _SECOND
+def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 200 * _SECOND
+    clock = [now]
+    monkeypatch.setattr("minecraft_ai.perception.time.monotonic_ns", lambda: clock[0])
     board = _board(now)
     executor = SkillExecutor(_UnusedPolicy())
     executor.start(
@@ -274,22 +276,24 @@ def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes() -> None:
         duration_ms=150,
     )
 
-    _merge_fast_overlay(board, observed_ns=now + 100_000_000)
+    clock[0] = now + 100_000_000
+    _merge_fast_overlay(board, observed_ns=clock[0])
     awaiting_semantics = executor.tick(
         board,
         sequence=2,
-        now_ns=now + 100_000_000,
+        now_ns=clock[0],
     )
     assert awaiting_semantics.action is None
 
+    clock[0] = now + 70 * _SECOND
     _merge_inventory(
         board,
-        observed_ns=now + 70 * _SECOND,
+        observed_ns=clock[0],
         logs=2,
         planks=0,
         recipe=True,
     )
-    clicked = executor.tick(board, sequence=3, now_ns=now + 70 * _SECOND)
+    clicked = executor.tick(board, sequence=3, now_ns=clock[0])
 
     assert clicked.run.outcome == SkillOutcome.RUNNING
     assert clicked.action is not None
@@ -299,14 +303,15 @@ def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes() -> None:
     assert clicked.action.cursor_y == 0.25
     assert clicked.action.duration_ms == 50
 
+    clock[0] = now + 140 * _SECOND
     _merge_inventory(
         board,
-        observed_ns=now + 140 * _SECOND,
+        observed_ns=clock[0],
         logs=1,
         planks=4,
         recipe=False,
     )
-    closed = executor.tick(board, sequence=4, now_ns=now + 140 * _SECOND)
+    closed = executor.tick(board, sequence=4, now_ns=clock[0])
 
     assert closed.run.outcome == SkillOutcome.RUNNING
     assert closed.action == MotorAction(
@@ -316,14 +321,15 @@ def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes() -> None:
         duration_ms=150,
     )
 
+    clock[0] = now + 141 * _SECOND
     board.merge_semantics(
         instance_id="bedrock:test",
         facts=(
-            _fact("scene.mode", "world", observed_ns=now + 141 * _SECOND),
-            _fact("scene.playable", True, observed_ns=now + 141 * _SECOND),
+            _fact("scene.mode", "world", observed_ns=clock[0]),
+            _fact("scene.playable", True, observed_ns=clock[0]),
         ),
     )
-    finished = executor.tick(board, sequence=5, now_ns=now + 141 * _SECOND)
+    finished = executor.tick(board, sequence=5, now_ns=clock[0])
 
     assert finished.run.outcome == SkillOutcome.SUCCEEDED
     assert finished.outcome_verification is not None

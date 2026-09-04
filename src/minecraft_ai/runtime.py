@@ -209,6 +209,14 @@ def _plan_step_requests_inventory_transition(skill_id: str, step: str) -> bool:
             normalized == prefix or normalized.startswith(f"{prefix} ")
             for prefix in prefixes
         )
+    if skill_id == "activate_visible_gui_control":
+        words = set(normalized.split())
+        return bool(
+            words.intersection({"activate", "choose", "click", "press", "select"})
+            and words.intersection(
+                {"button", "control", "gui", "menu", "play", "server", "tab", "world"}
+            )
+        )
     return True
 
 
