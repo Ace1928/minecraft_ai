@@ -532,6 +532,29 @@ def _window_is_descendant_or_same(window: Any, ancestor_window_id: int) -> bool:
     return False
 
 
+def _focus_belongs_to_minecraft_session(
+    window: Any,
+    *,
+    capture_window_id: int | None,
+    input_window_id: int,
+) -> bool:
+    """Accept Wine's desktop focus owner or the nested game subtree.
+
+    In BedrockOnLinux's Wine virtual desktop the stable X input focus remains
+    on the outer ``Wine Desktop`` window while Wine routes keyboard input to
+    its foreground Win32 child.  The nested fullscreen Minecraft X window is
+    override-redirect and advertises that it does not accept X input focus.
+    Forcing focus onto that child immediately bounces it back to the desktop
+    and can make an adjacent XTEST key event disappear.  A direct/non-desktop
+    target still works because its capture and input window IDs are identical.
+    """
+
+    current_id = int(getattr(window, "id", 0))
+    if capture_window_id is not None and current_id == capture_window_id:
+        return True
+    return _window_is_descendant_or_same(window, input_window_id)
+
+
 def require_isolated_display(
     display_name: str,
     host_display: str | None = None,
@@ -782,11 +805,12 @@ class IsolatedX11InputBackend:
         return True
 
     def _ensure_input_focus(self) -> None:
-        """Bedrock only consumes input while its client window has X focus.
+        """Ensure Wine's session focus owner can route input to Bedrock.
 
-        Isolated (non-host) displays assert focus before bursts. Host-display
-        play is target-oriented (window-directed keys, parked-pointer XTEST) and
-        never touches the operator's focus, so this stays a no-op there.
+        Isolated Wine virtual desktops retain X focus on the capture desktop,
+        not their override-redirect Minecraft child.  Accept either that
+        stable owner or a focus already inside the game subtree. Host-display
+        play is target-oriented and never touches the operator's focus.
         """
         if self._targeted:
             return
@@ -795,14 +819,21 @@ class IsolatedX11InputBackend:
             return
         try:
             current = self._display.get_input_focus().focus
-            if _window_is_descendant_or_same(current, input_window_id):
+            if _focus_belongs_to_minecraft_session(
+                current,
+                capture_window_id=self.target_window_id,
+                input_window_id=input_window_id,
+            ):
                 return
-            input_window = self._display.create_resource_object(
+            # Restore the stable Wine desktop owner when one exists.  Direct
+            # sessions naturally use the same ID for capture and input.
+            focus_window_id = self.target_window_id or input_window_id
+            focus_window = self._display.create_resource_object(
                 "window",
-                input_window_id,
+                focus_window_id,
             )
-            input_window.get_attributes()
-            input_window.set_input_focus(self._x.RevertToParent, self._x.CurrentTime)
+            focus_window.get_attributes()
+            focus_window.set_input_focus(self._x.RevertToParent, self._x.CurrentTime)
             self._display.sync()
         except Exception as exc:
             raise IsolationError(

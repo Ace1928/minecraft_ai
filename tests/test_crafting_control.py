@@ -181,7 +181,7 @@ def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes() -> None:
         sequence=1,
         keys_down=("e",),
         keys_up=("e",),
-        duration_ms=50,
+        duration_ms=150,
     )
 
     _merge_fast_overlay(board, observed_ns=now + 100_000_000)
@@ -223,7 +223,7 @@ def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes() -> None:
         sequence=4,
         keys_down=("e",),
         keys_up=("e",),
-        duration_ms=50,
+        duration_ms=150,
     )
 
     board.merge_semantics(

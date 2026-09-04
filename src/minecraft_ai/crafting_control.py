@@ -13,6 +13,9 @@ from .perception import EvidenceRegion, PerceptionBlackboard, PerceptionFact, Tr
 from .safety import MotorAction
 
 
+INVENTORY_TOGGLE_DURATION_MS = 150
+
+
 class PlankCraftPhase(StrEnum):
     OPEN_INVENTORY = "open_inventory"
     LOCATE_RECIPE = "locate_recipe"
@@ -428,7 +431,12 @@ class BoundedPlankCraftController:
             sequence=sequence,
             keys_down=(key,),
             keys_up=(key,),
-            duration_ms=50,
+            # Bedrock/Proton samples gameplay keys less reliably than its
+            # render cadence suggests. Retained live trajectories prove that
+            # 112 ms and 321 ms inventory holds register while 50 ms can be
+            # missed. Keep this one atomic, bounded transaction so a stalled
+            # next frame can never leave E held.
+            duration_ms=INVENTORY_TOGGLE_DURATION_MS,
         )
 
     def _click(

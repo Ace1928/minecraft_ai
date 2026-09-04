@@ -717,19 +717,52 @@ def bedrock_ui_chrome_present(frame: CapturedFrame) -> bool:
 
 
 def bedrock_inventory_overlay_present(frame: CapturedFrame) -> bool:
-    """Detect the centered neutral chrome of Bedrock's inventory screen.
+    """Detect Bedrock's survival or recipe-book inventory chrome.
 
-    The two-region conjunction was calibrated against retained raw Bedrock
-    frames on this deployment. Stable inventory frames had an upper light-gray
-    ratio of at least 0.448 and a header neutral-gray ratio of at least 0.687;
-    nearby world/death controls reached at most 0.232 in the upper region. The
-    looser thresholds retain an empirical margin while requiring both pieces of
-    axis-aligned chrome. This remains a negative-only safety signal: it does not
-    assert which inventory, tab, recipe, or item is visible.
+    Survival inventory uses a wide split layout: its recipe pane is dominated
+    by dark neutral slot fill while the player/crafting pane independently has
+    mid and light neutral chrome. That asymmetric three-palette conjunction is
+    much harder for a textured world frame to satisfy than a whole-screen gray
+    ratio. The retained compact recipe-book layout is covered by the original
+    upper/header conjunction below. This remains a negative-only safety signal:
+    it does not assert which inventory, tab, recipe, or item is visible.
     """
     if not frame.bgra or frame.width < 320 or frame.height < 180:
         return False
     pixels = _numpy_bgra(frame)
+    left_slot_ratio = _sampled_neutral_ratio(
+        frame,
+        x_start=0.15,
+        x_end=0.46,
+        y_start=0.18,
+        y_end=0.75,
+        luma_min=70,
+        luma_max=110,
+        pixels=pixels,
+    )
+    if left_slot_ratio >= 0.55:
+        right_mid_ratio = _sampled_neutral_ratio(
+            frame,
+            x_start=0.47,
+            x_end=0.84,
+            y_start=0.18,
+            y_end=0.75,
+            luma_min=120,
+            luma_max=160,
+            pixels=pixels,
+        )
+        right_light_ratio = _sampled_neutral_ratio(
+            frame,
+            x_start=0.47,
+            x_end=0.84,
+            y_start=0.18,
+            y_end=0.75,
+            luma_min=175,
+            luma_max=220,
+            pixels=pixels,
+        )
+        if right_mid_ratio >= 0.25 and right_light_ratio >= 0.20:
+            return True
     upper_light_ratio = _sampled_neutral_ratio(
         frame,
         x_start=0.10,

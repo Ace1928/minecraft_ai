@@ -319,6 +319,32 @@ def test_bedrock_inventory_chrome_requires_both_calibrated_regions() -> None:
     )
 
 
+def test_bedrock_wide_survival_inventory_uses_asymmetric_panel_palettes() -> None:
+    width, height = 640, 360
+    pixels = bytearray(bytes((35, 55, 30, 255)) * width * height)
+    for y in range(int(height * 0.18), int(height * 0.75)):
+        for x in range(int(width * 0.15), int(width * 0.46)):
+            offset = (y * width + x) * 4
+            pixels[offset : offset + 4] = bytes((93, 93, 93, 255))
+        for x in range(int(width * 0.47), int(width * 0.84)):
+            offset = (y * width + x) * 4
+            shade = 139 if y % 4 else 198
+            pixels[offset : offset + 4] = bytes((shade, shade, shade, 255))
+    frame = _frame(bytes(pixels), width=width, height=height)
+
+    assert bedrock_inventory_overlay_present(frame)
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["scene.playable"].value is False
+    assert facts["scene.inventory_overlay"].value is True
+
+
+def test_uniform_gray_world_does_not_match_split_inventory_palettes() -> None:
+    width, height = 640, 360
+    frame = _frame(bytes((93, 93, 93, 255)) * width * height, width=width, height=height)
+
+    assert not bedrock_inventory_overlay_present(frame)
+
+
 def test_complete_survival_hud_is_required_for_camera_calibration() -> None:
     width, height = 640, 360
     pixels = bytearray(bytes((20, 20, 20, 255)) * width * height)

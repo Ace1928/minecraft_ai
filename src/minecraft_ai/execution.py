@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from .crafting_control import BoundedPlankCraftController
+from .crafting_control import BoundedPlankCraftController, INVENTORY_TOGGLE_DURATION_MS
 from .mining_control import MiningLeaseGuard
 from .motor import MotorIntent, MotorPolicy
 from .outcome_verifier import (
@@ -68,6 +68,7 @@ class SkillExecutor:
         self._plank_crafter = BoundedPlankCraftController()
         self._outcome_verifier = TemporalOutcomeVerifier()
         self._pending_mining_verification: _PendingMiningVerification | None = None
+        self._inventory_close_sent = False
 
     @property
     def run(self) -> SkillRun | None:
@@ -131,6 +132,7 @@ class SkillExecutor:
         self._plank_crafter.reset()
         self._outcome_verifier.reset()
         self._pending_mining_verification = None
+        self._inventory_close_sent = False
         self._run = SkillRun(
             run_id=run_id,
             skill_id=spec.skill_id,
@@ -205,6 +207,8 @@ class SkillExecutor:
                 sequence=sequence,
                 now_ns=now,
             )
+        if self._spec.skill_id == "close_open_inventory":
+            return self._tick_inventory_close(sequence=sequence)
 
         intent = MotorIntent(
             skill_id=self._spec.skill_id,
@@ -331,6 +335,47 @@ class SkillExecutor:
         return ExecutionTick(
             run=self._run,
             action=step.action,
+            motor_intent=intent,
+            policy_status=_policy_status_snapshot(self.policy),
+            action_origin=ActionOrigin.SYNTHETIC,
+        )
+
+    def _tick_inventory_close(self, *, sequence: int) -> ExecutionTick:
+        """Toggle an open inventory once, then wait for world-frame proof.
+
+        Closing an already-detected inventory is a fixed safety recovery, not a
+        visuomotor search problem. One atomic, empirically reliable E toggle
+        avoids repeated policy guesses while the normal success contract above
+        still requires fresh perception to report a playable world.
+        """
+        if self._spec is None or self._run is None:
+            raise RuntimeError("no skill is running")
+        intent = MotorIntent(
+            skill_id=self._spec.skill_id,
+            mode=self._spec.policy_ref or self._spec.skill_id,
+            episode_id=self._run.run_id,
+            action_level=self._spec.action_level,
+            instruction=self._instruction_override or _policy_instruction(self._spec),
+            parameters=self.policy_parameters,
+        )
+        self._last_intent = intent
+        if self._inventory_close_sent:
+            return ExecutionTick(
+                run=self._run,
+                action=None,
+                motor_intent=intent,
+                policy_status=_policy_status_snapshot(self.policy),
+                action_origin=ActionOrigin.SYNTHETIC,
+            )
+        self._inventory_close_sent = True
+        return ExecutionTick(
+            run=self._run,
+            action=MotorAction(
+                sequence=sequence,
+                keys_down=("e",),
+                keys_up=("e",),
+                duration_ms=INVENTORY_TOGGLE_DURATION_MS,
+            ),
             motor_intent=intent,
             policy_status=_policy_status_snapshot(self.policy),
             action_origin=ActionOrigin.SYNTHETIC,

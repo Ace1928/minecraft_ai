@@ -356,19 +356,20 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="close_open_inventory",
-            version=3,
+            version=4,
             name="Close open inventory",
             description=(
-                "Close the currently open Bedrock inventory through the learned GUI expert's "
-                "action and verify that the playable world returns before resuming locomotion"
+                "Close the currently open Bedrock inventory with one bounded inventory toggle "
+                "and verify that the playable world returns before resuming locomotion"
             ),
             stage=SkillStage.EXPERIMENTAL,
             success_conditions=(SkillCondition(key="scene.playable", operator="truthy"),),
             expected_effects=("inventory_closed", "playable_scene_restored"),
             max_duration_ms=10_000,
             action_level=ActionLevel.GUI,
-            # This option deliberately has no ROCKET body route. The GUI
-            # expert owns its native inventory toggle for the entire episode.
+            # This recovery deliberately has no ROCKET body route. The runtime
+            # emits one bounded native inventory toggle, then waits for visual
+            # proof that the playable world returned.
             policy_ref="close_inventory",
             policy_instruction="close inventory",
             action_permissions=SkillActionPermissions(

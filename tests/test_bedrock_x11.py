@@ -9,6 +9,7 @@ from minecraft_ai.platforms.bedrock_x11 import (
     _client_fit_dimensions,
     _content_axis_reposition_delta,
     _contained_content_rect,
+    _focus_belongs_to_minecraft_session,
     _resolve_minecraft_input_window,
     _window_is_descendant_or_same,
 )
@@ -87,6 +88,32 @@ def test_focus_descendant_is_accepted_as_part_of_minecraft_subtree() -> None:
     assert _window_is_descendant_or_same(minecraft, minecraft.id)
     assert _window_is_descendant_or_same(drawable, minecraft.id)
     assert not _window_is_descendant_or_same(minecraft, 999)
+
+
+def test_wine_capture_desktop_is_accepted_as_session_focus_owner() -> None:
+    _, desktop, minecraft, drawable = _wine_tree()
+
+    assert _focus_belongs_to_minecraft_session(
+        desktop,
+        capture_window_id=desktop.id,
+        input_window_id=minecraft.id,
+    )
+    assert _focus_belongs_to_minecraft_session(
+        drawable,
+        capture_window_id=desktop.id,
+        input_window_id=minecraft.id,
+    )
+
+
+def test_unrelated_focus_is_not_accepted_for_minecraft_session() -> None:
+    display, desktop, minecraft, _ = _wine_tree()
+    root = display.windows[1]
+
+    assert not _focus_belongs_to_minecraft_session(
+        root,
+        capture_window_id=desktop.id,
+        input_window_id=minecraft.id,
+    )
 
 
 def test_complete_wine_drawable_is_accepted_for_capture() -> None:

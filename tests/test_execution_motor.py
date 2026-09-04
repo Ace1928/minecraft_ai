@@ -109,6 +109,43 @@ def test_open_inventory_success_requires_grounded_inventory_gui() -> None:
     )
 
 
+def test_close_inventory_emits_one_bounded_toggle_then_waits_for_proof() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("close_open_inventory")
+    inventory = _board(_fact("scene.playable", False))
+    executor.start(spec, run_id="close-inventory", now_ns=100)
+
+    first = executor.tick(inventory, sequence=41, now_ns=200)
+    waiting = executor.tick(inventory, sequence=42, now_ns=300)
+
+    assert first.run.outcome == SkillOutcome.RUNNING
+    assert first.action == MotorAction(
+        sequence=41,
+        keys_down=("e",),
+        keys_up=("e",),
+        duration_ms=150,
+    )
+    assert first.action_origin == ActionOrigin.SYNTHETIC
+    assert waiting.run.outcome == SkillOutcome.RUNNING
+    assert waiting.action is None
+    assert policy.intent is None
+
+
+def test_close_inventory_is_a_noop_when_world_is_already_playable() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("close_open_inventory")
+    executor.start(spec, run_id="already-closed", now_ns=100)
+
+    tick = executor.tick(_board(_fact("scene.playable", True)), sequence=9, now_ns=200)
+
+    assert tick.run.outcome == SkillOutcome.SUCCEEDED
+    assert tick.action is not None
+    assert "e" not in tick.action.keys_down
+    assert policy.intent is None
+
+
 def test_skill_contract_becomes_learned_policy_instruction() -> None:
     policy = _IntentCapturePolicy()
     executor = SkillExecutor(policy)
