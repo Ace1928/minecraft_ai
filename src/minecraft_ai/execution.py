@@ -5,6 +5,13 @@ from dataclasses import dataclass, field
 
 from .mining_control import MiningLeaseGuard
 from .motor import MotorIntent, MotorPolicy
+from .outcome_verifier import (
+    OutcomeKind,
+    OutcomeSignal,
+    OutcomeStatus,
+    OutcomeVerification,
+    TemporalOutcomeVerifier,
+)
 from .perception import PerceptionBlackboard
 from .safety import MotorAction
 from .skills import (
@@ -26,6 +33,23 @@ class ExecutionTick:
     motor_intent: MotorIntent | None = None
     policy_status: dict[str, object] = field(default_factory=dict)
     action_origin: ActionOrigin = ActionOrigin.POLICY
+    outcome_verification: OutcomeVerification | None = None
+
+
+@dataclass(frozen=True)
+class _PendingMiningVerification:
+    failure_code: SkillFailureCode
+    deadline_ns: int
+
+
+_MINING_POST_RELEASE_VERIFY_MS = 5_000
+_MINING_SUCCESS_OVERRIDABLE_FAILURES = frozenset(
+    {
+        SkillFailureCode.MINING_TARGET_CHANGED,
+        SkillFailureCode.MINING_VISUAL_STAGNATION,
+        SkillFailureCode.MINING_LEASE_EXPIRED,
+    }
+)
 
 
 class SkillExecutor:
@@ -40,6 +64,8 @@ class SkillExecutor:
         self._initiated = False
         self._last_intent: MotorIntent | None = None
         self._mining_guard = MiningLeaseGuard()
+        self._outcome_verifier = TemporalOutcomeVerifier()
+        self._pending_mining_verification: _PendingMiningVerification | None = None
 
     @property
     def run(self) -> SkillRun | None:
@@ -89,6 +115,8 @@ class SkillExecutor:
         self._initiated = False
         self._last_intent = None
         self._mining_guard.reset()
+        self._outcome_verifier.reset()
+        self._pending_mining_verification = None
         self._run = SkillRun(
             run_id=run_id,
             skill_id=spec.skill_id,
@@ -111,7 +139,9 @@ class SkillExecutor:
             return ExecutionTick(run=self._run, action=None)
         now = time.monotonic_ns() if now_ns is None else now_ns
 
-        if now - self._run.started_ns > self._spec.max_duration_ms * 1_000_000:
+        if self._pending_mining_verification is not None:
+            return self._verify_released_mining_outcome(blackboard, now_ns=now)
+        if now - self._run.started_ns >= self._spec.max_duration_ms * 1_000_000:
             return self._finish(SkillOutcome.TIMED_OUT, now, "skill-timeout")
         failed = _first_matching(self._spec.failure_conditions, blackboard, now_ns=now)
         if failed is not None:
@@ -121,8 +151,14 @@ class SkillExecutor:
                 f"failure-condition:{failed.key}",
                 recover=True,
             )
-        if self._spec.success_conditions and conditions_satisfied(
-            self._spec.success_conditions, blackboard, now_ns=now
+        if (
+            self._spec.skill_id != "mine_visible_block"
+            and self._spec.success_conditions
+            and conditions_satisfied(
+                self._spec.success_conditions,
+                blackboard,
+                now_ns=now,
+            )
         ):
             return self._finish(SkillOutcome.SUCCEEDED, now, None)
         if not self._initiated:
@@ -160,7 +196,39 @@ class SkillExecutor:
         action = self.policy.act(blackboard, intent, sequence=sequence)
         self._last_intent = intent
         mining = self._mining_guard.inspect(action, blackboard, intent, now_ns=now)
+        verification = self._observe_mining_outcome(
+            blackboard,
+            action=mining.action,
+            now_ns=now,
+        )
         if mining.failure_code is not None:
+            if (
+                verification is not None
+                and verification.status == OutcomeStatus.SUCCEEDED
+                and mining.failure_code in _MINING_SUCCESS_OVERRIDABLE_FAILURES
+            ):
+                return self._finish(
+                    SkillOutcome.SUCCEEDED,
+                    now,
+                    None,
+                    outcome_verification=verification,
+                )
+            if (
+                mining.failure_code in _MINING_SUCCESS_OVERRIDABLE_FAILURES
+                and verification is not None
+            ):
+                if (
+                    verification.status == OutcomeStatus.PROGRESS
+                    and verification.signal == OutcomeSignal.BLOCK_DAMAGE_PROGRESS
+                ):
+                    return self._begin_released_mining_verification(
+                        blackboard,
+                        now_ns=now,
+                        failure_code=mining.failure_code,
+                        force_release_left=mining.force_release_left,
+                        force_release_keys=mining.force_release_keys,
+                        force_release_buttons=mining.force_release_buttons,
+                    )
             return self._finish(
                 SkillOutcome.FAILED,
                 now,
@@ -171,12 +239,210 @@ class SkillExecutor:
                 force_release_keys=mining.force_release_keys,
                 force_release_buttons=mining.force_release_buttons,
             )
+        if verification is not None and verification.status == OutcomeStatus.SUCCEEDED:
+            return self._finish(
+                SkillOutcome.SUCCEEDED,
+                now,
+                None,
+                outcome_verification=verification,
+            )
+        if verification is not None and verification.status == OutcomeStatus.STALLED:
+            return self._finish(
+                SkillOutcome.FAILED,
+                now,
+                SkillFailureCode.MINING_VISUAL_STAGNATION.value,
+                recover=True,
+                failure_code=SkillFailureCode.MINING_VISUAL_STAGNATION,
+                force_release_left=True,
+                outcome_verification=verification,
+            )
         return ExecutionTick(
             run=self._run,
             action=mining.action,
             motor_intent=intent,
             policy_status=_policy_status_snapshot(self.policy),
             action_origin=(ActionOrigin.SYNTHETIC if mining.synthetic else ActionOrigin.POLICY),
+        )
+
+    def _observe_mining_outcome(
+        self,
+        blackboard: PerceptionBlackboard,
+        *,
+        action: MotorAction | None,
+        now_ns: int,
+    ) -> OutcomeVerification | None:
+        if self._spec is None or self._run is None:
+            return None
+        if self._spec.skill_id != "mine_visible_block":
+            return None
+        if self._outcome_verifier.active_run_id != self._run.run_id:
+            observer_source = getattr(self.policy, "outcome_observer_source", None)
+            trusted_transition_source = (
+                observer_source() if callable(observer_source) else None
+            )
+            self._outcome_verifier.begin(
+                self._run.run_id,
+                OutcomeKind.MINING,
+                blackboard,
+                now_ns=now_ns,
+                trusted_transition_source=(
+                    trusted_transition_source
+                    if isinstance(trusted_transition_source, str)
+                    and trusted_transition_source
+                    else None
+                ),
+            )
+        return self._outcome_verifier.observe(
+            blackboard,
+            action=action,
+            now_ns=now_ns,
+        )
+
+    def _begin_released_mining_verification(
+        self,
+        blackboard: PerceptionBlackboard,
+        *,
+        now_ns: int,
+        failure_code: SkillFailureCode,
+        force_release_left: bool,
+        force_release_keys: tuple[str, ...],
+        force_release_buttons: tuple[str, ...],
+    ) -> ExecutionTick:
+        if self._run is None:
+            raise RuntimeError("no skill is running")
+        release = self._release_motor(
+            force_release_left=force_release_left,
+            force_release_keys=force_release_keys,
+            force_release_buttons=force_release_buttons,
+            preserve_outcome_perception=True,
+        )
+        self._outcome_verifier.observe(
+            blackboard,
+            action=release,
+            now_ns=now_ns,
+        )
+        self._pending_mining_verification = _PendingMiningVerification(
+            failure_code=failure_code,
+            deadline_ns=now_ns + _MINING_POST_RELEASE_VERIFY_MS * 1_000_000,
+        )
+        return ExecutionTick(
+            run=self._run,
+            action=release,
+            motor_intent=self._last_intent,
+            policy_status=_policy_status_snapshot(self.policy),
+            action_origin=ActionOrigin.RESET,
+        )
+
+    def _release_motor(
+        self,
+        *,
+        force_release_left: bool = False,
+        force_release_keys: tuple[str, ...] = (),
+        force_release_buttons: tuple[str, ...] = (),
+        preserve_outcome_perception: bool = False,
+    ) -> MotorAction:
+        guard_keys = self._mining_guard.held_keys
+        guard_buttons = self._mining_guard.held_buttons
+        mining_held = self._mining_guard.reset()
+        release_for_observation = getattr(self.policy, "release_for_observation", None)
+        release = (
+            release_for_observation()
+            if preserve_outcome_perception and callable(release_for_observation)
+            else self.policy.reset()
+        )
+        if mining_held or force_release_left:
+            release = _force_button_release(release, "left")
+        for button in tuple(sorted({*guard_buttons, *force_release_buttons})):
+            release = _force_button_release(release, button)
+        all_release_keys = tuple(sorted({*guard_keys, *force_release_keys}))
+        if all_release_keys:
+            release = _force_key_release(release, all_release_keys)
+        return release
+
+    def _verify_released_mining_outcome(
+        self,
+        blackboard: PerceptionBlackboard,
+        *,
+        now_ns: int,
+    ) -> ExecutionTick:
+        if self._run is None or self._pending_mining_verification is None:
+            raise RuntimeError("no mining outcome is awaiting verification")
+        pending = self._pending_mining_verification
+        unsafe = _urgent_mining_scene_reason(blackboard, now_ns=now_ns)
+        if unsafe is not None:
+            return self._finish(
+                SkillOutcome.FAILED,
+                now_ns,
+                unsafe,
+                recover=True,
+                failure_code=SkillFailureCode.MINING_UNSAFE_SCENE,
+                force_release_left=True,
+            )
+        assert self._spec is not None
+        failed = _first_matching(self._spec.failure_conditions, blackboard, now_ns=now_ns)
+        if failed is not None:
+            return self._finish(
+                SkillOutcome.FAILED,
+                now_ns,
+                f"failure-condition:{failed.key}",
+                recover=True,
+                force_release_left=True,
+            )
+        if self._spec.invariants and not conditions_satisfied(
+            self._spec.invariants,
+            blackboard,
+            now_ns=now_ns,
+        ):
+            return self._finish(
+                SkillOutcome.FAILED,
+                now_ns,
+                "invariant-lost",
+                recover=True,
+                force_release_left=True,
+            )
+        if now_ns - self._run.started_ns >= self._spec.max_duration_ms * 1_000_000:
+            return self._finish(
+                SkillOutcome.TIMED_OUT,
+                now_ns,
+                "skill-timeout",
+                force_release_left=True,
+            )
+        if now_ns >= pending.deadline_ns:
+            return self._finish(
+                SkillOutcome.FAILED,
+                now_ns,
+                pending.failure_code.value,
+                recover=True,
+                failure_code=pending.failure_code,
+                force_release_left=True,
+            )
+        poll_perception = getattr(self.policy, "poll_perception", None)
+        if callable(poll_perception) and self._last_intent is not None:
+            poll_perception(blackboard, self._last_intent)
+        verification = self._outcome_verifier.observe(blackboard, now_ns=now_ns)
+        if verification.status == OutcomeStatus.SUCCEEDED:
+            return self._finish(
+                SkillOutcome.SUCCEEDED,
+                now_ns,
+                None,
+                outcome_verification=verification,
+            )
+        if verification.status == OutcomeStatus.STALLED:
+            return self._finish(
+                SkillOutcome.FAILED,
+                now_ns,
+                SkillFailureCode.MINING_VISUAL_STAGNATION.value,
+                recover=True,
+                failure_code=SkillFailureCode.MINING_VISUAL_STAGNATION,
+                force_release_left=True,
+                outcome_verification=verification,
+            )
+        return ExecutionTick(
+            run=self._run,
+            action=None,
+            motor_intent=self._last_intent,
+            policy_status=_policy_status_snapshot(self.policy),
+            action_origin=ActionOrigin.RESET,
         )
 
     def cancel(self, *, now_ns: int | None = None) -> ExecutionTick:
@@ -196,6 +462,7 @@ class SkillExecutor:
         force_release_left: bool = False,
         force_release_keys: tuple[str, ...] = (),
         force_release_buttons: tuple[str, ...] = (),
+        outcome_verification: OutcomeVerification | None = None,
     ) -> ExecutionTick:
         if self._run is None or self._spec is None:
             raise RuntimeError("no skill is running")
@@ -209,19 +476,15 @@ class SkillExecutor:
             }
         )
         motor_intent = self._last_intent
-        guard_keys = self._mining_guard.held_keys
-        guard_buttons = self._mining_guard.held_buttons
-        mining_held = self._mining_guard.reset()
-        release = self.policy.reset()
-        if mining_held or force_release_left:
-            release = _force_button_release(release, "left")
-        for button in tuple(sorted({*guard_buttons, *force_release_buttons})):
-            release = _force_button_release(release, button)
-        all_release_keys = tuple(sorted({*guard_keys, *force_release_keys}))
-        if all_release_keys:
-            release = _force_key_release(release, all_release_keys)
+        release = self._release_motor(
+            force_release_left=force_release_left,
+            force_release_keys=force_release_keys,
+            force_release_buttons=force_release_buttons,
+        )
         policy_status = _policy_status_snapshot(self.policy)
         self._last_intent = None
+        self._outcome_verifier.reset()
+        self._pending_mining_verification = None
         recovery = self._spec.recovery_skills if recover else ()
         return ExecutionTick(
             run=self._run,
@@ -230,6 +493,7 @@ class SkillExecutor:
             motor_intent=motor_intent,
             policy_status=policy_status,
             action_origin=ActionOrigin.RESET,
+            outcome_verification=outcome_verification,
         )
 
 
@@ -250,6 +514,30 @@ def _force_key_release(action: MotorAction, keys: tuple[str, ...]) -> MotorActio
             "keys_up": tuple(sorted({*action.keys_up, *requested})),
         }
     )
+
+
+def _urgent_mining_scene_reason(
+    blackboard: PerceptionBlackboard,
+    *,
+    now_ns: int,
+) -> str | None:
+    danger = blackboard.fact("danger.immediate", min_confidence=0.65, now_ns=now_ns)
+    if danger is not None and danger.value is True:
+        return "mining-unsafe:danger.immediate"
+    overlay = blackboard.fact("scene.ui_overlay", min_confidence=0.65, now_ns=now_ns)
+    if overlay is not None and overlay.value is True:
+        return "mining-unsafe:scene.ui_overlay"
+    playable = blackboard.fact("scene.playable", min_confidence=0.65, now_ns=now_ns)
+    if playable is not None and playable.value is False:
+        return "mining-unsafe:scene.playable"
+    for key in ("scene.mode", "gui.mode"):
+        mode = blackboard.fact(key, min_confidence=0.65, now_ns=now_ns)
+        if mode is not None and isinstance(mode.value, str) and mode.value not in {
+            "world",
+            "unknown",
+        }:
+            return f"mining-unsafe:{key}:{mode.value}"
+    return None
 
 
 def _policy_status_snapshot(policy: MotorPolicy) -> dict[str, object]:

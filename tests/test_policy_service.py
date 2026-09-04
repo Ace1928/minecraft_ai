@@ -443,6 +443,62 @@ def test_grounded_router_merges_temporally_filtered_target_feedback() -> None:
     assert after_two_misses is not None and after_two_misses.value is False
 
 
+def test_grounded_router_polls_rocket_after_releasing_only_the_body() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _TargetFeedbackPolicy("rocket", key="a")
+    router = GroundedPolicyRouter(primary, grounded)
+    board = _operator_tracked_board(age_ms=0)
+    mine = MotorIntent(
+        skill_id="mine_visible_block",
+        mode="mine",
+        episode_id="mine-1",
+        action_level=ActionLevel.GROUNDED,
+    )
+    router.act(board, mine, sequence=1)
+
+    release = router.release_for_observation()
+
+    assert release.keys_up == ("w",)
+    assert primary.resets == 1
+    assert grounded.resets == 0
+    assert router.status()["grounding_active"] is True
+
+    first_ns = time.monotonic_ns()
+    grounded.observation = GroundedTargetObservation(
+        observed_ns=first_ns,
+        probability=0.05,
+        point_yx=None,
+        bbox_xyxy=None,
+        model_version="rocket-test",
+    )
+    assert router.poll_perception(board, mine)
+    second_ns = time.monotonic_ns()
+    grounded.observation = GroundedTargetObservation(
+        observed_ns=second_ns,
+        probability=0.03,
+        point_yx=None,
+        bbox_xyxy=None,
+        model_version="rocket-test",
+    )
+    assert router.poll_perception(board, mine)
+
+    assert primary.calls == 1
+    assert grounded.calls == 3
+    visible = board.fact("target.visible", now_ns=second_ns)
+    probability = board.fact("target.exists_probability", now_ns=second_ns)
+    assert visible is not None and visible.value is False
+    assert probability is not None and probability.value == pytest.approx(0.03)
+    assert probability.source == router.outcome_observer_source()
+    latest = board.latest()
+    assert latest is not None
+    track = next(item for item in latest.tracks if item.track_id == "log-1")
+    assert track.attributes["source"] == "operator"
+    assert track.attributes["tracking_source"] == probability.source
+
+    router.reset()
+    assert grounded.resets == 1
+
+
 def test_grounded_feedback_survives_cpu_latency_then_expires_at_bounded_ttl() -> None:
     primary = _RoutingPolicy("steve", key="w")
     grounded = _TargetFeedbackPolicy("rocket", key="a")

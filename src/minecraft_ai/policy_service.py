@@ -1041,6 +1041,48 @@ class GroundedPolicyRouter:
         self._last_binding_conflict = None
         return release
 
+    def release_for_observation(self) -> MotorAction:
+        """Release the physical body while retaining an active ROCKET lease.
+
+        Mining outcome verification needs post-release observations, but a full
+        router reset discards the queued ROCKET request and its exact target
+        binding. This release resets every possible body expert while leaving
+        the non-actuating grounding observer alive for a short verification
+        window. A normal reset still tears everything down at option exit.
+        """
+        if not self._grounding_active or self._grounded_track_id is None:
+            return self.reset()
+        sequence = self._last_sequence + 1
+        release = MotorAction(sequence=sequence)
+        for policy in self._body_policies():
+            release = _merge_policy_release(release, policy.reset())
+        self._last_sequence = sequence
+        return release
+
+    def poll_perception(
+        self,
+        blackboard: PerceptionBlackboard,
+        intent: MotorIntent,
+    ) -> bool:
+        """Advance only the bound ROCKET observer and merge fresh target facts."""
+        episode_id = intent.episode_id or f"legacy:{intent.skill_id}"
+        if (
+            not self._grounding_active
+            or self._grounded_track_id is None
+            or self._episode_level != ActionLevel.GROUNDED
+            or episode_id != self._episode_id
+        ):
+            return False
+        routed_intent = intent.model_copy(
+            update={"target_track_id": self._grounded_track_id}
+        )
+        self._observe_grounding(blackboard, routed_intent)
+        return self._merge_grounded_target_perception(blackboard)
+
+    def outcome_observer_source(self) -> str:
+        """Return the exact configured source trusted for target outcomes."""
+        return f"learned:{self.grounded.policy_id}:aux-localization:not-training-label"
+
     def close(self) -> None:
         for policy in self._policies():
             close = getattr(policy, "close", None)
@@ -1182,7 +1224,7 @@ class GroundedPolicyRouter:
             x0, y0, x1, y1 = bbox_xyxy
             if x1 > x0 and y1 > y0:
                 region = ScreenRegion(x=x0, y=y0, width=x1 - x0, height=y1 - y0)
-        source = f"learned:{self.grounded.policy_id}:aux-localization:not-training-label"
+        source = self.outcome_observer_source()
         attributes = dict(target.attributes)
         attributes.update(
             {

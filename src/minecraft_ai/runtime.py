@@ -24,6 +24,7 @@ from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
 from .grounded_perception import resolve_grounded_output_keys
 from .memory import MemoryKind, MemoryRecord, MemoryStore
 from .motor import MotorIntent
+from .outcome_verifier import OutcomeSignal, OutcomeStatus, OutcomeVerification
 from .perception import ActivePerceptionQuery, PerceptionBlackboard, PerceptionFact, Track
 from .perception_service import RealtimePerceptionService, perceptual_hash_distance
 from .planning import Goal
@@ -166,6 +167,25 @@ def _accepted_action_provenance(
     )
 
 
+def _trajectory_outcome_annotations(
+    execution: ExecutionTick | None,
+) -> tuple[dict[str, float], tuple[str, ...]]:
+    if execution is None or execution.outcome_verification is None:
+        return {}, ()
+    verification = execution.outcome_verification
+    if (
+        execution.run.outcome != SkillOutcome.SUCCEEDED
+        or verification.run_id != execution.run.run_id
+        or verification.status != OutcomeStatus.SUCCEEDED
+        or verification.signal != OutcomeSignal.BLOCK_BROKEN
+    ):
+        return {}, ()
+    return (
+        {OutcomeSignal.BLOCK_BROKEN.value: verification.confidence},
+        (f"skill-run:{execution.run.run_id}:block-broken",),
+    )
+
+
 def _reported_action_level(
     execution: ExecutionTick | None,
     status: dict[str, object],
@@ -277,12 +297,44 @@ def _terminal_run_event(
     )
 
 
+def _verified_outcome_event(
+    run: SkillRun,
+    verification: OutcomeVerification,
+    *,
+    observed_ns: int,
+    trajectory_id: str | None,
+) -> RuntimeEvent | None:
+    if (
+        run.outcome != SkillOutcome.SUCCEEDED
+        or verification.run_id != run.run_id
+        or verification.status != OutcomeStatus.SUCCEEDED
+        or verification.signal != OutcomeSignal.BLOCK_BROKEN
+    ):
+        return None
+    return RuntimeEvent(
+        event_id=f"skill-run:{run.run_id}:block-broken",
+        kind=RuntimeEventKind.BLOCK_BROKEN,
+        observed_ns=observed_ns,
+        trajectory_id=trajectory_id,
+        payload={
+            "run_id": run.run_id,
+            "skill_id": run.skill_id,
+            "signal": verification.signal.value,
+            "confidence": verification.confidence,
+            "verified_monotonic_ns": verification.observed_ns,
+            "reason": verification.reason,
+            "evidence_keys_json": json.dumps(verification.evidence_keys),
+        },
+    )
+
+
 def _terminal_run_memory(
     run: SkillRun,
     stats: SkillStats,
     *,
     observed_ns: int,
     existing: dict[str, MemoryRecord],
+    outcome_verification: OutcomeVerification | None = None,
 ) -> MemoryRecord | None:
     """Create a stable, factual memory from a verified terminal outcome.
 
@@ -334,6 +386,17 @@ def _terminal_run_memory(
     }
     if run.ended_ns is not None:
         metadata["latest_duration_ms"] = (run.ended_ns - run.started_ns) / 1_000_000
+    if outcome_verification is not None:
+        metadata.update(
+            {
+                "verified_outcome": outcome_verification.signal.value,
+                "verified_outcome_confidence": outcome_verification.confidence,
+                "verified_outcome_monotonic_ns": outcome_verification.observed_ns,
+                "verified_outcome_evidence_json": json.dumps(
+                    outcome_verification.evidence_keys
+                ),
+            }
+        )
     if run.outcome == SkillOutcome.SUCCEEDED:
         text = (
             f"Verified success for skill '{run.skill_id}' in context "
@@ -919,7 +982,13 @@ class AgentRuntime:
                 self._send_motor(result.action, execution=result)
         finally:
             if result.run.outcome != SkillOutcome.RUNNING:
-                self._record_terminal_run(result.run)
+                if result.outcome_verification is None:
+                    self._record_terminal_run(result.run)
+                else:
+                    self._record_terminal_run(
+                        result.run,
+                        outcome_verification=result.outcome_verification,
+                    )
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
         if result.run.outcome != SkillOutcome.RUNNING:
             recovery = _first_feasible_recovery(
@@ -1120,6 +1189,7 @@ class AgentRuntime:
             blackboard = self.blackboard.latest()
             if frame is not None and blackboard is not None:
                 running = self.executor.run if execution is None else execution.run
+                reward_signals, event_ids = _trajectory_outcome_annotations(execution)
                 try:
                     self.trajectory.record_accepted(
                         action=action,
@@ -1132,6 +1202,8 @@ class AgentRuntime:
                         goal_id=None
                         if self._last_decision is None
                         else self._last_decision.chosen_goal_id,
+                        reward_signals=reward_signals,
+                        event_ids=event_ids,
                     )
                 except Exception as exc:
                     reason = f"{type(exc).__name__}: {exc}"
@@ -1634,7 +1706,12 @@ class AgentRuntime:
             ),
         )
 
-    def _record_terminal_run(self, run: SkillRun) -> None:
+    def _record_terminal_run(
+        self,
+        run: SkillRun,
+        *,
+        outcome_verification: OutcomeVerification | None = None,
+    ) -> None:
         """Record one terminal option exactly once across every exit path."""
 
         if run.outcome == SkillOutcome.RUNNING:
@@ -1675,11 +1752,26 @@ class AgentRuntime:
                 None if self.trajectory is None else self.trajectory.manifest.trajectory_id
             ),
         )
+        outcome_event = (
+            None
+            if outcome_verification is None
+            else _verified_outcome_event(
+                run,
+                outcome_verification,
+                observed_ns=observed_ns,
+                trajectory_id=(
+                    None
+                    if self.trajectory is None
+                    else self.trajectory.manifest.trajectory_id
+                ),
+            )
+        )
         memory = _terminal_run_memory(
             run,
             stats,
             observed_ns=observed_ns,
             existing=self.memories.records,
+            outcome_verification=outcome_verification,
         )
         if memory is not None:
             self.memories.upsert(memory)
@@ -1688,6 +1780,8 @@ class AgentRuntime:
             return
         self._pending_skill_stats[(run.skill_id, run.context_key)] = stats
         self._pending_runtime_events[event.event_id] = event
+        if outcome_event is not None:
+            self._pending_runtime_events[outcome_event.event_id] = outcome_event
         if memory is not None:
             self._pending_memories[memory.memory_id] = memory
         self._flush_pending_skill_stats(force=True)
