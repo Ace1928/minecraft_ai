@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import io
+import statistics
 import time
 
 import pytest
 from PIL import Image, ImageDraw
 
+import minecraft_ai.perception_service as perception_service
 from minecraft_ai.grounded_perception import GroundedPerceptionRepairError
 from minecraft_ai.models import ModelResponse
 from minecraft_ai.perception import (
@@ -18,13 +20,16 @@ from minecraft_ai.perception import (
     Track,
 )
 from minecraft_ai.perception_service import (
+    BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
     BEDROCK_INVENTORY_ZERO_SOURCE,
     ActiveVLMWorker,
     BootstrapFastPerception,
+    RealtimePerceptionService,
     SemanticJob,
     SemanticObservation,
     bedrock_air_bubbles,
     bedrock_death_screen_present,
+    bedrock_hotbar_log_count,
     bedrock_inventory_overlay_present,
     bedrock_inventory_slot_observation,
     bedrock_survival_hud_present,
@@ -250,6 +255,112 @@ _VERIFIED_DIRT_RGB_8X8 = bytes.fromhex(
     "61452e70523a7a593e6d50394b33225f432e654b365c4029583f2b543a265b3e27"
     "422e1e453021634832684c36624732563c295d4430614732483629412e21"
 )
+
+_VERIFIED_HOTBAR_LOG_RGB_5X13 = bytes.fromhex(
+    "383d19685834937648ac8a56b28f58a98953a1824ba5854fad8f56a3844f91744563562f3e3f1c"
+    "625030977d4d9c7c47b3915aa1814ba4854ea5864fa3824ba68750b3915ba98751a4855377623c"
+    "4a3921524124795f389a7e4bac8c55ae8c57a5834ca78751aa8a53a483508066404a3a20392c19"
+    "3a2c1a46371f4d3b214c3b2079603a9c7f4dac8c58a586527f653e4e3c232c220f33291b372b1c"
+    "4939204a391f47372242341d524127584424715c39503b21322616392c1b342718322719342719"
+)
+_VERIFIED_HOTBAR_DIRT_RGB_5X13 = bytes.fromhex(
+    "32261059432897745874563c92694779543b815b3f996e4f7e583c906844886b50735539423216"
+    "8f6a4b7c5b3f8e6547855f4384654f8862427a573c7e573a8f6b4d7d583d785338906748815d42"
+    "63442b73543d87603f845c3d8863458a63438e66449c72538162468a6247856043583d284a3424"
+    "5c43316549325f48366a4d357f5c41795538865f4089614674543c5f48344431213e2d1e423123"
+    "5c422d60422b60432e74533963432b75543b7c5b40654a32412c1d4434294a36283e2d1f402d1e"
+)
+_HOTBAR_DIGITS = {
+    0: (".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."),
+    1: ("..#..", ".##..", "..#..", "..#..", "..#..", "..#..", "#####"),
+    2: (".###.", "#...#", "....#", "..##.", ".#...", "#...#", "#####"),
+    3: (".###.", "#...#", "....#", "..##.", "....#", "#...#", ".###."),
+    4: ("...##", "..#.#", ".#..#", "#...#", "#####", "....#", "....#"),
+    5: ("#####", "#....", "####.", "....#", "....#", "#...#", ".###."),
+    6: ("..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###."),
+    7: ("#####", "#...#", "....#", "...#.", "..#..", "..#..", "..#.."),
+    8: (".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."),
+    9: (".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.."),
+}
+
+
+def _classic_hotbar_frame(
+    *,
+    occupant: str = "empty",
+    count: int = 1,
+    slot: int = 0,
+) -> CapturedFrame:
+    width, height = 1920, 1054
+    image = Image.new("RGB", (width, height), (20, 20, 20))
+    draw = ImageDraw.Draw(image)
+    # A direct survival HUD signature plus the version-pinned four-pixel
+    # classic-hotbar rail and vertical slot dividers.
+    draw.rectangle((560, 870, 760, 900), fill=(230, 25, 25))
+    draw.rectangle((688, 966, 1319, 969), fill=(140, 140, 140))
+    for x in range(594, 1315, 80):
+        draw.rectangle((x, 974, x + 3, 1053), fill=(140, 140, 140))
+    draw.rectangle((688, 1045, 1319, 1048), fill=(140, 140, 140))
+
+    slot_x = 594 + slot * 80
+    template_bytes = (
+        _VERIFIED_HOTBAR_DIRT_RGB_5X13
+        if occupant == "dirt"
+        else _VERIFIED_HOTBAR_LOG_RGB_5X13
+    )
+    template = Image.frombytes("RGB", (13, 5), template_bytes)
+    if occupant in {"log", "dirt", "unrecognized_log", "masked_log_adversary"}:
+        source = template.load()
+        for row in range(5):
+            for column in range(13):
+                color = source[column, row]
+                if occupant == "unrecognized_log":
+                    color = tuple(
+                        min(255, component + offset)
+                        for component, offset in zip(color, (65, 70, 55), strict=True)
+                    )
+                elif occupant == "masked_log_adversary":
+                    red, green, blue = color
+                    in_old_mask = (
+                        (red + green + blue) / 3 > 75 and red - blue > 30
+                    )
+                    if not in_old_mask:
+                        color = (245, 20, 235)
+                draw.rectangle(
+                    (
+                        slot_x + 20 + column * 4,
+                        984 + row * 4,
+                        slot_x + 23 + column * 4,
+                        987 + row * 4,
+                    ),
+                    fill=color,
+                )
+    elif occupant != "empty":
+        raise AssertionError(f"unsupported synthetic hotbar occupant {occupant!r}")
+
+    if occupant == "log" and count > 1:
+        digits = str(count)
+        starts = (58,) if len(digits) == 1 else (34, 58)
+        for digit, start in zip(digits, starts, strict=True):
+            glyph = _HOTBAR_DIGITS.get(int(digit), ("#####",) * 7)
+            for row, line in enumerate(glyph):
+                for column, value in enumerate(line):
+                    if value == "#":
+                        draw.rectangle(
+                            (
+                                slot_x + start + column * 4,
+                                1010 + row * 4,
+                                slot_x + start + column * 4 + 3,
+                                1013 + row * 4,
+                            ),
+                            fill=(255, 255, 255),
+                        )
+    return CapturedFrame(
+        frame_id=1,
+        captured_ns=1,
+        width=width,
+        height=height,
+        bgra=image.convert("RGBA").tobytes("raw", "BGRA"),
+    )
 
 
 def _classic_inventory_frame(
@@ -522,6 +633,167 @@ def test_complete_survival_hud_is_required_for_camera_calibration() -> None:
     )
 
 
+@pytest.mark.parametrize("count", range(1, 17))
+def test_classic_hotbar_reads_only_calibrated_log_stack_counts(count: int) -> None:
+    frame = _classic_hotbar_frame(occupant="log", count=count, slot=1)
+
+    assert bedrock_hotbar_log_count(frame) == count
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["inventory.hotbar.logs"].value == count
+    assert facts["inventory.hotbar.logs"].source == BEDROCK_HOTBAR_LOG_COUNT_SOURCE
+    assert facts["inventory.hotbar.logs"].confidence == 0.995
+    assert facts["inventory.hotbar.logs"].expires_after_ms == 250
+    assert "inventory.logs" not in facts
+
+
+def test_classic_hotbar_certifies_zero_for_dirt_and_empty_peers() -> None:
+    frame = _classic_hotbar_frame(occupant="dirt")
+
+    assert bedrock_hotbar_log_count(frame) == 0
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["inventory.hotbar.logs"].value == 0
+    assert facts["inventory.hotbar.logs"].source == BEDROCK_HOTBAR_LOG_COUNT_SOURCE
+    assert "inventory.logs" not in facts
+
+
+def test_classic_hotbar_zero_does_not_erase_full_inventory_possession() -> None:
+    frame = _classic_hotbar_frame(occupant="dirt")
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=frame.frame_id,
+            captured_ns=frame.captured_ns,
+            instance_id="bedrock:test",
+            width=frame.width,
+            height=frame.height,
+            facts=(
+                PerceptionFact(
+                    key="inventory.logs",
+                    value=12,
+                    confidence=0.99,
+                    observed_ns=0,
+                    source="inventory-screen:exact-test",
+                ),
+                *BootstrapFastPerception().infer(frame),
+            ),
+        )
+    )
+    global_count = board.fact("inventory.logs", now_ns=1)
+    hotbar_count = board.fact("inventory.hotbar.logs", now_ns=1)
+    assert global_count is not None and global_count.value == 12
+    assert hotbar_count is not None and hotbar_count.value == 0
+
+
+def test_realtime_hotbar_fact_is_bound_to_capture_not_inference_clock() -> None:
+    template = _classic_hotbar_frame(occupant="log", count=1)
+    captured_ns = time.monotonic_ns()
+    frame = CapturedFrame(
+        frame_id=1, captured_ns=captured_ns, width=template.width, height=template.height,
+        bgra=template.bgra,
+    )
+
+    class Capture:
+        def capture(self) -> CapturedFrame:
+            return frame
+
+        def close(self) -> None:
+            pass
+
+    board = PerceptionBlackboard()
+    service = RealtimePerceptionService(
+        capture_source=Capture(), blackboard=board, instance_id="bedrock:test"
+    )
+    state = service.capture_once()
+    fact = board.fact("inventory.hotbar.logs", now_ns=time.monotonic_ns())
+    diagnostic = board.fact("frame.dhash", now_ns=time.monotonic_ns())
+    assert fact is not None and diagnostic is not None
+    assert fact.observed_ns == state.captured_ns == captured_ns
+    assert diagnostic.observed_ns > captured_ns
+
+
+def test_classic_hotbar_geometry_cache_revalidates_current_pixels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = _classic_hotbar_frame(occupant="log", count=16)
+    original = perception_service._classic_hotbar_geometry
+    scans = 0
+
+    def counted_scan(pixels: object) -> tuple[int, int] | None:
+        nonlocal scans
+        scans += 1
+        return original(pixels)
+
+    monkeypatch.setattr(perception_service, "_classic_hotbar_geometry", counted_scan)
+    observer = BootstrapFastPerception()
+    assert any(f.key == "inventory.hotbar.logs" for f in observer.infer(frame))
+    assert any(f.key == "inventory.hotbar.logs" for f in observer.infer(frame))
+    assert scans == 1
+    broken = Image.frombytes("RGBA", (frame.width, frame.height), frame.bgra, "raw", "BGRA")
+    ImageDraw.Draw(broken).rectangle((688, 966, 1319, 969), fill=(20, 20, 20, 255))
+    invalid_frame = CapturedFrame(
+        frame_id=2,
+        captured_ns=2,
+        width=frame.width,
+        height=frame.height,
+        bgra=broken.tobytes("raw", "BGRA"),
+    )
+    assert not any(f.key == "inventory.hotbar.logs" for f in observer.infer(invalid_frame))
+    assert scans == 2
+
+
+def test_classic_hotbar_ignores_world_stripe_without_slot_dividers() -> None:
+    frame = _classic_hotbar_frame(occupant="log", count=1)
+    image = Image.frombytes("RGBA", (frame.width, frame.height), frame.bgra, "raw", "BGRA")
+    ImageDraw.Draw(image).rectangle((688, 894, 1319, 897), fill=(140, 140, 140, 255))
+    striped = CapturedFrame(
+        frame_id=2,
+        captured_ns=2,
+        width=frame.width,
+        height=frame.height,
+        bgra=image.tobytes("raw", "BGRA"),
+    )
+    assert bedrock_hotbar_log_count(striped) == 1
+    assert bedrock_hotbar_log_count(frame) == 1
+
+
+def test_classic_hotbar_cached_decoder_has_bounded_cpu_cost() -> None:
+    frame = _classic_hotbar_frame(occupant="log", count=16)
+    pixels = perception_service._numpy_bgra(frame)
+    geometry = perception_service._classic_hotbar_geometry(pixels)
+    assert geometry is not None
+    timings = []
+    for _ in range(9):
+        started = time.perf_counter()
+        assert perception_service._classic_hotbar_geometry_matches(pixels, geometry)
+        assert perception_service._classic_hotbar_log_count(pixels, geometry=geometry) == 16
+        timings.append(time.perf_counter() - started)
+    # A conservative regression ceiling, not a claim about inference capacity.
+    # Median avoids a single busy CI scheduling slice failing the check.
+    assert statistics.median(timings) < 0.050
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        pytest.param(
+            _classic_hotbar_frame(occupant="unrecognized_log"),
+            id="unrecognized-log-like-icon",
+        ),
+        pytest.param(
+            _classic_hotbar_frame(occupant="masked_log_adversary"),
+            id="masked-only-log-lookalike",
+        ),
+        pytest.param(_classic_hotbar_frame(occupant="log", count=17), id="unknown-count"),
+    ],
+)
+def test_classic_hotbar_abstains_on_uncalibrated_icon_or_glyph(
+    frame: CapturedFrame,
+) -> None:
+    assert bedrock_hotbar_log_count(frame) is None
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert "inventory.hotbar.logs" not in facts
+
+
 def test_bedrock_air_hud_is_a_calibrated_safety_observation() -> None:
     width, height = 1279, 635
     pixels = bytearray(bytes((20, 20, 20, 255)) * width * height)
@@ -634,7 +906,7 @@ def test_active_vlm_encodes_only_regions_capable_of_proving_typed_request() -> N
         )
     )
 
-    assert {item.region_kind.value for item in observation.evidence} == {"hotbar", "gui"}
+    assert {item.region_kind.value for item in observation.evidence} == {"gui"}
     assert model.schema is not None
     properties = model.schema["properties"]
     assert isinstance(properties, dict)

@@ -2,6 +2,22 @@
 
 The roadmap is ordered by dependency and release gates. Later phases must not bypass earlier safety and observability requirements.
 
+## Current Bedrock execution checkpoint — 2026-09-05
+
+This is the immediate gameplay critical path, not a claim that whole phases below are complete.
+
+- [x] Guarded private-LAN operator viewing and commands; game input remains isolated.
+- [x] Deterministic inventory open/close: live transitions verified without restarting Minecraft.
+- [x] Agent-only reload: live game, GPU server, input calibration and supervisor preserved.
+- [x] Exact traversal-stall recovery transaction implemented and tested. Live reorientation/query ran, but the initial VLM answer abstained; escape is not yet demonstrated.
+- [x] Version-pinned oak hotbar counts 0–16 and pre-break-to-post-collection exact +1 verification implemented. Hotbar evidence is not a whole-inventory count; unknown items, including spruce logs, abstain.
+- [ ] Make the focused crosshair probe produce useful, correctly grounded live answers within the small model's output budget.
+- [ ] Demonstrate autonomous soft-block clearance and escape from the observed dirt pocket.
+- [ ] Demonstrate three consecutive verified log acquisitions without manual intervention or game restart; extend item recognition only from calibrated evidence if the local tree variant requires it.
+- [ ] Demonstrate a verified log-to-planks inventory transformation, then use that run to select the next progression upgrade.
+
+Retain failed trajectories as failures. Do not promote a successful block break into resource possession, or test coverage into a completed live gameplay milestone.
+
 ## Phase 0 — Public extraction and safety foundation
 
 **Goal:** a clean standalone project that cannot accidentally expose private/proprietary dependencies.

@@ -35,6 +35,7 @@ class RuntimeEventKind(StrEnum):
     INVENTORY_CHANGED = "inventory_changed"
     GUI_CHANGED = "gui_changed"
     BLOCK_BROKEN = "block_broken"
+    RESOURCE_ACQUIRED = "resource_acquired"
     TARGET_LOST = "target_lost"
     WORLD_MODEL_SURPRISE = "world_model_surprise"
     HUMAN_CORRECTION = "human_correction"

@@ -17,6 +17,7 @@ from minecraft_ai.perception import (
     ScreenRegion,
     Track,
 )
+from minecraft_ai.perception_service import BEDROCK_HOTBAR_LOG_COUNT_SOURCE
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.skills import SkillCondition, SkillFailureCode, SkillOutcome, SkillSpec
 from minecraft_ai.trajectory import ActionOrigin
@@ -325,6 +326,84 @@ def test_verified_replacement_converts_target_changed_to_one_success() -> None:
     assert policy.act_calls == 2
     assert policy.observation_release_calls == 1
     assert policy.perception_poll_calls == 2
+
+
+@pytest.mark.parametrize("before", [None, 0, 15])
+def test_mining_preserves_pre_attack_hotbar_count_after_immediate_pickup(
+    before: int | None,
+) -> None:
+    now = time.monotonic_ns()
+    executor, _ = _executor(now, None, SkillFailureCode.MINING_TARGET_CHANGED)
+    baseline = (
+        None
+        if before is None
+        else PerceptionFact(
+            key="inventory.hotbar.logs",
+            value=before,
+            confidence=0.995,
+            observed_ns=now,
+            source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+            expires_after_ms=250,
+        )
+    )
+    first = executor.tick(
+        _board(
+            now,
+            crosshair_hash=_HASH_A,
+            target_visible=True,
+            extra_facts=() if baseline is None else (baseline,),
+        ),
+        sequence=1,
+        now_ns=now,
+    )
+    assert first.action is not None and "left" in first.action.buttons_down
+    assert executor.mining_hotbar_log_baseline == baseline
+    for sequence, offset_ns in enumerate((500_000_000, 850_000_000, 900_000_000), start=2):
+        # Break confirmation may settle after automatic pickup. None must also
+        # stay frozen rather than inventing a post-break starting count.
+        board = _board(
+            now + offset_ns,
+            crosshair_hash=_HASH_B,
+            target_visible=False,
+            extra_facts=(
+                PerceptionFact(
+                    key="inventory.hotbar.logs",
+                    value=(before or 0) + 1,
+                    confidence=0.995,
+                    observed_ns=now + offset_ns,
+                    source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+                    expires_after_ms=250,
+                ),
+            ),
+        )
+        terminal = executor.tick(board, sequence=sequence, now_ns=now + offset_ns)
+        assert executor.mining_hotbar_log_baseline == baseline
+    assert terminal.run.outcome == SkillOutcome.SUCCEEDED
+    assert terminal.outcome_verification is not None
+    assert terminal.outcome_verification.signal == OutcomeSignal.BLOCK_BROKEN
+
+
+def test_mining_does_not_reuse_recent_hotbar_fact_when_current_frame_abstains() -> None:
+    now = time.monotonic_ns()
+    executor, _ = _executor(now, None)
+    previous = PerceptionFact(
+        key="inventory.hotbar.logs",
+        value=0,
+        confidence=0.995,
+        observed_ns=now - 1,
+        source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+        expires_after_ms=250,
+    )
+    board = _board(
+        now,
+        crosshair_hash=_HASH_A,
+        target_visible=True,
+        extra_facts=(previous,),
+    )
+    assert board.fact("inventory.hotbar.logs", now_ns=now) is not None
+    first = executor.tick(board, sequence=1, now_ns=now)
+    assert first.action is not None and "left" in first.action.buttons_down
+    assert executor.mining_hotbar_log_baseline is None
 
 
 def test_visual_change_without_target_loss_remains_target_changed_failure() -> None:

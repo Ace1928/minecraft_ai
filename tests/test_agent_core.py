@@ -33,6 +33,7 @@ from minecraft_ai.perception import (
 from minecraft_ai.planning import Goal, GoalScorer
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
+from minecraft_ai.perception_service import BEDROCK_HOTBAR_LOG_COUNT_SOURCE
 from minecraft_ai.roles import BUILTIN_ROLES, get_role
 from minecraft_ai.cognition import CognitionDecision, HighLevelController
 from minecraft_ai.runtime import (
@@ -49,6 +50,7 @@ from minecraft_ai.runtime import (
     _semantic_deadline_ms,
     _semantic_refresh_allowed,
     _skill_stats_totals,
+    _trajectory_outcome_annotations,
     _verified_log_break,
 )
 from minecraft_ai.safety import MotorAction
@@ -1706,6 +1708,124 @@ def test_intermediate_mine_success_does_not_advance_plan_before_collection(
         )
 
         assert runtime._plan_index == 0
+
+
+def test_collection_success_persists_resource_event_and_advances_plan_once(tmp_path: Path) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime_for_learning(database)
+        runtime._plan_steps = ("mine and collect a log", "craft planks")
+        runtime._plan_goal_id = "progression:wood"
+        runtime._last_decision = CognitionDecision(chosen_goal_id="progression:wood")
+        run = SkillRun(
+            run_id="verified-pickup",
+            skill_id="collect_recent_drop",
+            context_key="progression:wood",
+            started_ns=1,
+            ended_ns=2,
+            outcome=SkillOutcome.SUCCEEDED,
+        )
+        verification = OutcomeVerification(
+            run_id=run.run_id,
+            kind=OutcomeKind.RESOURCE_ACQUISITION,
+            status=OutcomeStatus.SUCCEEDED,
+            signal=OutcomeSignal.RESOURCE_ACQUIRED,
+            observed_ns=2,
+            confidence=0.995,
+            reason="stable exact pre-break to post-action hotbar +1",
+            target_kind="log",
+            evidence_keys=("inventory.hotbar.logs",),
+        )
+        for _ in range(2):
+            runtime._record_terminal_run(run, outcome_verification=verification)
+        assert runtime._plan_index == 1
+        events = database.load_runtime_events(limit=10)
+        assert len(events) == 2
+        assert {event.kind for event in events} == {
+            RuntimeEventKind.SKILL_SUCCEEDED, RuntimeEventKind.RESOURCE_ACQUIRED
+        }
+        assert runtime.metrics.skill_successes == 1
+        assert _trajectory_outcome_annotations(
+            ExecutionTick(run=run, action=None, outcome_verification=verification)
+        ) == (
+            {"resource_acquired": 0.995},
+            ("skill-run:verified-pickup:resource-acquired",),
+        )
+
+
+def test_runtime_transfers_prebreak_baseline_after_synchronous_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.monotonic_ns()
+    order: list[str] = []
+    runtime = object.__new__(AgentRuntime)
+    runtime.metrics = RuntimeMetrics()
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime.executor.start(runtime.skills.get("mine_visible_block"), run_id="break-bound")
+    baseline = PerceptionFact(
+        key="inventory.hotbar.logs", value=0, confidence=0.995,
+        observed_ns=now - 5_000_000_000, source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+        expires_after_ms=250,
+    )
+    runtime.executor._mining_hotbar_log_baseline = baseline
+    runtime.blackboard = PerceptionBlackboard()
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=1, captured_ns=now, instance_id="bedrock:test", width=1280, height=720,
+            facts=(baseline.model_copy(update={"value": 1, "observed_ns": now}),),
+        )
+    )
+
+    def capture() -> CapturedFrame:
+        order.append("capture")
+        return CapturedFrame(1, now, 1280, 720, b"")
+
+    def execute(*_args: object, **_kwargs: object) -> ExecutionTick:
+        order.append("policy")
+        run = SkillRun(
+            run_id="break-bound", skill_id="mine_visible_block", started_ns=now - 6_000_000_000,
+            ended_ns=now, outcome=SkillOutcome.SUCCEEDED,
+        )
+        runtime.executor._run = run
+        return ExecutionTick(
+            run=run,
+            action=MotorAction(sequence=1, buttons_up=("left",)),
+            outcome_verification=OutcomeVerification(
+                run_id=run.run_id, kind=OutcomeKind.MINING, status=OutcomeStatus.SUCCEEDED,
+                signal=OutcomeSignal.BLOCK_BROKEN, observed_ns=now, confidence=0.99,
+                reason="verified log break", target_kind="oak_log",
+            ),
+        )
+
+    monkeypatch.setattr(runtime.executor, "tick", execute)
+    runtime.perception = SimpleNamespace(  # type: ignore[assignment]
+        capture_once=capture, stale=lambda: False, instance_id="bedrock:test"
+    )
+    runtime.telemetry = SimpleNamespace(publish=lambda _payload: None)  # type: ignore[assignment]
+    runtime._sequence = 1
+    runtime._plan_steps = ()
+    runtime._plan_index = 0
+    runtime._plan_goal_id = None
+    for method in (
+        "_merge_operator_target", "_merge_policy_perception", "_flush_pending_skill_stats",
+        "_flush_pending_learning_records", "_flush_pending_operator_status_updates",
+        "_publish_player_chat_facts", "_consume_cognition", "_start_cognition_if_due",
+        "_request_semantics_if_due", "_route_observed_scene_recovery", "_advance_headroom_recovery",
+    ):
+        monkeypatch.setattr(runtime, method, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_telemetry_payload", lambda **_kwargs: {})
+    monkeypatch.setattr(runtime, "_expire_late_headroom_child", lambda result: (result, False))
+    monkeypatch.setattr(runtime, "_is_headroom_child_result", lambda _result: False)
+    monkeypatch.setattr(runtime, "_send_motor", lambda *_args, **_kwargs: order.append("send"))
+    monkeypatch.setattr(
+        runtime, "_record_terminal_run", lambda *_args, **_kwargs: order.append("record")
+    )
+    runtime.tick()
+    assert order == ["capture", "policy", "send", "record"]
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.skill_id == "collect_recent_drop"
+    assert runtime.executor._collection_possession.baseline_count == 0
+    assert runtime.executor._collection_possession.baseline_observed_ns == baseline.observed_ns
 
 
 def test_pending_cognition_cannot_replace_atomic_collection() -> None:

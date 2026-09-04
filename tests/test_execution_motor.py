@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from minecraft_ai.action_levels import ActionLevel
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.execution import SkillExecutor, conditions_satisfied
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
+from minecraft_ai.outcome_verifier import OutcomeKind, OutcomeSignal, OutcomeStatus
 from minecraft_ai.perception import (
     FrameState,
     PerceptionBlackboard,
@@ -14,6 +17,7 @@ from minecraft_ai.perception import (
     Track,
 )
 from minecraft_ai.safety import MotorAction
+from minecraft_ai.perception_service import BEDROCK_HOTBAR_LOG_COUNT_SOURCE
 from minecraft_ai.skills import (
     SkillActionPermissions,
     SkillCondition,
@@ -47,6 +51,18 @@ class _IntentCapturePolicy:
         return MotorAction(sequence=1)
 
 
+class _MovingIntentCapturePolicy(_IntentCapturePolicy):
+    def act(
+        self,
+        blackboard: PerceptionBlackboard,
+        intent: MotorIntent,
+        *,
+        sequence: int,
+    ) -> MotorAction:
+        super().act(blackboard, intent, sequence=sequence)
+        return MotorAction(sequence=sequence, keys_down=("w",), duration_ms=50)
+
+
 def _board(*facts: PerceptionFact) -> PerceptionBlackboard:
     board = PerceptionBlackboard()
     board.publish(
@@ -75,6 +91,23 @@ def _fact(
         observed_ns=time.monotonic_ns(),
         source="test",
         expires_after_ms=1_000_000,
+    )
+
+
+def _hotbar_log_fact(
+    count: int,
+    *,
+    observed_ns: int,
+    source: str = BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+    expires_after_ms: int = 250,
+) -> PerceptionFact:
+    return PerceptionFact(
+        key="inventory.hotbar.logs",
+        value=count,
+        confidence=0.995,
+        observed_ns=observed_ns,
+        source=source,
+        expires_after_ms=expires_after_ms,
     )
 
 
@@ -259,6 +292,188 @@ def test_collect_recent_drop_is_bounded_and_disables_interactions() -> None:
     assert terminal.run.outcome == SkillOutcome.FAILED
     assert terminal.run.failure_code == SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED
     assert terminal.run.failure_reason == "resource.pickup_unverified"
+
+
+@pytest.mark.parametrize("before,after", [(0, 1), (6, 7), (8, 9), (9, 10), (15, 16)])
+def test_collect_recent_drop_requires_stable_post_action_log_increment(
+    before: int, after: int
+) -> None:
+    started_ns = 1_000_000_000
+    policy = _MovingIntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("collect_recent_drop")
+    board = _board(
+        _fact("collection.recent_log_break", True),
+        # The drop was automatically picked up before collection began. This
+        # first post-start frame must not overwrite the pre-break baseline.
+        _hotbar_log_fact(after, observed_ns=started_ns + 10_000_000),
+    )
+    executor.start(
+        spec,
+        run_id="collect-verified",
+        now_ns=started_ns,
+        collection_hotbar_log_baseline=_hotbar_log_fact(
+            before, observed_ns=started_ns - 3_000_000
+        ),
+    )
+
+    baseline = executor.tick(board, sequence=1, now_ns=started_ns + 20_000_000)
+    assert baseline.run.outcome == SkillOutcome.RUNNING
+    assert baseline.action is not None and baseline.action.keys_down == ("w",)
+
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(_hotbar_log_fact(after, observed_ns=started_ns + 100_000_000),),
+    )
+    first_positive = executor.tick(board, sequence=2, now_ns=started_ns + 110_000_000)
+    repeated_same_frame = executor.tick(board, sequence=3, now_ns=started_ns + 150_000_000)
+    assert first_positive.run.outcome == SkillOutcome.RUNNING
+    assert repeated_same_frame.run.outcome == SkillOutcome.RUNNING
+
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(_hotbar_log_fact(after, observed_ns=started_ns + 360_000_000),),
+    )
+    terminal = executor.tick(board, sequence=4, now_ns=started_ns + 370_000_000)
+
+    assert terminal.run.outcome == SkillOutcome.SUCCEEDED
+    assert terminal.action is not None and "w" in terminal.action.keys_up
+    assert terminal.outcome_verification is not None
+    assert terminal.outcome_verification.kind == OutcomeKind.RESOURCE_ACQUISITION
+    assert terminal.outcome_verification.status == OutcomeStatus.SUCCEEDED
+    assert terminal.outcome_verification.signal == OutcomeSignal.RESOURCE_ACQUIRED
+    assert terminal.outcome_verification.target_kind == "log"
+    assert terminal.outcome_verification.evidence_keys == ("inventory.hotbar.logs",)
+    assert executor.tick(
+        board, sequence=5, now_ns=started_ns + 380_000_000
+    ).outcome_verification is None
+
+
+def test_collect_recent_drop_rejects_unbound_or_noncanonical_increments() -> None:
+    started_ns = 2_000_000_000
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("collect_recent_drop")
+    board = _board(
+        _fact("collection.recent_log_break", True),
+        _hotbar_log_fact(0, observed_ns=started_ns + 10_000_000),
+    )
+    executor.start(
+        spec,
+        run_id="collect-no-motion",
+        now_ns=started_ns,
+        collection_hotbar_log_baseline=_hotbar_log_fact(
+            0, observed_ns=started_ns - 1_000_000
+        ),
+    )
+    executor.tick(board, sequence=1, now_ns=started_ns + 20_000_000)
+
+    for sequence, observed_ns in enumerate(
+        (started_ns + 100_000_000, started_ns + 400_000_000),
+        start=2,
+    ):
+        board.merge_semantics(
+            instance_id="bedrock:test",
+            facts=(_hotbar_log_fact(1, observed_ns=observed_ns),),
+        )
+        tick = executor.tick(board, sequence=sequence, now_ns=observed_ns + 10_000_000)
+        assert tick.run.outcome == SkillOutcome.RUNNING
+
+    terminal = executor.tick(board, sequence=4, now_ns=started_ns + 5_000_000_001)
+    assert terminal.run.outcome == SkillOutcome.FAILED
+    assert terminal.run.failure_code == SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED
+
+
+def test_collect_recent_drop_rejects_vlm_stale_unchanged_and_multi_item_counts() -> None:
+    started_ns = 3_000_000_000
+    policy = _MovingIntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("collect_recent_drop")
+    board = _board(
+        _fact("collection.recent_log_break", True),
+        _hotbar_log_fact(0, observed_ns=started_ns + 10_000_000),
+    )
+    executor.start(
+        spec,
+        run_id="collect-reject",
+        now_ns=started_ns,
+        collection_hotbar_log_baseline=_hotbar_log_fact(
+            0, observed_ns=started_ns - 1_000_000
+        ),
+    )
+    executor.tick(board, sequence=1, now_ns=started_ns + 20_000_000)
+
+    rejected = (
+        _hotbar_log_fact(
+            1,
+            observed_ns=started_ns + 100_000_000,
+            source="vlm:test:inventory-query",
+        ),
+        _hotbar_log_fact(0, observed_ns=started_ns + 200_000_000),
+        _hotbar_log_fact(2, observed_ns=started_ns + 300_000_000),
+        _hotbar_log_fact(
+            1,
+            observed_ns=started_ns + 400_000_000,
+            expires_after_ms=1,
+        ),
+    )
+    for sequence, fact in enumerate(rejected, start=2):
+        board.merge_semantics(instance_id="bedrock:test", facts=(fact,))
+        tick = executor.tick(
+            board,
+            sequence=sequence,
+            now_ns=fact.observed_ns + 10_000_000,
+        )
+        assert tick.run.outcome == SkillOutcome.RUNNING
+
+    terminal = executor.tick(board, sequence=6, now_ns=started_ns + 5_000_000_001)
+    assert terminal.run.outcome == SkillOutcome.FAILED
+    assert terminal.run.failure_code == SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED
+
+
+@pytest.mark.parametrize(
+    "baseline_update",
+    [
+        None,
+        {"key": "inventory.logs"},
+        {"source": "vlm:test:inventory-query"},
+        {"confidence": 0.9},
+        {"value": True},
+        {"observed_ns": 4_010_000_000},
+    ],
+)
+def test_collect_recent_drop_never_invents_a_missing_prebreak_baseline(
+    baseline_update: dict[str, object] | None,
+) -> None:
+    started_ns = 4_000_000_000
+    executor = SkillExecutor(_MovingIntentCapturePolicy())
+    baseline = (
+        None
+        if baseline_update is None
+        else _hotbar_log_fact(0, observed_ns=started_ns - 1_000_000).model_copy(
+            update=baseline_update
+        )
+    )
+    executor.start(
+        build_bootstrap_skill_library().get("collect_recent_drop"),
+        run_id="no-prebreak-evidence",
+        now_ns=started_ns,
+        collection_hotbar_log_baseline=baseline,
+    )
+    board = _board(_fact("collection.recent_log_break", True))
+    for sequence, count, offset_ns in (
+        (1, 0, 10_000_000), (2, 1, 100_000_000), (3, 1, 400_000_000)
+    ):
+        board.merge_semantics(
+            instance_id="bedrock:test",
+            facts=(_hotbar_log_fact(count, observed_ns=started_ns + offset_ns),),
+        )
+        result = executor.tick(
+            board, sequence=sequence, now_ns=started_ns + offset_ns + 1_000_000
+        )
+        assert result.run.outcome == SkillOutcome.RUNNING
+    terminal = executor.tick(board, sequence=4, now_ns=started_ns + 5_000_000_001)
+    assert terminal.run.failure_code == SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED
 
 
 def test_close_inventory_emits_one_bounded_toggle_then_waits_for_proof() -> None:

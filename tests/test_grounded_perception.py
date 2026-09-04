@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import time
 
+import pytest
 from PIL import Image
 
 from minecraft_ai.grounded_perception import (
@@ -134,7 +135,7 @@ def test_grounded_output_keys_use_only_literal_supported_contract_tokens() -> No
     )
 
 
-def test_inventory_claim_requires_hotbar_or_gui_pixels_and_degrades_to_unknown() -> None:
+def test_inventory_claim_requires_gui_pixels_and_degrades_to_unknown() -> None:
     world = _evidence(EvidenceRegion.WORLD)
     hotbar = _evidence(EvidenceRegion.HOTBAR)
     report = _report(
@@ -148,6 +149,25 @@ def test_inventory_claim_requires_hotbar_or_gui_pixels_and_degrades_to_unknown()
     assert inventory.value is None
     assert any(
         rejection.key == "inventory.logs" and rejection.code == RejectionCode.WRONG_EVIDENCE_REGION
+        for rejection in report.rejections
+    )
+
+
+@pytest.mark.parametrize("count", [0, 4])
+@pytest.mark.parametrize(
+    "key",
+    ["inventory.logs", "inventory.planks", "inventory.crafting_table", "inventory.build_blocks"],
+)
+def test_hotbar_only_claim_cannot_publish_whole_inventory_count(key: str, count: int) -> None:
+    hotbar = _evidence(EvidenceRegion.HOTBAR)
+    report = _report(
+        (_claim(key, count, hotbar.evidence_id),),
+        evidence=(hotbar,),
+        requested_keys=(key,),
+    )
+    assert key not in report.observed_values()
+    assert any(
+        rejection.key == key and rejection.code == RejectionCode.WRONG_EVIDENCE_REGION
         for rejection in report.rejections
     )
 
@@ -243,13 +263,14 @@ def test_conflicting_cited_prose_is_rejected_and_never_becomes_summary() -> None
 
 def test_visible_slot_evidence_cross_checks_aggregate_inventory_count() -> None:
     hotbar = _evidence(EvidenceRegion.HOTBAR)
+    gui = _evidence(EvidenceRegion.GUI)
     report = _report(
         (
             _claim("hotbar.slot.0.item", "minecraft:oak_log", hotbar.evidence_id),
             _claim("hotbar.slot.0.count", 3, hotbar.evidence_id),
-            _claim("inventory.logs", 9, hotbar.evidence_id),
+            _claim("inventory.logs", 2, gui.evidence_id),
         ),
-        evidence=(hotbar,),
+        evidence=(hotbar, gui),
     )
 
     values = report.observed_values()
@@ -259,6 +280,20 @@ def test_visible_slot_evidence_cross_checks_aggregate_inventory_count() -> None:
         rejection.key == "inventory.logs" and rejection.code == RejectionCode.CROSS_FIELD_CONFLICT
         for rejection in report.rejections
     )
+
+
+def test_full_inventory_count_can_exceed_visible_hotbar_subtotal() -> None:
+    hotbar = _evidence(EvidenceRegion.HOTBAR)
+    gui = _evidence(EvidenceRegion.GUI)
+    report = _report(
+        (
+            _claim("hotbar.slot.0.item", "minecraft:oak_log", hotbar.evidence_id),
+            _claim("hotbar.slot.0.count", 3, hotbar.evidence_id),
+            _claim("inventory.logs", 9, gui.evidence_id),
+        ),
+        evidence=(hotbar, gui),
+    )
+    assert report.observed_values()["inventory.logs"] == 9
 
 
 def test_blackboard_keeps_only_manifests_referenced_by_fresh_facts() -> None:

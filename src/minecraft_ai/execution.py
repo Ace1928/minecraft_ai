@@ -17,7 +17,8 @@ from .outcome_verifier import (
     OutcomeVerification,
     TemporalOutcomeVerifier,
 )
-from .perception import PerceptionBlackboard
+from .perception import PerceptionBlackboard, PerceptionFact
+from .perception_service import BEDROCK_HOTBAR_LOG_COUNT_SOURCE
 from .safety import MotorAction
 from .skills import (
     SkillActionPermissions,
@@ -47,7 +48,20 @@ class _PendingMiningVerification:
     deadline_ns: int
 
 
+@dataclass
+class _CollectionPossessionState:
+    """Pre-break hotbar baseline and post-action evidence for one collection run."""
+
+    baseline_count: int | None = None
+    baseline_observed_ns: int = -1
+    motion_started_ns: int | None = None
+    candidate_count: int | None = None
+    candidate_first_ns: int = -1
+    candidate_last_ns: int = -1
+
+
 _MINING_POST_RELEASE_VERIFY_MS = 5_000
+_COLLECTION_STABLE_NS = 250_000_000
 _MINING_SUCCESS_OVERRIDABLE_FAILURES = frozenset(
     {
         SkillFailureCode.MINING_TARGET_CHANGED,
@@ -60,6 +74,26 @@ _TRAVERSAL_SKILL_IDS = frozenset(
 )
 _LOCOMOTION_RELEASE_KEYS = ("a", "d", "s", "space", "w")
 _REACQUIRE_MIN_CONFIDENCE = 0.65
+
+
+def _exact_hotbar_log_fact(
+    fact: PerceptionFact,
+    *,
+    now_ns: int | None = None,
+) -> bool:
+    return (
+        fact.key == "inventory.hotbar.logs"
+        and fact.source == BEDROCK_HOTBAR_LOG_COUNT_SOURCE
+        and fact.confidence >= 0.99
+        and isinstance(fact.value, int)
+        and not isinstance(fact.value, bool)
+        and fact.value >= 0
+        and fact.observed_ns >= 0
+        and (
+            now_ns is None
+            or 0 <= now_ns - fact.observed_ns <= fact.expires_after_ms * 1_000_000
+        )
+    )
 
 
 class SkillExecutor:
@@ -79,6 +113,9 @@ class SkillExecutor:
         self._pending_mining_verification: _PendingMiningVerification | None = None
         self._inventory_open_sent = False
         self._inventory_close_sent = False
+        self._collection_possession = _CollectionPossessionState()
+        self._mining_hotbar_log_baseline: PerceptionFact | None = None
+        self._mining_attack_started = False
         self._complete_on_locomotion_progress = False
 
     @property
@@ -97,6 +134,11 @@ class SkillExecutor:
     def parameters(self) -> dict[str, str | int | float | bool]:
         """Return the active option bindings without exposing mutable executor state."""
         return dict(self._parameters)
+
+    @property
+    def mining_hotbar_log_baseline(self) -> PerceptionFact | None:
+        """Immutable exact evidence frozen before this run's first mining attack."""
+        return self._mining_hotbar_log_baseline
 
     @property
     def policy_parameters(self) -> dict[str, str | int | float | bool]:
@@ -141,6 +183,7 @@ class SkillExecutor:
         now_ns: int | None = None,
         instruction: str | None = None,
         complete_on_locomotion_progress: bool = False,
+        collection_hotbar_log_baseline: PerceptionFact | None = None,
     ) -> SkillRun:
         if self._run is not None and self._run.outcome == SkillOutcome.RUNNING:
             raise RuntimeError("a skill is already running")
@@ -156,6 +199,23 @@ class SkillExecutor:
         self._pending_mining_verification = None
         self._inventory_open_sent = False
         self._inventory_close_sent = False
+        self._collection_possession = _CollectionPossessionState()
+        if (
+            spec.skill_id == "collect_recent_drop"
+            and collection_hotbar_log_baseline is not None
+            and _exact_hotbar_log_fact(collection_hotbar_log_baseline)
+            and collection_hotbar_log_baseline.observed_ns <= started
+        ):
+            # This historical snapshot was fresh before mining's first attack;
+            # do not expire it or replace it with an already-collected frame.
+            self._collection_possession.baseline_count = int(
+                collection_hotbar_log_baseline.value
+            )
+            self._collection_possession.baseline_observed_ns = (
+                collection_hotbar_log_baseline.observed_ns
+            )
+        self._mining_hotbar_log_baseline = None
+        self._mining_attack_started = False
         self._complete_on_locomotion_progress = complete_on_locomotion_progress
         self._run = SkillRun(
             run_id=run_id,
@@ -252,6 +312,34 @@ class SkillExecutor:
         if self._spec.skill_id == "close_open_inventory":
             return self._tick_inventory_close(sequence=sequence)
 
+        if self._spec.skill_id == "collect_recent_drop":
+            verification = self._observe_collection_possession(
+                blackboard,
+                now_ns=now,
+            )
+            if verification is not None:
+                return self._finish(
+                    SkillOutcome.SUCCEEDED,
+                    now,
+                    None,
+                    force_release_keys=_LOCOMOTION_RELEASE_KEYS,
+                    outcome_verification=verification,
+                )
+
+        if self._spec.skill_id == "mine_visible_block" and not self._mining_attack_started:
+            fact = blackboard.fact("inventory.hotbar.logs", now_ns=now)
+            frame = blackboard.raw_latest()
+            self._mining_hotbar_log_baseline = (
+                fact
+                if (
+                    fact is not None
+                    and frame is not None
+                    and fact.observed_ns == frame.captured_ns
+                    and _exact_hotbar_log_fact(fact, now_ns=now)
+                )
+                else None
+            )
+
         intent = MotorIntent(
             skill_id=self._spec.skill_id,
             mode=self._spec.policy_ref or self._spec.skill_id,
@@ -273,6 +361,24 @@ class SkillExecutor:
         action = self.policy.act(blackboard, intent, sequence=sequence)
         self._last_intent = intent
         mining = self._mining_guard.inspect(action, blackboard, intent, now_ns=now)
+        if (
+            self._spec.skill_id == "mine_visible_block"
+            and mining.failure_code is None
+            and "left" in mining.action.buttons_down
+        ):
+            # Even an absent baseline is frozen: a later frame could already
+            # contain the automatically collected drop from this attack.
+            self._mining_attack_started = True
+        if (
+            self._spec.skill_id == "collect_recent_drop"
+            and self._collection_possession.baseline_count is not None
+            and set(mining.action.keys_down).intersection(_LOCOMOTION_RELEASE_KEYS)
+        ):
+            baseline_ns = self._collection_possession.baseline_observed_ns
+            if now > baseline_ns:
+                started_ns = self._collection_possession.motion_started_ns
+                if started_ns is None:
+                    self._collection_possession.motion_started_ns = now
         verification = self._observe_mining_outcome(
             blackboard,
             action=mining.action,
@@ -376,6 +482,65 @@ class SkillExecutor:
                 and traversal_verification.status == OutcomeStatus.PROGRESS
                 else None
             ),
+        )
+
+    def _observe_collection_possession(
+        self,
+        blackboard: PerceptionBlackboard,
+        *,
+        now_ns: int,
+    ) -> OutcomeVerification | None:
+        """Require fresh post-action hotbar +1 against the preserved pre-break count."""
+        if self._run is None or self._spec is None:
+            return None
+        if self._spec.skill_id != "collect_recent_drop":
+            return None
+        state = self._collection_possession
+        fact = blackboard.fact("inventory.hotbar.logs", now_ns=now_ns)
+        if (
+            state.baseline_count is None
+            or fact is None
+            or not _exact_hotbar_log_fact(fact, now_ns=now_ns)
+            or fact.observed_ns <= self._run.started_ns
+        ):
+            state.candidate_count = None
+            state.candidate_first_ns = -1
+            state.candidate_last_ns = -1
+            return None
+        if fact.observed_ns <= state.baseline_observed_ns:
+            return None
+        count = int(fact.value)
+        expected = state.baseline_count + 1
+        motion_started_ns = state.motion_started_ns
+        if (
+            count != expected
+            or motion_started_ns is None
+            or fact.observed_ns <= motion_started_ns
+        ):
+            state.candidate_count = None
+            state.candidate_first_ns = -1
+            state.candidate_last_ns = -1
+            return None
+        if fact.observed_ns <= state.candidate_last_ns:
+            return None
+        if state.candidate_count != count:
+            state.candidate_count = count
+            state.candidate_first_ns = fact.observed_ns
+            state.candidate_last_ns = fact.observed_ns
+            return None
+        state.candidate_last_ns = fact.observed_ns
+        if fact.observed_ns - state.candidate_first_ns < _COLLECTION_STABLE_NS:
+            return None
+        return OutcomeVerification(
+            run_id=self._run.run_id,
+            kind=OutcomeKind.RESOURCE_ACQUISITION,
+            status=OutcomeStatus.SUCCEEDED,
+            signal=OutcomeSignal.RESOURCE_ACQUIRED,
+            observed_ns=fact.observed_ns,
+            confidence=fact.confidence,
+            reason="stable post-action hotbar log count increased by one",
+            evidence_keys=("inventory.hotbar.logs",),
+            target_kind="log",
         )
 
     def _tick_plank_crafting(

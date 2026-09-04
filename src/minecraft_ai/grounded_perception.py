@@ -480,16 +480,12 @@ _CLAIM_RULES: dict[str, _ClaimRule] = {
     "target.kind": _ClaimRule((str,), _WORLD),
     "target.mineable": _ClaimRule((bool,), _WORLD),
     "target.near": _ClaimRule((bool,), _WORLD),
-    "inventory.logs": _ClaimRule((int,), frozenset({EvidenceRegion.HOTBAR, EvidenceRegion.GUI}), 0),
-    "inventory.planks": _ClaimRule(
-        (int,), frozenset({EvidenceRegion.HOTBAR, EvidenceRegion.GUI}), 0
-    ),
-    "inventory.crafting_table": _ClaimRule(
-        (int,), frozenset({EvidenceRegion.HOTBAR, EvidenceRegion.GUI}), 0
-    ),
-    "inventory.build_blocks": _ClaimRule(
-        (int,), frozenset({EvidenceRegion.HOTBAR, EvidenceRegion.GUI}), 0
-    ),
+    # These are whole-inventory counts. A hotbar crop proves only a subset,
+    # including when it contains zero matching stacks.
+    "inventory.logs": _ClaimRule((int,), _GUI, 0),
+    "inventory.planks": _ClaimRule((int,), _GUI, 0),
+    "inventory.crafting_table": _ClaimRule((int,), _GUI, 0),
+    "inventory.build_blocks": _ClaimRule((int,), _GUI, 0),
     "player.health": _ClaimRule((int, float), _HUD, 0, 20),
     "player.hunger": _ClaimRule((int, float), _HUD, 0, 20),
     "player.armor": _ClaimRule((int, float), _HUD, 0, 20),
@@ -837,9 +833,9 @@ def _inventory_conflicts(values: dict[str, JsonScalar | None], conflicts: dict[s
     for category, total in visible_totals.items():
         aggregate_key = f"inventory.{category}"
         aggregate = values.get(aggregate_key)
-        if supported[category] and isinstance(aggregate, int) and aggregate != total:
+        if supported[category] and isinstance(aggregate, int) and aggregate < total:
             conflicts[aggregate_key] = (
-                f"aggregate count {aggregate} disagrees with visible slot total {total}"
+                f"full inventory count {aggregate} is below visible hotbar subtotal {total}"
             )
 
 
@@ -1341,6 +1337,7 @@ def _grounded_prompt(
     requested = ", ".join(output_keys) if output_keys else "all contract keys visibly supported"
     claim_shape = _safe_unknown_claim_example(output_keys)
     inventory_zero_rule = (
+        "Inventory totals are full-inventory counts, never hotbar-only counts. "
         "Only when the complete inventory grid is visibly present in the cited GUI panel, "
         "report inventory.logs=0 or inventory.planks=0 when no matching stack is visible; "
         "otherwise abstain from those counts. "
@@ -1362,8 +1359,9 @@ def _grounded_prompt(
         f"{inventory_zero_rule}"
         "If emitted, status=unknown or abstain requires value=null, confidence=0, and "
         "evidence_ids=[]. Never infer hidden inventory, seed, coordinates, biome, identity, "
-        "recipes, or history. Inventory needs hotbar/GUI evidence; HUD values need HUD; targets "
-        "and obstacles need world; chat needs chat/GUI. Track boxes use normalized ORIGINAL FULL "
+        "recipes, or history. Whole-inventory totals need the complete GUI inventory grid; "
+        "hotbar slot claims need hotbar evidence; HUD values need HUD; targets and obstacles "
+        "need world; chat needs chat/GUI. Track boxes use normalized ORIGINAL FULL "
         "FRAME coordinates, lie inside the cited crop, and cite world/GUI. Prefer an empty "
         "prose_summary; any factual summary text must use exact "
         "[key=JSON_VALUE @evidence_id] citations. Historical chat cannot classify this scene. "

@@ -18,6 +18,7 @@ class OutcomeKind(StrEnum):
     INVENTORY_OPEN = "inventory_open"
     INVENTORY_CLOSE = "inventory_close"
     CRAFTING = "crafting"
+    RESOURCE_ACQUISITION = "resource_acquisition"
 
 
 class OutcomeStatus(StrEnum):
@@ -38,6 +39,7 @@ class OutcomeSignal(StrEnum):
     INVENTORY_OPENED = "inventory_opened"
     INVENTORY_CLOSED = "inventory_closed"
     PLANKS_CRAFTED = "planks_crafted"
+    RESOURCE_ACQUIRED = "resource_acquired"
     GUI_TRANSITION_STALLED = "gui_transition_stalled"
 
 

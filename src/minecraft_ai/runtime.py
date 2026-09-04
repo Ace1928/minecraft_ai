@@ -472,12 +472,15 @@ def _trajectory_outcome_annotations(
         execution.run.outcome != SkillOutcome.SUCCEEDED
         or verification.run_id != execution.run.run_id
         or verification.status != OutcomeStatus.SUCCEEDED
-        or verification.signal != OutcomeSignal.BLOCK_BROKEN
+        or verification.signal not in {
+            OutcomeSignal.BLOCK_BROKEN, OutcomeSignal.RESOURCE_ACQUIRED
+        }
     ):
         return {}, ()
+    event_suffix = verification.signal.value.replace("_", "-")
     return (
-        {OutcomeSignal.BLOCK_BROKEN.value: verification.confidence},
-        (f"skill-run:{execution.run.run_id}:block-broken",),
+        {verification.signal.value: verification.confidence},
+        (f"skill-run:{execution.run.run_id}:{event_suffix}",),
     )
 
 
@@ -603,7 +606,9 @@ def _verified_outcome_event(
         run.outcome != SkillOutcome.SUCCEEDED
         or verification.run_id != run.run_id
         or verification.status != OutcomeStatus.SUCCEEDED
-        or verification.signal != OutcomeSignal.BLOCK_BROKEN
+        or verification.signal not in {
+            OutcomeSignal.BLOCK_BROKEN, OutcomeSignal.RESOURCE_ACQUIRED
+        }
     ):
         return None
     payload: dict[str, str | int | float | bool] = {
@@ -618,8 +623,12 @@ def _verified_outcome_event(
     if verification.target_kind is not None:
         payload["target_kind"] = verification.target_kind
     return RuntimeEvent(
-        event_id=f"skill-run:{run.run_id}:block-broken",
-        kind=RuntimeEventKind.BLOCK_BROKEN,
+        event_id=f"skill-run:{run.run_id}:{verification.signal.value.replace('_', '-')}",
+        kind=(
+            RuntimeEventKind.BLOCK_BROKEN
+            if verification.signal == OutcomeSignal.BLOCK_BROKEN
+            else RuntimeEventKind.RESOURCE_ACQUIRED
+        ),
         observed_ns=observed_ns,
         trajectory_id=trajectory_id,
         payload=payload,
@@ -1248,6 +1257,9 @@ class AgentRuntime:
             self._policy_warmup_error = f"{type(exc).__name__}: {exc}"
 
     def tick(self) -> None:
+        # Capture is synchronous and precedes action selection. A later tick's
+        # deterministic hotbar evidence can only arrive after _send_motor below
+        # returns; a rejected send raises, while a suppressed send stops the run.
         capture_started = time.perf_counter()
         frame = self.perception.capture_once()
         self.metrics.frames += 1
@@ -1388,6 +1400,9 @@ class AgentRuntime:
                     self.skills.get("collect_recent_drop"),
                     run_id=uuid.uuid4().hex,
                     context_key=result.run.context_key,
+                    collection_hotbar_log_baseline=(
+                        self.executor.mining_hotbar_log_baseline
+                    ),
                 )
                 return
             if self._route_headroom_terminal(result):

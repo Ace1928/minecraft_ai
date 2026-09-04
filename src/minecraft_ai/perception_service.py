@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -52,6 +53,9 @@ class FastPerception(Protocol):
 
 BEDROCK_INVENTORY_ZERO_SOURCE = (
     "deterministic:bedrock-1.26.45.1-classic-inventory-v1:not-training-label"
+)
+BEDROCK_HOTBAR_LOG_COUNT_SOURCE = (
+    "deterministic:bedrock-1.26.45.1-classic-hud-hotbar-oak-logs-v2:not-training-label"
 )
 
 
@@ -517,6 +521,12 @@ class BootstrapFastPerception:
 
     model_id: str = "bootstrap-rgb-v1"
     training_label_eligible: bool = False
+    _hotbar_geometry_cache: dict[tuple[int, int], tuple[int, int]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def infer(self, frame: CapturedFrame) -> tuple[PerceptionFact, ...]:
         if not frame.bgra or frame.width <= 0 or frame.height <= 0:
@@ -568,6 +578,7 @@ class BootstrapFastPerception:
         safety_source = "safety:bedrock-hud-v1:not-training-label"
         safety_values: tuple[tuple[str, str | int | float | bool], ...] = ()
         death_screen = bedrock_death_screen_present(frame)
+        in_world_hud = False
         if death_screen:
             safety_values = (
                 ("scene.playable", False),
@@ -631,6 +642,37 @@ class BootstrapFastPerception:
             )
             for key, value in safety_values
         )
+        if not ui_overlay and in_world_hud:
+            pixels = _numpy_bgra(frame)
+            geometry = self._hotbar_geometry_cache.get((frame.width, frame.height))
+            if geometry is not None and not _classic_hotbar_geometry_matches(
+                pixels,
+                geometry,
+            ):
+                self._hotbar_geometry_cache.pop((frame.width, frame.height), None)
+                geometry = None
+            if geometry is None and pixels is not None:
+                geometry = _classic_hotbar_geometry(pixels)
+                if geometry is not None:
+                    self._hotbar_geometry_cache[(frame.width, frame.height)] = geometry
+            hotbar_logs = (
+                None
+                if pixels is None or geometry is None
+                else _classic_hotbar_log_count(pixels, geometry=geometry)
+            )
+            if hotbar_logs is not None:
+                facts.append(
+                    PerceptionFact(
+                        key="inventory.hotbar.logs",
+                        value=hotbar_logs,
+                        confidence=0.995,
+                        # Bind possession to these captured pixels, not the
+                        # later inference clock used by diagnostic facts.
+                        observed_ns=frame.captured_ns,
+                        source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+                        expires_after_ms=250,
+                    )
+                )
         if inventory_overlay:
             inventory_slots = _bedrock_inventory_slot_observation(frame)
             if inventory_slots is not None and inventory_slots.wood_absence_certified:
@@ -821,6 +863,375 @@ def _bedrock_top_ui_chrome_present(frame: CapturedFrame) -> bool:
             bright += int(luma > 180 * 256)
             sampled += 1
     return bool(sampled > 0 and bright / sampled >= 0.90)
+
+
+# This deliberately narrow hotbar reader is pinned to Bedrock 1.26.45.1's
+# classic HUD at the installed 4-pixel UI scale. Its oak-log appearance was
+# calibrated from full-frame SHA-256
+# 8030dcaadb885e78249874bd349f674f54e28c3afb54168f8093a961a207fcf2;
+# the corresponding vanilla side/top textures hash to
+# 7abc3068a65c71784b14562ba254e3420c6d6301c8eb33d29fd25084f7e95c86 and
+# b955d6f267fc9a5b34aaa6ebae0db54b0bad45b4d46c2dbc80b904e79e3347d4.
+# Dirt negatives and digit calibration include full-frame hashes
+# b52d54b4304b36139734409cb9d332f09dd01be1fa97de4d9b7bfdd50719bed1
+# and 78269c29397779015f18001ac0199b64cd4fc4b99fe4374093a49bac2a8a3edd.
+# The 0-9 bitmaps are the first five ink columns and seven ink rows from the
+# installed version's ``font/default8.png`` (SHA-256
+# 8fb37d2fc1e61ab0cf4bdbb315435bce1da425ea8471a0b2ca815d5a7b74e193).
+# Counts use that fixed game glyph atlas and layout; this is not general OCR.
+# Only compact statistics live in source; operator screenshots remain outside
+# the repository and are never treated as training labels.
+_CLASSIC_HOTBAR_RAIL_MIN_LENGTH = 628
+_CLASSIC_HOTBAR_RAIL_MAX_LENGTH = 636
+_CLASSIC_HOTBAR_FIRST_SLOT_FROM_RAIL = 94
+_CLASSIC_HOTBAR_SLOT_PITCH = 80
+_CLASSIC_HOTBAR_LOG_RGB_5X13 = bytes.fromhex(
+    "383d19685834937648ac8a56b28f58a98953a1824ba5854fad8f56a3844f91744563562f3e3f1c"
+    "625030977d4d9c7c47b3915aa1814ba4854ea5864fa3824ba68750b3915ba98751a4855377623c"
+    "4a3921524124795f389a7e4bac8c55ae8c57a5834ca78751aa8a53a483508066404a3a20392c19"
+    "3a2c1a46371f4d3b214c3b2079603a9c7f4dac8c58a586527f653e4e3c232c220f33291b372b1c"
+    "4939204a391f47372242341d524127584424715c39503b21322616392c1b342718322719342719"
+)
+_CLASSIC_HOTBAR_DIRT_RGB_5X13 = bytes.fromhex(
+    "32261059432897745874563c92694779543b815b3f996e4f7e583c906844886b50735539423216"
+    "8f6a4b7c5b3f8e6547855f4384654f8862427a573c7e573a8f6b4d7d583d785338906748815d42"
+    "63442b73543d87603f845c3d8863458a63438e66449c72538162468a6247856043583d284a3424"
+    "5c43316549325f48366a4d357f5c41795538865f4089614674543c5f48344431213e2d1e423123"
+    "5c422d60422b60432e74533963432b75543b7c5b40654a32412c1d4434294a36283e2d1f402d1e"
+)
+_CLASSIC_HOTBAR_DIGITS_5X7 = {
+    0: (".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."),
+    1: ("..#..", ".##..", "..#..", "..#..", "..#..", "..#..", "#####"),
+    2: (".###.", "#...#", "....#", "..##.", ".#...", "#...#", "#####"),
+    3: (".###.", "#...#", "....#", "..##.", "....#", "#...#", ".###."),
+    4: ("...##", "..#.#", ".#..#", "#...#", "#####", "....#", "....#"),
+    5: ("#####", "#....", "####.", "....#", "....#", "#...#", ".###."),
+    6: ("..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###."),
+    7: ("#####", "#...#", "....#", "...#.", "..#..", "..#..", "..#.."),
+    8: (".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."),
+    9: (".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.."),
+}
+_CLASSIC_HOTBAR_MAX_VERIFIED_COUNT = 16
+
+
+def bedrock_hotbar_log_count(frame: CapturedFrame) -> int | None:
+    """Read exact visible oak-log stacks from the pinned classic hotbar.
+
+    This is a template observer, not OCR and not a generic item classifier.
+    Every slot must be a calibrated oak log, calibrated dirt, or certified empty;
+    unknown items (including other log species) make the entire count unknown.
+    A recognized log needs either no count glyph (one) or a pinned font match
+    from 2 through 16. This counts only the visible hotbar, never hidden inventory. Any UI
+    scale, geometry, icon, or count uncertainty returns ``None``.
+    """
+    if not frame.bgra or frame.width < 1280 or frame.height < 700:
+        return None
+    if not bedrock_in_world_hud_present(frame):
+        return None
+    pixels = _numpy_bgra(frame)
+    if pixels is None:
+        return None
+    geometry = _classic_hotbar_geometry(pixels)
+    if geometry is None:
+        return None
+    return _classic_hotbar_log_count(pixels, geometry=geometry)
+
+
+def _classic_hotbar_log_count(
+    pixels: Any,
+    *,
+    geometry: tuple[int, int],
+) -> int | None:
+    first_slot_x, rail_y = geometry
+    total = 0
+    for slot in range(9):
+        slot_x = first_slot_x + slot * _CLASSIC_HOTBAR_SLOT_PITCH
+        classification = _classic_hotbar_slot_kind(pixels, slot_x=slot_x, rail_y=rail_y)
+        if classification == "ambiguous":
+            return None
+        if classification != "log":
+            continue
+        count = _classic_hotbar_stack_count(pixels, slot_x=slot_x, rail_y=rail_y)
+        if count is None:
+            return None
+        total += count
+    return total
+
+
+def _classic_hotbar_geometry_matches(
+    pixels: Any | None,
+    geometry: tuple[int, int],
+) -> bool:
+    """Cheaply validate cached rail geometry against the current frame."""
+
+    if pixels is None:
+        return False
+    numpy = importlib.import_module("numpy")
+    first_slot_x, rail_y = geometry
+    height, width = pixels.shape[:2]
+    rail_x = first_slot_x + _CLASSIC_HOTBAR_FIRST_SLOT_FROM_RAIL
+    rail_width = (_CLASSIC_HOTBAR_SLOT_PITCH * 8) - 8
+    if (
+        rail_x < 1
+        or rail_y < 1
+        or rail_y + 4 > height
+        or rail_x + rail_width >= width
+    ):
+        return False
+    rail = pixels[rail_y : rail_y + 4, rail_x : rail_x + rail_width, :3].astype(
+        numpy.int16
+    )
+    high = rail.max(axis=2)
+    low = rail.min(axis=2)
+    neutral = (high - low <= 18) & (rail[:, :, 2] >= 85) & (rail[:, :, 2] <= 235)
+    before = pixels[rail_y : rail_y + 4, rail_x - 1, :3].astype(numpy.int16)
+    after = pixels[rail_y : rail_y + 4, rail_x + rail_width, :3].astype(numpy.int16)
+    return bool(
+        float(neutral.mean()) >= 0.98
+        and not _classic_hotbar_neutral_column(before)
+        and not _classic_hotbar_neutral_column(after)
+        and _classic_hotbar_slot_dividers_match(pixels, geometry)
+    )
+
+
+def _classic_hotbar_slot_dividers_match(
+    pixels: Any,
+    geometry: tuple[int, int],
+) -> bool:
+    """A horizontal world stripe is not a HUD: require its vertical slot grid."""
+    numpy = importlib.import_module("numpy")
+    first_slot_x, rail_y = geometry
+    # The first selected slot's border has different geometry; the seven
+    # subsequent dividers have the same pinned four-pixel neutral inner rail.
+    y0, y1 = rail_y + 12, rail_y + 54
+    if y1 > pixels.shape[0]:
+        return False
+    columns = first_slot_x + numpy.arange(2, 9) * _CLASSIC_HOTBAR_SLOT_PITCH
+    columns = (columns[:, None] + numpy.arange(4)).reshape(-1)
+    dividers = pixels[y0:y1, columns, :3].astype(numpy.int16).reshape(42, 7, 4, 3)
+    high = dividers.max(axis=3)
+    low = dividers.min(axis=3)
+    neutral = (high - low <= 22) & (dividers[:, :, :, 2] >= 70)
+    neutral &= dividers[:, :, :, 2] <= 235
+    return bool(numpy.all(neutral.mean(axis=(0, 2)) >= 0.96))
+
+
+def _classic_hotbar_neutral_column(column: Any) -> bool:
+    high = column.max(axis=1)
+    low = column.min(axis=1)
+    return bool(
+        (((high - low) <= 18) & (column[:, 2] >= 85) & (column[:, 2] <= 235)).mean()
+        >= 0.75
+    )
+
+
+def _classic_hotbar_geometry(pixels: Any) -> tuple[int, int] | None:
+    """Locate the four-row neutral rail immediately above classic hotbar slots."""
+    numpy = importlib.import_module("numpy")
+    height, width = pixels.shape[:2]
+    y_start, y_end = max(0, height - 160), max(0, height - 40)
+    x_start, x_end = int(width * 0.30), int(width * 0.75)
+    rows = pixels[y_start:y_end, x_start:x_end, :3].astype(numpy.int16)
+    high = rows.max(axis=2)
+    low = rows.min(axis=2)
+    neutral = (high - low <= 18) & (rows[:, :, 2] >= 85) & (rows[:, :, 2] <= 235)
+    transitions = numpy.diff(
+        numpy.pad(neutral.astype(numpy.int8), ((0, 0), (1, 1))),
+        axis=1,
+    )
+    start_rows, starts = numpy.nonzero(transitions == 1)
+    end_rows, ends = numpy.nonzero(transitions == -1)
+    if not numpy.array_equal(start_rows, end_rows):
+        return None
+    starts = starts + x_start
+    ends = ends - 1 + x_start
+    lengths = ends - starts + 1
+    centers = (starts + ends) / 2
+    selected = (
+        (lengths >= _CLASSIC_HOTBAR_RAIL_MIN_LENGTH)
+        & (lengths <= _CLASSIC_HOTBAR_RAIL_MAX_LENGTH)
+        & (centers >= width * 0.45)
+        & (centers <= width * 0.60)
+    )
+    candidates = tuple(
+        (int(y_start + row), int(start), int(end))
+        for row, start, end in zip(
+            start_rows[selected],
+            starts[selected],
+            ends[selected],
+            strict=True,
+        )
+    )
+    for index in range(3, len(candidates)):
+        group = candidates[index - 3 : index + 1]
+        if any(
+            current[0] != previous[0] + 1
+            or abs(current[1] - previous[1]) > 1
+            or abs(current[2] - previous[2]) > 1
+            for previous, current in zip(group, group[1:], strict=False)
+        ):
+            continue
+        first_y, first_start, _ = group[0]
+        first_slot_x = first_start - _CLASSIC_HOTBAR_FIRST_SLOT_FROM_RAIL
+        if (
+            first_slot_x < 0
+            or first_slot_x + 8 * _CLASSIC_HOTBAR_SLOT_PITCH + 78 > width
+            or first_y + 58 > height
+        ):
+            return None
+        geometry = first_slot_x, first_y
+        if _classic_hotbar_geometry_matches(pixels, geometry):
+            return geometry
+    return None
+
+
+def _classic_hotbar_slot_kind(
+    pixels: Any,
+    *,
+    slot_x: int,
+    rail_y: int,
+) -> Literal["log", "other", "ambiguous"]:
+    numpy = importlib.import_module("numpy")
+    patch = pixels[rail_y + 18 : rail_y + 38, slot_x + 20 : slot_x + 72, :3]
+    if patch.shape != (20, 52, 3):
+        return "ambiguous"
+    # Captures are BGRA; the calibrated compact template is RGB.
+    patch = patch[:, :, ::-1].astype(numpy.int32)
+    grid = numpy.rint(
+        patch.reshape(5, 4, 13, 4, 3).mean(axis=(1, 3))
+    ).astype(numpy.int32)
+    template, dirt_template, mask = _classic_hotbar_template_arrays()
+    # Compare only the bright, warm diamond cells occupied by the rendered log
+    # top, then independently constrain every remaining cell. The second gate
+    # prevents an arbitrary icon/background that copies only the old mask from
+    # being certified as a log.
+    difference = numpy.abs(grid - template)
+    mean_difference = float(difference[mask].mean())
+    if (
+        mean_difference <= 8.0
+        and float(numpy.percentile(difference.max(axis=2)[mask], 95)) <= 20.0
+        and float(difference[~mask].mean()) <= 18.0
+        and float(numpy.percentile(difference.max(axis=2)[~mask], 95)) <= 45.0
+    ):
+        return "log"
+    dirt_difference = numpy.abs(grid - dirt_template)
+    if (
+        float(dirt_difference.mean()) <= 4.0
+        and float(numpy.percentile(dirt_difference.max(axis=2), 95)) <= 14.0
+    ):
+        return "other"
+    if _classic_hotbar_slot_empty(pixels, slot_x=slot_x, rail_y=rail_y):
+        return "other"
+    return "ambiguous"
+
+
+@lru_cache(maxsize=1)
+def _classic_hotbar_template_arrays() -> tuple[Any, Any, Any]:
+    """Compile immutable embedded templates once for the realtime fast path."""
+
+    numpy = importlib.import_module("numpy")
+    log = numpy.frombuffer(_CLASSIC_HOTBAR_LOG_RGB_5X13, dtype=numpy.uint8).reshape(
+        5,
+        13,
+        3,
+    ).astype(numpy.int32)
+    dirt = numpy.frombuffer(_CLASSIC_HOTBAR_DIRT_RGB_5X13, dtype=numpy.uint8).reshape(
+        5,
+        13,
+        3,
+    ).astype(numpy.int32)
+    mask = (log.mean(axis=2) > 75) & (log[:, :, 0] - log[:, :, 2] > 30)
+    for value in (log, dirt, mask):
+        value.flags.writeable = False
+    return log, dirt, mask
+
+
+def _classic_hotbar_slot_empty(
+    pixels: Any,
+    *,
+    slot_x: int,
+    rail_y: int,
+) -> bool:
+    """Certify a low-detail translucent slot, never an arbitrary non-log item."""
+    numpy = importlib.import_module("numpy")
+    bottom = min(pixels.shape[0], rail_y + 67)
+    patch = pixels[rail_y + 11 : bottom, slot_x + 12 : slot_x + 72, :3].astype(
+        numpy.float32
+    )
+    if patch.shape[0] < 40 or patch.shape[1:] != (60, 3):
+        return False
+    gray = patch.mean(axis=2)
+    edge_strength = (
+        float(numpy.abs(numpy.diff(gray, axis=0)).mean())
+        + float(numpy.abs(numpy.diff(gray, axis=1)).mean())
+    ) / 2
+    center = patch[7:27, 8:60]
+    border = numpy.concatenate(
+        (
+            patch[:8].reshape(-1, 3),
+            patch[-8:].reshape(-1, 3),
+            patch[:, :8].reshape(-1, 3),
+            patch[:, -8:].reshape(-1, 3),
+        ),
+        axis=0,
+    )
+    return bool(
+        float(gray.std()) <= 18.0
+        and edge_strength <= 4.5
+        and abs(float(center.mean() - border.mean())) <= 8.0
+    )
+
+
+def _classic_hotbar_stack_count(
+    pixels: Any,
+    *,
+    slot_x: int,
+    rail_y: int,
+) -> int | None:
+    """Decode only pinned 5x7 atlas glyphs through 16; no glyph means one."""
+    numpy = importlib.import_module("numpy")
+    height = pixels.shape[0]
+    available_bottom = min(height, rail_y + 72)
+    # Bedrock right-aligns the final 5-pixel glyph at +58 and advances a prior
+    # glyph by six pixels. At the pinned 4-pixel UI scale this is an exact
+    # 11x7 logical-cell region for all current survival counts (1..16).
+    patch = pixels[rail_y + 44 : available_bottom, slot_x + 34 : slot_x + 78, :3]
+    if patch.shape[1:] != (44, 3) or patch.shape[0] < 12:
+        return None
+    high = patch.max(axis=2).astype(numpy.int16)
+    low = patch.min(axis=2).astype(numpy.int16)
+    luma = patch[:, :, :3].mean(axis=2)
+    white = (high - low <= 35) & (luma >= 210)
+    if int(white.sum()) <= 2:
+        return 1
+    if patch.shape[0] != 28:
+        return None
+    fractions = white.reshape(7, 4, 11, 4).mean(axis=(1, 3))
+    # Antialiasing or partial glyphs land in the indeterminate band.
+    if bool(((fractions > 0.15) & (fractions < 0.65)).any()):
+        return None
+    observed = tuple(
+        "".join("#" if fractions[row, column] >= 0.65 else "." for column in range(11))
+        for row in range(7)
+    )
+    matches = tuple(
+        value
+        for value in range(2, _CLASSIC_HOTBAR_MAX_VERIFIED_COUNT + 1)
+        if observed == _classic_hotbar_count_template(value)
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
+@lru_cache(maxsize=_CLASSIC_HOTBAR_MAX_VERIFIED_COUNT - 1)
+def _classic_hotbar_count_template(value: int) -> tuple[str, ...]:
+    digits = str(value)
+    if len(digits) == 1:
+        return tuple("......" + row for row in _CLASSIC_HOTBAR_DIGITS_5X7[value])
+    if len(digits) == 2:
+        left = _CLASSIC_HOTBAR_DIGITS_5X7[int(digits[0])]
+        right = _CLASSIC_HOTBAR_DIGITS_5X7[int(digits[1])]
+        return tuple(a + "." + b for a, b in zip(left, right, strict=True))
+    raise ValueError("classic hotbar verifier supports at most two digits")
 
 
 _CLASSIC_INVENTORY_CANONICAL_WIDTH = 1920

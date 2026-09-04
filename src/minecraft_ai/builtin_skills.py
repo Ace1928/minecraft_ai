@@ -125,7 +125,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="collect_recent_drop",
-            version=1,
+            version=2,
             name="Collect recent drop",
             description=(
                 "For a few seconds after a verified log break, move over the nearby dropped "
@@ -140,7 +140,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 ),
             ),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
-            expected_effects=("resource_pickup_attempted",),
+            expected_effects=("resource_pickup_attempted", "resource_acquired"),
             recovery_skills=("escape_submersion", "retreat_from_danger"),
             max_duration_ms=5_000,
             action_level=ActionLevel.LATENT,
