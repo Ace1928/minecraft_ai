@@ -78,6 +78,33 @@ lease until an isolated capture contains both the survival heart bank and the
 hotbar. This detector is only a launch-safety interlock; it is explicitly not a
 semantic perception source or training label.
 
+## Private-LAN operator dashboard
+
+The dashboard stays loopback-only by default. To let trusted devices on the
+same home LAN watch the live frame and submit operator instructions, bind its
+guarded LAN mode:
+
+```bash
+minecraft-ai dashboard --host 0.0.0.0 --port 8765
+```
+
+Open `http://<computer-name>.local:8765/` from another device. Avahi/Bonjour
+must be running for the memorable `.local` name; the machine's private IPv4
+address is the fallback. The checked-in
+`systemd/minecraft-ai-dashboard-live.service` uses this guarded LAN mode.
+
+LAN mode is deliberately not an unrestricted public listener. Every request
+must come from loopback, an RFC1918 subnet, or a link-local/IPv6 unique-local
+address. Numeric `Host` headers must exactly match the socket destination, and
+named access is limited to `localhost`, the machine's own mDNS name, and any
+explicit `--allowed-host <name>.local` aliases. Mutation requests retain the
+JSON-only and same-origin checks that prevent browser form CSRF and DNS
+rebinding. There is no user authentication or TLS, so expose it only on a
+trusted private LAN; do not port-forward 8765.
+
+If a host firewall is enabled, allow TCP 8765 only from the directly connected
+private subnet rather than opening the port globally.
+
 Live camera control also requires an exact-version, machine-local measured
 profile at:
 

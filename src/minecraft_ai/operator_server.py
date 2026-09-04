@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import socket
 import threading
 import time
 import uuid
@@ -66,6 +67,82 @@ MAX_BODY_BYTES = 16 * 1024
 FRAME_REFERENCE_TTL_NS = 120 * 1_000_000_000
 MAX_FRAME_REFERENCES = 8
 READINESS_TELEMETRY_MAX_AGE_NS = 5 * 1_000_000_000
+
+_RFC1918_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+_IPV4_LINK_LOCAL = ipaddress.ip_network("169.254.0.0/16")
+_IPV6_UNIQUE_LOCAL = ipaddress.ip_network("fc00::/7")
+_IPV6_LINK_LOCAL = ipaddress.ip_network("fe80::/10")
+
+
+def _private_operator_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return whether an endpoint belongs to the explicitly supported local scopes."""
+
+    if address.is_loopback:
+        return True
+    if isinstance(address, ipaddress.IPv4Address):
+        return address in _IPV4_LINK_LOCAL or any(
+            address in network for network in _RFC1918_NETWORKS
+        )
+    return address in _IPV6_UNIQUE_LOCAL or address in _IPV6_LINK_LOCAL
+
+
+def _normalize_operator_hostname(hostname: str) -> str:
+    normalized = hostname.strip().rstrip(".").casefold()
+    if not normalized or normalized != hostname.strip().rstrip(".").lower():
+        # HTTP Host is an ASCII protocol field. Refuse Unicode lookalikes rather
+        # than silently applying an IDNA policy that browsers may interpret
+        # differently.
+        raise ValueError("operator hostname must contain lowercase-compatible ASCII")
+    try:
+        encoded = normalized.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("operator hostname must contain ASCII only") from exc
+    labels = encoded.decode("ascii").split(".")
+    if any(
+        not label
+        or len(label) > 63
+        or label.startswith("-")
+        or label.endswith("-")
+        or not all(character.isalnum() or character == "-" for character in label)
+        for label in labels
+    ):
+        raise ValueError("operator hostname is invalid")
+    if normalized != "localhost" and not normalized.endswith(".local"):
+        raise ValueError("operator hostname must be localhost or an mDNS .local name")
+    return normalized
+
+
+def _default_operator_hostnames() -> frozenset[str]:
+    names = {"localhost"}
+    machine_name = socket.gethostname().strip().rstrip(".")
+    if machine_name:
+        try:
+            if machine_name.casefold().endswith(".local"):
+                names.add(_normalize_operator_hostname(machine_name))
+            else:
+                names.add(_normalize_operator_hostname(f"{machine_name}.local"))
+        except ValueError:
+            # A malformed OS hostname must not broaden the Host allowlist.
+            pass
+    return frozenset(names)
+
+
+def _validate_dashboard_bind_address(host: str) -> ipaddress.IPv4Address:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise ValueError("dashboard host must be a numeric IPv4 address") from exc
+    if not isinstance(address, ipaddress.IPv4Address):
+        raise ValueError("dashboard currently supports IPv4 binding only")
+    if not (address.is_unspecified or _private_operator_address(address)):
+        raise ValueError(
+            "dashboard must bind to loopback, RFC1918/link-local, or the IPv4 wildcard"
+        )
+    return address
 
 
 @dataclass(frozen=True)
@@ -493,29 +570,61 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             )
 
     def _validate_mutation_request(self) -> None:
-        self._validate_request_host()
+        requested_host, requested_port = self._validate_request_host()
         media_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().casefold()
         if media_type != "application/json":
             raise ValueError("Content-Type must be application/json")
         origin = self.headers.get("Origin")
         if origin is None:
             return
-        parsed = urlparse(origin)
-        if parsed.scheme not in {"http", "https"} or parsed.netloc != self.headers.get("Host"):
+        try:
+            parsed = urlparse(origin)
+            origin_host = parsed.hostname
+            origin_port = parsed.port
+        except ValueError as exc:
+            raise ValueError("cross-origin operator mutations are not allowed") from exc
+        if (
+            parsed.scheme not in {"http", "https"}
+            or origin_host is None
+            or origin_port is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+            or self._canonical_request_host(origin_host) != requested_host
+            or origin_port != requested_port
+        ):
             raise ValueError("cross-origin operator mutations are not allowed")
 
-    def _validate_request_host(self) -> None:
-        """Reject DNS-rebound requests before exposing any operator route."""
+    @staticmethod
+    def _canonical_request_host(host: str) -> str:
+        try:
+            return str(ipaddress.ip_address(host))
+        except ValueError:
+            return _normalize_operator_hostname(host)
+
+    def _validate_request_host(self) -> tuple[str, int]:
+        """Allow only exact local endpoints and private-source clients.
+
+        Comparing numeric Host values with the socket's actual local endpoint
+        prevents a wildcard listener from accepting arbitrary private-looking
+        Host headers. Named access is an exact mDNS allowlist, which preserves
+        DNS-rebinding protection while permitting a memorable LAN URL.
+        """
 
         raw_host = self.headers.get("Host", "").strip()
         if not raw_host:
-            raise ValueError("Host must identify the bound loopback operator endpoint")
+            raise ValueError("Host must identify an allowed private-LAN operator endpoint")
         try:
             parsed = urlparse(f"//{raw_host}")
             requested_host = parsed.hostname
             requested_port = parsed.port
         except ValueError as exc:
-            raise ValueError("Host must identify the bound loopback operator endpoint") from exc
+            raise ValueError(
+                "Host must identify an allowed private-LAN operator endpoint"
+            ) from exc
         server_address = self.server.server_address
         if (
             requested_host is None
@@ -528,19 +637,45 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             or not isinstance(server_address, tuple)
             or len(server_address) < 2
         ):
-            raise ValueError("Host must identify the bound loopback operator endpoint")
+            raise ValueError("Host must identify an allowed private-LAN operator endpoint")
         try:
-            requested_address = ipaddress.ip_address(requested_host)
-            bound_address = ipaddress.ip_address(str(server_address[0]))
             bound_port = int(server_address[1])
         except (TypeError, ValueError) as exc:
-            raise ValueError("Host must identify the bound loopback operator endpoint") from exc
-        if (
-            not requested_address.is_loopback
-            or requested_address != bound_address
-            or requested_port != bound_port
+            raise ValueError(
+                "Host must identify an allowed private-LAN operator endpoint"
+            ) from exc
+        if requested_port != bound_port:
+            raise ValueError("Host must identify an allowed private-LAN operator endpoint")
+
+        try:
+            client_address = ipaddress.ip_address(str(self.client_address[0]))
+            local_address = ipaddress.ip_address(str(self.connection.getsockname()[0]))
+        except (AttributeError, IndexError, TypeError, ValueError) as exc:
+            raise ValueError("operator connection endpoint could not be verified") from exc
+        if not _private_operator_address(client_address) or not _private_operator_address(
+            local_address
         ):
-            raise ValueError("Host must identify the bound loopback operator endpoint")
+            raise ValueError("operator requests are restricted to private-LAN clients")
+
+        canonical_host = self._canonical_request_host(requested_host)
+        try:
+            requested_address = ipaddress.ip_address(canonical_host)
+        except ValueError:
+            allowed_hostnames = getattr(
+                self.server,
+                "operator_allowed_hostnames",
+                _default_operator_hostnames(),
+            )
+            if canonical_host not in allowed_hostnames:
+                raise ValueError(
+                    "Host must identify an allowed private-LAN operator endpoint"
+                ) from None
+        else:
+            if requested_address != local_address:
+                raise ValueError(
+                    "Host must identify the connection's exact local operator endpoint"
+                )
+        return canonical_host, requested_port
 
     def _read_body(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length", "")
@@ -805,16 +940,19 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
         del format, args
 
 
-def serve_operator_dashboard(*, host: str = "127.0.0.1", port: int = 8765) -> None:
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError as exc:
-        raise ValueError("dashboard host must be a numeric loopback address") from exc
-    if not address.is_loopback:
-        raise ValueError("dashboard is local-only and must bind to a loopback address")
+def serve_operator_dashboard(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    allowed_hosts: tuple[str, ...] = (),
+) -> None:
+    _validate_dashboard_bind_address(host)
     if not 1 <= port <= 65535:
         raise ValueError("dashboard port must be between 1 and 65535")
     server = ThreadingHTTPServer((host, port), OperatorRequestHandler)
+    configured_hostnames = set(_default_operator_hostnames())
+    configured_hostnames.update(_normalize_operator_hostname(name) for name in allowed_hosts)
+    server.operator_allowed_hostnames = frozenset(configured_hostnames)  # type: ignore[attr-defined]
     try:
         server.serve_forever(poll_interval=0.25)
     finally:

@@ -1,0 +1,16 @@
+[Unit]
+Description=Minecraft AI operator dashboard (private-LAN telemetry + operator input)
+After=graphical-session.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/minecraft_ai
+ExecStart=%h/minecraft_ai/.venv/bin/python %h/minecraft_ai/.venv/bin/minecraft-ai dashboard --host 0.0.0.0 --port 8765
+Restart=on-failure
+RestartSec=5
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=%t
+
+[Install]
+WantedBy=default.target

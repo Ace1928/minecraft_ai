@@ -985,13 +985,25 @@ def logs(lines: int = typer.Option(80, min=1, max=2000)) -> None:
 
 @app.command()
 def dashboard(
-    host: str = typer.Option("127.0.0.1", help="Numeric loopback address."),
+    host: str = typer.Option(
+        "127.0.0.1",
+        help="Numeric loopback/private IPv4 address, or 0.0.0.0 for guarded LAN access.",
+    ),
     port: int = typer.Option(8765, min=1, max=65535),
+    allowed_hosts: list[str] | None = typer.Option(
+        None,
+        "--allowed-host",
+        help="Exact localhost or .local Host name to permit; repeat for aliases.",
+    ),
 ) -> None:
-    """Serve the local telemetry and high-level agent interaction surface."""
+    """Serve the private-LAN telemetry and high-level agent interaction surface."""
     _ensure_dirs()
     print(f"[green]Operator dashboard[/green] http://{host}:{port}/")
-    serve_operator_dashboard(host=host, port=port)
+    serve_operator_dashboard(
+        host=host,
+        port=port,
+        allowed_hosts=tuple(allowed_hosts or ()),
+    )
 
 
 @app.command("record-human")

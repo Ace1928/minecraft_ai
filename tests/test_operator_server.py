@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import threading
 import time
@@ -18,6 +19,9 @@ from minecraft_ai.agent_lifecycle import AgentProcess
 from minecraft_ai.operator_server import (
     OperatorRequestHandler,
     _capture_live_bedrock_frame,
+    _default_operator_hostnames,
+    _private_operator_address,
+    _validate_dashboard_bind_address,
     operator_readiness,
 )
 from minecraft_ai.perception_service import frame_dhash
@@ -129,6 +133,132 @@ def test_stale_agent_descriptor_cannot_authorize_host_capture(monkeypatch) -> No
     )
 
     assert _capture_live_bedrock_frame() is None
+
+
+class _EndpointSocket:
+    def __init__(self, address: str, port: int = 8765) -> None:
+        self._endpoint = (address, port)
+
+    def getsockname(self) -> tuple[str, int]:
+        return self._endpoint
+
+
+def _request_validator(
+    *,
+    request_host: str,
+    client_address: str,
+    local_address: str,
+    allowed_hostnames: frozenset[str] = frozenset({"localhost", "minecraft-ai.local"}),
+) -> OperatorRequestHandler:
+    handler = object.__new__(OperatorRequestHandler)
+    handler.headers = {"Host": request_host}
+    handler.client_address = (client_address, 50_000)
+    handler.connection = _EndpointSocket(local_address)
+    handler.server = SimpleNamespace(
+        server_address=("0.0.0.0", 8765),
+        operator_allowed_hostnames=allowed_hostnames,
+    )
+    return handler
+
+
+@pytest.mark.parametrize(
+    "address",
+    (
+        "127.0.0.1",
+        "10.1.2.3",
+        "172.16.0.1",
+        "172.31.255.254",
+        "192.168.4.166",
+        "169.254.20.3",
+        "::1",
+        "fd12:3456::1",
+        "fe80::1",
+    ),
+)
+def test_operator_private_address_scopes_are_explicit(address: str) -> None:
+    assert _private_operator_address(ipaddress.ip_address(address)) is True
+
+
+@pytest.mark.parametrize(
+    "address",
+    ("0.0.0.0", "100.64.0.1", "172.15.255.255", "172.32.0.1", "8.8.8.8", "2001:4860:4860::8888"),
+)
+def test_operator_private_address_scopes_reject_non_lan(address: str) -> None:
+    assert _private_operator_address(ipaddress.ip_address(address)) is False
+
+
+def test_dashboard_bind_accepts_guarded_ipv4_wildcard_and_rejects_public() -> None:
+    assert str(_validate_dashboard_bind_address("0.0.0.0")) == "0.0.0.0"
+    assert str(_validate_dashboard_bind_address("192.168.4.166")) == "192.168.4.166"
+    with pytest.raises(ValueError, match="loopback, RFC1918/link-local"):
+        _validate_dashboard_bind_address("8.8.8.8")
+    with pytest.raises(ValueError, match="IPv4 binding only"):
+        _validate_dashboard_bind_address("::")
+
+
+def test_lan_request_accepts_exact_destination_ip_or_allowlisted_mdns_name() -> None:
+    numeric = _request_validator(
+        request_host="192.168.4.166:8765",
+        client_address="192.168.4.50",
+        local_address="192.168.4.166",
+    )
+    assert numeric._validate_request_host() == ("192.168.4.166", 8765)
+
+    named = _request_validator(
+        request_host="Minecraft-AI.local.:8765",
+        client_address="192.168.4.50",
+        local_address="192.168.4.166",
+    )
+    assert named._validate_request_host() == ("minecraft-ai.local", 8765)
+
+
+@pytest.mark.parametrize(
+    ("request_host", "client_address", "local_address"),
+    (
+        ("192.168.4.166:8765", "8.8.8.8", "192.168.4.166"),
+        ("192.168.4.99:8765", "192.168.4.50", "192.168.4.166"),
+        ("rebind.example:8765", "192.168.4.50", "192.168.4.166"),
+        ("minecraft-ai.local:8765", "192.168.4.50", "203.0.113.20"),
+    ),
+)
+def test_lan_request_rejects_public_sources_wrong_targets_and_rebinding(
+    request_host: str,
+    client_address: str,
+    local_address: str,
+) -> None:
+    handler = _request_validator(
+        request_host=request_host,
+        client_address=client_address,
+        local_address=local_address,
+    )
+    with pytest.raises(ValueError):
+        handler._validate_request_host()
+
+
+def test_lan_mutation_requires_matching_normalized_origin() -> None:
+    handler = _request_validator(
+        request_host="Minecraft-AI.local:8765",
+        client_address="192.168.4.50",
+        local_address="192.168.4.166",
+    )
+    handler.headers.update(
+        {
+            "Content-Type": "application/json",
+            "Origin": "http://minecraft-ai.local:8765",
+        }
+    )
+    handler._validate_mutation_request()
+
+    handler.headers["Origin"] = "http://untrusted.local:8765"
+    with pytest.raises(ValueError, match="cross-origin"):
+        handler._validate_mutation_request()
+
+
+def test_default_operator_hostname_is_narrow_mdns_allowlist(monkeypatch) -> None:
+    monkeypatch.setattr("minecraft_ai.operator_server.socket.gethostname", lambda: "Eidos-Desktop")
+    assert _default_operator_hostnames() == frozenset(
+        {"localhost", "eidos-desktop.local"}
+    )
 
 
 def test_operator_pause_revokes_supervisor_before_waiting_for_agent(
