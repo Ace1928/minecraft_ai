@@ -1,0 +1,13 @@
+[Unit]
+Description=Minecraft AI operator local hostname advertisement
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/minecraft_ai/.venv/bin/python %h/minecraft_ai/scripts/publish_operator_mdns.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

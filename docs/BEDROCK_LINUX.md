@@ -93,6 +93,15 @@ must be running for the memorable `.local` name; the machine's private IPv4
 address is the fallback. The checked-in
 `systemd/minecraft-ai-dashboard-live.service` uses this guarded LAN mode.
 
+If Avahi reports `Local name collision` while publishing the computer's LAN
+address, an existing static alias can already own its reverse record. The
+optional `systemd/minecraft-ai-operator-mdns.service` advertises the computer's
+existing `.local` name without a reverse record, preserving those aliases.
+It discovers the private IPv4 address of a physical default-route interface
+and refreshes the advertisement if the address changes. Install that user
+unit and enable it alongside the dashboard; it needs `avahi-publish-address`
+from `avahi-utils`. This does not restart the game or change its input path.
+
 LAN mode is deliberately not an unrestricted public listener. Every request
 must come from loopback, an RFC1918 subnet, or a link-local/IPv6 unique-local
 address. Numeric `Host` headers must exactly match the socket destination, and
