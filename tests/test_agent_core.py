@@ -24,8 +24,10 @@ from minecraft_ai.outcome_verifier import (
     OutcomeVerification,
 )
 from minecraft_ai.perception import (
+    EvidenceRegion,
     FrameState,
     PerceptionBlackboard,
+    PerceptionEvidence,
     PerceptionFact,
     ScreenRegion,
     Track,
@@ -35,7 +37,13 @@ from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.perception_service import BEDROCK_HOTBAR_LOG_COUNT_SOURCE
 from minecraft_ai.roles import BUILTIN_ROLES, get_role
-from minecraft_ai.cognition import CognitionDecision, HighLevelController
+from minecraft_ai.cognition import (
+    BootstrapCognitionPolicy,
+    CognitionContext,
+    CognitionDecision,
+    HighLevelController,
+    planks_retry_requires_wood,
+)
 from minecraft_ai.runtime import (
     AgentRuntime,
     RuntimeMetrics,
@@ -1708,6 +1716,288 @@ def test_intermediate_mine_success_does_not_advance_plan_before_collection(
         )
 
         assert runtime._plan_index == 0
+
+
+@pytest.mark.parametrize("outcome", [SkillOutcome.FAILED, SkillOutcome.CANCELLED])
+def test_unfinished_crafting_recovery_close_does_not_consume_plan_step(
+    tmp_path: Path, outcome: SkillOutcome,
+) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime_for_learning(database)
+        runtime._plan_steps = ("craft planks", "build workbench")
+        runtime._plan_goal_id = "wood"
+        runtime._last_decision = CognitionDecision(chosen_goal_id="wood")
+        runtime.skills = build_bootstrap_skill_library()
+        runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+        failed = SkillRun(
+            run_id="failed-planks", skill_id="craft_wood_planks", context_key="wood",
+            started_ns=1, ended_ns=2, outcome=outcome,
+            failure_reason=(
+                "crafting-no-logs-observed-in-inventory"
+                if outcome == SkillOutcome.FAILED else "replan-requested"
+            ),
+        )
+        runtime._record_terminal_run(failed)
+        recovery = runtime._start_recovery_skill(
+            runtime.skills.get("close_open_inventory"), failed
+        ).model_copy(
+            update={"ended_ns": time.monotonic_ns(), "outcome": SkillOutcome.SUCCEEDED}
+        )
+        runtime._record_terminal_run(recovery)
+        runtime._record_terminal_run(recovery)
+        assert runtime._plan_index == 0
+        assert runtime.metrics.skill_successes == 1
+
+        # A real planned inventory-close task remains a normal success.
+        runtime._plan_steps = ("close inventory",)
+        planned = recovery.model_copy(update={"run_id": "planned-close"})
+        runtime._record_terminal_run(planned)
+        assert runtime._plan_index == 1
+
+
+def test_planks_retry_guard_survives_restart_and_positive_evidence_expiry(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite3"
+    with StateDatabase(path) as database:
+        runtime = _runtime_for_learning(database)
+        assert runtime._planks_retry_requires_wood() is False
+        runtime._record_terminal_run(
+            SkillRun(
+                run_id="no-logs-before-restart", skill_id="craft_wood_planks",
+                started_ns=1, ended_ns=2, outcome=SkillOutcome.FAILED,
+                failure_reason="crafting-no-logs-observed-in-inventory",
+            )
+        )
+        assert runtime._planks_retry_requires_wood() is True
+
+    with StateDatabase(path) as database:
+        resumed = _runtime_for_learning(database)
+        resumed.memories = database.load_memories()
+        assert not resumed._recent_skill_runs
+        assert resumed._planks_retry_requires_wood() is True
+        now = time.monotonic_ns()
+        resumed.blackboard = PerceptionBlackboard()
+        resumed.blackboard.publish(
+            FrameState(
+                frame_id=1, captured_ns=now, instance_id="bedrock:test", width=1, height=1,
+                facts=(PerceptionFact(
+                    key="inventory.hotbar.logs", value=0, confidence=0.995,
+                    observed_ns=now, source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+                ),),
+            )
+        )
+        assert resumed._planks_retry_requires_wood() is True
+        assert resumed.blackboard.fact("inventory.logs") is None
+        positive_ns = time.monotonic_ns()
+        resumed.blackboard.merge_semantics(
+            instance_id="bedrock:test",
+            facts=(PerceptionFact(
+                key="inventory.hotbar.logs", value=1, confidence=0.995,
+                observed_ns=positive_ns, source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+            ),),
+        )
+        assert resumed._planks_retry_requires_wood() is False
+
+    with StateDatabase(path) as database:
+        resumed_again = _runtime_for_learning(database)
+        resumed_again.memories = database.load_memories()
+        # No current count is retained. Only permission to re-audit was saved.
+        assert resumed_again._planks_retry_requires_wood() is False
+        resumed_again._record_terminal_run(
+            SkillRun(
+                run_id="fresh-no-logs", skill_id="craft_wood_planks",
+                started_ns=3, ended_ns=4, outcome=SkillOutcome.FAILED,
+                failure_reason="crafting-no-logs-observed-in-inventory",
+            )
+        )
+        assert resumed_again._planks_retry_requires_wood() is True
+
+
+@pytest.mark.parametrize("evidence_kind", ["vlm-hotbar", "bare-global", "stale", "future"])
+def test_planks_retry_rejects_untrusted_or_stale_positive_evidence(
+    tmp_path: Path, evidence_kind: str,
+) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime_for_learning(database)
+        now = time.monotonic_ns()
+        runtime._record_terminal_run(
+            SkillRun(
+                run_id="no-logs", skill_id="craft_wood_planks",
+                started_ns=now - 2_000_000_000, ended_ns=now - 1_000_000_000,
+                outcome=SkillOutcome.FAILED,
+                failure_reason="crafting-no-logs-observed-in-inventory",
+            )
+        )
+        fact = PerceptionFact(
+            key="inventory.logs" if evidence_kind == "bare-global" else "inventory.hotbar.logs",
+            value=1, confidence=0.995,
+            observed_ns=(
+                now - 500_000_000 if evidence_kind == "stale"
+                else now + 10_000_000_000 if evidence_kind == "future" else now
+            ),
+            source=(
+                "vlm:guess" if evidence_kind == "vlm-hotbar" else BEDROCK_HOTBAR_LOG_COUNT_SOURCE
+            ),
+            expires_after_ms=250,
+        )
+        runtime.blackboard = PerceptionBlackboard()
+        runtime.blackboard.publish(
+            FrameState(
+                frame_id=1, captured_ns=now, instance_id="bedrock:test", width=1, height=1,
+                facts=(fact,),
+            )
+        )
+        assert runtime._planks_retry_requires_wood() is True
+
+
+@pytest.mark.parametrize(
+    "evidence_kind,clears",
+    [
+        ("current", True), ("no-reference", False), ("before-failure", False),
+        ("at-failure", False), ("after-completion", False), ("arbitrary-source", False),
+    ],
+)
+def test_planks_retry_positive_global_count_requires_its_gui_evidence(
+    tmp_path: Path, evidence_kind: str, clears: bool,
+) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime_for_learning(database)
+        now = time.monotonic_ns()
+        runtime._record_terminal_run(
+            SkillRun(
+                run_id="no-logs", skill_id="craft_wood_planks",
+                started_ns=now - 2_000_000_000, ended_ns=now - 1_000_000_000,
+                outcome=SkillOutcome.FAILED,
+                failure_reason="crafting-no-logs-observed-in-inventory",
+            )
+        )
+        captured_ns = {
+            "before-failure": now - 2_000_000_000,
+            "at-failure": now - 1_000_000_000,
+            "after-completion": now + 1,
+        }.get(evidence_kind, now)
+        evidence = PerceptionEvidence(
+            evidence_id="frame-1:gui", frame_id=1, captured_ns=captured_ns,
+            region_kind=EvidenceRegion.GUI,
+            region=ScreenRegion(x=0, y=0, width=1, height=1),
+            pixel_sha256="a" * 64, crop_width=16, crop_height=16,
+        )
+        fact = PerceptionFact(
+            key="inventory.logs", value=1, confidence=0.995, observed_ns=now,
+            source=(
+                "arbitrary:test" if evidence_kind == "arbitrary-source"
+                else "vlm:test:grounded-inventory"
+            ),
+            expires_after_ms=250,
+            evidence_refs=() if evidence_kind == "no-reference" else (evidence.evidence_id,),
+        )
+        runtime.blackboard = PerceptionBlackboard()
+        runtime.blackboard.publish(
+            FrameState(
+                frame_id=1, captured_ns=now, instance_id="bedrock:test", width=16, height=16,
+                facts=(fact,), evidence=(evidence,),
+            )
+        )
+        assert runtime._planks_retry_requires_wood() is not clears
+        markers = [
+            memory for memory in runtime.memories.records.values()
+            if memory.source == "runtime:craft-prerequisite-repair"
+        ]
+        assert len(markers) == int(clears)
+
+
+@pytest.mark.parametrize(
+    "status,text,blocked",
+    [
+        (OperatorMessageStatus.QUEUED, "Craft planks once.", False),
+        (OperatorMessageStatus.DELIVERED, "Craft planks once.", False),
+        (OperatorMessageStatus.ACKNOWLEDGED, "Craft planks once.", True),
+        (OperatorMessageStatus.QUEUED, "Explore nearby.", True),
+    ],
+)
+def test_only_fresh_explicit_craft_request_overrides_no_logs_guard(
+    status: OperatorMessageStatus, text: str, blocked: bool,
+) -> None:
+    context = CognitionContext(
+        role=get_role("generalist"), goals=(), memories=(), promises=(), wiki=(),
+        planks_retry_requires_wood=True,
+        operator_messages=(OperatorMessage(
+            message_id="fresh-request", created_ns=1, text=text, status=status,
+        ),),
+    )
+    assert planks_retry_requires_wood(context) is blocked
+
+
+def test_planks_retry_override_selects_same_directive_as_operator_fast_path() -> None:
+    context = CognitionContext(
+        role=get_role("generalist"), goals=(), memories=(), promises=(), wiki=(),
+        planks_retry_requires_wood=True,
+        operator_messages=(
+            OperatorMessage(
+                message_id="newer-question", created_ns=2, text="What are you doing?",
+                kind=OperatorMessageKind.QUESTION,
+            ),
+            OperatorMessage(message_id="craft-once", created_ns=1, text="Craft planks once."),
+        ),
+    )
+    controller = HighLevelController(
+        _OperatorFastPathOnlyModel(), build_bootstrap_skill_library()
+    )
+    decision = controller.decide(PerceptionBlackboard(), context)
+    assert decision.skill_id == "craft_wood_planks"
+    assert decision.chosen_goal_id == "operator:craft-once"
+    assert planks_retry_requires_wood(context) is False
+    context.operator_messages = (
+        context.operator_messages[0],
+        context.operator_messages[1].model_copy(
+            update={"status": OperatorMessageStatus.ACKNOWLEDGED}
+        ),
+    )
+    assert planks_retry_requires_wood(context) is True
+
+
+def test_cognition_excludes_missing_wood_retry_but_reenables_after_repair() -> None:
+    skills = build_bootstrap_skill_library()
+    failed = SkillRun(
+        run_id="previous-craft", skill_id="craft_wood_planks", started_ns=1, ended_ns=2,
+        outcome=SkillOutcome.FAILED, failure_reason="crafting-no-logs-observed-in-inventory",
+    )
+    skills.record(failed)
+    skills.record(failed.model_copy(update={"run_id": "previous-craft-2"}))
+    context = CognitionContext(
+        role=get_role("generalist"), goals=(), memories=(), promises=(), wiki=(),
+        recent_skill_runs=(), planks_retry_requires_wood=True,
+    )
+    controller = HighLevelController(_OperatorFastPathOnlyModel(), skills)
+    board = PerceptionBlackboard()
+    assert "craft_wood_planks" not in {
+        entry["skill_id"] for entry in controller._feasible_skill_payloads(
+            board, query_text="craft planks", context=context
+        )
+    }
+    assert "craft_wood_planks" not in {
+        skill for skill, _ in controller._decision_repair_bounds(board, context).allowed_skills
+    }
+    context.planks_retry_requires_wood = False
+    context.recent_skill_runs = (failed,)
+    assert controller._blocking_skill_run(
+        CognitionDecision(skill_id="craft_wood_planks"), context
+    ) is None
+    assert "craft_wood_planks" not in controller._recently_blocked_skill_ids(context)
+    assert "craft_wood_planks" in {
+        entry["skill_id"] for entry in controller._feasible_skill_payloads(
+            board, query_text="craft planks", context=context
+        )
+    }
+
+
+def test_bootstrap_cognition_does_not_retry_blocked_crafting_plan() -> None:
+    context = CognitionContext(
+        role=get_role("generalist"), goals=(), memories=(), promises=(), wiki=(),
+        current_plan=("craft_wood_planks",), planks_retry_requires_wood=True,
+    )
+    fallback = BootstrapCognitionPolicy(build_bootstrap_skill_library())
+    for _ in range(2):
+        assert fallback.decide(PerceptionBlackboard(), context).skill_id == "explore_forward"
 
 
 def test_collection_success_persists_resource_event_and_advances_plan_once(tmp_path: Path) -> None:

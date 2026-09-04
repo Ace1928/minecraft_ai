@@ -110,6 +110,27 @@ class CognitionContext:
     plan_goal_id: str | None = None
     plan_index: int = 0
     plan_started_ns: int = 0
+    planks_retry_requires_wood: bool = False
+
+
+def planks_retry_requires_wood(context: CognitionContext) -> bool:
+    """A fresh explicit craft command permits one audit, not a permanent bypass."""
+    if not context.planks_retry_requires_wood:
+        return False
+    active = next(
+        (
+            message for message in context.operator_messages
+            if message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+        ),
+        None,
+    )
+    if (
+        active is not None
+        and active.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+        and "craft_wood_planks" in _operator_requested_skill_ids(active.text)
+    ):
+        return False
+    return True
 
 
 @dataclass
@@ -723,6 +744,7 @@ class HighLevelController:
             feasible_skill_payloads = self._feasible_skill_payloads(
                 blackboard,
                 query_text=planning_query,
+                context=context,
             )
             required_fact_keys: set[str] = set()
             for skill_payload in feasible_skill_payloads:
@@ -814,6 +836,7 @@ class HighLevelController:
                     }
                     for run in context.recent_skill_runs[:4]
                 ],
+                "planks_retry_requires_wood": planks_retry_requires_wood(context),
                 "current_plan": {
                     "goal": (
                         None if context.plan_goal_id is None else context.plan_goal_id[:128]
@@ -940,6 +963,13 @@ class HighLevelController:
                 )
             if decision.skill_id is not None:
                 selected = self.skills.get(decision.skill_id)
+                if selected.skill_id == "craft_wood_planks" and planks_retry_requires_wood(context):
+                    return self._repair_infeasible(
+                        decision,
+                        blackboard,
+                        context,
+                        reason="planks retry needs positive log evidence after inventory had none",
+                    )
                 if not initiation_satisfied(selected, blackboard):
                     missing = tuple(
                         condition.key
@@ -1111,6 +1141,7 @@ class HighLevelController:
         blackboard: PerceptionBlackboard,
         *,
         query_text: str = "",
+        context: CognitionContext | None = None,
     ) -> list[dict[str, object]]:
         ranked: list[tuple[int, float, float, str, dict[str, object]]] = []
         stop_words = {
@@ -1147,6 +1178,12 @@ class HighLevelController:
             "retreat_from_danger",
         }
         for skill in self.skills.specs.values():
+            if (
+                skill.skill_id == "craft_wood_planks"
+                and context is not None
+                and planks_retry_requires_wood(context)
+            ):
+                continue
             if not initiation_satisfied(skill, blackboard):
                 continue
             stats = self.skills.stats.get((skill.skill_id, "default"))
@@ -1230,6 +1267,7 @@ class HighLevelController:
                 key=lambda candidate: candidate.skill_id,
             )
             if initiation_satisfied(skill, blackboard)
+            and not (skill.skill_id == "craft_wood_planks" and planks_retry_requires_wood(context))
             and (allowed_skill_ids is None or skill.skill_id in allowed_skill_ids)
         )
         constraints = (
@@ -1262,6 +1300,12 @@ class HighLevelController:
                 SkillOutcome.TIMED_OUT,
             }:
                 continue
+            if (
+                recent.skill_id == "craft_wood_planks"
+                and recent.failure_reason == "crafting-no-logs-observed-in-inventory"
+                and not planks_retry_requires_wood(context)
+            ):
+                continue  # New possession evidence repaired this particular prerequisite.
             stats = self.skills.stats.get((decision.skill_id, recent.context_key))
             if stats is not None and stats.consecutive_failures >= 2:
                 return recent
@@ -1271,6 +1315,12 @@ class HighLevelController:
         blocked: set[str] = set()
         for run in context.recent_skill_runs:
             if run.outcome not in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
+                continue
+            if (
+                run.skill_id == "craft_wood_planks"
+                and run.failure_reason == "crafting-no-logs-observed-in-inventory"
+                and not planks_retry_requires_wood(context)
+            ):
                 continue
             stats = self.skills.stats.get((run.skill_id, run.context_key))
             if stats is not None and stats.consecutive_failures >= 2:
@@ -1291,6 +1341,7 @@ class HighLevelController:
             skill.skill_id
             for skill in self.skills.specs.values()
             if skill.skill_id not in blocked_skill_ids and initiation_satisfied(skill, blackboard)
+            and not (skill.skill_id == "craft_wood_planks" and planks_retry_requires_wood(context))
         )
         self.metrics.repairs += 1
         self.metrics.retry_repairs += 1
@@ -1411,6 +1462,7 @@ class HighLevelController:
             skill.skill_id
             for skill in self.skills.specs.values()
             if initiation_satisfied(skill, blackboard)
+            and not (skill.skill_id == "craft_wood_planks" and planks_retry_requires_wood(context))
         )
         self.metrics.repairs += 1
         repair_bounds = self._decision_repair_bounds(

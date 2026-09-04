@@ -16,6 +16,7 @@ from .cognition import (
     CognitionContext,
     CognitionDecision,
     HighLevelController,
+    planks_retry_requires_wood,
 )
 from .action_levels import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
@@ -33,8 +34,19 @@ from .mining_control import (
 from .models import local_model_inference_available
 from .motor import MotorIntent
 from .outcome_verifier import OutcomeKind, OutcomeSignal, OutcomeStatus, OutcomeVerification
-from .perception import ActivePerceptionQuery, PerceptionBlackboard, PerceptionFact, Track
-from .perception_service import RealtimePerceptionService, frame_dhash, perceptual_hash_distance
+from .perception import (
+    ActivePerceptionQuery,
+    EvidenceRegion,
+    PerceptionBlackboard,
+    PerceptionFact,
+    Track,
+)
+from .perception_service import (
+    BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+    RealtimePerceptionService,
+    frame_dhash,
+    perceptual_hash_distance,
+)
 from .planning import Goal
 from .roles import RoleProfile
 from .safety import MotorAction
@@ -71,6 +83,8 @@ _COGNITION_RETRY_MAX_NS = 30_000_000_000
 _OPERATOR_FOLLOWUP_DELAY_NS = 250_000_000
 _CRAFT_SEMANTIC_LATENCY_MARGIN = 1.25
 _CRAFT_SEMANTIC_MAX_REQUIRED_BUDGET_MS = 60_000
+_PLANKS_NO_LOGS_REASON = "crafting-no-logs-observed-in-inventory"
+_PLANKS_RETRY_CLEAR_MEMORY = "working:planks-retry-positive-log-evidence"
 _HEADROOM_QUERY_OUTPUT_KEYS = (
     "scene.mode",
     "scene.playable",
@@ -1148,6 +1162,10 @@ class AgentRuntime:
     _last_operator_storage_retry_ns: int = field(default=0, init=False)
     _traversal_escalation_pending: bool = field(default=False, init=False)
     _headroom_recovery: _HeadroomRecovery | None = field(default=None, init=False)
+    _plan_neutral_recovery_runs: set[str] = field(default_factory=set, init=False)
+    _planks_no_logs_failure_ns: int = field(default=0, init=False)
+    _planks_failure_memory: MemoryRecord | None = field(default=None, init=False)
+    _planks_failure_memory_initialized: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz < 0:
@@ -1293,6 +1311,7 @@ class AgentRuntime:
         self._flush_pending_operator_status_updates()
         self.telemetry.publish(self._telemetry_payload(state="running"))
         self._publish_player_chat_facts()
+        self._planks_retry_requires_wood()
         self._consume_cognition()
         self._start_cognition_if_due()
         self._request_semantics_if_due(frame.frame_id)
@@ -1417,12 +1436,7 @@ class AgentRuntime:
                 recovery_started=recovery is not None,
             )
             if recovery is not None:
-                self.executor.start(
-                    recovery,
-                    run_id=uuid.uuid4().hex,
-                    context_key=result.run.context_key,
-                    parameters=_compatible_recovery_parameters(result.run, recovery),
-                )
+                self._start_recovery_skill(recovery, result.run)
 
     def _is_headroom_child_result(self, result: ExecutionTick) -> bool:
         recovery = getattr(self, "_headroom_recovery", None)
@@ -2387,6 +2401,14 @@ class AgentRuntime:
             self._pending_operator_message_ids = ()
             self._cognition_requested = True
             return
+        if (
+            decision.skill_id == "craft_wood_planks"
+            and self._planks_retry_requires_wood()
+            and planks_retry_requires_wood(self._cognition_context())
+        ):
+            self._pending_operator_message_ids = ()
+            self._cognition_requested = True
+            return
         if self._close_crafting_gui_before_world_decision(decision):
             return
         selected_message_id = _selected_operator_message_id(
@@ -2527,11 +2549,7 @@ class AgentRuntime:
             self.blackboard,
         )
         if recovery is not None:
-            self.executor.start(
-                recovery,
-                run_id=uuid.uuid4().hex,
-                context_key=cancelled.run.context_key,
-            )
+            self._start_recovery_skill(recovery, cancelled.run)
             # The recovery's terminal result is what requests fresh cognition.
             self._cognition_requested = False
         else:
@@ -2707,6 +2725,12 @@ class AgentRuntime:
             raise ValueError("cannot record a running skill")
         if run.run_id in self._recorded_run_ids:
             return
+        neutral: set[str] = getattr(self, "_plan_neutral_recovery_runs", set())
+        if run.run_id in neutral:
+            advance_plan = False
+            neutral.discard(run.run_id)
+        if run.skill_id == "craft_wood_planks" and run.failure_reason == _PLANKS_NO_LOGS_REASON:
+            self._planks_no_logs_failure_ns = run.ended_ns or time.monotonic_ns()
         stats = self.skills.record(run)
         if len(self._recorded_run_order) == _RECORDED_RUN_ID_LIMIT:
             self._recorded_run_ids.discard(self._recorded_run_order.popleft())
@@ -2759,6 +2783,9 @@ class AgentRuntime:
         )
         if memory is not None:
             self.memories.upsert(memory)
+            if run.skill_id == "craft_wood_planks" and run.failure_reason == _PLANKS_NO_LOGS_REASON:
+                self._planks_failure_memory = memory
+                self._planks_failure_memory_initialized = True
 
         if self.state_db is None:
             return
@@ -2969,7 +2996,105 @@ class AgentRuntime:
             plan_goal_id=self._plan_goal_id,
             plan_index=self._plan_index,
             plan_started_ns=self._plan_started_ns,
+            planks_retry_requires_wood=self._planks_retry_requires_wood(),
         )
+
+    def _start_recovery_skill(self, recovery: SkillSpec, parent: SkillRun) -> SkillRun:
+        run = self.executor.start(
+            recovery,
+            run_id=uuid.uuid4().hex,
+            context_key=parent.context_key,
+            parameters=_compatible_recovery_parameters(parent, recovery),
+        )
+        if (
+            parent.skill_id == "craft_wood_planks"
+            and parent.outcome != SkillOutcome.SUCCEEDED
+            and recovery.skill_id == "close_open_inventory"
+        ):
+            self._plan_neutral_recovery_runs = {
+                *getattr(self, "_plan_neutral_recovery_runs", ()), run.run_id
+            }
+        return run
+
+    def _planks_retry_requires_wood(self) -> bool:
+        """Persist one prerequisite repair, not a stale claim of inventory absence."""
+        memories = getattr(self, "memories", None)
+        if memories is None:
+            return False
+        if not getattr(self, "_planks_failure_memory_initialized", False):
+            self._planks_failure_memory = max(
+                (
+                    memory for memory in memories.records.values()
+                    if memory.source == "runtime:verified-skill-outcome"
+                    and memory.metadata.get("skill_id") == "craft_wood_planks"
+                    and memory.metadata.get("reported_reason") == _PLANKS_NO_LOGS_REASON
+                ),
+                key=lambda memory: memory.updated_ns,
+                default=None,
+            )
+            self._planks_failure_memory_initialized = True
+        failure = self._planks_failure_memory
+        if failure is None:
+            return False  # Unknown initial inventory still receives one bounded audit.
+        cleared = memories.records.get(_PLANKS_RETRY_CLEAR_MEMORY)
+        if (
+            cleared is not None
+            and cleared.source == "runtime:craft-prerequisite-repair"
+            and cleared.metadata.get("failure_revision_ns") == failure.updated_ns
+        ):
+            return False
+        board = getattr(self, "blackboard", None)
+        if board is None:
+            return True
+        now = time.monotonic_ns()
+        for key in ("inventory.hotbar.logs", "inventory.logs"):
+            fact = board.fact(key, min_confidence=0.9, now_ns=now)
+            if (
+                fact is None
+                or not isinstance(fact.value, int)
+                or isinstance(fact.value, bool)
+                or fact.value < 1
+                or fact.observed_ns <= getattr(self, "_planks_no_logs_failure_ns", 0)
+                or not 0 <= now - fact.observed_ns <= fact.expires_after_ms * 1_000_000
+            ):
+                continue
+            if key == "inventory.hotbar.logs":
+                if fact.source != BEDROCK_HOTBAR_LOG_COUNT_SOURCE or fact.confidence < 0.99:
+                    continue
+            else:
+                latest = board.latest()
+                if not fact.source.startswith("vlm:") or latest is None or not any(
+                    evidence.region_kind == EvidenceRegion.GUI
+                    and evidence.evidence_id in fact.evidence_refs
+                    # VLM observed_ns is completion time, not capture time.
+                    # A delayed pre-failure image must not repair the prerequisite.
+                    and getattr(self, "_planks_no_logs_failure_ns", 0)
+                    < evidence.captured_ns <= fact.observed_ns
+                    for evidence in latest.evidence
+                ):
+                    continue
+            observed_ns = time.time_ns()
+            marker = MemoryRecord(
+                memory_id=_PLANKS_RETRY_CLEAR_MEMORY,
+                kind=MemoryKind.WORKING,
+                text="New positive log evidence permits a bounded planks inventory audit.",
+                created_ns=observed_ns if cleared is None else cleared.created_ns,
+                updated_ns=observed_ns,
+                confidence=fact.confidence,
+                importance=0.3,
+                source="runtime:craft-prerequisite-repair",
+                metadata={
+                    "failure_revision_ns": failure.updated_ns,
+                    "evidence_key": fact.key,
+                    "evidence_source": fact.source,
+                },
+            )
+            memories.upsert(marker)
+            if getattr(self, "state_db", None) is not None:
+                self._pending_memories[marker.memory_id] = marker
+                self._flush_pending_learning_records(force=True)
+            return False
+        return True
 
     def _telemetry_payload(self, *, state: str) -> dict[str, object]:
         running = self.executor.run
