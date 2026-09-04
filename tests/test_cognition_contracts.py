@@ -1334,7 +1334,10 @@ def test_top_level_research_request_does_not_buy_unrelated_visual_work(
         ("mine_visible_block", ("target.visible",), ("target.visible",)),
         (
             "explore_forward",
-            ("scene.horizon_visible", "scene.nearby_obstacles_detected_and_type_of_obstacle_if_any"),
+            (
+                "scene.horizon_visible",
+                "scene.nearby_obstacles_detected_and_type_of_obstacle_if_any",
+            ),
             ("obstacle.ahead",),
         ),
     ),
