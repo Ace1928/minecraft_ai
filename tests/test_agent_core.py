@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 import sqlite3
 import threading
@@ -35,7 +36,10 @@ from minecraft_ai.perception import (
 from minecraft_ai.planning import Goal, GoalScorer
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
-from minecraft_ai.perception_service import BEDROCK_HOTBAR_LOG_COUNT_SOURCE
+from minecraft_ai.perception_service import (
+    BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+    BEDROCK_HUD_SAFETY_SOURCE,
+)
 from minecraft_ai.roles import BUILTIN_ROLES, get_role
 from minecraft_ai.cognition import (
     BootstrapCognitionPolicy,
@@ -3199,7 +3203,11 @@ def test_request_replan_rearms_cognition_with_bounded_backoff() -> None:
     assert runtime._cognition_retry_not_before_ns == retry_deadline
 
 
-def test_perception_only_replan_combines_questions_and_waits_for_one_fresh_result() -> None:
+def test_perception_only_replan_combines_questions_and_waits_for_one_fresh_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_ns = [1_000_000_000]
+    monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock_ns[0])
     class _Worker:
         completed = 3
         failures = 0
@@ -3278,6 +3286,7 @@ def test_perception_only_replan_combines_questions_and_waits_for_one_fresh_resul
         (9, "fedcba9876543210"),
         (10, "fedcba9876543210"),
     ):
+        clock_ns[0] += 50_000_000
         captured_ns = time.monotonic_ns()
         runtime.perception.last_capture = CapturedFrame(
             1,
@@ -3508,6 +3517,265 @@ def test_perception_grounding_timeout_or_dead_worker_releases_play(
     assert runtime._cognition_requested is True
     assert runtime._cognition_retry_count == 1
     assert runtime._cognition_retry_not_before_ns > now_ns
+    assert runtime._explore_keep_alive() is not None
+
+
+def _publish_probe_world_frame(
+    runtime: AgentRuntime,
+    now_ns: int,
+    *,
+    frame_hash: str = "0123456789abcdef",
+    facts: tuple[PerceptionFact, ...] = (),
+) -> None:
+    latest = runtime.blackboard.raw_latest()
+    assert latest is not None
+    runtime.blackboard.publish(FrameState(
+        frame_id=latest.frame_id + 1,
+        captured_ns=now_ns,
+        instance_id=latest.instance_id,
+        width=1280,
+        height=720,
+        facts=tuple(
+            PerceptionFact(
+                key=key,
+                value=value,
+                confidence=1.0,
+                observed_ns=now_ns,
+                source=BEDROCK_HUD_SAFETY_SOURCE,
+                expires_after_ms=250,
+            )
+            for key, value in (
+                ("frame.dhash", frame_hash),
+                ("scene.playable", True),
+                ("scene.mode", "world"),
+            )
+        ) + facts,
+    ))
+
+
+def _runtime_with_published_cognition_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    clock_ns: list[int],
+    *,
+    values: tuple[tuple[str, str | int | bool], ...] = (
+        ("target.visible", True), ("obstacle.ahead", True),
+    ),
+) -> tuple[AgentRuntime, tuple[PerceptionFact, ...]]:
+    monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock_ns[0])
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+    runtime = _runtime_with_waiting_cognition_perception(now_ns=clock_ns[0])
+    clock_ns[0] += 50_000_000
+    source = "vlm:test:pending-grounding"
+    observed = tuple(
+        PerceptionFact(
+            key=key,
+            value=value,
+            confidence=0.9,
+            observed_ns=clock_ns[0],
+            source=source,
+            expires_after_ms=15_000,
+        )
+        for key, value in values
+    )
+    _publish_probe_world_frame(runtime, clock_ns[0], facts=observed + (PerceptionFact(
+        key="scene.observation_dhash",
+        value="0123456789abcdef",
+        confidence=1.0,
+        observed_ns=clock_ns[0],
+        source=source,
+        expires_after_ms=120_000,
+    ),))
+    assert runtime._cognition_perception_probe is not None
+    runtime._cognition_perception_probe = replace(
+        runtime._cognition_perception_probe,
+        requested_keys=tuple(key for key, _value in values),
+        settle_dhash="0123456789abcdef",
+    )
+    runtime.perception = SimpleNamespace(  # type: ignore[assignment]
+        active_vlm=SimpleNamespace(status=lambda: {
+            "completed": 1, "failures": 0, "thread_alive": True,
+        }),
+        semantic_available=lambda: True,
+    )
+    runtime._reconcile_cognition_perception_probe()
+    return runtime, observed
+
+
+def _attach_probe_cognition(runtime: AgentRuntime) -> Future[CognitionDecision]:
+    future: Future[CognitionDecision] = Future()
+    assert future.set_running_or_notify_cancel()
+    runtime._pending_decision = future
+    probe = runtime._cognition_perception_probe
+    assert probe is not None
+    runtime._cognition_perception_probe = replace(probe, cognition_future=future)
+    return future
+
+
+def test_perception_handoff_keeps_one_slow_cognition_feasible_then_expires_action_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_ns = [10_000_000_000]
+    runtime, observed = _runtime_with_published_cognition_probe(monkeypatch, clock_ns)
+    probe = runtime._cognition_perception_probe
+    assert probe is not None and probe.handoff_deadline_ns is not None
+    context = CognitionContext(get_role("generalist"), (), (), (), ())
+    runtime._cognition_context = lambda: context  # type: ignore[method-assign]
+    runtime.cognition_hz = 1
+    runtime.high_level = HighLevelController(
+        SimpleNamespace(model_id="slow-test"),  # type: ignore[arg-type]
+        runtime.skills,
+    )
+    callbacks: list[object] = []
+    future: Future[CognitionDecision] = Future()
+
+    def defer(callback: object, *_args: object) -> Future[CognitionDecision]:
+        callbacks.append(callback)
+        return future
+
+    runtime._pool = SimpleNamespace(submit=defer)  # type: ignore[assignment]
+
+    def complete(*_args: object, **_kwargs: object) -> CognitionDecision:
+        clock_ns[0] += 30_000_000_000
+        _publish_probe_world_frame(runtime, clock_ns[0])
+        assert not observed[0].fresh()
+        assert runtime.blackboard.fact("target.visible") is not None
+        return CognitionDecision(skill_id="approach_visible_target")
+
+    monkeypatch.setattr(runtime.high_level, "_complete", complete)
+    runtime._start_cognition_if_due()
+    runtime._start_cognition_if_due()
+    assert len(callbacks) == 1
+    assert future.set_running_or_notify_cancel()
+    decision = runtime.high_level.decide(runtime.blackboard, context)
+    assert decision.skill_id == "approach_visible_target"
+    future.set_result(decision)
+
+    runtime._consume_cognition()
+
+    assert runtime._cognition_perception_probe is None
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.skill_id == "approach_visible_target"
+    retained = runtime.blackboard.fact("target.visible")
+    assert retained is not None
+    assert retained.observed_ns == observed[0].observed_ns
+    assert retained.source == observed[0].source
+    assert retained.confidence == observed[0].confidence
+    assert retained.evidence_refs == observed[0].evidence_refs
+    assert retained.observed_ns + retained.expires_after_ms * 1_000_000 <= (
+        clock_ns[0] + 2_000_000_000
+    )
+    clock_ns[0] += 2_100_000_000
+    assert runtime.blackboard.fact("target.visible") is None
+
+
+def test_perception_handoff_rechecks_scene_before_consuming_done_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_ns = [10_000_000_000]
+    runtime, _observed = _runtime_with_published_cognition_probe(monkeypatch, clock_ns)
+    future = _attach_probe_cognition(runtime)
+    future.set_result(CognitionDecision(skill_id="approach_visible_target"))
+    clock_ns[0] += 30_000_000_000
+    _publish_probe_world_frame(runtime, clock_ns[0], frame_hash="ffffffffffffffff")
+
+    runtime._consume_cognition()
+
+    assert runtime._cognition_perception_probe is None
+    assert runtime._pending_decision is None
+    assert runtime.executor.run is None
+    assert runtime.blackboard.fact("target.visible") is None
+    assert runtime._cognition_retry_count == 1
+
+
+def test_perception_handoff_revocation_preserves_newer_fact_producer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_ns = [10_000_000_000]
+    runtime, _observed = _runtime_with_published_cognition_probe(monkeypatch, clock_ns)
+    future = _attach_probe_cognition(runtime)
+    clock_ns[0] += 1_000_000_000
+    newer = PerceptionFact(
+        key="target.visible", value=False, confidence=1.0,
+        observed_ns=clock_ns[0], source="operator:new-observation",
+    )
+    _publish_probe_world_frame(runtime, clock_ns[0], facts=(newer,))
+
+    runtime._reconcile_cognition_perception_probe()
+
+    assert runtime._cognition_perception_probe is None
+    assert runtime._pending_decision is None
+    assert future.running()  # Running inference is detached; its late result has no owner.
+    assert runtime.blackboard.fact("target.visible") == newer
+    assert runtime.blackboard.fact("obstacle.ahead") is None
+
+
+@pytest.mark.parametrize("reason", ("hazard", "timeout", "pause", "operator"))
+def test_perception_handoff_revokes_cues_and_future_on_preemption(
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    clock_ns = [10_000_000_000]
+    runtime, _observed = _runtime_with_published_cognition_probe(monkeypatch, clock_ns)
+    _attach_probe_cognition(runtime)
+    clock_ns[0] += 91_000_000_000 if reason == "timeout" else 1_000_000_000
+    facts = () if reason != "hazard" else (PerceptionFact(
+        key="danger.immediate", value=True, confidence=0.995,
+        observed_ns=clock_ns[0], source=BEDROCK_HUD_SAFETY_SOURCE,
+    ),)
+    _publish_probe_world_frame(runtime, clock_ns[0], facts=facts)
+    if reason == "pause":
+        monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: True)
+    if reason == "operator":
+        runtime.cognition_hz = 1
+        runtime._new_queued_operator_message_waiting = lambda: True  # type: ignore[method-assign]
+        runtime._cognition_context = lambda: CognitionContext(  # type: ignore[method-assign]
+            get_role("generalist"), (), (), (), (),
+        )
+        runtime._stage_operator_fast_path = lambda _context: True  # type: ignore[method-assign]
+        runtime._start_cognition_if_due()
+    else:
+        runtime._reconcile_cognition_perception_probe()
+
+    assert runtime._cognition_perception_probe is None
+    assert runtime._pending_decision is None
+    assert runtime.blackboard.fact("target.visible") is None
+    assert runtime.blackboard.fact("obstacle.ahead") is None
+    if reason == "hazard":
+        assert runtime.executor.run is not None
+        assert runtime.executor.run.skill_id == "retreat_from_danger"
+
+
+def test_perception_handoff_never_extends_possession_safety_or_success_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_ns = [10_000_000_000]
+    runtime, observed = _runtime_with_published_cognition_probe(
+        monkeypatch, clock_ns,
+        values=(
+            ("target.visible", True), ("obstacle.ahead", False),
+            ("inventory.logs", 3), ("danger.immediate", False),
+            ("target.broken", True), ("target.mineable", True),
+        ),
+    )
+    probe = runtime._cognition_perception_probe
+    assert probe is not None
+    assert tuple(fact.key for fact in probe.retained_facts) == ("target.visible",)
+    for fact in observed[1:]:
+        assert runtime.blackboard.fact(fact.key) == fact
+
+
+@pytest.mark.parametrize("values", ((), (("target.visible", False),), (("inventory.logs", 3),)))
+def test_empty_or_nonretained_perception_result_retries_without_scene_hold(
+    monkeypatch: pytest.MonkeyPatch,
+    values: tuple[tuple[str, str | int | bool], ...],
+) -> None:
+    runtime, _observed = _runtime_with_published_cognition_probe(
+        monkeypatch, [10_000_000_000], values=values,
+    )
+
+    assert runtime._cognition_perception_probe is None
+    assert runtime._cognition_requested is True
+    assert runtime._cognition_retry_count == 1
     assert runtime._explore_keep_alive() is not None
 
 

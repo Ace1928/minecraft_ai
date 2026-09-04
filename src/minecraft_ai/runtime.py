@@ -101,6 +101,8 @@ _COGNITION_RETRY_BASE_NS = 2_000_000_000
 _COGNITION_RETRY_MAX_NS = 30_000_000_000
 _COGNITION_PERCEPTION_SETTLE_TIMEOUT_NS = 2_000_000_000
 _COGNITION_PERCEPTION_GROUNDING_TIMEOUT_NS = 180_000_000_000
+_COGNITION_PERCEPTION_HANDOFF_TIMEOUT_NS = 90_000_000_000
+_COGNITION_PERCEPTION_ACTION_GRACE_NS = 2_000_000_000
 _OPERATOR_FOLLOWUP_DELAY_NS = 250_000_000
 _CRAFT_SEMANTIC_LATENCY_MARGIN = 1.25
 _CRAFT_SEMANTIC_MAX_REQUIRED_BUDGET_MS = 60_000
@@ -140,6 +142,10 @@ class _CognitionPerceptionProbe:
     settle_dhash: str | None
     settle_deadline_ns: int
     grounding_deadline_ns: int | None = None
+    handoff_deadline_ns: int | None = None
+    query_source: str | None = None
+    retained_facts: tuple[PerceptionFact, ...] = ()
+    cognition_future: concurrent.futures.Future[CognitionDecision] | None = None
 
 
 @dataclass
@@ -2750,12 +2756,18 @@ class AgentRuntime:
         return completed + failures
 
     def _reconcile_cognition_perception_probe(self) -> None:
-        """Bind a perception-only replan to settled pixels, then await publication."""
+        """Hold one matched observation through one bounded follow-up decision."""
 
         probe = getattr(self, "_cognition_perception_probe", None)
         if probe is None:
             return
         now_ns = time.monotonic_ns()
+        stop_event = getattr(self, "_stop", None)
+        if (stop_event is not None and stop_event.is_set()) or operator_pause_latched():
+            self._clear_cognition_perception_probe(probe)
+            if stop_event is not None:
+                stop_event.set()
+            return
         running = self.executor.run
         if (
             self._execution_revision != probe.execution_revision
@@ -2764,13 +2776,13 @@ class AgentRuntime:
             # Safety/operator work may take ownership while this optional wait
             # is settling. Its visual publication remains independently
             # scene-matched, but it no longer owns runtime scheduling.
-            self._cognition_perception_probe = None
+            self._clear_cognition_perception_probe(probe)
             self._cognition_requested = True
             return
         if _observed_scene_recovery(self.skills, self.blackboard) is not None:
             # The normal scene router below owns death and modal UI recovery.
             # Release this optional wait before considering any world motion.
-            self._cognition_perception_probe = None
+            self._clear_cognition_perception_probe(probe)
             self._cognition_requested = True
             return
         safety = _first_feasible_recovery(
@@ -2791,7 +2803,7 @@ class AgentRuntime:
         if safety is not None:
             # New hazard evidence must reach the existing learned escape route
             # immediately, even while the slow observation worker is occupied.
-            self._cognition_perception_probe = None
+            self._clear_cognition_perception_probe(probe)
             self._cognition_requested = True
             stop_event = getattr(self, "_stop", None)
             if (stop_event is not None and stop_event.is_set()) or operator_pause_latched():
@@ -2809,9 +2821,25 @@ class AgentRuntime:
             }
             self._execution_revision += 1
             return
+        if probe.handoff_deadline_ns is not None:
+            if (
+                now_ns >= probe.handoff_deadline_ns
+                or not self._headroom_scene_is_safe()
+                or not self._cognition_probe_scene_matches(probe, now_ns=now_ns)
+                or any(
+                    (current := self.blackboard.fact(fact.key, now_ns=now_ns)) is None
+                    or current.source != fact.source
+                    or current.observed_ns != fact.observed_ns
+                    or current.value != fact.value
+                    for fact in probe.retained_facts
+                )
+            ):
+                self._clear_cognition_perception_probe(probe)
+                self._schedule_cognition_retry(now_ns=now_ns)
+            return
         if probe.query_id is None:
             if now_ns >= probe.settle_deadline_ns:
-                self._cognition_perception_probe = None
+                self._clear_cognition_perception_probe(probe)
                 self._schedule_cognition_retry(now_ns=now_ns)
                 return
             latest = self.blackboard.raw_latest()
@@ -2876,6 +2904,7 @@ class AgentRuntime:
                 probe,
                 query_id=query_id,
                 frame_id=latest.frame_id,
+                settle_dhash=current_hash,
                 terminal_count_before=terminal_count,
                 grounding_deadline_ns=(
                     now_ns + _COGNITION_PERCEPTION_GROUNDING_TIMEOUT_NS
@@ -2889,7 +2918,7 @@ class AgentRuntime:
             # Bound ownership of the scene even if a worker stalls or stops.
             # The in-flight job is left alone; its eventual publication still
             # passes the independent visual freshness checks.
-            self._cognition_perception_probe = None
+            self._clear_cognition_perception_probe(probe)
             self._schedule_cognition_retry(now_ns=now_ns)
             return
         if not self.perception.semantic_available():
@@ -2901,9 +2930,107 @@ class AgentRuntime:
             or terminal_count <= probe.terminal_count_before
         ):
             return
-        self._cognition_perception_probe = None
+        observation = self.blackboard.fact("scene.observation_dhash", min_confidence=1.0)
+        source = None if observation is None else observation.source
+        retained = tuple(
+            fact
+            for key in probe.requested_keys
+            if key in {"target.visible", "obstacle.ahead"}
+            and (fact := self.blackboard.fact(key, min_confidence=0.7, now_ns=now_ns)) is not None
+            and fact.source == source
+            and fact.value is True
+            and observation is not None
+            and fact.observed_ns == observation.observed_ns
+        )
+        if (
+            source is None
+            or not source.startswith("vlm:")
+            or not source.endswith(f":{probe.query_id}")
+            or observation is None
+            or observation.value != probe.settle_dhash
+            or not retained
+            or not self._headroom_scene_is_safe()
+            or not self._cognition_probe_scene_matches(probe, now_ns=now_ns)
+        ):
+            # Abstention, rejected publication, or scene drift must leave the
+            # motor free and retry boundedly rather than buy an empty hold.
+            self._clear_cognition_perception_probe(probe)
+            self._schedule_cognition_retry(now_ns=now_ns)
+            return
+        deadline_ns = now_ns + _COGNITION_PERCEPTION_HANDOFF_TIMEOUT_NS
+        retained = tuple(
+            fact.model_copy(update={
+                "expires_after_ms": max(1, (deadline_ns - fact.observed_ns) // 1_000_000),
+            })
+            for fact in retained
+        )
+        latest = self.blackboard.raw_latest()
+        assert latest is not None
+        self.blackboard.merge_semantics(instance_id=latest.instance_id, facts=retained)
+        self._cognition_perception_probe = replace(
+            probe,
+            handoff_deadline_ns=deadline_ns,
+            query_source=source,
+            retained_facts=retained,
+        )
         self._clear_cognition_retry()
         self._cognition_requested = True
+
+    def _cognition_probe_scene_matches(
+        self,
+        probe: _CognitionPerceptionProbe,
+        *,
+        now_ns: int,
+    ) -> bool:
+        current = self.blackboard.fact("frame.dhash", min_confidence=1.0, now_ns=now_ns)
+        if current is None or not isinstance(current.value, str) or probe.settle_dhash is None:
+            return False
+        try:
+            return perceptual_hash_distance(probe.settle_dhash, current.value) <= 2
+        except ValueError:
+            return False
+
+    def _clear_cognition_perception_probe(
+        self,
+        probe: _CognitionPerceptionProbe,
+        *,
+        action_grace: bool = False,
+    ) -> None:
+        """Revoke only this query's lease and decision, preserving newer producers."""
+
+        future = probe.cognition_future
+        if future is not None and self._pending_decision is future:
+            future.cancel()
+            self._pending_decision = None
+            self._pending_operator_message_ids = ()
+            self._pending_operator_message_kinds = {}
+        if probe.query_source is not None:
+            latest = self.blackboard.raw_latest()
+            if action_grace and latest is not None:
+                # Preserve provenance and the original observation timestamp.
+                # Only a decision accepted on the matched view gets enough
+                # remaining lifetime to cross the next motor boundary once.
+                expires_ns = time.monotonic_ns() + _COGNITION_PERCEPTION_ACTION_GRACE_NS
+                facts = tuple(
+                    fact.model_copy(update={
+                        "expires_after_ms": min(
+                            fact.expires_after_ms,
+                            max(1, (expires_ns - fact.observed_ns) // 1_000_000),
+                        ),
+                    })
+                    for fact in probe.retained_facts
+                    if (current := self.blackboard.fact(fact.key)) is not None
+                    and current.source == probe.query_source
+                    and current.observed_ns == fact.observed_ns
+                )
+                self.blackboard.merge_semantics(instance_id=latest.instance_id, facts=facts)
+            else:
+                self.blackboard.remove_semantic_facts(
+                    tuple(fact.key for fact in probe.retained_facts),
+                    expected_source=probe.query_source,
+                )
+        if getattr(self, "_cognition_perception_probe", None) is probe:
+            self._cognition_perception_probe = None
 
     def _reconcile_craft_semantic_probe(self, active: SkillRun) -> None:
         probe = getattr(self, "_craft_semantic_probe", None)
@@ -3019,15 +3146,18 @@ class AgentRuntime:
     def _start_cognition_if_due(self) -> None:
         perception_probe = getattr(self, "_cognition_perception_probe", None)
         if perception_probe is not None:
-            if not self._new_queued_operator_message_waiting():
+            if self._new_queued_operator_message_waiting():
+                # New operator authority revokes both the scene hold and its
+                # one decision, including the query's extended planning cues.
+                self._clear_cognition_perception_probe(perception_probe)
+            elif (
+                perception_probe.handoff_deadline_ns is None
+                or perception_probe.cognition_future is not None
+            ):
                 # The VLM worker and planner share one serialized local-model
-                # lane. Repeated replans must not starve the observation they
-                # explicitly requested.
+                # lane. Permit exactly one follow-up after publication; no
+                # replanning can extend this query's bounded scene ownership.
                 return
-            # Fresh operator authority may take over immediately. The old VLM
-            # result remains scene-matched at publication and therefore cannot
-            # contaminate a view changed by the operator's action.
-            self._cognition_perception_probe = None
         headroom = getattr(self, "_headroom_recovery", None)
         if headroom is not None:
             if not self._queued_operator_message_waiting():
@@ -3115,6 +3245,11 @@ class AgentRuntime:
             # Apply the completed decision on this motor-loop turn even when a
             # previously detached model request still occupies the sole worker.
             self.metrics.cognition_calls += 1
+            if getattr(self, "_cognition_perception_probe", None) is perception_probe:
+                if perception_probe is not None:
+                    self._cognition_perception_probe = replace(
+                        perception_probe, cognition_future=self._pending_decision,
+                    )
             self._consume_cognition()
             return
         if getattr(self, "_gui_fast_path_deferred", False):
@@ -3157,6 +3292,11 @@ class AgentRuntime:
         self._cognition_requested = False
         self._pending_execution_revision = self._execution_revision
         self.metrics.cognition_calls += 1
+        if getattr(self, "_cognition_perception_probe", None) is perception_probe:
+            if perception_probe is not None:
+                self._cognition_perception_probe = replace(
+                    perception_probe, cognition_future=self._pending_decision,
+                )
 
     def _preempt_pending_cognition_for_operator(self) -> bool:
         """Replace a stale model future with one safe deterministic operator decision."""
@@ -3250,6 +3390,32 @@ class AgentRuntime:
         return True
 
     def _consume_cognition(self) -> None:
+        probe = getattr(self, "_cognition_perception_probe", None)
+        if probe is None or probe.handoff_deadline_ns is None:
+            self._consume_cognition_decision()
+            return
+        # Tick consumes completed futures before its ordinary reconciliation.
+        # Validate the current captured view here too, before any action starts.
+        self._reconcile_cognition_perception_probe()
+        if self._cognition_perception_probe is not probe:
+            return
+        assert probe is not None
+        future = self._pending_decision
+        if future is None or future is not probe.cognition_future or not future.done():
+            return
+        previous_run = self.executor.run
+        try:
+            self._consume_cognition_decision()
+        finally:
+            running = self.executor.run
+            accepted_action = bool(
+                running is not None
+                and running is not previous_run
+                and running.outcome == SkillOutcome.RUNNING
+            )
+            self._clear_cognition_perception_probe(probe, action_grace=accepted_action)
+
+    def _consume_cognition_decision(self) -> None:
         if getattr(self, "_headroom_recovery", None) is not None:
             # A decision completed against pre-recovery pixels cannot take the
             # executor while the bounded recovery owns a stable scene. In the
@@ -4081,7 +4247,9 @@ class AgentRuntime:
             if cognition_probe is None
             else {
                 "phase": (
-                    "settling" if cognition_probe.query_id is None else "grounding"
+                    "handoff"
+                    if cognition_probe.handoff_deadline_ns is not None
+                    else "settling" if cognition_probe.query_id is None else "grounding"
                 ),
                 "query_id": cognition_probe.query_id,
                 "requested_keys": list(cognition_probe.requested_keys),
