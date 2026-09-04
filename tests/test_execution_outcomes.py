@@ -729,6 +729,185 @@ def test_progress_defers_recoverable_failure_for_two_delayed_target_losses(
     assert policy.perception_poll_calls == 2
 
 
+def test_prior_damage_progress_defers_lease_expiry_when_terminal_frame_is_baseline() -> None:
+    now = time.monotonic_ns()
+    executor, policy = _executor(
+        now,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        SkillFailureCode.MINING_LEASE_EXPIRED,
+    )
+    executor.tick(
+        _board(now, crosshair_hash=_HASH_A, target_visible=True),
+        sequence=1,
+        now_ns=now,
+    )
+    damage_phases = (
+        "ffffffffffffffff",
+        "aaaaaaaaaaaaaaaa",
+        "5555555555555555",
+        "f0f0f0f0f0f0f0f0",
+        "0f0f0f0f0f0f0f0f",
+    )
+    for sequence, (offset_ms, phase_hash) in enumerate(
+        zip((450, 550, 650, 750, 850), damage_phases, strict=True),
+        start=2,
+    ):
+        progress = executor.tick(
+            _board(
+                now + offset_ms * 1_000_000,
+                crosshair_hash=phase_hash,
+                target_visible=True,
+            ),
+            sequence=sequence,
+            now_ns=now + offset_ms * 1_000_000,
+        )
+        assert progress.run.outcome == SkillOutcome.RUNNING
+        assert progress.outcome_verification is None
+
+    released = executor.tick(
+        _board(now + 2_500_000_000, crosshair_hash=_HASH_A, target_visible=True),
+        sequence=7,
+        now_ns=now + 2_500_000_000,
+    )
+
+    assert released.run.outcome == SkillOutcome.RUNNING
+    assert released.action is not None and "left" in released.action.buttons_up
+    assert released.action_origin == ActionOrigin.RESET
+    assert policy.observation_release_calls == 1
+
+    replacement_hash = "3333333333333333"
+    terminal = released
+    for sequence, offset_ms in enumerate((2_850, 2_950, 3_050), start=8):
+        terminal = executor.tick(
+            _board(
+                now + offset_ms * 1_000_000,
+                crosshair_hash=replacement_hash,
+                target_visible=True,
+            ),
+            sequence=sequence,
+            now_ns=now + offset_ms * 1_000_000,
+        )
+
+    assert terminal.run.outcome == SkillOutcome.SUCCEEDED
+    assert terminal.outcome_verification is not None
+    assert terminal.outcome_verification.signal == OutcomeSignal.BLOCK_BROKEN
+    assert policy.act_calls == 7
+    assert policy.perception_poll_calls == 3
+
+
+def test_prior_damage_progress_does_not_defer_target_changed_failure() -> None:
+    now = time.monotonic_ns()
+    executor, policy = _executor(
+        now,
+        None,
+        None,
+        SkillFailureCode.MINING_TARGET_CHANGED,
+    )
+    executor.tick(
+        _board(now, crosshair_hash=_HASH_A, target_visible=True),
+        sequence=1,
+        now_ns=now,
+    )
+    executor.tick(
+        _board(now + 500_000_000, crosshair_hash=_HASH_B, target_visible=True),
+        sequence=2,
+        now_ns=now + 500_000_000,
+    )
+
+    terminal = executor.tick(
+        _board(now + 600_000_000, crosshair_hash=_HASH_A, target_visible=True),
+        sequence=3,
+        now_ns=now + 600_000_000,
+    )
+
+    assert terminal.run.outcome == SkillOutcome.FAILED
+    assert terminal.run.failure_code == SkillFailureCode.MINING_TARGET_CHANGED
+    assert terminal.recovery_skills == ("reacquire_target",)
+    assert terminal.action is not None and "left" in terminal.action.buttons_up
+    assert policy.observation_release_calls == 0
+
+
+def test_lease_expiry_without_damage_progress_remains_terminal_failure() -> None:
+    now = time.monotonic_ns()
+    executor, policy = _executor(
+        now,
+        None,
+        SkillFailureCode.MINING_LEASE_EXPIRED,
+    )
+    executor.tick(
+        _board(now, crosshair_hash=_HASH_A, target_visible=True),
+        sequence=1,
+        now_ns=now,
+    )
+
+    terminal = executor.tick(
+        _board(now + 2_500_000_000, crosshair_hash=_HASH_A, target_visible=True),
+        sequence=2,
+        now_ns=now + 2_500_000_000,
+    )
+
+    assert terminal.run.outcome == SkillOutcome.FAILED
+    assert terminal.run.failure_code == SkillFailureCode.MINING_LEASE_EXPIRED
+    assert terminal.action is not None and "left" in terminal.action.buttons_up
+    assert policy.observation_release_calls == 0
+
+
+def test_cancelled_damage_progress_cannot_defer_next_run_lease_expiry() -> None:
+    now = time.monotonic_ns()
+    executor, policy = _executor(now, None, None)
+    executor.tick(
+        _board(now, crosshair_hash=_HASH_A, target_visible=True),
+        sequence=1,
+        now_ns=now,
+    )
+    executor.tick(
+        _board(now + 500_000_000, crosshair_hash=_HASH_B, target_visible=True),
+        sequence=2,
+        now_ns=now + 500_000_000,
+    )
+    assert executor._mining_damage_progress_observed is True
+
+    cancelled = executor.cancel(now_ns=now + 600_000_000)
+    assert cancelled.run.outcome == SkillOutcome.CANCELLED
+    assert cancelled.action is not None and "left" in cancelled.action.buttons_up
+    assert executor._mining_damage_progress_observed is False
+
+    executor.start(
+        SkillSpec(
+            skill_id="mine_visible_block",
+            name="Mine visible block",
+            policy_ref="mine",
+            recovery_skills=("reacquire_target",),
+            max_duration_ms=20_000,
+        ),
+        run_id="mine-outcome-next",
+        now_ns=now + 1_000_000_000,
+    )
+    executor._mining_guard = cast(
+        Any,
+        _ScriptedMiningGuard(None, SkillFailureCode.MINING_LEASE_EXPIRED),
+    )
+    executor.tick(
+        _board(now + 1_000_000_000, crosshair_hash=_HASH_A, target_visible=True),
+        sequence=4,
+        now_ns=now + 1_000_000_000,
+    )
+    terminal = executor.tick(
+        _board(now + 3_500_000_000, crosshair_hash=_HASH_A, target_visible=True),
+        sequence=5,
+        now_ns=now + 3_500_000_000,
+    )
+
+    assert terminal.run.outcome == SkillOutcome.FAILED
+    assert terminal.run.failure_code == SkillFailureCode.MINING_LEASE_EXPIRED
+    assert policy.observation_release_calls == 0
+
+
 @pytest.mark.parametrize(
     "guard_failure",
     (

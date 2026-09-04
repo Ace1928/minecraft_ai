@@ -148,6 +148,7 @@ class SkillExecutor:
         self._collection_possession = _CollectionPossessionState()
         self._mining_hotbar_log_baseline: PerceptionFact | None = None
         self._mining_attack_started = False
+        self._mining_damage_progress_observed = False
         self._gather_mining_started = False
         self._gather_acquisitions_remaining = _GATHER_ACQUISITIONS_REQUIRED
         self._verified_collection_hotbar_log_count: int | None = None
@@ -287,6 +288,7 @@ class SkillExecutor:
             )
         self._mining_hotbar_log_baseline = None
         self._mining_attack_started = False
+        self._mining_damage_progress_observed = False
         self._gather_mining_started = False
         self._gather_acquisitions_remaining = gather_acquisitions_remaining
         self._verified_collection_hotbar_log_count = None
@@ -526,6 +528,11 @@ class SkillExecutor:
             )
         )
         if mining.failure_code is not None:
+            current_damage_progress = bool(
+                verification is not None
+                and verification.status == OutcomeStatus.PROGRESS
+                and verification.signal == OutcomeSignal.BLOCK_DAMAGE_PROGRESS
+            )
             if (
                 verification is not None
                 and verification.status == OutcomeStatus.SUCCEEDED
@@ -539,20 +546,27 @@ class SkillExecutor:
                 )
             if (
                 mining.failure_code in _MINING_SUCCESS_OVERRIDABLE_FAILURES
-                and verification is not None
-            ):
-                if (
-                    verification.status == OutcomeStatus.PROGRESS
-                    and verification.signal == OutcomeSignal.BLOCK_DAMAGE_PROGRESS
-                ):
-                    return self._begin_released_mining_verification(
-                        blackboard,
-                        now_ns=now,
-                        failure_code=mining.failure_code,
-                        force_release_left=mining.force_release_left,
-                        force_release_keys=mining.force_release_keys,
-                        force_release_buttons=mining.force_release_buttons,
+                and (
+                    current_damage_progress
+                    or (
+                        mining.failure_code == SkillFailureCode.MINING_LEASE_EXPIRED
+                        and self._mining_damage_progress_observed
                     )
+                )
+            ):
+                # A lease can expire on the first replacement/baseline-like
+                # frame after several earlier crack phases. Prior action-bound
+                # damage may defer only that wall-clock cutoff. Target changes
+                # and stalls retain their typed recovery unless this exact tick
+                # still reports damage, matching the preexisting behavior.
+                return self._begin_released_mining_verification(
+                    blackboard,
+                    now_ns=now,
+                    failure_code=mining.failure_code,
+                    force_release_left=mining.force_release_left,
+                    force_release_keys=mining.force_release_keys,
+                    force_release_buttons=mining.force_release_buttons,
+                )
             return self._finish(
                 SkillOutcome.FAILED,
                 now,
@@ -821,6 +835,7 @@ class SkillExecutor:
         trusted_transition_source = (
             observer_source() if callable(observer_source) else None
         )
+        self._mining_damage_progress_observed = False
         self._outcome_verifier.begin(
             self._run.run_id,
             OutcomeKind.MINING,
@@ -854,11 +869,17 @@ class SkillExecutor:
             return None
         if self._outcome_verifier.active_run_id != self._run.run_id:
             self._begin_mining_outcome_verifier(blackboard, now_ns=now_ns)
-        return self._outcome_verifier.observe(
+        verification = self._outcome_verifier.observe(
             blackboard,
             action=action,
             now_ns=now_ns,
         )
+        if (
+            verification.status == OutcomeStatus.PROGRESS
+            and verification.signal == OutcomeSignal.BLOCK_DAMAGE_PROGRESS
+        ):
+            self._mining_damage_progress_observed = True
+        return verification
 
     def _observe_traversal_outcome(
         self,
@@ -1093,6 +1114,7 @@ class SkillExecutor:
         policy_status = _policy_status_snapshot(self.policy)
         self._last_intent = None
         self._outcome_verifier.reset()
+        self._mining_damage_progress_observed = False
         self._pending_mining_verification = None
         recovery = self._spec.recovery_skills if recover else ()
         return ExecutionTick(
