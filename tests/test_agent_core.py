@@ -823,6 +823,31 @@ def test_runtime_owns_global_sequence_across_independent_action_routes(
     assert trajectory.accepted_calls == 1
 
 
+def test_runtime_preserves_policy_sequence_ahead_of_wire_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, trajectory = _motor_shutdown_runtime()
+    sent: list[dict[str, object]] = []
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+
+    def accept(_command: str, **payload: object) -> dict[str, object]:
+        action = payload["action"]
+        assert isinstance(action, dict)
+        sent.append(action)
+        return {"accepted_sequence": action["sequence"]}
+
+    monkeypatch.setattr("minecraft_ai.runtime.send_command", accept)
+
+    # A reset after a deliberately quiet verification tick may legitimately
+    # be ahead of the last physical action. The supervisor accepts monotonic
+    # gaps, and preserving this value keeps the policy's next call non-replayed.
+    runtime._send_motor(MotorAction(sequence=9))
+
+    assert sent[0]["sequence"] == 9
+    assert runtime._sequence == 10
+    assert trajectory.accepted_calls == 1
+
+
 def test_motor_send_treats_transient_stop_during_ipc_as_expected_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

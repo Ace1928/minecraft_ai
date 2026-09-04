@@ -1209,11 +1209,13 @@ class AgentRuntime:
             return
         # The supervisor lease has one global replay counter, while learned
         # policy bodies and synthetic controllers maintain independent local
-        # counters. Runtime is the sole merger of those routes, so it owns the
-        # final monotonically increasing wire sequence. In particular, a
-        # policy reset after a synthetic GUI action must never reuse sequence 0
-        # and trip the supervisor's fail-closed replay guard.
-        if action.sequence != self._sequence:
+        # counters. Runtime rebases a lagging route onto the wire counter, but
+        # preserves an action that is already ahead: mining's post-release
+        # verifier can consume local policy/reset sequences while deliberately
+        # emitting no wire action. Collapsing that gap makes the next policy
+        # call replay its own last sequence and crashes the agent even though
+        # the supervisor would safely accept the monotonic jump.
+        if action.sequence < self._sequence:
             action = action.model_copy(update={"sequence": self._sequence})
         provenance = _accepted_action_provenance(
             execution,
