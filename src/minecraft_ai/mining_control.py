@@ -1507,7 +1507,7 @@ def _lease_duration_ms(rule: _BlockRule, selected_item: str) -> int:
             "netherite": 650,
         }.get(material, 3_600)
     if rule.family == _BlockFamily.SOFT:
-        return 1_200
+        return 2_500
     if rule.family == _BlockFamily.OBSIDIAN:
         return 9_200 if _tool_tier(selected_item, suffix="pickaxe") == 5 else 10_200
     if rule.family == _BlockFamily.ANCIENT_DEBRIS:

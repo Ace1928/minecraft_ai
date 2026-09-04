@@ -631,6 +631,7 @@ def test_pending_attack_has_typed_wall_clock_timeout_and_forced_release() -> Non
         ("oak_log", "minecraft:stick", None),
         ("oak_log", None, None),
         ("dirt", None, None),
+        ("stone", "minecraft:stick", SkillFailureCode.MINING_WRONG_TOOL),
         ("stone", None, "pending"),
     ],
 )
@@ -1714,6 +1715,76 @@ def test_one_block_wall_clock_bound_releases_even_with_visual_change() -> None:
 
     assert stopped.run.failure_code == SkillFailureCode.MINING_LEASE_EXPIRED
     assert stopped.action is not None and "left" in stopped.action.buttons_up
+
+
+def test_soft_block_lease_includes_bounded_break_verification_margin() -> None:
+    now = time.monotonic_ns()
+    guard = MiningLeaseGuard()
+    intent = MotorIntent(skill_id="mine", mode="mine", episode_id="soft:one")
+
+    started = guard.inspect(
+        MotorAction(sequence=1, buttons_down=("left",)),
+        _mining_board(now_ns=now, kind="dirt", item=None),
+        intent,
+        now_ns=now,
+    )
+    before_deadline = guard.inspect(
+        MotorAction(sequence=2, buttons_up=("left",)),
+        _mining_board(
+            now_ns=now + 2_499_000_000,
+            kind="dirt",
+            item=None,
+            crosshair_hash=_HASH_B,
+        ),
+        intent,
+        now_ns=now + 2_499_000_000,
+    )
+    at_deadline = guard.inspect(
+        MotorAction(sequence=3),
+        _mining_board(
+            now_ns=now + 2_500_000_000,
+            kind="dirt",
+            item=None,
+            crosshair_hash=_HASH_A,
+        ),
+        intent,
+        now_ns=now + 2_500_000_000,
+    )
+
+    assert started.failure_code is None
+    assert before_deadline.failure_code is None
+    assert "left" not in before_deadline.action.buttons_up
+    assert at_deadline.failure_code == SkillFailureCode.MINING_LEASE_EXPIRED
+    assert at_deadline.force_release_left is True
+
+
+def test_absolute_mining_bound_caps_extended_soft_block_lease() -> None:
+    now = time.monotonic_ns()
+    guard = MiningLeaseGuard(absolute_max_ms=2_000)
+    intent = MotorIntent(skill_id="mine", mode="mine", episode_id="soft:capped")
+    board = _mining_board(now_ns=now, kind="dirt", item=None)
+
+    started = guard.inspect(
+        MotorAction(sequence=1, buttons_down=("left",)),
+        board,
+        intent,
+        now_ns=now,
+    )
+    expired = guard.inspect(
+        MotorAction(sequence=2),
+        _mining_board(
+            now_ns=now + 2_000_000_000,
+            kind="dirt",
+            item=None,
+            crosshair_hash=_HASH_B,
+        ),
+        intent,
+        now_ns=now + 2_000_000_000,
+    )
+
+    assert started.failure_code is None
+    assert expired.failure_code == SkillFailureCode.MINING_LEASE_EXPIRED
+    assert expired.force_release_left is True
 
 
 def test_guard_rejects_episode_change_and_reset_reports_release() -> None:
