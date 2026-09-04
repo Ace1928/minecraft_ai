@@ -190,8 +190,17 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     collect_drop = skills.get("collect_recent_drop")
 
     assert "visible trunk" in gather.description
+    assert gather.version == 7
+    assert gather.parameters == ()
+    assert gather.description.startswith("Acquire exactly three new oak logs")
+    assert "each executor attempt" in gather.description.casefold()
+    assert "collect_recent_drop" in gather.description
+    assert "three acquisitions" in gather.description
+    assert "generic inventory.logs claims do not qualify" in gather.description
     assert approach.initiation_alternatives[0][0].key == "target.reference_available"
-    assert gather.success_conditions[0].key == "inventory.logs"
+    assert gather.success_conditions == ()
+    assert gather.expected_effects == ("block_broken",)
+    assert gather.policy_instruction == "mine oak log"
     assert "Bedrock crafting interface" in crafting.description
     assert crafting.success_conditions[0].key == "inventory.crafting_table"
     assert retreat.preconditions[0].key == "danger.immediate"

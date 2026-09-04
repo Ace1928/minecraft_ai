@@ -9,7 +9,7 @@ from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.execution import SkillExecutor
 from minecraft_ai.mining_control import MiningGuardDecision
 from minecraft_ai.motor import MotorIntent
-from minecraft_ai.outcome_verifier import OutcomeSignal
+from minecraft_ai.outcome_verifier import OutcomeKind, OutcomeSignal, OutcomeStatus
 from minecraft_ai.perception import (
     FrameState,
     PerceptionBlackboard,
@@ -139,6 +139,36 @@ class _ScriptedMiningGuard:
         return held
 
 
+class _SuppressFirstLeftMiningGuard(_ScriptedMiningGuard):
+    def __init__(self) -> None:
+        super().__init__(None, None)
+        self._suppress_next_left = True
+
+    def inspect(
+        self,
+        action: MotorAction,
+        blackboard: PerceptionBlackboard,
+        intent: MotorIntent,
+        *,
+        now_ns: int | None = None,
+    ) -> MiningGuardDecision:
+        if self._suppress_next_left:
+            action = action.model_copy(
+                update={
+                    "buttons_down": tuple(
+                        button for button in action.buttons_down if button != "left"
+                    )
+                }
+            )
+            self._suppress_next_left = False
+        return super().inspect(
+            action,
+            blackboard,
+            intent,
+            now_ns=now_ns,
+        )
+
+
 def _fact(
     key: str,
     value: str | int | float | bool,
@@ -156,11 +186,29 @@ def _fact(
     )
 
 
+def _hotbar_log_fact(
+    count: int,
+    *,
+    now_ns: int,
+    source: str = BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+    confidence: float = 0.995,
+) -> PerceptionFact:
+    return PerceptionFact(
+        key="inventory.hotbar.logs",
+        value=count,
+        confidence=confidence,
+        observed_ns=now_ns,
+        source=source,
+        expires_after_ms=250,
+    )
+
+
 def _board(
     now_ns: int,
     *,
     crosshair_hash: str,
     target_visible: bool,
+    target_kind: str = "dirt",
     extra_facts: tuple[PerceptionFact, ...] = (),
 ) -> PerceptionBlackboard:
     board = PerceptionBlackboard()
@@ -186,7 +234,7 @@ def _board(
                 ),
                 _fact(
                     "target.kind",
-                    "dirt",
+                    target_kind,
                     now_ns=now_ns,
                     source="learned:test-target",
                 ),
@@ -201,7 +249,7 @@ def _board(
             tracks=(
                 Track(
                     track_id="target:test",
-                    label="dirt",
+                    label=target_kind,
                     confidence=1.0,
                     region=ScreenRegion(x=0.4, y=0.4, width=0.2, height=0.2),
                     first_seen_ns=now_ns,
@@ -275,6 +323,10 @@ def _executor(
     )
     executor._mining_guard = cast(Any, _ScriptedMiningGuard(*failures))
     return executor, policy
+
+
+def _active_outcome_kind(executor: SkillExecutor) -> OutcomeKind | None:
+    return executor._outcome_verifier._kind
 
 
 def test_verified_replacement_converts_target_changed_to_one_success() -> None:
@@ -404,6 +456,196 @@ def test_mining_does_not_reuse_recent_hotbar_fact_when_current_frame_abstains() 
     first = executor.tick(board, sequence=1, now_ns=now)
     assert first.action is not None and "left" in first.action.buttons_down
     assert executor.mining_hotbar_log_baseline is None
+
+
+@pytest.mark.parametrize(
+    ("fact_update", "expected_count"),
+    (
+        ({}, 4),
+        ({"observed_ns": -1}, None),
+        ({"source": "vlm:test:inventory-query"}, None),
+        ({"confidence": 0.98}, None),
+        ({"value": True}, None),
+        ({"key": "inventory.logs"}, None),
+    ),
+)
+def test_gather_freezes_only_a_canonical_current_frame_pre_attack_count(
+    fact_update: dict[str, object],
+    expected_count: int | None,
+) -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy(MotorAction(sequence=0, buttons_down=("left",)))
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("gather_nearby_wood"),
+        run_id="gather-frame-bound-baseline",
+        now_ns=now,
+    )
+    executor._mining_guard = cast(Any, _ScriptedMiningGuard(None))
+    effective_update = dict(fact_update)
+    if effective_update.get("observed_ns") == -1:
+        effective_update["observed_ns"] = now - 1
+    baseline = _hotbar_log_fact(4, now_ns=now).model_copy(update=effective_update)
+    board = _board(
+        now,
+        crosshair_hash=_HASH_A,
+        target_visible=True,
+        target_kind="oak_log",
+    )
+    raw_frame = board.raw_latest()
+    assert raw_frame is not None
+    assert all(fact.key != "inventory.hotbar.logs" for fact in raw_frame.facts)
+    board.merge_semantics(instance_id="bedrock:test", facts=(baseline,))
+
+    started = executor.tick(
+        board,
+        sequence=1,
+        now_ns=now,
+    )
+
+    assert started.run.outcome == (
+        SkillOutcome.RUNNING if expected_count is not None else SkillOutcome.FAILED
+    )
+    assert started.action is not None
+    assert ("left" in started.action.buttons_down) is (expected_count is not None)
+    if expected_count is None:
+        assert started.run.failure_code == SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED
+        assert "left" in started.action.buttons_up
+        assert _active_outcome_kind(executor) is None
+    assert (
+        None
+        if executor.mining_hotbar_log_baseline is None
+        else executor.mining_hotbar_log_baseline.value
+    ) == expected_count
+
+
+def test_gather_does_not_succeed_from_generic_inventory_logs() -> None:
+    now = time.monotonic_ns()
+    executor = SkillExecutor(_TraversalPolicy(MotorAction(sequence=0)))
+    executor.start(
+        build_bootstrap_skill_library().get("gather_nearby_wood"),
+        run_id="gather-no-generic-success",
+        now_ns=now,
+    )
+    board = _traversal_board(now, luma_grid=_LUMA_A)
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(
+            _fact(
+                "inventory.logs",
+                99,
+                now_ns=now,
+                source="vlm:test:inventory-query",
+            ),
+        ),
+    )
+
+    result = executor.tick(board, sequence=1, now_ns=now)
+
+    assert result.run.outcome == SkillOutcome.RUNNING
+    assert result.outcome_verification is None
+
+
+@pytest.mark.parametrize(
+    ("baseline", "remaining", "allowed"),
+    ((13, 3, True), (14, 3, False), (14, 2, True), (15, 1, True), (16, 1, False)),
+)
+def test_gather_attacks_only_when_every_remaining_count_is_observable(
+    baseline: int,
+    remaining: int,
+    allowed: bool,
+) -> None:
+    now = time.monotonic_ns()
+    executor = SkillExecutor(
+        _TraversalPolicy(MotorAction(sequence=0, buttons_down=("left",)))
+    )
+    executor.start(
+        build_bootstrap_skill_library().get("gather_nearby_wood"),
+        run_id="gather-observer-range",
+        now_ns=now,
+        gather_acquisitions_remaining=remaining,
+    )
+    executor._mining_guard = cast(Any, _ScriptedMiningGuard(None))
+
+    result = executor.tick(
+        _board(
+            now,
+            crosshair_hash=_HASH_A,
+            target_visible=True,
+            target_kind="oak_log",
+            extra_facts=(_hotbar_log_fact(baseline, now_ns=now),),
+        ),
+        sequence=1,
+        now_ns=now,
+    )
+
+    assert result.action is not None
+    assert ("left" in result.action.buttons_down) is allowed
+    if allowed:
+        assert result.run.outcome == SkillOutcome.RUNNING
+    else:
+        assert result.run.outcome == SkillOutcome.FAILED
+        assert result.run.failure_code == SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED
+        assert result.run.failure_reason == "gather-hotbar-successor-range-unverified"
+
+
+def test_collection_exposes_only_the_stably_verified_post_motion_count() -> None:
+    started_ns = time.monotonic_ns()
+    policy = _TraversalPolicy(MotorAction(sequence=0, keys_down=("w",)))
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("collect_recent_drop"),
+        run_id="collection-count-accessor",
+        now_ns=started_ns,
+        collection_hotbar_log_baseline=_hotbar_log_fact(
+            3,
+            now_ns=started_ns - 1_000_000,
+        ),
+    )
+    board = _traversal_board(started_ns + 10_000_000, luma_grid=_LUMA_A)
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(
+            _fact(
+                "collection.recent_log_break",
+                True,
+                now_ns=started_ns + 10_000_000,
+                source="verified:test:block-broken",
+            ),
+            _hotbar_log_fact(4, now_ns=started_ns + 10_000_000),
+        ),
+    )
+
+    executor.tick(board, sequence=1, now_ns=started_ns + 20_000_000)
+    assert executor.verified_collection_hotbar_log_count is None
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(_hotbar_log_fact(4, now_ns=started_ns + 100_000_000),),
+    )
+    executor.tick(board, sequence=2, now_ns=started_ns + 110_000_000)
+    assert executor.verified_collection_hotbar_log_count is None
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(_hotbar_log_fact(4, now_ns=started_ns + 360_000_000),),
+    )
+
+    terminal = executor.tick(
+        board,
+        sequence=3,
+        now_ns=started_ns + 370_000_000,
+    )
+
+    assert terminal.run.outcome == SkillOutcome.SUCCEEDED
+    assert terminal.outcome_verification is not None
+    assert terminal.outcome_verification.signal == OutcomeSignal.RESOURCE_ACQUIRED
+    assert executor.verified_collection_hotbar_log_count == 4
+
+    executor.start(
+        build_bootstrap_skill_library().get("explore_forward"),
+        run_id="collection-count-reset",
+        now_ns=started_ns + 400_000_000,
+    )
+    assert executor.verified_collection_hotbar_log_count is None
 
 
 def test_visual_change_without_target_loss_remains_target_changed_failure() -> None:
@@ -785,7 +1027,13 @@ def test_gather_scan_without_locomotion_does_not_report_traversal_stall() -> Non
     )
 
     executor.tick(
-        _traversal_board(now, luma_grid=_LUMA_A),
+        _board(
+            now,
+            crosshair_hash=_HASH_A,
+            target_visible=True,
+            target_kind="oak_log",
+            extra_facts=(_hotbar_log_fact(0, now_ns=now),),
+        ),
         sequence=1,
         now_ns=now,
     )
@@ -809,6 +1057,181 @@ def test_gather_scan_without_locomotion_does_not_report_traversal_stall() -> Non
     )
     assert acquisition_timeout.outcome_verification is None
     assert executor._outcome_verifier.active_run_id is None
+
+
+def test_gather_switches_from_traversal_to_mining_on_first_accepted_attack() -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy(
+        MotorAction(sequence=0, keys_down=("w",), buttons_down=("left",)),
+        MotorAction(sequence=0, keys_up=("w",), buttons_down=("left",)),
+    )
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("gather_nearby_wood"),
+        run_id="gather-phase-switch",
+        now_ns=now,
+    )
+    executor._mining_guard = cast(Any, _SuppressFirstLeftMiningGuard())
+    approach_baseline = _hotbar_log_fact(1, now_ns=now)
+
+    approaching = executor.tick(
+        _board(
+            now,
+            crosshair_hash=_HASH_A,
+            target_visible=True,
+            target_kind="oak_log",
+            extra_facts=(approach_baseline,),
+        ),
+        sequence=1,
+        now_ns=now,
+    )
+    assert approaching.run.outcome == SkillOutcome.RUNNING
+    assert approaching.action is not None
+    assert "left" not in approaching.action.buttons_down
+    assert _active_outcome_kind(executor) == OutcomeKind.TRAVERSAL
+    assert executor.mining_hotbar_log_baseline is None
+
+    attack_ns = now + 100_000_000
+    baseline = _hotbar_log_fact(2, now_ns=attack_ns)
+    attacking = executor.tick(
+        _board(
+            attack_ns,
+            crosshair_hash=_HASH_A,
+            target_visible=True,
+            target_kind="oak_log",
+            extra_facts=(baseline,),
+        ),
+        sequence=2,
+        now_ns=attack_ns,
+    )
+
+    assert attacking.run.outcome == SkillOutcome.RUNNING
+    assert attacking.action is not None and "left" in attacking.action.buttons_down
+    assert attacking.motor_intent is not None
+    assert attacking.motor_intent.target_label == "oak_log"
+    assert _active_outcome_kind(executor) == OutcomeKind.MINING
+    assert executor.mining_hotbar_log_baseline == baseline
+
+
+def test_gather_mining_phase_can_verify_a_bound_log_break() -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy(
+        MotorAction(sequence=0, buttons_down=("left",)),
+        MotorAction(sequence=0),
+        MotorAction(sequence=0),
+        MotorAction(sequence=0),
+    )
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("gather_nearby_wood"),
+        run_id="gather-verified-log-break",
+        now_ns=now,
+    )
+    executor._mining_guard = cast(Any, _ScriptedMiningGuard(None, None, None, None))
+
+    for sequence, offset_ms in enumerate((0, 500, 600), start=1):
+        pending = executor.tick(
+            _board(
+                now + offset_ms * 1_000_000,
+                crosshair_hash=_HASH_A if offset_ms == 0 else _HASH_B,
+                target_visible=True,
+                target_kind="oak_log",
+                extra_facts=(
+                    (_hotbar_log_fact(0, now_ns=now),)
+                    if offset_ms == 0
+                    else ()
+                ),
+            ),
+            sequence=sequence,
+            now_ns=now + offset_ms * 1_000_000,
+        )
+        assert pending.run.outcome == SkillOutcome.RUNNING
+
+    broken_ns = now + 700_000_000
+    terminal = executor.tick(
+        _board(
+            broken_ns,
+            crosshair_hash=_HASH_B,
+            target_visible=True,
+            target_kind="oak_log",
+            extra_facts=(
+                _fact(
+                    "target.broken",
+                    True,
+                    now_ns=broken_ns,
+                    source="learned:test-target",
+                ),
+            ),
+        ),
+        sequence=4,
+        now_ns=broken_ns,
+    )
+
+    assert terminal.run.outcome == SkillOutcome.SUCCEEDED
+    assert terminal.outcome_verification is not None
+    assert terminal.outcome_verification.kind == OutcomeKind.MINING
+    assert terminal.outcome_verification.status == OutcomeStatus.SUCCEEDED
+    assert terminal.outcome_verification.signal == OutcomeSignal.BLOCK_BROKEN
+    assert terminal.outcome_verification.target_kind == "oak_log"
+
+
+def test_gather_never_observes_traversal_after_attack_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy(
+        MotorAction(sequence=0, keys_down=("w",)),
+        MotorAction(sequence=0, keys_up=("w",), buttons_down=("left",)),
+        MotorAction(sequence=0),
+    )
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("gather_nearby_wood"),
+        run_id="gather-one-way-verifier",
+        now_ns=now,
+    )
+    executor._mining_guard = cast(Any, _ScriptedMiningGuard(None, None, None))
+    executor.tick(
+        _traversal_board(now, luma_grid=_LUMA_A),
+        sequence=1,
+        now_ns=now,
+    )
+    attack_ns = now + 100_000_000
+    executor.tick(
+        _board(
+            attack_ns,
+            crosshair_hash=_HASH_A,
+            target_visible=True,
+            target_kind="oak_log",
+            extra_facts=(_hotbar_log_fact(0, now_ns=attack_ns),),
+        ),
+        sequence=2,
+        now_ns=attack_ns,
+    )
+
+    def reject_traversal_observation(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("traversal observer ran after gather entered mining")
+
+    monkeypatch.setattr(
+        executor,
+        "_observe_traversal_outcome",
+        reject_traversal_observation,
+    )
+    later_ns = now + 3_200_000_000
+    still_mining = executor.tick(
+        _board(
+            later_ns,
+            crosshair_hash=_HASH_A,
+            target_visible=True,
+            target_kind="oak_log",
+        ),
+        sequence=3,
+        now_ns=later_ns,
+    )
+
+    assert still_mining.run.outcome == SkillOutcome.RUNNING
+    assert still_mining.run.failure_code is None
+    assert _active_outcome_kind(executor) == OutcomeKind.MINING
 
 
 def test_traversal_progress_is_evidence_without_finishing_the_skill() -> None:

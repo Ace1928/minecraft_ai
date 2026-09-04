@@ -111,6 +111,7 @@ _HEADROOM_TIMEOUT_MARGIN_S = 5.0
 _HEADROOM_TRANSACTION_MAX_S = 180.0
 _HEADROOM_SETTLE_TIMEOUT_NS = 2_000_000_000
 _HEADROOM_STABLE_SUCCESSOR_FRAMES = 2
+_GATHER_ACQUISITIONS_REQUIRED = 3
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,18 @@ class _CraftSemanticProbe:
     run_id: str
     phase: PlankCraftPhase
     terminal_count_before: int
+
+
+@dataclass
+class _GatherAcquisitionContinuation:
+    """One volatile, evidence-bound three-log gather transaction."""
+
+    context_key: str
+    parameters: dict[str, str | int | float | bool]
+    instruction: str | None
+    active_run_id: str
+    last_exact_count: int
+    resource_acquired_events: int = 0
 
 
 @dataclass
@@ -264,6 +277,64 @@ def _verified_log_break(verification: OutcomeVerification | None) -> bool:
         return False
     target = verification.target_kind.casefold().removeprefix("minecraft:")
     return target == "log" or target.endswith("_log")
+
+
+def _verified_oak_log_break(verification: OutcomeVerification | None) -> bool:
+    """Accept only the oak species covered by the deterministic count observer."""
+
+    if not _verified_log_break(verification) or verification is None:
+        return False
+    target = verification.target_kind
+    return bool(
+        isinstance(target, str)
+        and target.casefold().removeprefix("minecraft:") == "oak_log"
+    )
+
+
+def _exact_frozen_log_count(fact: PerceptionFact | None, run: SkillRun) -> int | None:
+    """Validate a canonical pre-attack count without expiring its frozen snapshot."""
+
+    if (
+        fact is None
+        or fact.key != "inventory.hotbar.logs"
+        or fact.source != BEDROCK_HOTBAR_LOG_COUNT_SOURCE
+        or fact.confidence < 0.99
+        or not isinstance(fact.value, int)
+        or isinstance(fact.value, bool)
+        or fact.value < 0
+        or run.ended_ns is None
+        or fact.observed_ns > run.ended_ns
+    ):
+        return None
+    return fact.value
+
+
+def _verified_gather_acquisition(
+    result: ExecutionTick,
+    continuation: _GatherAcquisitionContinuation,
+    *,
+    exact_count: int | None,
+) -> bool:
+    """Require this continuation's active collection run and exact next count."""
+
+    verification = result.outcome_verification
+    return bool(
+        continuation.resource_acquired_events < _GATHER_ACQUISITIONS_REQUIRED
+        and continuation.active_run_id == result.run.run_id
+        and continuation.context_key == result.run.context_key
+        and result.run.skill_id == "collect_recent_drop"
+        and result.run.outcome == SkillOutcome.SUCCEEDED
+        and verification is not None
+        and verification.run_id == result.run.run_id
+        and verification.kind == OutcomeKind.RESOURCE_ACQUISITION
+        and verification.status == OutcomeStatus.SUCCEEDED
+        and verification.signal == OutcomeSignal.RESOURCE_ACQUIRED
+        and verification.target_kind == "log"
+        and "inventory.hotbar.logs" in verification.evidence_keys
+        and isinstance(exact_count, int)
+        and not isinstance(exact_count, bool)
+        and exact_count == continuation.last_exact_count + 1
+    )
 
 
 def _verified_obstacle_stall(result: ExecutionTick) -> bool:
@@ -1257,6 +1328,10 @@ class AgentRuntime:
     _last_operator_storage_retry_ns: int = field(default=0, init=False)
     _traversal_escalation_pending: bool = field(default=False, init=False)
     _headroom_recovery: _HeadroomRecovery | None = field(default=None, init=False)
+    _gather_acquisition_continuation: _GatherAcquisitionContinuation | None = field(
+        default=None,
+        init=False,
+    )
     _plan_neutral_recovery_runs: set[str] = field(default_factory=set, init=False)
     _planks_no_logs_failure_ns: int = field(default=0, init=False)
     _planks_failure_memory: MemoryRecord | None = field(default=None, init=False)
@@ -1443,23 +1518,79 @@ class AgentRuntime:
         )
         self._merge_policy_perception()
         result, headroom_deadline_expired = self._expire_late_headroom_child(result)
-        if (
-            result.run.skill_id == "collect_recent_drop"
-            and result.run.outcome != SkillOutcome.RUNNING
-        ):
-            self.blackboard.merge_semantics(
-                instance_id=self.perception.instance_id,
-                facts=(
-                    PerceptionFact(
-                        key="collection.recent_log_break",
-                        value=False,
-                        confidence=0.995,
-                        observed_ns=time.monotonic_ns(),
-                        source=f"runtime:{result.run.run_id}:collection-terminal",
-                        expires_after_ms=250,
-                    ),
-                ),
+        continuation = getattr(self, "_gather_acquisition_continuation", None)
+        terminal = result.run.outcome != SkillOutcome.RUNNING
+        verification = result.outcome_verification
+        continuation_owned = bool(
+            terminal
+            and continuation is not None
+            and continuation.active_run_id == result.run.run_id
+            and continuation.context_key == result.run.context_key
+        )
+        frozen_gather_baseline = self.executor.mining_hotbar_log_baseline
+        frozen_gather_count = _exact_frozen_log_count(
+            frozen_gather_baseline,
+            result.run,
+        )
+        verified_gather_break = bool(
+            terminal
+            and result.run.skill_id == "gather_nearby_wood"
+            and result.run.outcome == SkillOutcome.SUCCEEDED
+            and verification is not None
+            and verification.run_id == result.run.run_id
+            and _verified_oak_log_break(verification)
+        )
+        gather_break_claim = bool(
+            terminal
+            and result.run.skill_id == "gather_nearby_wood"
+            and verification is not None
+            and verification.signal == OutcomeSignal.BLOCK_BROKEN
+        )
+        gather_handoff = bool(
+            terminal
+            and verified_gather_break
+            and "collect_recent_drop" in self.skills.specs
+            and frozen_gather_count is not None
+            and (
+                continuation is None
+                or (
+                    continuation_owned
+                    and frozen_gather_count == continuation.last_exact_count
+                )
             )
+        )
+        verified_collection_count = getattr(
+            self.executor,
+            "verified_collection_hotbar_log_count",
+            None,
+        )
+        verified_gather_collection = bool(
+            terminal
+            and continuation_owned
+            and continuation is not None
+            and _verified_gather_acquisition(
+                result,
+                continuation,
+                exact_count=verified_collection_count,
+            )
+        )
+        gather_collection_complete = bool(
+            verified_gather_collection
+            and continuation is not None
+            and continuation.resource_acquired_events == _GATHER_ACQUISITIONS_REQUIRED - 1
+        )
+        gather_transaction_terminal = bool(
+            terminal
+            and (
+                result.run.skill_id == "gather_nearby_wood"
+                or continuation is not None
+            )
+        )
+        inherited_plan_neutral = bool(
+            terminal
+            and result.run.run_id
+            in getattr(self, "_plan_neutral_recovery_runs", set())
+        )
         collect_recent_drop = bool(
             result.run.outcome == SkillOutcome.SUCCEEDED
             and result.run.skill_id == "mine_visible_block"
@@ -1484,12 +1615,31 @@ class AgentRuntime:
             not collect_recent_drop
             and (not headroom_child or headroom_retry_advances_plan)
         )
+        if gather_transaction_terminal:
+            # A gather break and the first two exact pickups are intermediate.
+            # Only the third transaction-owned RESOURCE_ACQUIRED event consumes
+            # the plan node.
+            advance_plan = gather_collection_complete
+        recorded_verification = verification
+        if (gather_break_claim and not verified_gather_break) or (
+            continuation is not None
+            and terminal
+            and result.run.skill_id == "collect_recent_drop"
+            and not verified_gather_collection
+        ):
+            # Never persist a duplicate, unowned, or count-inexact acquisition
+            # as one of this transaction's three facts.
+            recorded_verification = None
+        if continuation is not None and terminal and not (
+            gather_handoff or (verified_gather_collection and not gather_collection_complete)
+        ):
+            self._gather_acquisition_continuation = None
         try:
             if result.action is not None:
                 self._send_motor(result.action, execution=result)
         finally:
             if result.run.outcome != SkillOutcome.RUNNING:
-                if result.outcome_verification is None:
+                if recorded_verification is None:
                     self._record_terminal_run(
                         result.run,
                         advance_plan=advance_plan,
@@ -1497,32 +1647,69 @@ class AgentRuntime:
                 else:
                     self._record_terminal_run(
                         result.run,
-                        outcome_verification=result.outcome_verification,
+                        outcome_verification=recorded_verification,
                         advance_plan=advance_plan,
                     )
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
-        if result.run.outcome != SkillOutcome.RUNNING:
-            if collect_recent_drop:
-                self.blackboard.merge_semantics(
-                    instance_id=self.perception.instance_id,
-                    facts=(
-                        PerceptionFact(
-                            key="collection.recent_log_break",
-                            value=True,
-                            confidence=0.995,
-                            observed_ns=time.monotonic_ns(),
-                            source=f"verified:{result.run.run_id}:block-broken",
-                            expires_after_ms=6_000,
-                        ),
+        if terminal:
+            stop_event = getattr(self, "_stop", None)
+            if (
+                (stop_event is not None and stop_event.is_set())
+                or operator_pause_latched()
+            ):
+                # A pause/stop observed while releasing this terminal action
+                # owns the executor. Never resurrect a successor transaction.
+                self._gather_acquisition_continuation = None
+                if stop_event is not None:
+                    stop_event.set()
+                return
+            if gather_handoff:
+                assert frozen_gather_baseline is not None
+                assert frozen_gather_count is not None
+                if continuation is None:
+                    continuation = _GatherAcquisitionContinuation(
+                        context_key=result.run.context_key,
+                        parameters=dict(result.run.parameters),
+                        instruction=self.executor.instruction,
+                        active_run_id=result.run.run_id,
+                        last_exact_count=frozen_gather_count,
+                    )
+                collection_run = self._start_drop_collection(
+                    result.run,
+                    frozen_gather_baseline,
+                )
+                continuation.active_run_id = collection_run.run_id
+                self._gather_acquisition_continuation = continuation
+                return
+            if verified_gather_collection:
+                assert continuation is not None
+                assert verified_collection_count is not None
+                continuation.last_exact_count = verified_collection_count
+                continuation.resource_acquired_events += 1
+                if gather_collection_complete:
+                    self._note_terminal_for_cognition(
+                        result.run,
+                        recovery_started=False,
+                    )
+                    return
+                gather_run_id = uuid.uuid4().hex
+                self.executor.start(
+                    self.skills.get("gather_nearby_wood"),
+                    run_id=gather_run_id,
+                    context_key=continuation.context_key,
+                    parameters=continuation.parameters,
+                    instruction=continuation.instruction,
+                    gather_acquisitions_remaining=(
+                        _GATHER_ACQUISITIONS_REQUIRED
+                        - continuation.resource_acquired_events
                     ),
                 )
-                self.executor.start(
-                    self.skills.get("collect_recent_drop"),
-                    run_id=uuid.uuid4().hex,
-                    context_key=result.run.context_key,
-                    collection_hotbar_log_baseline=(
-                        self.executor.mining_hotbar_log_baseline
-                    ),
+                continuation.active_run_id = gather_run_id
+                return
+            if collect_recent_drop:
+                self._start_drop_collection(
+                    result.run,
+                    self.executor.mining_hotbar_log_baseline,
                 )
                 return
             if self._route_headroom_terminal(result):
@@ -1537,7 +1724,62 @@ class AgentRuntime:
                 recovery_started=recovery is not None,
             )
             if recovery is not None:
-                self._start_recovery_skill(recovery, result.run)
+                self._start_recovery_skill(
+                    recovery,
+                    result.run,
+                    plan_neutral=(
+                        inherited_plan_neutral
+                        or (
+                            gather_transaction_terminal
+                            and not gather_collection_complete
+                        )
+                    ),
+                )
+
+    def _start_drop_collection(
+        self,
+        broken_run: SkillRun,
+        baseline: PerceptionFact | None,
+    ) -> SkillRun:
+        self.blackboard.merge_semantics(
+            instance_id=self.perception.instance_id,
+            facts=(PerceptionFact(
+                key="collection.recent_log_break",
+                value=True,
+                confidence=0.995,
+                observed_ns=time.monotonic_ns(),
+                source=f"verified:{broken_run.run_id}:block-broken",
+                expires_after_ms=6_000,
+            ),),
+        )
+        return self.executor.start(
+            self.skills.get("collect_recent_drop"),
+            run_id=uuid.uuid4().hex,
+            context_key=broken_run.context_key,
+            collection_hotbar_log_baseline=baseline,
+        )
+
+    def _clear_drop_collection_authorization(self, run: SkillRun) -> None:
+        """Revoke the short-lived pickup fact on every collector terminal path."""
+
+        blackboard = getattr(self, "blackboard", None)
+        perception = getattr(self, "perception", None)
+        instance_id = getattr(perception, "instance_id", None)
+        if blackboard is None or not isinstance(instance_id, str) or not instance_id:
+            return
+        blackboard.merge_semantics(
+            instance_id=instance_id,
+            facts=(
+                PerceptionFact(
+                    key="collection.recent_log_break",
+                    value=False,
+                    confidence=0.995,
+                    observed_ns=time.monotonic_ns(),
+                    source=f"runtime:{run.run_id}:collection-terminal",
+                    expires_after_ms=250,
+                ),
+            ),
+        )
 
     def _is_headroom_child_result(self, result: ExecutionTick) -> bool:
         recovery = getattr(self, "_headroom_recovery", None)
@@ -1953,6 +2195,11 @@ class AgentRuntime:
         # single query abstained; never ask again or improvise another target.
         if self.perception.semantic_available():
             self._clear_headroom_recovery(recovery)
+            # The completed semantic transaction found no authorized block to
+            # clear. Release only the traversal keepalive latch so safe,
+            # non-attacking exploration can continue while cognition replans.
+            self._traversal_escalation_pending = False
+            self._cognition_requested = True
 
     def _headroom_scene_is_safe(self) -> bool:
         now_ns = time.monotonic_ns()
@@ -2155,10 +2402,24 @@ class AgentRuntime:
         recovery = _observed_scene_recovery(self.skills, self.blackboard)
         if recovery is None:
             return
+        continuation = getattr(self, "_gather_acquisition_continuation", None)
+        headroom = getattr(self, "_headroom_recovery", None)
+        incomplete_gather = bool(
+            continuation is not None
+            or (
+                running is not None
+                and running.outcome == SkillOutcome.RUNNING
+                and (
+                    running.skill_id == "gather_nearby_wood"
+                    or running.run_id
+                    in getattr(self, "_plan_neutral_recovery_runs", set())
+                )
+            )
+            or (headroom is not None and headroom.origin_skill_id == "gather_nearby_wood")
+        )
         # Death and modal UI recovery outrank the optional terrain-clear
         # transaction at every phase. The normal cancellation path below owns
         # releasing any active mining/traversal inputs.
-        headroom = getattr(self, "_headroom_recovery", None)
         if headroom is not None:
             self._clear_headroom_recovery(headroom)
         if running is not None and running.outcome == SkillOutcome.RUNNING:
@@ -2180,6 +2441,7 @@ class AgentRuntime:
             and running.skill_id == recovery.skill_id
         ):
             return
+        self._gather_acquisition_continuation = None
         context_key = "scene-recovery"
         if running is not None and running.outcome == SkillOutcome.RUNNING:
             context_key = running.context_key
@@ -2190,11 +2452,16 @@ class AgentRuntime:
             finally:
                 self._record_terminal_run(cancelled.run)
             self._execution_revision += 1
-        self.executor.start(
+        recovery_run = self.executor.start(
             recovery,
             run_id=uuid.uuid4().hex,
             context_key=context_key,
         )
+        if incomplete_gather:
+            self._plan_neutral_recovery_runs = {
+                *getattr(self, "_plan_neutral_recovery_runs", ()),
+                recovery_run.run_id,
+            }
         self._cognition_requested = True
 
     def _lease_heartbeat(self) -> None:
@@ -2227,6 +2494,7 @@ class AgentRuntime:
         execution: ExecutionTick | None = None,
     ) -> None:
         if self._stop.is_set() or operator_pause_latched():
+            self._gather_acquisition_continuation = None
             self._stop.set()
             return
         # The supervisor lease has one global replay counter, while learned
@@ -2577,6 +2845,24 @@ class AgentRuntime:
                 finally:
                     self._record_terminal_run(cancelled.run, advance_plan=False)
                 self._execution_revision += 1
+        continuation = getattr(self, "_gather_acquisition_continuation", None)
+        if continuation is not None:
+            if not self._queued_operator_message_waiting():
+                return
+            running = self.executor.run
+            self._gather_acquisition_continuation = None
+            if (
+                running is not None
+                and running.outcome == SkillOutcome.RUNNING
+                and running.run_id == continuation.active_run_id
+            ):
+                cancelled = self.executor.cancel()
+                try:
+                    if cancelled.action is not None:
+                        self._send_motor(cancelled.action, execution=cancelled)
+                finally:
+                    self._record_terminal_run(cancelled.run, advance_plan=False)
+                self._execution_revision += 1
         executor = getattr(self, "executor", None)
         active = None if executor is None else executor.run
         if (
@@ -2768,6 +3054,15 @@ class AgentRuntime:
             return
         executor = getattr(self, "executor", None)
         active = None if executor is None else executor.run
+        continuation = getattr(self, "_gather_acquisition_continuation", None)
+        if continuation is not None:
+            if (
+                active is not None
+                and active.outcome == SkillOutcome.RUNNING
+                and active.run_id == continuation.active_run_id
+            ):
+                return
+            self._gather_acquisition_continuation = None
         if (
             active is not None
             and active.outcome == SkillOutcome.RUNNING
@@ -3128,6 +3423,8 @@ class AgentRuntime:
             raise ValueError("cannot record a running skill")
         if run.run_id in self._recorded_run_ids:
             return
+        if run.skill_id == "collect_recent_drop":
+            self._clear_drop_collection_authorization(run)
         neutral: set[str] = getattr(self, "_plan_neutral_recovery_runs", set())
         if run.run_id in neutral:
             advance_plan = False
@@ -3402,14 +3699,20 @@ class AgentRuntime:
             planks_retry_requires_wood=self._planks_retry_requires_wood(),
         )
 
-    def _start_recovery_skill(self, recovery: SkillSpec, parent: SkillRun) -> SkillRun:
+    def _start_recovery_skill(
+        self,
+        recovery: SkillSpec,
+        parent: SkillRun,
+        *,
+        plan_neutral: bool = False,
+    ) -> SkillRun:
         run = self.executor.start(
             recovery,
             run_id=uuid.uuid4().hex,
             context_key=parent.context_key,
             parameters=_compatible_recovery_parameters(parent, recovery),
         )
-        if (
+        if plan_neutral or (
             parent.skill_id == "craft_wood_planks"
             and parent.outcome != SkillOutcome.SUCCEEDED
             and recovery.skill_id == "close_open_inventory"

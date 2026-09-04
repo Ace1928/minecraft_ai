@@ -78,10 +78,7 @@ ARENA_TASK_BINDINGS: dict[str, ArenaTaskBinding] = {
         task_id="b_mine_log",
         fixture_id="resource-range",
         phases=(
-            ArenaSkillPhase(
-                "gather_nearby_wood",
-                {"wood_kind": "fixture-marked", "minimum_logs": 1},
-            ),
+            ArenaSkillPhase("gather_nearby_wood"),
         ),
     ),
     "b_open_inventory": ArenaTaskBinding(

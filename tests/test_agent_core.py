@@ -47,6 +47,8 @@ from minecraft_ai.cognition import (
 from minecraft_ai.runtime import (
     AgentRuntime,
     RuntimeMetrics,
+    _GatherAcquisitionContinuation,
+    _HeadroomRecovery,
     _accepted_action_provenance,
     _authorized_game_chat,
     _active_operator_messages,
@@ -59,7 +61,9 @@ from minecraft_ai.runtime import (
     _semantic_refresh_allowed,
     _skill_stats_totals,
     _trajectory_outcome_annotations,
+    _verified_gather_acquisition,
     _verified_log_break,
+    _verified_oak_log_break,
 )
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.social import (
@@ -466,6 +470,80 @@ def test_intentional_crafting_gui_ownership_suppresses_auto_close() -> None:
     assert runtime.executor.run is not None
     assert runtime.executor.run.run_id == "craft:owns-gui"
     assert runtime.executor.run.outcome == SkillOutcome.RUNNING
+
+
+@pytest.mark.parametrize("lineage", ("recovery", "headroom"))
+def test_death_recovery_preserves_incomplete_gather_plan_neutrality(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lineage: str,
+) -> None:
+    now = time.monotonic_ns()
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime_for_learning(database)
+        runtime.skills = build_bootstrap_skill_library()
+        runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+        runtime.blackboard = PerceptionBlackboard()
+        runtime.blackboard.publish(
+            FrameState(
+                frame_id=1,
+                captured_ns=now,
+                instance_id="bedrock:death",
+                width=1280,
+                height=720,
+                facts=(
+                    PerceptionFact(
+                        key="scene.death",
+                        value=True,
+                        confidence=0.995,
+                        observed_ns=now,
+                        source="safety:bedrock-hud-v1:not-training-label",
+                    ),
+                ),
+            )
+        )
+        runtime._gather_acquisition_continuation = None
+        runtime._headroom_recovery = None
+        runtime._plan_neutral_recovery_runs = set()
+        runtime._execution_revision = 0
+        runtime._cognition_requested = False
+        runtime._plan_steps = ("gather exactly three new oak logs",)
+        runtime._plan_goal_id = "wood"
+        runtime._last_decision = CognitionDecision(chosen_goal_id="wood")
+        if lineage == "recovery":
+            running = runtime.executor.start(
+                runtime.skills.get("reacquire_target"),
+                run_id="gather-recovery",
+                context_key="wood",
+            )
+            runtime._plan_neutral_recovery_runs.add(running.run_id)
+        else:
+            running = runtime.executor.start(
+                runtime.skills.get("mine_visible_block"),
+                run_id="headroom-child",
+                context_key="wood",
+            )
+            runtime._headroom_recovery = _HeadroomRecovery(
+                context_key="wood",
+                traversal_parameters={},
+                deadline_ns=now + 60_000_000_000,
+                origin_skill_id="gather_nearby_wood",
+                phase="mining",
+                mining_run_id=running.run_id,
+            )
+        monkeypatch.setattr(runtime, "_send_motor", lambda *_args, **_kwargs: None)
+
+        runtime._route_observed_scene_recovery()
+
+        respawn = runtime.executor.run
+        assert respawn is not None and respawn.skill_id == "respawn_after_death"
+        assert respawn.run_id in runtime._plan_neutral_recovery_runs
+        runtime._record_terminal_run(
+            respawn.model_copy(
+                update={"ended_ns": now + 1, "outcome": SkillOutcome.SUCCEEDED}
+            )
+        )
+        assert runtime._plan_index == 0
 
 
 def test_stale_inventory_scene_does_not_preempt_world_play() -> None:
@@ -1277,6 +1355,10 @@ def test_only_verified_log_breaks_trigger_drop_collection() -> None:
     assert _verified_log_break(verified.model_copy(update={"status": OutcomeStatus.PROGRESS})) is (
         False
     )
+    assert _verified_oak_log_break(verified) is True
+    assert _verified_oak_log_break(
+        verified.model_copy(update={"target_kind": "minecraft:spruce_log"})
+    ) is False
 
 
 def test_newest_acknowledged_operator_directive_remains_active() -> None:
@@ -1858,6 +1940,88 @@ def test_unfinished_crafting_recovery_close_does_not_consume_plan_step(
         assert runtime._plan_index == 1
 
 
+@pytest.mark.parametrize("acquisitions_before_failure", (1, 2))
+def test_incomplete_gather_recovery_does_not_consume_plan_step(
+    tmp_path: Path,
+    acquisitions_before_failure: int,
+) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime_for_learning(database)
+        runtime.skills = build_bootstrap_skill_library()
+        runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+        runtime._plan_steps = ("gather three new oak logs", "craft planks")
+        runtime._plan_goal_id = "wood"
+        runtime._last_decision = CognitionDecision(chosen_goal_id="wood")
+        failed = SkillRun(
+            run_id=f"collect-failed-after-{acquisitions_before_failure}",
+            skill_id="collect_recent_drop",
+            context_key="wood",
+            started_ns=1,
+            ended_ns=2,
+            outcome=SkillOutcome.FAILED,
+            failure_code=SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED,
+        )
+        runtime._record_terminal_run(failed, advance_plan=False)
+        recovery = runtime._start_recovery_skill(
+            runtime.skills.get("reacquire_target"),
+            failed,
+            plan_neutral=True,
+        ).model_copy(
+            update={"ended_ns": 3, "outcome": SkillOutcome.SUCCEEDED}
+        )
+
+        runtime._record_terminal_run(recovery)
+
+        assert runtime._plan_index == 0
+
+
+def test_cancelled_collection_revokes_recent_break_authorization(tmp_path: Path) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime_for_learning(database)
+        runtime.skills = build_bootstrap_skill_library()
+        runtime.blackboard = PerceptionBlackboard()
+        runtime.perception = SimpleNamespace(instance_id="bedrock:test")  # type: ignore[assignment]
+        runtime.blackboard.publish(
+            FrameState(
+                frame_id=1,
+                captured_ns=time.monotonic_ns(),
+                instance_id="bedrock:test",
+                width=1280,
+                height=720,
+            )
+        )
+        runtime.blackboard.merge_semantics(
+            instance_id="bedrock:test",
+            facts=(
+                PerceptionFact(
+                    key="collection.recent_log_break",
+                    value=True,
+                    confidence=0.995,
+                    observed_ns=time.monotonic_ns(),
+                    source="verified:break:one",
+                    expires_after_ms=6_000,
+                ),
+            ),
+        )
+        cancelled = SkillRun(
+            run_id="cancelled-collector",
+            skill_id="collect_recent_drop",
+            started_ns=1,
+            ended_ns=2,
+            outcome=SkillOutcome.CANCELLED,
+        )
+
+        runtime._record_terminal_run(cancelled, advance_plan=False)
+
+        authorization = runtime.blackboard.fact(
+            "collection.recent_log_break",
+            now_ns=time.monotonic_ns(),
+        )
+        assert authorization is not None
+        assert authorization.value is False
+        assert authorization.source == "runtime:cancelled-collector:collection-terminal"
+
+
 def test_inventory_transitions_only_consume_explicit_inventory_plan_steps(
     tmp_path: Path,
 ) -> None:
@@ -2164,7 +2328,7 @@ def test_cognition_strips_cross_skill_action_constraints_from_gather_wood() -> N
     )
     decision = HighLevelController(_Model(), skills).decide(PerceptionBlackboard(), context)
     assert decision.skill_id == "gather_nearby_wood"
-    assert decision.skill_parameters == {"wood_kind": "logs", "minimum_logs": 3}
+    assert decision.skill_parameters == {}
     executor = SkillExecutor(BootstrapMotorPolicy())
     executor.start(
         skills.get(decision.skill_id),
@@ -2248,13 +2412,16 @@ def test_collection_success_persists_resource_event_and_advances_plan_once(tmp_p
         )
 
 
-def test_runtime_transfers_prebreak_baseline_after_synchronous_send(
+@pytest.mark.parametrize("stop_during_send", (False, True))
+def test_runtime_transfers_prebreak_baseline_only_when_send_keeps_runtime_live(
     monkeypatch: pytest.MonkeyPatch,
+    stop_during_send: bool,
 ) -> None:
     now = time.monotonic_ns()
     order: list[str] = []
     runtime = object.__new__(AgentRuntime)
     runtime.metrics = RuntimeMetrics()
+    runtime._stop = threading.Event()
     runtime.skills = build_bootstrap_skill_library()
     runtime.executor = SkillExecutor(BootstrapMotorPolicy())
     runtime.executor.start(runtime.skills.get("mine_visible_block"), run_id="break-bound")
@@ -2312,16 +2479,196 @@ def test_runtime_transfers_prebreak_baseline_after_synchronous_send(
     monkeypatch.setattr(runtime, "_telemetry_payload", lambda **_kwargs: {})
     monkeypatch.setattr(runtime, "_expire_late_headroom_child", lambda result: (result, False))
     monkeypatch.setattr(runtime, "_is_headroom_child_result", lambda _result: False)
-    monkeypatch.setattr(runtime, "_send_motor", lambda *_args, **_kwargs: order.append("send"))
+    def send(*_args: object, **_kwargs: object) -> None:
+        order.append("send")
+        if stop_during_send:
+            runtime._stop.set()
+
+    monkeypatch.setattr(runtime, "_send_motor", send)
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
     monkeypatch.setattr(
         runtime, "_record_terminal_run", lambda *_args, **_kwargs: order.append("record")
     )
     runtime.tick()
     assert order == ["capture", "policy", "send", "record"]
     assert runtime.executor.run is not None
+    if stop_during_send:
+        assert runtime.executor.run.run_id == "break-bound"
+        return
     assert runtime.executor.run.skill_id == "collect_recent_drop"
     assert runtime.executor._collection_possession.baseline_count == 0
     assert runtime.executor._collection_possession.baseline_observed_ns == baseline.observed_ns
+
+
+def test_gather_continuation_requires_three_exact_pickups_before_plan_advance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime.blackboard = PerceptionBlackboard()
+    captured_ns = time.monotonic_ns()
+    runtime.blackboard.publish(FrameState(
+        frame_id=1, captured_ns=captured_ns, instance_id="bedrock:test",
+        width=1280, height=720,
+    ))
+    runtime.perception = SimpleNamespace(  # type: ignore[assignment]
+        capture_once=lambda: CapturedFrame(1, captured_ns, 1280, 720, b""),
+        stale=lambda: False, instance_id="bedrock:test",
+    )
+    runtime.telemetry = SimpleNamespace(publish=lambda _payload: None)  # type: ignore[assignment]
+    runtime.metrics = RuntimeMetrics()
+    runtime._sequence = 1
+    runtime._plan_steps = ("gather three logs", "craft planks")
+    runtime._plan_goal_id = "progression:wood"
+    runtime._plan_index = 0
+    runtime._last_decision = CognitionDecision(chosen_goal_id="progression:wood")
+    runtime._pending_decision = None
+    runtime._execution_revision = 0
+    runtime._cognition_requested = False
+    runtime._traversal_escalation_pending = False
+    runtime._gather_acquisition_continuation = None
+    bindings: dict[str, str | int | float | bool] = {}
+    instruction = "Collect exactly three nearby oak logs."
+    runtime.executor.start(
+        runtime.skills.get("gather_nearby_wood"), run_id="gather-origin",
+        context_key="progression:wood", parameters=bindings, instruction=instruction,
+    )
+    exact_count = 4
+    recorded: list[tuple[SkillRun, OutcomeVerification | None, bool]] = []
+
+    def execute(*_args: object, **_kwargs: object) -> ExecutionTick:
+        nonlocal exact_count
+        active = runtime.executor.run
+        assert active is not None
+        ended_ns = time.monotonic_ns()
+        terminal = active.model_copy(
+            update={"ended_ns": ended_ns, "outcome": SkillOutcome.SUCCEEDED}
+        )
+        runtime.executor._run = terminal
+        if active.skill_id == "gather_nearby_wood":
+            runtime.executor._mining_hotbar_log_baseline = PerceptionFact(
+                key="inventory.hotbar.logs", value=exact_count, confidence=0.995,
+                observed_ns=ended_ns - 1, source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+                expires_after_ms=250,
+            )
+            kind, signal, target = OutcomeKind.MINING, OutcomeSignal.BLOCK_BROKEN, "oak_log"
+        else:
+            exact_count += 1
+            runtime.executor._verified_collection_hotbar_log_count = exact_count
+            kind, signal, target = (
+                OutcomeKind.RESOURCE_ACQUISITION, OutcomeSignal.RESOURCE_ACQUIRED, "log"
+            )
+        return ExecutionTick(run=terminal, action=None, outcome_verification=OutcomeVerification(
+            run_id=active.run_id, kind=kind, status=OutcomeStatus.SUCCEEDED,
+            signal=signal, observed_ns=ended_ns, confidence=0.995,
+            reason="verified", target_kind=target,
+            evidence_keys=(
+                ("inventory.hotbar.logs",)
+                if signal == OutcomeSignal.RESOURCE_ACQUIRED
+                else ()
+            ),
+        ))
+
+    def record(
+        run: SkillRun,
+        *,
+        outcome_verification: OutcomeVerification | None = None,
+        advance_plan: bool = True,
+    ) -> None:
+        recorded.append((run, outcome_verification, advance_plan))
+        if run.outcome == SkillOutcome.SUCCEEDED and advance_plan:
+            runtime._advance_plan_on_step_complete(run)
+
+    monkeypatch.setattr(runtime.executor, "tick", execute)
+    monkeypatch.setattr(runtime, "_record_terminal_run", record)
+    for method in (
+        "_merge_operator_target", "_merge_policy_perception", "_flush_pending_skill_stats",
+        "_flush_pending_learning_records", "_flush_pending_operator_status_updates",
+        "_publish_player_chat_facts", "_consume_cognition", "_start_cognition_if_due",
+        "_request_semantics_if_due", "_route_observed_scene_recovery",
+        "_advance_headroom_recovery",
+    ):
+        monkeypatch.setattr(runtime, method, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_telemetry_payload", lambda **_kwargs: {})
+    monkeypatch.setattr(runtime, "_expire_late_headroom_child", lambda result: (result, False))
+    monkeypatch.setattr(runtime, "_is_headroom_child_result", lambda _result: False)
+
+    for acquired in range(1, 4):
+        runtime.tick()
+        assert runtime.executor.run is not None
+        assert runtime.executor.run.skill_id == "collect_recent_drop"
+        runtime.tick()
+        if acquired < 3:
+            continuation = runtime._gather_acquisition_continuation
+            assert continuation is not None
+            assert (continuation.resource_acquired_events, continuation.last_exact_count) == (
+                acquired, 4 + acquired,
+            )
+            assert runtime.executor.run is not None
+            assert runtime.executor.run.skill_id == "gather_nearby_wood"
+            assert runtime.executor.run.context_key == "progression:wood"
+            assert runtime.executor.parameters == bindings
+            assert runtime.executor.instruction == instruction
+            assert runtime.executor._gather_acquisitions_remaining == 3 - acquired
+            assert runtime._plan_index == 0
+
+    acquisitions = [
+        item for item in recorded
+        if item[1] is not None and item[1].signal == OutcomeSignal.RESOURCE_ACQUIRED
+    ]
+    assert len(acquisitions) == 3
+    assert [item[2] for item in acquisitions] == [False, False, True]
+    assert len({item[0].run_id for item in acquisitions}) == 3
+    assert runtime._gather_acquisition_continuation is None
+    assert runtime._plan_index == 1
+
+
+@pytest.mark.parametrize(
+    ("result_run_id", "verification_run_id", "exact_count"),
+    (("other", "collect-1", 5), ("collect-1", "other", 5), ("collect-1", "collect-1", 6)),
+)
+def test_gather_acquisition_rejects_unowned_or_nonincremental_evidence(
+    result_run_id: str,
+    verification_run_id: str,
+    exact_count: int,
+) -> None:
+    continuation = _GatherAcquisitionContinuation(
+        context_key="progression:wood",
+        parameters={},
+        instruction="Gather three logs.",
+        active_run_id="collect-1",
+        last_exact_count=4,
+    )
+    run = SkillRun(
+        run_id=result_run_id,
+        skill_id="collect_recent_drop",
+        context_key="progression:wood",
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.SUCCEEDED,
+    )
+    result = ExecutionTick(
+        run=run,
+        action=None,
+        outcome_verification=OutcomeVerification(
+            run_id=verification_run_id,
+            kind=OutcomeKind.RESOURCE_ACQUISITION,
+            status=OutcomeStatus.SUCCEEDED,
+            signal=OutcomeSignal.RESOURCE_ACQUIRED,
+            observed_ns=2,
+            confidence=0.995,
+            reason="claimed pickup",
+            target_kind="log",
+            evidence_keys=("inventory.hotbar.logs",),
+        ),
+    )
+
+    assert not _verified_gather_acquisition(
+        result,
+        continuation,
+        exact_count=exact_count,
+    )
 
 
 def test_pending_cognition_cannot_replace_atomic_collection() -> None:
@@ -2361,6 +2708,36 @@ def test_pending_cognition_cannot_replace_atomic_collection() -> None:
     assert runtime._pending_decision is future
     assert runtime.executor.run is not None
     assert runtime.executor.run.run_id == "atomic-collection"
+
+
+def test_pending_cognition_cannot_replace_owned_gather_continuation() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime.executor.start(
+        runtime.skills.get("gather_nearby_wood"),
+        run_id="gather-second",
+        context_key="progression:wood",
+        parameters={},
+        instruction="Keep gathering the same logs.",
+    )
+    runtime._gather_acquisition_continuation = _GatherAcquisitionContinuation(
+        context_key="progression:wood",
+        parameters={},
+        instruction="Keep gathering the same logs.",
+        active_run_id="gather-second",
+        last_exact_count=2,
+        resource_acquired_events=1,
+    )
+    future: Future[CognitionDecision] = Future()
+    future.set_result(CognitionDecision(skill_id="explore_forward"))
+    runtime._pending_decision = future
+
+    runtime._consume_cognition()
+
+    assert runtime._pending_decision is future
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.run_id == "gather-second"
 
 
 def test_keepalive_timeout_is_an_event_not_a_permanent_failure_memory(

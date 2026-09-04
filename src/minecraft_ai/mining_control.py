@@ -1742,12 +1742,9 @@ def _requested_target_matches(
         return True
     if requested in {"log", "tree", "tree_trunk", "trunk"}:
         return observed_rule.family == _BlockFamily.LOG
-    requested_rule = _block_rule(requested)
-    return bool(
-        requested_rule is not None
-        and requested_rule.family == _BlockFamily.LOG
-        and observed_rule.family == _BlockFamily.LOG
-    )
+    # A named species is an exact destructive boundary. Family-level matching
+    # is reserved for the explicit generic aliases above.
+    return False
 
 
 def _hash_distance(first: str, second: str) -> int:

@@ -62,6 +62,11 @@ class _CollectionPossessionState:
 
 _MINING_POST_RELEASE_VERIFY_MS = 5_000
 _COLLECTION_STABLE_NS = 250_000_000
+_GATHER_ACQUISITIONS_REQUIRED = 3
+# The pinned glyph observer is calibrated only through 16. Treat that as a
+# conservative whole-transaction ceiling because it does not expose per-slot
+# stack layout to the executor.
+_GATHER_MAX_VERIFIED_HOTBAR_TOTAL = 16
 _MINING_SUCCESS_OVERRIDABLE_FAILURES = frozenset(
     {
         SkillFailureCode.MINING_TARGET_CHANGED,
@@ -103,6 +108,26 @@ def _exact_hotbar_log_fact(
     )
 
 
+def _current_frame_hotbar_log_fact(
+    blackboard: PerceptionBlackboard,
+    *,
+    now_ns: int,
+) -> PerceptionFact | None:
+    """Return the exact canonical log count bound to the latest captured frame."""
+    frame = blackboard.raw_latest()
+    fact = blackboard.fact("inventory.hotbar.logs", now_ns=now_ns)
+    return (
+        fact
+        if (
+            frame is not None
+            and fact is not None
+            and fact.observed_ns == frame.captured_ns
+            and _exact_hotbar_log_fact(fact, now_ns=now_ns)
+        )
+        else None
+    )
+
+
 class SkillExecutor:
     """Evaluate semantic skill contracts against live perception every tick."""
 
@@ -123,6 +148,9 @@ class SkillExecutor:
         self._collection_possession = _CollectionPossessionState()
         self._mining_hotbar_log_baseline: PerceptionFact | None = None
         self._mining_attack_started = False
+        self._gather_mining_started = False
+        self._gather_acquisitions_remaining = _GATHER_ACQUISITIONS_REQUIRED
+        self._verified_collection_hotbar_log_count: int | None = None
         self._complete_on_locomotion_progress = False
         self._locomotion_progress_events = 0
         self._locomotion_progress_first_ns: int | None = None
@@ -150,6 +178,11 @@ class SkillExecutor:
     def mining_hotbar_log_baseline(self) -> PerceptionFact | None:
         """Immutable exact evidence frozen before this run's first mining attack."""
         return self._mining_hotbar_log_baseline
+
+    @property
+    def verified_collection_hotbar_log_count(self) -> int | None:
+        """Stable exact post-motion log count accepted by collection verification."""
+        return self._verified_collection_hotbar_log_count
 
     @property
     def policy_parameters(self) -> dict[str, str | int | float | bool]:
@@ -197,6 +230,7 @@ class SkillExecutor:
         locomotion_progress_events_required: int = 1,
         locomotion_progress_min_ms: int = 0,
         collection_hotbar_log_baseline: PerceptionFact | None = None,
+        gather_acquisitions_remaining: int = _GATHER_ACQUISITIONS_REQUIRED,
     ) -> SkillRun:
         if self._run is not None and self._run.outcome == SkillOutcome.RUNNING:
             raise RuntimeError("a skill is already running")
@@ -216,6 +250,14 @@ class SkillExecutor:
             raise ValueError(
                 "locomotion_progress_min_ms must be a non-negative integer"
             )
+        if (
+            not isinstance(gather_acquisitions_remaining, int)
+            or isinstance(gather_acquisitions_remaining, bool)
+            or not 1
+            <= gather_acquisitions_remaining
+            <= _GATHER_ACQUISITIONS_REQUIRED
+        ):
+            raise ValueError("gather_acquisitions_remaining must be between 1 and 3")
         started = time.monotonic_ns() if now_ns is None else now_ns
         self._spec = spec
         self._parameters = dict(parameters or {})
@@ -245,6 +287,9 @@ class SkillExecutor:
             )
         self._mining_hotbar_log_baseline = None
         self._mining_attack_started = False
+        self._gather_mining_started = False
+        self._gather_acquisitions_remaining = gather_acquisitions_remaining
+        self._verified_collection_hotbar_log_count = None
         self._complete_on_locomotion_progress = complete_on_locomotion_progress
         self._locomotion_progress_events = 0
         self._locomotion_progress_first_ns = None
@@ -306,7 +351,12 @@ class SkillExecutor:
             ):
                 return self._finish(SkillOutcome.SUCCEEDED, now, None)
         elif (
-            self._spec.skill_id not in {"mine_visible_block", "craft_wood_planks"}
+            self._spec.skill_id
+            not in {
+                "mine_visible_block",
+                "gather_nearby_wood",
+                "craft_wood_planks",
+            }
             and self._spec.success_conditions
             and conditions_satisfied(
                 self._spec.success_conditions,
@@ -372,6 +422,14 @@ class SkillExecutor:
                 )
                 else None
             )
+        gather_hotbar_log_baseline = (
+            _current_frame_hotbar_log_fact(blackboard, now_ns=now)
+            if (
+                self._spec.skill_id == "gather_nearby_wood"
+                and not self._gather_mining_started
+            )
+            else None
+        )
 
         intent = MotorIntent(
             skill_id=self._spec.skill_id,
@@ -383,7 +441,11 @@ class SkillExecutor:
                 or _policy_instruction(self._spec)
             ),
             condition_scale=self._spec.policy_condition_scale,
-            target_label=_target_label(self._parameters),
+            target_label=(
+                "oak_log"
+                if self._spec.skill_id == "gather_nearby_wood"
+                else _target_label(self._parameters)
+            ),
             target_track_id=(
                 _target_track_id(self._parameters)
                 if self._spec.skill_id == "mine_visible_block"
@@ -394,14 +456,51 @@ class SkillExecutor:
         action = self.policy.act(blackboard, intent, sequence=sequence)
         self._last_intent = intent
         mining = self._mining_guard.inspect(action, blackboard, intent, now_ns=now)
+        accepted_left_press = bool(
+            mining.failure_code is None and "left" in mining.action.buttons_down
+        )
+        if (
+            self._spec.skill_id == "gather_nearby_wood"
+            and not self._gather_mining_started
+            and accepted_left_press
+            and (
+                gather_hotbar_log_baseline is None
+                or int(gather_hotbar_log_baseline.value)
+                + self._gather_acquisitions_remaining
+                > _GATHER_MAX_VERIFIED_HOTBAR_TOTAL
+            )
+        ):
+            return self._finish(
+                SkillOutcome.FAILED,
+                now,
+                (
+                    "gather-hotbar-baseline-unverified"
+                    if gather_hotbar_log_baseline is None
+                    else "gather-hotbar-successor-range-unverified"
+                ),
+                recover=True,
+                failure_code=SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED,
+                force_release_left=True,
+            )
         if (
             self._spec.skill_id == "mine_visible_block"
-            and mining.failure_code is None
-            and "left" in mining.action.buttons_down
+            and accepted_left_press
         ):
             # Even an absent baseline is frozen: a later frame could already
             # contain the automatically collected drop from this attack.
             self._mining_attack_started = True
+        if (
+            self._spec.skill_id == "gather_nearby_wood"
+            and not self._gather_mining_started
+            and accepted_left_press
+        ):
+            # The traversal verifier owns gather only until the mining guard
+            # accepts an attack. Freeze this exact pre-action frame, discard
+            # all traversal history, and make the phase transition one-way.
+            self._mining_hotbar_log_baseline = gather_hotbar_log_baseline
+            self._outcome_verifier.reset()
+            self._begin_mining_outcome_verifier(blackboard, now_ns=now)
+            self._gather_mining_started = True
         if (
             self._spec.skill_id == "collect_recent_drop"
             and self._collection_possession.baseline_count is not None
@@ -417,10 +516,14 @@ class SkillExecutor:
             action=mining.action,
             now_ns=now,
         )
-        traversal_verification = self._observe_traversal_outcome(
-            blackboard,
-            action=mining.action,
-            now_ns=now,
+        traversal_verification = (
+            None
+            if self._gather_mining_started
+            else self._observe_traversal_outcome(
+                blackboard,
+                action=mining.action,
+                now_ns=now,
+            )
         )
         if mining.failure_code is not None:
             if (
@@ -573,6 +676,7 @@ class SkillExecutor:
         state.candidate_last_ns = fact.observed_ns
         if fact.observed_ns - state.candidate_first_ns < _COLLECTION_STABLE_NS:
             return None
+        self._verified_collection_hotbar_log_count = count
         return OutcomeVerification(
             run_id=self._run.run_id,
             kind=OutcomeKind.RESOURCE_ACQUISITION,
@@ -705,6 +809,31 @@ class SkillExecutor:
             action_origin=ActionOrigin.SYNTHETIC,
         )
 
+    def _begin_mining_outcome_verifier(
+        self,
+        blackboard: PerceptionBlackboard,
+        *,
+        now_ns: int,
+    ) -> None:
+        if self._run is None:
+            raise RuntimeError("no skill is running")
+        observer_source = getattr(self.policy, "outcome_observer_source", None)
+        trusted_transition_source = (
+            observer_source() if callable(observer_source) else None
+        )
+        self._outcome_verifier.begin(
+            self._run.run_id,
+            OutcomeKind.MINING,
+            blackboard,
+            now_ns=now_ns,
+            trusted_transition_source=(
+                trusted_transition_source
+                if isinstance(trusted_transition_source, str)
+                and trusted_transition_source
+                else None
+            ),
+        )
+
     def _observe_mining_outcome(
         self,
         blackboard: PerceptionBlackboard,
@@ -714,25 +843,17 @@ class SkillExecutor:
     ) -> OutcomeVerification | None:
         if self._spec is None or self._run is None:
             return None
-        if self._spec.skill_id != "mine_visible_block":
+        mining_phase = bool(
+            self._spec.skill_id == "mine_visible_block"
+            or (
+                self._spec.skill_id == "gather_nearby_wood"
+                and self._gather_mining_started
+            )
+        )
+        if not mining_phase:
             return None
         if self._outcome_verifier.active_run_id != self._run.run_id:
-            observer_source = getattr(self.policy, "outcome_observer_source", None)
-            trusted_transition_source = (
-                observer_source() if callable(observer_source) else None
-            )
-            self._outcome_verifier.begin(
-                self._run.run_id,
-                OutcomeKind.MINING,
-                blackboard,
-                now_ns=now_ns,
-                trusted_transition_source=(
-                    trusted_transition_source
-                    if isinstance(trusted_transition_source, str)
-                    and trusted_transition_source
-                    else None
-                ),
-            )
+            self._begin_mining_outcome_verifier(blackboard, now_ns=now_ns)
         return self._outcome_verifier.observe(
             blackboard,
             action=action,
@@ -749,6 +870,8 @@ class SkillExecutor:
         if self._spec is None or self._run is None:
             return None
         if self._spec.skill_id not in _TRAVERSAL_SKILL_IDS:
+            return None
+        if self._spec.skill_id == "gather_nearby_wood" and self._gather_mining_started:
             return None
         if self._outcome_verifier.active_run_id != self._run.run_id:
             if (

@@ -703,7 +703,7 @@ def test_high_level_prompt_reserves_interaction_and_skill_evidence_facts() -> No
             expires_after_ms=10_000,
         ),
         PerceptionFact(
-            key="inventory.logs",
+            key="inventory.hotbar.logs",
             value=0,
             confidence=1.0,
             observed_ns=now,
@@ -733,11 +733,18 @@ def test_high_level_prompt_reserves_interaction_and_skill_evidence_facts() -> No
 
     controller.decide(_board(*facts), context)
 
-    strategic = json.loads(model.initial_messages[1].content)["fresh_facts"]
+    payload = json.loads(model.initial_messages[1].content)
+    strategic = payload["fresh_facts"]
     assert len(strategic) == 16
     assert "social.player_message" in strategic
     assert "target.visible" in strategic
-    assert "inventory.logs" in strategic
+    assert "inventory.hotbar.logs" in strategic
+    gather = next(
+        skill for skill in payload["skills"]
+        if skill["skill_id"] == "gather_nearby_wood"
+    )
+    assert gather["description"].startswith("Acquire exactly three new oak logs")
+    assert gather["success_evidence"] == []
 
 
 def test_high_level_goal_shortlist_keeps_custom_goal_after_role_standing_goals() -> None:

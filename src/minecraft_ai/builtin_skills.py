@@ -442,18 +442,24 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="gather_nearby_wood",
-            version=5,
+            version=7,
             name="Gather nearby wood",
             description=(
-                "Find a nearby tree, approach a visible trunk rather than leaves, mine connected "
-                "logs, collect the drops, and stop after at least three logs are visible in the "
-                "hotbar or inventory"
+                "Acquire exactly three new oak logs as three verified break-and-pickup "
+                "transactions. Each executor attempt finds a nearby oak tree, approaches a "
+                "visible trunk rather than leaves, and breaks one bound oak log. A verified "
+                "block break is not acquisition: runtime hands off to collect_recent_drop, "
+                "counts only its stable exact canonical hotbar +1 as one verified acquisition, "
+                "and repeats fresh gather attempts until three acquisitions are verified. "
+                "Completion uses only current "
+                "inventory.hotbar.logs from the pinned calibrated oak-log observer; hidden "
+                "inventory, other wood species, and generic inventory.logs claims do not qualify"
             ),
             stage=SkillStage.EXPERIMENTAL,
-            parameters=("wood_kind", "minimum_logs"),
-            success_conditions=(SkillCondition(key="inventory.logs", operator="gte", value=3),),
+            parameters=(),
+            success_conditions=(),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
-            expected_effects=("inventory.logs>=3", "wood_resource_acquired"),
+            expected_effects=("block_broken",),
             recovery_skills=(
                 "escape_submersion",
                 "retreat_from_danger",
@@ -462,7 +468,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             max_duration_ms=90_000,
             action_level=ActionLevel.GROUNDED,
             policy_ref="gather_wood",
-            policy_instruction="mine log",
+            policy_instruction="mine oak log",
             action_permissions=SkillActionPermissions(
                 allow_use=False,
                 allow_drop=False,

@@ -15,7 +15,10 @@ from minecraft_ai.perception import (
     ScreenRegion,
     Track,
 )
-from minecraft_ai.perception_service import BootstrapFastPerception
+from minecraft_ai.perception_service import (
+    BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+    BootstrapFastPerception,
+)
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.runtime import _terminal_run_event, _terminal_run_memory
 from minecraft_ai.safety import MotorAction
@@ -618,6 +621,43 @@ def test_pending_attack_has_typed_wall_clock_timeout_and_forced_release() -> Non
     assert waiting.action is not None and "left" not in waiting.action.buttons_down
     assert stopped.run.failure_code == SkillFailureCode.MINING_ACQUISITION_TIMEOUT
     assert stopped.action is not None and "left" in stopped.action.buttons_up
+
+
+def test_gather_rejects_non_oak_log_before_attack() -> None:
+    now = time.monotonic_ns()
+    policy = _ScriptedPolicy(MotorAction(sequence=0, buttons_down=("left",)))
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("gather_nearby_wood"),
+        run_id="gather-spruce-rejected",
+        now_ns=now,
+    )
+
+    tick = executor.tick(
+        _mining_board(
+            now_ns=now,
+            kind="spruce_log",
+            item=None,
+            extra_facts=(
+                PerceptionFact(
+                    key="inventory.hotbar.logs",
+                    value=0,
+                    confidence=0.995,
+                    observed_ns=now,
+                    source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+                    expires_after_ms=250,
+                ),
+            ),
+        ),
+        sequence=1,
+        now_ns=now,
+    )
+
+    assert tick.run.outcome == SkillOutcome.FAILED
+    assert tick.run.failure_code == SkillFailureCode.MINING_TARGET_MISMATCH
+    assert tick.action is not None
+    assert "left" not in tick.action.buttons_down
+    assert "left" in tick.action.buttons_up
 
 
 @pytest.mark.parametrize(

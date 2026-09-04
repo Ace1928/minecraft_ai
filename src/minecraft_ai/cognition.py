@@ -759,7 +759,10 @@ class HighLevelController:
                 query_text=planning_query,
                 context=context,
             )
-            required_fact_keys: set[str] = set()
+            # The canonical visible log count is strategic state even though
+            # exact gather completion is a three-event transaction rather than
+            # an absolute SkillCondition.
+            required_fact_keys: set[str] = {"inventory.hotbar.logs"}
             for skill_payload in feasible_skill_payloads:
                 evidence_items = skill_payload.get("success_evidence")
                 if not isinstance(evidence_items, list):
