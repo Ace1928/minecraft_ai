@@ -215,6 +215,233 @@ def test_cracks_that_clear_after_release_do_not_become_block_break_success() -> 
     assert verdict.signal == OutcomeSignal.NONE
 
 
+def test_complete_damage_cycle_verifies_same_material_replacement() -> None:
+    now = time.monotonic_ns()
+    board = _board(now, frame_hash="402420a0a2a22454")
+    track_id = "operator:same-material"
+    operator_source = f"operator:explicit-grounding:{track_id}"
+    rocket_source = "learned:learned:minestudio-rocket2:test:aux-localization:not-training-label"
+    _publish_target(
+        board,
+        now,
+        visible=True,
+        source=operator_source,
+        track_id=track_id,
+        track_attributes={"source": "operator", "grounding": "explicit-region"},
+    )
+    verifier = TemporalOutcomeVerifier()
+    verifier.begin(
+        "mine-same-material",
+        OutcomeKind.MINING,
+        board,
+        now_ns=now,
+        trusted_transition_source=rocket_source,
+    )
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=1, buttons_down=("left",)),
+        now_ns=now,
+    )
+
+    # These are the distinct crosshair phases from a real Bedrock dirt-break
+    # trajectory. The target remains semantically visible because another dirt
+    # block is directly behind the exact block that was attacked.
+    damage_hashes = (
+        "558c64a4a2a22050",
+        "4a2a26a6a2a26050",
+        "a34326a6a2b17874",
+        "5d5a5e942c513530",
+        "6b6d6a972e553d38",
+    )
+    for index, crosshair_hash in enumerate(damage_hashes, start=1):
+        sample_ns = now + (400 + index * 100) * 1_000_000
+        _publish_hashes(
+            board,
+            sample_ns,
+            frame_hash=crosshair_hash,
+            crosshair_hash=crosshair_hash,
+        )
+        _publish_target(
+            board,
+            sample_ns,
+            visible=True,
+            source=operator_source,
+            track_id=track_id,
+            exists_probability=0.98,
+            track_attributes={"source": "operator", "grounding": "explicit-region"},
+        )
+        verdict = verifier.observe(board, now_ns=sample_ns)
+        assert verdict.status != OutcomeStatus.SUCCEEDED
+
+    release_ns = now + 1_100_000_000
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=2, buttons_up=("left",)),
+        now_ns=release_ns,
+    )
+    replacement = "51535e942c513534"
+    for index in range(3):
+        settled_ns = now + (1_400 + index * 100) * 1_000_000
+        _publish_hashes(
+            board,
+            settled_ns,
+            frame_hash=replacement,
+            crosshair_hash=replacement,
+        )
+        _publish_target(
+            board,
+            settled_ns,
+            visible=True,
+            source=rocket_source,
+            track_id=track_id,
+            exists_probability=0.98,
+            track_attributes={"source": "operator", "tracking_source": rocket_source},
+        )
+        verdict = verifier.observe(board, now_ns=settled_ns)
+
+    assert verdict.status == OutcomeStatus.SUCCEEDED
+    assert verdict.signal == OutcomeSignal.BLOCK_BROKEN
+    assert verdict.confidence == 0.88
+    assert verdict.evidence_keys == (
+        "frame.crosshair_dhash",
+        "target.track_id",
+        f"target.track_id={track_id}",
+        f"target.binding_source={operator_source}",
+        "target.exists_probability",
+        f"target.tracking_source={rocket_source}",
+    )
+    assert "multiple damage phases" in verdict.reason
+
+
+def test_incomplete_damage_cycle_cannot_verify_same_material_replacement() -> None:
+    now = time.monotonic_ns()
+    board = _board(now)
+    _publish_target(board, now, visible=True)
+    verifier = TemporalOutcomeVerifier()
+    verifier.begin("mine-incomplete-cycle", OutcomeKind.MINING, board, now_ns=now)
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=1, buttons_down=("left",)),
+        now_ns=now,
+    )
+
+    # A single large occlusion followed by changed stable pixels is not a
+    # complete damage cycle and therefore remains fail-closed.
+    burst_ns = now + 600_000_000
+    _publish_hashes(
+        board,
+        burst_ns,
+        frame_hash=_HASH_B,
+        crosshair_hash=_HASH_B,
+    )
+    verifier.observe(board, now_ns=burst_ns)
+    release_ns = now + 700_000_000
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=2, buttons_up=("left",)),
+        now_ns=release_ns,
+    )
+    replacement = "0f0f0f0f0f0f0f0f"
+    for index in range(3):
+        settled_ns = now + (1_000 + index * 100) * 1_000_000
+        _publish_hashes(
+            board,
+            settled_ns,
+            frame_hash=replacement,
+            crosshair_hash=replacement,
+        )
+        _publish_target(board, settled_ns, visible=True, exists_probability=0.98)
+        verdict = verifier.observe(board, now_ns=settled_ns)
+
+    assert verdict.status != OutcomeStatus.SUCCEEDED
+    assert verdict.signal != OutcomeSignal.BLOCK_BROKEN
+
+
+def test_damage_cycle_rejects_positive_observation_captured_before_release() -> None:
+    now = time.monotonic_ns()
+    board = _board(now, frame_hash="402420a0a2a22454")
+    _publish_target(board, now, visible=True)
+    verifier = TemporalOutcomeVerifier()
+    verifier.begin("mine-stale-positive", OutcomeKind.MINING, board, now_ns=now)
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=1, buttons_down=("left",)),
+        now_ns=now,
+    )
+    for index, crosshair_hash in enumerate(
+        (
+            "558c64a4a2a22050",
+            "4a2a26a6a2a26050",
+            "a34326a6a2b17874",
+            "5d5a5e942c513530",
+            "6b6d6a972e553d38",
+        ),
+        start=1,
+    ):
+        sample_ns = now + (400 + index * 100) * 1_000_000
+        _publish_hashes(board, sample_ns, frame_hash=crosshair_hash)
+        _publish_target(board, sample_ns, visible=True, exists_probability=0.98)
+        verifier.observe(board, now_ns=sample_ns)
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=2, buttons_up=("left",)),
+        now_ns=now + 1_100_000_000,
+    )
+    replacement = "51535e942c513534"
+    for index in range(3):
+        settled_ns = now + (1_400 + index * 100) * 1_000_000
+        _publish_hashes(board, settled_ns, frame_hash=replacement)
+        verdict = verifier.observe(board, now_ns=settled_ns)
+
+    assert verdict.status != OutcomeStatus.SUCCEEDED
+    assert verdict.signal != OutcomeSignal.BLOCK_BROKEN
+
+
+def test_damage_phases_that_clear_to_baseline_remain_unverified() -> None:
+    now = time.monotonic_ns()
+    baseline = "402420a0a2a22454"
+    board = _board(now, frame_hash=baseline)
+    _publish_target(board, now, visible=True)
+    verifier = TemporalOutcomeVerifier()
+    verifier.begin("mine-cleared-cycle", OutcomeKind.MINING, board, now_ns=now)
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=1, buttons_down=("left",)),
+        now_ns=now,
+    )
+    for index, crosshair_hash in enumerate(
+        (
+            "558c64a4a2a22050",
+            "4a2a26a6a2a26050",
+            "a34326a6a2b17874",
+            "5d5a5e942c513530",
+            "6b6d6a972e553d38",
+        ),
+        start=1,
+    ):
+        sample_ns = now + (400 + index * 100) * 1_000_000
+        _publish_hashes(
+            board,
+            sample_ns,
+            frame_hash=crosshair_hash,
+            crosshair_hash=crosshair_hash,
+        )
+        verifier.observe(board, now_ns=sample_ns)
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=2, buttons_up=("left",)),
+        now_ns=now + 900_000_000,
+    )
+    for index in range(3):
+        settled_ns = now + (1_200 + index * 100) * 1_000_000
+        _publish_hashes(board, settled_ns, frame_hash=baseline)
+        _publish_target(board, settled_ns, visible=True, exists_probability=0.98)
+        verdict = verifier.observe(board, now_ns=settled_ns)
+
+    assert verdict.status != OutcomeStatus.SUCCEEDED
+    assert verdict.signal != OutcomeSignal.BLOCK_BROKEN
+
+
 def test_stable_replacement_plus_fresh_target_loss_verifies_block_break() -> None:
     now = time.monotonic_ns()
     board = _board(now)

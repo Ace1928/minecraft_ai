@@ -68,6 +68,8 @@ class OutcomeVerifierConfig:
     mining_post_release_settle_ms: int = 300
     mining_stable_samples: int = 3
     mining_target_loss_samples: int = 2
+    mining_damage_phase_samples: int = 5
+    mining_peak_damage_distance: int = 24
     mining_stall_ms: int = 1_500
     traversal_change_distance: int = 6
     traversal_crosshair_change_distance: int = 4
@@ -90,6 +92,8 @@ class OutcomeVerifierConfig:
             self.mining_post_release_settle_ms,
             self.mining_stable_samples,
             self.mining_target_loss_samples,
+            self.mining_damage_phase_samples,
+            self.mining_peak_damage_distance,
             self.mining_stall_ms,
             self.traversal_change_distance,
             self.traversal_crosshair_change_distance,
@@ -118,6 +122,8 @@ class _MiningState:
     samples: int = 0
     candidate_hash: str | None = None
     candidate_samples: int = 0
+    damage_phase_hashes: list[str] = field(default_factory=list)
+    peak_damage_distance: int = 0
     target_fact_ns: int = -1
     target_loss_samples: int = 0
     target_loss_source: str | None = None
@@ -164,10 +170,12 @@ _INVENTORY_KEYS = frozenset({"e", "escape", "esc"})
 class TemporalOutcomeVerifier:
     """Verify narrow outcomes from action-bound temporal visual evidence.
 
-    Hash changes prove only that pixels changed. Mining success additionally
-    requires an explicit break fact or repeated low target-existence probability
-    bound to the exact source and track attacked. Consequently crack animation
-    and unrelated inventory changes can report no more than progress.
+    One hash change proves only that pixels changed. Mining success additionally
+    requires an explicit break fact, repeated exact-bound target loss, or a
+    complete action-bound damage cycle: several distinct attack-time phases and
+    stable replacement pixels after release. Consequently a crack animation
+    that clears, one transient occlusion, and unrelated inventory changes can
+    report no more than progress.
     """
 
     config: OutcomeVerifierConfig = field(default_factory=OutcomeVerifierConfig)
@@ -338,11 +346,30 @@ class TemporalOutcomeVerifier:
             and state.target_was_visible
             and state.target_loss_samples >= self.config.mining_target_loss_samples
         )
+        replacement_target = _bound_target_still_present_after_release(
+            state,
+            blackboard,
+            now_ns=now_ns,
+            min_probability=self.config.min_fact_confidence,
+        )
+        settled_damage_cycle = bool(
+            release_settled
+            and state.target_was_visible
+            and len(state.damage_phase_hashes) >= self.config.mining_damage_phase_samples
+            and state.peak_damage_distance >= self.config.mining_peak_damage_distance
+            and state.candidate_hash is not None
+            and all(
+                _hash_distance(state.candidate_hash, phase_hash)
+                > self.config.static_hash_distance
+                for phase_hash in state.damage_phase_hashes
+            )
+            and replacement_target is not None
+        )
         if (
             not state.invalidated
             and attack_ms >= self.config.mining_min_attack_ms
             and stable_change
-            and (strong or settled_target_loss)
+            and (strong or settled_target_loss or settled_damage_cycle)
         ):
             evidence = (
                 "frame.crosshair_dhash",
@@ -361,17 +388,34 @@ class TemporalOutcomeVerifier:
                     if settled_target_loss
                     else ()
                 ),
+                *(
+                    (
+                        "target.track_id",
+                        f"target.track_id={state.target_track_id}",
+                        f"target.binding_source={state.target_source}",
+                        "target.exists_probability",
+                        f"target.tracking_source={replacement_target.source}",
+                    )
+                    if settled_damage_cycle and replacement_target is not None
+                    else ()
+                ),
             )
             return self._result(
                 OutcomeStatus.SUCCEEDED,
                 OutcomeSignal.BLOCK_BROKEN,
                 now_ns,
-                0.98 if strong else 0.92,
+                0.98 if strong else (0.92 if settled_target_loss else 0.88),
                 (
                     "stationary sustained attack produced an explicit bound break observation"
                     if strong
-                    else "stationary sustained attack produced stable replacement pixels and "
-                    "two consecutive exact-bound low target-existence observations"
+                    else (
+                        "stationary sustained attack produced stable replacement pixels and "
+                        "two consecutive exact-bound low target-existence observations"
+                        if settled_target_loss
+                        else "stationary sustained attack traversed multiple damage phases, "
+                        "settled on stable replacement pixels, and the exact-bound observer "
+                        "found another matching target behind them"
+                    )
                 ),
                 evidence,
             )
@@ -676,6 +720,20 @@ def _update_mining_hash(
         state.baseline_hash is not None
         and _hash_distance(state.baseline_hash, current) >= config.mining_change_distance
     )
+    if (
+        changed
+        and state.attack_started_ns is not None
+        and state.attack_released_ns is None
+        and now_ns - state.attack_started_ns >= config.mining_min_attack_ms * 1_000_000
+    ):
+        assert state.baseline_hash is not None
+        baseline_distance = _hash_distance(state.baseline_hash, current)
+        state.peak_damage_distance = max(state.peak_damage_distance, baseline_distance)
+        if not state.damage_phase_hashes or (
+            _hash_distance(state.damage_phase_hashes[-1], current)
+            > config.static_hash_distance
+        ):
+            state.damage_phase_hashes.append(current)
     if not changed:
         state.candidate_hash = None
         state.candidate_samples = 0
@@ -753,6 +811,39 @@ def _strong_break_evidence(
     if not verified:
         return False, ()
     return True, ("target.broken", "target.track_id")
+
+
+def _bound_target_still_present_after_release(
+    state: _MiningState,
+    blackboard: PerceptionBlackboard,
+    *,
+    now_ns: int,
+    min_probability: float,
+) -> PerceptionFact | None:
+    """Return a fresh exact-bound positive after the attacked pixels settled.
+
+    This is deliberately not success evidence by itself. Combined with the
+    complete damage cycle it distinguishes an identical block behind the one
+    attacked from a classifier that simply stayed positive throughout mining.
+    """
+    if state.attack_released_ns is None:
+        return None
+    probability = _semantic_fact(
+        blackboard,
+        "target.exists_probability",
+        now_ns=now_ns,
+        min_confidence=1.0,
+    )
+    if (
+        probability is None
+        or probability.observed_ns <= state.attack_released_ns
+        or not isinstance(probability.value, (int, float))
+        or isinstance(probability.value, bool)
+        or float(probability.value) < min_probability
+        or not _matches_target_binding(state, blackboard, probability)
+    ):
+        return None
+    return probability
 
 
 def _refresh_traversal_hashes(
