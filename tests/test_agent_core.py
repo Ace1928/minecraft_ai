@@ -4,6 +4,7 @@ from collections import deque
 from concurrent.futures import Future
 from pathlib import Path
 import sqlite3
+import threading
 import time
 from types import SimpleNamespace
 
@@ -552,6 +553,7 @@ def test_trajectory_failure_degrades_recording_without_stopping_motor(
 
     trajectory = _BrokenTrajectory()
     runtime = object.__new__(AgentRuntime)
+    runtime._stop = threading.Event()
     runtime.blackboard = board
     runtime.perception = SimpleNamespace(
         last_capture=CapturedFrame(1, now, 1, 1, b"\x00\x00\x00\xff")
@@ -567,6 +569,7 @@ def test_trajectory_failure_degrades_recording_without_stopping_motor(
     runtime._last_keepalive_skill_id = None
     runtime._sequence = 0
     runtime.metrics = RuntimeMetrics()
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
     monkeypatch.setattr(
         "minecraft_ai.runtime.send_command",
         lambda *_args, **_kwargs: {
@@ -581,6 +584,204 @@ def test_trajectory_failure_degrades_recording_without_stopping_motor(
     assert runtime._sequence == 1
     assert trajectory.disabled_reason == "OSError: simulated recorder fault"
     assert runtime.trajectory_disabled_reason == "OSError: simulated recorder fault"
+
+
+class _AcceptedTrajectorySpy:
+    def __init__(self) -> None:
+        self.accepted_calls = 0
+
+    def record_accepted(self, **_kwargs: object) -> bool:
+        self.accepted_calls += 1
+        return True
+
+
+def _motor_shutdown_runtime() -> tuple[AgentRuntime, _AcceptedTrajectorySpy]:
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:shutdown-test",
+            width=1,
+            height=1,
+        )
+    )
+    trajectory = _AcceptedTrajectorySpy()
+    runtime = object.__new__(AgentRuntime)
+    runtime._stop = threading.Event()
+    runtime.blackboard = board
+    runtime.perception = SimpleNamespace(
+        last_capture=CapturedFrame(1, now, 1, 1, b"\x00\x00\x00\xff")
+    )
+    runtime.executor = SimpleNamespace(
+        policy=SimpleNamespace(policy_id="learned:test"),
+        run=None,
+    )
+    runtime.trajectory = trajectory  # type: ignore[assignment]
+    runtime.trajectory_disabled_reason = None
+    runtime.lease_id = "lease-test"
+    runtime._last_decision = None
+    runtime._sequence = 7
+    runtime.metrics = RuntimeMetrics(motor_actions=3)
+    return runtime, trajectory
+
+
+def test_motor_send_noops_when_runtime_is_already_stopping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, trajectory = _motor_shutdown_runtime()
+    runtime._stop.set()
+    calls: list[str] = []
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+    monkeypatch.setattr(
+        "minecraft_ai.runtime.send_command",
+        lambda command, **_kwargs: calls.append(command),
+    )
+
+    runtime._send_motor(MotorAction(sequence=7, keys_down=("w",)))
+
+    assert calls == []
+    assert runtime._sequence == 7
+    assert runtime.metrics.motor_actions == 3
+    assert trajectory.accepted_calls == 0
+
+
+def test_motor_send_noops_when_operator_pause_is_already_latched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, trajectory = _motor_shutdown_runtime()
+    calls: list[str] = []
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: True)
+    monkeypatch.setattr(
+        "minecraft_ai.runtime.send_command",
+        lambda command, **_kwargs: calls.append(command),
+    )
+
+    runtime._send_motor(MotorAction(sequence=7, buttons_down=("left",)))
+
+    assert calls == []
+    assert runtime._stop.is_set()
+    assert runtime._sequence == 7
+    assert runtime.metrics.motor_actions == 3
+    assert trajectory.accepted_calls == 0
+
+
+def test_motor_send_treats_pause_latched_during_ipc_as_expected_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, trajectory = _motor_shutdown_runtime()
+    paused = False
+
+    def pause_during_send(_command: str, **_kwargs: object) -> dict[str, object]:
+        nonlocal paused
+        paused = True
+        raise RuntimeError("RuntimeError: operator pause is latched")
+
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: paused)
+    monkeypatch.setattr("minecraft_ai.runtime.send_command", pause_during_send)
+
+    runtime._send_motor(MotorAction(sequence=7, buttons_down=("left",)))
+
+    assert runtime._stop.is_set()
+    assert runtime._sequence == 7
+    assert runtime.metrics.motor_actions == 3
+    assert trajectory.accepted_calls == 0
+
+
+def test_motor_send_propagates_unrelated_ipc_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, trajectory = _motor_shutdown_runtime()
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+
+    def fail_send(_command: str, **_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("transport failure")
+
+    monkeypatch.setattr("minecraft_ai.runtime.send_command", fail_send)
+
+    with pytest.raises(RuntimeError, match="transport failure"):
+        runtime._send_motor(MotorAction(sequence=7))
+
+    assert not runtime._stop.is_set()
+    assert runtime._sequence == 7
+    assert runtime.metrics.motor_actions == 3
+    assert trajectory.accepted_calls == 0
+
+
+def test_motor_send_treats_transient_stop_during_ipc_as_expected_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, trajectory = _motor_shutdown_runtime()
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+
+    def stop_during_send(_command: str, **_kwargs: object) -> dict[str, object]:
+        runtime.stop()
+        raise FileNotFoundError("control.json")
+
+    monkeypatch.setattr("minecraft_ai.runtime.send_command", stop_during_send)
+
+    runtime._send_motor(MotorAction(sequence=7, keys_up=("w",)))
+
+    assert runtime._stop.is_set()
+    assert runtime._sequence == 7
+    assert runtime.metrics.motor_actions == 3
+    assert trajectory.accepted_calls == 0
+
+
+def test_run_forever_does_not_failsafe_when_pause_wins_motor_send_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _trajectory = _motor_shutdown_runtime()
+    runtime.motor_hz = 20.0
+    runtime._lease_thread = None
+    runtime._last_renew_ns = 0
+    runtime._lease_fault = None
+    runtime.perception = SimpleNamespace(
+        active_vlm=None,
+        last_capture=object(),
+        close=lambda: None,
+    )
+    runtime.executor = SimpleNamespace(
+        policy=SimpleNamespace(policy_id="learned:test"),
+        run=None,
+        close=lambda: None,
+    )
+    runtime.trajectory = None
+    runtime.telemetry = SimpleNamespace(publish=lambda *_args, **_kwargs: None)
+    runtime._pool = SimpleNamespace(shutdown=lambda **_kwargs: None)
+    runtime._lease_heartbeat = lambda: None  # type: ignore[method-assign]
+    runtime._merge_operator_target = lambda: None  # type: ignore[method-assign]
+    runtime._start_cognition_if_due = lambda: None  # type: ignore[method-assign]
+    runtime._warmup_policy = lambda: None  # type: ignore[method-assign]
+    runtime._flush_pending_skill_stats = lambda **_kwargs: None  # type: ignore[method-assign]
+    runtime._flush_pending_learning_records = (  # type: ignore[method-assign]
+        lambda **_kwargs: None
+    )
+    runtime._telemetry_payload = lambda **_kwargs: {}  # type: ignore[method-assign]
+    failsafe_calls: list[str] = []
+    runtime._failsafe = failsafe_calls.append  # type: ignore[method-assign]
+    paused = False
+
+    def send(command: str, **_kwargs: object) -> dict[str, object]:
+        nonlocal paused
+        if command == "motor-action":
+            paused = True
+            raise RuntimeError("RuntimeError: operator pause is latched")
+        return {}
+
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: paused)
+    monkeypatch.setattr("minecraft_ai.runtime.send_command", send)
+    runtime.tick = lambda: runtime._send_motor(  # type: ignore[method-assign]
+        MotorAction(sequence=7, keys_down=("w",))
+    )
+
+    runtime.run_forever()
+
+    assert failsafe_calls == []
+    assert runtime._stop.is_set()
+    assert runtime._sequence == 7
+    assert runtime.metrics.motor_actions == 3
 
 
 def test_optional_semantics_yield_to_cognition_and_operator_work() -> None:

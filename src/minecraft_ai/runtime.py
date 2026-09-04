@@ -40,7 +40,7 @@ from .social import (
 from .telemetry import TelemetryPublisher
 from .trajectory import ActionOrigin, ActionProvenance, TrajectoryRecorder, motor_condition_id
 from .storage import StateDatabase
-from .supervisor import send_command
+from .supervisor import operator_pause_latched, send_command
 
 
 _EXPLORE_KEEPALIVE_CONTEXT = "explore-keepalive"
@@ -1174,16 +1174,29 @@ class AgentRuntime:
         *,
         execution: ExecutionTick | None = None,
     ) -> None:
+        if self._stop.is_set() or operator_pause_latched():
+            self._stop.set()
+            return
         provenance = _accepted_action_provenance(
             execution,
             self.blackboard,
             fallback_policy_id=self.executor.policy.policy_id,
         )
-        accepted = send_command(
-            "motor-action",
-            lease_id=self.lease_id,
-            action=action.model_dump(mode="json"),
-        )
+        try:
+            accepted = send_command(
+                "motor-action",
+                lease_id=self.lease_id,
+                action=action.model_dump(mode="json"),
+            )
+        except Exception:
+            # Pause/stop can land after the preflight check while an already-running
+            # tick is crossing the supervisor boundary. That revocation is an
+            # expected shutdown, not an agent fault. Recheck after rejection to
+            # close the TOCTOU window without hiding unrelated transport failures.
+            if self._stop.is_set() or operator_pause_latched():
+                self._stop.set()
+                return
+            raise
         if self.trajectory is not None:
             frame = self.perception.last_capture
             blackboard = self.blackboard.latest()
