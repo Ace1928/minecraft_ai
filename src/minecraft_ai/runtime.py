@@ -814,6 +814,10 @@ class AgentRuntime:
     _pool: SingleWorkerDaemonExecutor = field(init=False)
     _last_decision: CognitionDecision | None = field(default=None, init=False)
     _pending_operator_message_ids: tuple[str, ...] = field(default=(), init=False)
+    _pending_operator_message_kinds: dict[str, OperatorMessageKind] = field(
+        default_factory=dict,
+        init=False,
+    )
     _pending_operator_status_updates: dict[
         str,
         tuple[OperatorMessageStatus, int, str | None],
@@ -1540,6 +1544,11 @@ class AgentRuntime:
             for message in context.operator_messages
             if message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
         )
+        self._pending_operator_message_kinds = {
+            message.message_id: message.kind
+            for message in context.operator_messages
+            if message.message_id in self._pending_operator_message_ids
+        }
         if self.state_db is not None:
             for message in context.operator_messages:
                 if message.status == OperatorMessageStatus.QUEUED:
@@ -1648,6 +1657,11 @@ class AgentRuntime:
         replacement.set_result(decision)
         self._pending_decision = replacement
         self._pending_operator_message_ids = pending_ids
+        self._pending_operator_message_kinds = {
+            message.message_id: message.kind
+            for message in context.operator_messages
+            if message.message_id in pending_ids
+        }
         self._pending_execution_revision = self._execution_revision
         self._cognition_requested = False
         return True
@@ -1691,14 +1705,25 @@ class AgentRuntime:
             return
         if self._close_crafting_gui_before_world_decision(decision):
             return
+        selected_message_id = _selected_operator_message_id(
+            decision,
+            self._pending_operator_message_ids,
+        )
+        if (
+            selected_message_id is not None
+            and getattr(self, "_pending_operator_message_kinds", {}).get(
+                selected_message_id
+            )
+            == OperatorMessageKind.CORRECTION
+        ):
+            # Corrections are bounded overrides, not durable multi-step goals.
+            # The accepted skill still executes under its operator context, but
+            # model-generated plan text cannot keep replaying it afterward.
+            decision = decision.model_copy(update={"plan_steps": ()})
         self._last_decision = decision
         self._adopt_plan_if_revised(decision)
         operator_acknowledged = False
         if self.state_db is not None and self._pending_operator_message_ids:
-            selected_message_id = _selected_operator_message_id(
-                decision,
-                self._pending_operator_message_ids,
-            )
             if selected_message_id is not None and not decision.request_replan:
                 response = decision.say or decision.reasoning_summary
                 operator_acknowledged = self._persist_operator_message_status(
@@ -1708,6 +1733,7 @@ class AgentRuntime:
                     response_text=response,
                 )
             self._pending_operator_message_ids = ()
+            self._pending_operator_message_kinds = {}
         for question in decision.ask_perception:
             latest = self.blackboard.raw_latest()
             if latest is None:

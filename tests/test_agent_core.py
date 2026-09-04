@@ -2025,6 +2025,7 @@ def _runtime_with_completed_decision(
     runtime._pending_execution_revision = 0
     runtime._execution_revision = 0
     runtime._pending_operator_message_ids = pending_message_ids
+    runtime._pending_operator_message_kinds = {}
     runtime._cognition_requested = False
     runtime._cognition_retry_count = 0
     runtime._cognition_retry_not_before_ns = 0
@@ -2701,6 +2702,47 @@ def test_valid_decision_acknowledges_its_own_delivered_message(tmp_path: Path) -
         assert persisted.response_text == "I am exploring for a route out."
         assert runtime._cognition_requested is False
         assert runtime._cognition_retry_count == 0
+    finally:
+        database.close()
+
+
+def test_accepted_correction_cannot_install_a_persistent_plan(tmp_path: Path) -> None:
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    try:
+        message = OperatorMessage(
+            message_id="one-shot-craft",
+            created_ns=1,
+            text="Try crafting planks once, then reassess.",
+            kind=OperatorMessageKind.CORRECTION,
+            status=OperatorMessageStatus.DELIVERED,
+            delivered_ns=2,
+        )
+        database.save_operator_message(message)
+        runtime = _runtime_with_completed_decision(
+            CognitionDecision(
+                chosen_goal_id="operator:one-shot-craft",
+                skill_id="craft_wood_planks",
+                instruction=message.text,
+                plan_steps=("craft wood planks", "close inventory", "try again"),
+            ),
+            database=database,
+            pending_message_ids=("one-shot-craft",),
+        )
+        runtime._pending_operator_message_kinds = {
+            "one-shot-craft": OperatorMessageKind.CORRECTION
+        }
+        runtime.skills = build_bootstrap_skill_library()
+        runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+
+        runtime._consume_cognition()
+
+        assert runtime._last_decision is not None
+        assert runtime._last_decision.plan_steps == ()
+        assert runtime.executor.run is not None
+        assert runtime.executor.run.context_key == "operator:one-shot-craft"
+        assert database.load_operator_messages(limit=1)[0].status == (
+            OperatorMessageStatus.ACKNOWLEDGED
+        )
     finally:
         database.close()
 
