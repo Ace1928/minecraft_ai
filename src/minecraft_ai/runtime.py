@@ -56,7 +56,9 @@ _EXPLORE_KEEPALIVE_CONTEXT = "explore-keepalive"
 _BOUNDED_KEEPALIVE_SKILL_IDS = frozenset(
     {"explore_forward", "traverse_level_ground", "traverse_visible_obstacle"}
 )
-_ATOMIC_SKILL_IDS = frozenset({"close_open_inventory", "collect_recent_drop"})
+_ATOMIC_SKILL_IDS = frozenset(
+    {"open_inventory", "close_open_inventory", "collect_recent_drop"}
+)
 _RECORDED_RUN_ID_LIMIT = 4_096
 _COGNITION_RETRY_BASE_NS = 2_000_000_000
 _COGNITION_RETRY_MAX_NS = 30_000_000_000

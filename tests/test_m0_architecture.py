@@ -228,13 +228,12 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert collect_drop.action_permissions.allow_inventory is False
     assert collect_drop.action_permissions.allow_hotbar is False
     assert open_inventory.policy_ref == "open_inventory"
-    assert open_inventory.version == 2
+    assert open_inventory.version == 3
     assert open_inventory.action_level == ActionLevel.GUI
     assert open_inventory.policy_instruction == "open inventory"
-    assert open_inventory.success_conditions[0].key == "scene.mode"
-    assert open_inventory.success_conditions[0].value == "gui"
-    assert open_inventory.success_conditions[1].key == "gui.mode"
-    assert open_inventory.success_conditions[1].value == "inventory"
+    assert open_inventory.success_conditions[0].key == "scene.inventory_overlay"
+    assert open_inventory.success_conditions[0].operator == "truthy"
+    assert open_inventory.success_conditions[0].min_confidence == 0.99
     assert open_inventory.action_permissions.allow_inventory is True
     assert open_inventory.action_permissions.allow_attack is False
     assert close_inventory.policy_ref == "close_inventory"

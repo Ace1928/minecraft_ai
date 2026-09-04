@@ -14,8 +14,13 @@ from minecraft_ai.perception import (
     Track,
 )
 from minecraft_ai.safety import MotorAction
-from minecraft_ai.skills import SkillActionPermissions, SkillCondition, SkillOutcome, SkillSpec
-from minecraft_ai.skills import SkillFailureCode
+from minecraft_ai.skills import (
+    SkillActionPermissions,
+    SkillCondition,
+    SkillFailureCode,
+    SkillOutcome,
+    SkillSpec,
+)
 from minecraft_ai.trajectory import ActionOrigin
 
 
@@ -57,11 +62,16 @@ def _board(*facts: PerceptionFact) -> PerceptionBlackboard:
     return board
 
 
-def _fact(key: str, value: str | int | float | bool) -> PerceptionFact:
+def _fact(
+    key: str,
+    value: str | int | float | bool,
+    *,
+    confidence: float = 1.0,
+) -> PerceptionFact:
     return PerceptionFact(
         key=key,
         value=value,
-        confidence=1.0,
+        confidence=confidence,
         observed_ns=time.monotonic_ns(),
         source="test",
         expires_after_ms=1_000_000,
@@ -165,30 +175,62 @@ def test_running_skill_emits_bounded_motor_action() -> None:
     assert abs(tick.action.mouse_dy) <= policy.max_mouse_step
 
 
-def test_open_inventory_success_requires_grounded_inventory_gui() -> None:
+def test_open_inventory_success_requires_calibrated_inventory_overlay() -> None:
     spec = build_bootstrap_skill_library().get("open_inventory")
 
     assert conditions_satisfied(
         spec.success_conditions,
-        _board(
-            _fact("scene.mode", "gui"),
-            _fact("gui.mode", "inventory"),
-        ),
+        _board(_fact("scene.inventory_overlay", True, confidence=0.995)),
     )
     assert not conditions_satisfied(
         spec.success_conditions,
-        _board(
-            _fact("scene.mode", "gui"),
-            _fact("gui.mode", "crafting"),
-        ),
+        _board(_fact("scene.inventory_overlay", True, confidence=0.90)),
     )
     assert not conditions_satisfied(
         spec.success_conditions,
-        _board(
-            _fact("scene.mode", "world"),
-            _fact("gui.mode", "inventory"),
-        ),
+        _board(_fact("scene.inventory_overlay", False, confidence=0.995)),
     )
+
+
+def test_open_inventory_emits_one_bounded_toggle_then_waits_for_proof() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("open_inventory")
+    world = _board(_fact("scene.inventory_overlay", False, confidence=0.995))
+    executor.start(spec, run_id="open-inventory", now_ns=100)
+
+    first = executor.tick(world, sequence=31, now_ns=200)
+    waiting = executor.tick(world, sequence=32, now_ns=300)
+
+    assert first.run.outcome == SkillOutcome.RUNNING
+    assert first.action == MotorAction(
+        sequence=31,
+        keys_down=("e",),
+        keys_up=("e",),
+        duration_ms=150,
+    )
+    assert first.action_origin == ActionOrigin.SYNTHETIC
+    assert waiting.run.outcome == SkillOutcome.RUNNING
+    assert waiting.action is None
+    assert policy.intent is None
+
+
+def test_open_inventory_is_a_noop_when_overlay_is_already_present() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("open_inventory")
+    executor.start(spec, run_id="already-open", now_ns=100)
+
+    tick = executor.tick(
+        _board(_fact("scene.inventory_overlay", True, confidence=0.995)),
+        sequence=9,
+        now_ns=200,
+    )
+
+    assert tick.run.outcome == SkillOutcome.SUCCEEDED
+    assert tick.action is not None
+    assert "e" not in tick.action.keys_down
+    assert policy.intent is None
 
 
 def test_collect_recent_drop_is_bounded_and_disables_interactions() -> None:

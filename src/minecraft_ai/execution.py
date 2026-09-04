@@ -77,6 +77,7 @@ class SkillExecutor:
         self._plank_crafter = BoundedPlankCraftController()
         self._outcome_verifier = TemporalOutcomeVerifier()
         self._pending_mining_verification: _PendingMiningVerification | None = None
+        self._inventory_open_sent = False
         self._inventory_close_sent = False
 
     @property
@@ -151,6 +152,7 @@ class SkillExecutor:
         self._plank_crafter.reset()
         self._outcome_verifier.reset()
         self._pending_mining_verification = None
+        self._inventory_open_sent = False
         self._inventory_close_sent = False
         self._run = SkillRun(
             run_id=run_id,
@@ -242,6 +244,8 @@ class SkillExecutor:
                 sequence=sequence,
                 now_ns=now,
             )
+        if self._spec.skill_id == "open_inventory":
+            return self._tick_inventory_open(sequence=sequence)
         if self._spec.skill_id == "close_open_inventory":
             return self._tick_inventory_close(sequence=sequence)
 
@@ -399,14 +403,34 @@ class SkillExecutor:
             action_origin=ActionOrigin.SYNTHETIC,
         )
 
-    def _tick_inventory_close(self, *, sequence: int) -> ExecutionTick:
-        """Toggle an open inventory once, then wait for world-frame proof.
+    def _tick_inventory_open(self, *, sequence: int) -> ExecutionTick:
+        """Toggle the inventory once, then wait for calibrated overlay proof."""
+        if self._spec is None or self._run is None:
+            raise RuntimeError("no skill is running")
+        intent = self._inventory_toggle_intent()
+        if self._inventory_open_sent:
+            return ExecutionTick(
+                run=self._run,
+                action=None,
+                motor_intent=intent,
+                policy_status=_policy_status_snapshot(self.policy),
+                action_origin=ActionOrigin.SYNTHETIC,
+            )
+        self._inventory_open_sent = True
+        return ExecutionTick(
+            run=self._run,
+            action=MotorAction(
+                sequence=sequence,
+                keys_down=("e",),
+                keys_up=("e",),
+                duration_ms=INVENTORY_TOGGLE_DURATION_MS,
+            ),
+            motor_intent=intent,
+            policy_status=_policy_status_snapshot(self.policy),
+            action_origin=ActionOrigin.SYNTHETIC,
+        )
 
-        Closing an already-detected inventory is a fixed safety recovery, not a
-        visuomotor search problem. One atomic, empirically reliable E toggle
-        avoids repeated policy guesses while the normal success contract above
-        still requires fresh perception to report a playable world.
-        """
+    def _inventory_toggle_intent(self) -> MotorIntent:
         if self._spec is None or self._run is None:
             raise RuntimeError("no skill is running")
         intent = MotorIntent(
@@ -418,6 +442,19 @@ class SkillExecutor:
             parameters=self.policy_parameters,
         )
         self._last_intent = intent
+        return intent
+
+    def _tick_inventory_close(self, *, sequence: int) -> ExecutionTick:
+        """Toggle an open inventory once, then wait for world-frame proof.
+
+        Closing an already-detected inventory is a fixed safety recovery, not a
+        visuomotor search problem. One atomic, empirically reliable E toggle
+        avoids repeated policy guesses while the normal success contract above
+        still requires fresh perception to report a playable world.
+        """
+        if self._spec is None or self._run is None:
+            raise RuntimeError("no skill is running")
+        intent = self._inventory_toggle_intent()
         if self._inventory_close_sent:
             return ExecutionTick(
                 run=self._run,

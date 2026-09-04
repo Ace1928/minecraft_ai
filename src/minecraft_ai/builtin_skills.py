@@ -368,20 +368,25 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="open_inventory",
-            version=2,
+            version=3,
             name="Open inventory",
             description=(
-                "Open the Bedrock inventory through the learned GUI expert and verify the "
-                "inventory scene before any inventory task is allowed to continue"
+                "Open the Bedrock inventory with one bounded inventory toggle and wait for "
+                "the calibrated inventory overlay detector before continuing"
             ),
             stage=SkillStage.EXPERIMENTAL,
             success_conditions=(
-                SkillCondition(key="scene.mode", operator="eq", value="gui"),
-                SkillCondition(key="gui.mode", operator="eq", value="inventory"),
+                SkillCondition(
+                    key="scene.inventory_overlay",
+                    operator="truthy",
+                    min_confidence=0.99,
+                ),
             ),
-            expected_effects=("inventory_opened", "inventory_scene_verified"),
+            expected_effects=("inventory_opened", "inventory_overlay_observed"),
             max_duration_ms=10_000,
             action_level=ActionLevel.GUI,
+            # Opening inventory is a fixed native control transition. The
+            # learned controller does not need to rediscover the E binding.
             policy_ref="open_inventory",
             policy_instruction="open inventory",
             action_permissions=SkillActionPermissions(
