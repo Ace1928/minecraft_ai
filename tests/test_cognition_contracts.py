@@ -147,6 +147,43 @@ class _WireCapturingModel(_ShelterSelectingModel):
         )
 
 
+class _GrammarCapturingModel:
+    model_id = "grammar-contract-test"
+
+    def __init__(self) -> None:
+        self.grammar = ""
+
+    def complete_constrained(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, object],
+        grammar: str,
+    ) -> ModelResponse:
+        del messages, name, schema
+        self.grammar = grammar
+        return ModelResponse(
+            text=json.dumps(
+                {
+                    "r": "Follow the direct movement instruction",
+                    "g": "operator:move-now",
+                    "s": "explore_forward",
+                    "p": {},
+                    "o": None,
+                    "c": None,
+                    "x": False,
+                    "q": [],
+                    "w": None,
+                    "d": "move forward through safe open terrain",
+                    "n": ["move forward"],
+                }
+            ),
+            model=self.model_id,
+            latency_ms=1.0,
+        )
+
+
 class _TargetSelectingModel(_ShelterSelectingModel):
     def complete_structured(
         self,
@@ -518,9 +555,7 @@ def test_compact_option_repair_preserves_operator_authority_and_parameter_bounds
     assert "fresh_facts" not in combined
     assert "ACTIVE OPERATOR DIRECTIVE" not in combined
     repair_payload = json.loads(repair_messages[1].content)
-    assert repair_payload["authority_bounds"]["authority_goal_id"] == (
-        "operator:bounded-repair"
-    )
+    assert repair_payload["authority_bounds"]["authority_goal_id"] == ("operator:bounded-repair")
     assert repair_payload["authority_bounds"]["required_action_constraints"] == {
         "allow_attack": False
     }
@@ -561,6 +596,31 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
     assert sum(len(message.content) for message in model.initial_messages) < 8_000
     assert decision.chosen_goal_id == "operator:correction"
     assert decision.say == "I am climbing the hill now."
+
+
+def test_direct_operator_action_uses_sampler_grammar_that_requires_a_skill() -> None:
+    message = OperatorMessage(
+        message_id="move-now",
+        created_ns=2,
+        text="Move forward through safe open terrain.",
+        status=OperatorMessageStatus.DELIVERED,
+    )
+    context = _context()
+    context.operator_messages = (message,)
+    model = _GrammarCapturingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    decision = controller.decide(_board(), context)
+
+    skill_rule = next(line for line in model.grammar.splitlines() if line.startswith("skill ::="))
+    authority_rule = next(
+        line for line in model.grammar.splitlines() if line.startswith("authority-goal ::=")
+    )
+    assert '"null"' not in skill_rule
+    assert "explore_forward" in skill_rule
+    assert '"null"' not in authority_rule
+    assert "operator:move-now" in authority_rule
+    assert decision.skill_id == "explore_forward"
 
 
 def test_fresh_operator_directive_owns_idle_replan_decision() -> None:

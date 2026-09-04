@@ -90,11 +90,38 @@ class OpenAICompatibleLocalModel:
             },
         )
 
+    def complete_constrained(
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, object],
+        grammar: str,
+    ) -> ModelResponse:
+        """Enforce a native llama.cpp grammar when the endpoint supports it.
+
+        Some llama.cpp chat templates accept ``response_format`` while still
+        decoding unconstrained prose.  Cognition decisions are control-plane
+        data, so use the sampler-level grammar on llama.cpp and retain the
+        portable JSON-schema fallback for other OpenAI-compatible servers.
+        """
+
+        if self._llama_grammar_available():
+            try:
+                return self._complete(messages, grammar=grammar)
+            except Exception as exc:
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                if status_code not in {400, 404, 422}:
+                    raise
+                self._grammar_supported = False
+        return self.complete_structured(messages, name=name, schema=schema)
+
     def _complete(
         self,
         messages: tuple[ModelMessage, ...],
         *,
         response_format: dict[str, object] | None = None,
+        grammar: str | None = None,
     ) -> ModelResponse:
         import time
 
@@ -111,6 +138,8 @@ class OpenAICompatibleLocalModel:
             payload["reasoning_format"] = self.reasoning_format
         if response_format is not None:
             payload["response_format"] = response_format
+        if grammar is not None:
+            payload["grammar"] = grammar
         # Multiple local llama.cpp servers may share one GPU. Concurrent VLM
         # prefill and strategic decoding caused both requests to take roughly
         # six times longer on the managed machine. Serialize local inference

@@ -95,3 +95,27 @@ def test_local_model_omits_backend_specific_reasoning_controls_by_default(
 
     assert "thinking_budget_tokens" not in state["json"]
     assert "reasoning_format" not in state["json"]
+
+
+def test_local_model_uses_native_grammar_for_constrained_completion(
+    monkeypatch: Any,
+) -> None:
+    state: dict[str, Any] = {"active": 0, "peak": 0}
+    guard = threading.Lock()
+
+    def client(_model: OpenAICompatibleLocalModel) -> _TrackingClient:
+        return _TrackingClient(state, guard)
+
+    monkeypatch.setattr(OpenAICompatibleLocalModel, "_client", client)
+    model = OpenAICompatibleLocalModel(model_id="planner")
+    model._grammar_supported = True
+
+    model.complete_constrained(
+        (ModelMessage(role="user", content="decide"),),
+        name="decision",
+        schema={"type": "object"},
+        grammar='root ::= "{}"',
+    )
+
+    assert state["json"]["grammar"] == 'root ::= "{}"'
+    assert "response_format" not in state["json"]

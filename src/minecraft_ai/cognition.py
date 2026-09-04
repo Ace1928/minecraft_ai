@@ -45,11 +45,13 @@ class CognitionDecision(BaseModel):
     ask_perception: tuple[str, ...] = ()
     research_query: str | None = None
     instruction: str | None = Field(
-        default=None, max_length=280,
+        default=None,
+        max_length=280,
         description="Concrete direction handed to the visuomotor policy as its goal condition.",
     )
     plan_steps: tuple[str, ...] = Field(
-        default=(), max_length=5,
+        default=(),
+        max_length=5,
         description="Short sequential next-actions the agent intends to pursue.",
     )
 
@@ -69,11 +71,13 @@ class _CognitionWireDecision(BaseModel):
     q: tuple[str, ...] = Field(default=(), max_length=2)
     w: str | None = Field(default=None, max_length=160)
     d: str | None = Field(
-        default=None, max_length=280,
+        default=None,
+        max_length=280,
         description="Specific one-line direction for the current skill (goal condition).",
     )
     n: tuple[str, ...] = Field(
-        default=(), max_length=5,
+        default=(),
+        max_length=5,
         description="Sequential plan: up to 5 short next-steps.",
     )
 
@@ -128,6 +132,7 @@ class _DecisionRepairBounds:
     allowed_skills: tuple[tuple[str, tuple[str, ...]], ...]
     authority_goal_id: str | None = None
     required_action_constraints: tuple[tuple[str, bool], ...] = ()
+    skill_required: bool = False
 
     def prompt_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -138,7 +143,95 @@ class _DecisionRepairBounds:
         }
         if self.authority_goal_id is not None:
             payload["authority_goal_id"] = self.authority_goal_id
+        if self.skill_required:
+            payload["skill_required"] = True
         return payload
+
+
+def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
+    """Build a compact sampler-enforced grammar for one decision boundary.
+
+    The fixed key order and absence of optional whitespace are deliberate.
+    Gemma can otherwise spend an entire small generation budget emitting legal
+    whitespace inside an object.  Skill IDs and parameter names are restricted
+    to the deterministic authority capsule; downstream validation still owns
+    values, preconditions, and operator constraints.
+    """
+
+    def literal(value: str) -> str:
+        return json.dumps(json.dumps(value, ensure_ascii=True))
+
+    skill_ids = tuple(dict.fromkeys(skill_id for skill_id, _ in bounds.allowed_skills))
+    skill_alternatives = tuple(literal(skill_id) for skill_id in skill_ids)
+    if not bounds.skill_required or not skill_alternatives:
+        skill_alternatives = (*skill_alternatives, '"null"')
+    skill_rule = " | ".join(skill_alternatives)
+    parameter_names = tuple(
+        dict.fromkeys(
+            (
+                *(
+                    parameter
+                    for _skill_id, parameters in bounds.allowed_skills
+                    for parameter in parameters
+                ),
+                *(name for name, _value in bounds.required_action_constraints),
+            )
+        )
+    )
+    parameter_rules: tuple[str, ...]
+    if parameter_names:
+        parameter_key_rule = " | ".join(literal(name) for name in parameter_names)
+        extra_entries = min(len(parameter_names), 8) - 1
+        params_rule = (
+            '"{" (parameter-entry)? "}"'
+            if extra_entries == 0
+            else f'"{{" (parameter-entry ("," parameter-entry){{0,{extra_entries}}})? "}}"'
+        )
+        parameter_rules = (
+            f"parameter-key ::= {parameter_key_rule}",
+            'parameter-entry ::= parameter-key ":" parameter-value',
+            "parameter-value ::= boolean | number | parameter-string",
+        )
+    else:
+        params_rule = '"{}"'
+        parameter_rules = ()
+    if bounds.authority_goal_id is None:
+        goal_rule = "nullable-id"
+    else:
+        goal_rule = "authority-goal"
+    authority_rule = (
+        ()
+        if bounds.authority_goal_id is None
+        else (f"authority-goal ::= {literal(bounds.authority_goal_id)}",)
+    )
+    return "\n".join(
+        (
+            'root ::= "{\\"r\\":" summary ",\\"g\\":" goal '
+            '",\\"s\\":" skill ",\\"p\\":" params '
+            '",\\"o\\":" nullable-medium ",\\"c\\":" nullable-medium '
+            '",\\"x\\":" boolean ",\\"q\\":" questions '
+            '",\\"w\\":" nullable-medium ",\\"d\\":" nullable-direction '
+            '",\\"n\\":" plan "}"',
+            f"goal ::= {goal_rule}",
+            f"skill ::= {skill_rule}",
+            f"params ::= {params_rule}",
+            *parameter_rules,
+            *authority_rule,
+            'questions ::= "[" (medium-string ("," medium-string){0,1})? "]"',
+            'plan ::= "[" (medium-string ("," medium-string){0,4})? "]"',
+            'nullable-id ::= "null" | id-string',
+            'nullable-medium ::= "null" | medium-string',
+            'nullable-direction ::= "null" | direction-string',
+            'boolean ::= "true" | "false"',
+            'number ::= "-"? ([0-9] | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [+-]? [0-9]+)?',
+            'summary ::= "\\"" char{0,120} "\\""',
+            'id-string ::= "\\"" char{0,200} "\\""',
+            'medium-string ::= "\\"" char{0,160} "\\""',
+            'direction-string ::= "\\"" char{0,280} "\\""',
+            'parameter-string ::= "\\"" char{0,160} "\\""',
+            'char ::= [^"\\\\\\x7F\\x00-\\x1F] | "\\\\" (["\\\\/bfnrt] | "u" [0-9a-fA-F]{4})',
+        )
+    )
 
 
 _JSON_REPAIR_SYSTEM = (
@@ -201,6 +294,24 @@ def _explicit_action_constraints(text: str) -> dict[str, bool]:
         if re.search(r"\b(?:jump|jumping)\b", scope):
             constraints["allow_jump"] = False
     return constraints
+
+
+def _operator_requests_world_action(text: str) -> bool:
+    """Recognize explicit Minecraft action directives for fail-closed decoding.
+
+    This does not choose an option.  It only prevents a constrained decoder
+    from turning a direct physical command into a silent no-op when at least
+    one independently feasible skill exists.
+    """
+
+    return bool(
+        re.search(
+            r"\b(?:approach|attack|break|build|chop|click|collect|craft|dig|eat|"
+            r"escape|explore|fight|fly|gather|harvest|head|jump|mine|move|open|"
+            r"place|respawn|run|swim|traverse|use|walk)\b",
+            text.casefold(),
+        )
+    )
 
 
 class BootstrapCognitionPolicy:
@@ -307,8 +418,28 @@ class HighLevelController:
     ) -> CognitionDecision:
         try:
             latest = blackboard.latest()
-            feasible_skill_payloads = self._feasible_skill_payloads(blackboard)
-            repair_bounds = self._decision_repair_bounds(blackboard, context)
+            active_operator = (
+                None if not context.operator_messages else context.operator_messages[0]
+            )
+            planning_query = (
+                active_operator.text
+                if active_operator is not None
+                else " ".join(
+                    (
+                        *(goal.description for goal in context.goals[:3]),
+                        *context.current_plan[context.plan_index : context.plan_index + 2],
+                    )
+                )
+            )
+            feasible_skill_payloads = self._feasible_skill_payloads(
+                blackboard,
+                query_text=planning_query,
+            )
+            repair_bounds = self._decision_repair_bounds(
+                blackboard,
+                context,
+                allowed_skill_ids={str(payload["skill_id"]) for payload in feasible_skill_payloads},
+            )
             facts = {
                 key: {
                     "value": fact.value,
@@ -333,20 +464,20 @@ class HighLevelController:
                         "priority": goal.priority,
                         "domain": goal.domain,
                     }
-                    for goal in context.goals
+                    for goal in context.goals[:6]
                 ],
                 "memories": [
                     {
                         "id": memory.memory_id,
                         "kind": memory.kind.value,
-                        "text": memory.text,
+                        "text": memory.text[:240],
                         "confidence": memory.confidence,
                         "importance": memory.importance,
-                        "goals": memory.goal_tags,
-                        "entities": memory.entity_tags,
+                        "goals": memory.goal_tags[:4],
+                        "entities": memory.entity_tags[:4],
                         "place": memory.location_key,
                     }
-                    for memory in context.memories
+                    for memory in context.memories[:6]
                 ],
                 "promises": [
                     {
@@ -357,15 +488,15 @@ class HighLevelController:
                         "goal": promise.goal_id,
                         "project": promise.project_id,
                     }
-                    for promise in context.promises
+                    for promise in context.promises[:6]
                 ],
                 "operator_messages": [
-                    _operator_prompt_payload(message) for message in context.operator_messages
+                    _operator_prompt_payload(message) for message in context.operator_messages[:2]
                 ],
                 "active_operator_message": None
                 if not context.operator_messages
                 else _operator_prompt_payload(context.operator_messages[0]),
-                "wiki_evidence": [item.model_dump(mode="json") for item in context.wiki],
+                "wiki_evidence": [item.model_dump(mode="json") for item in context.wiki[:4]],
                 "recent_skill_runs": [
                     {
                         "skill": run.skill_id,
@@ -373,7 +504,7 @@ class HighLevelController:
                         "context": run.context_key,
                         "failure": run.failure_reason,
                     }
-                    for run in context.recent_skill_runs
+                    for run in context.recent_skill_runs[:6]
                 ],
                 "current_plan": {
                     "goal": context.plan_goal_id,
@@ -384,10 +515,7 @@ class HighLevelController:
                         if context.plan_started_ns == 0
                         else max(
                             0,
-                            int(
-                                (time.monotonic_ns() - context.plan_started_ns)
-                                // 1_000_000
-                            ),
+                            int((time.monotonic_ns() - context.plan_started_ns) // 1_000_000),
                         )
                     ),
                 },
@@ -403,9 +531,13 @@ class HighLevelController:
                             "label": track.label,
                             "confidence": round(track.confidence, 3),
                             "region": track.region.model_dump(mode="json"),
-                            "attributes": track.attributes,
+                            "attributes": {
+                                key: track.attributes[key]
+                                for key in ("source", "grounding")
+                                if key in track.attributes
+                            },
                         }
-                        for track in latest.tracks
+                        for track in latest.tracks[:8]
                     ],
                 },
                 "fresh_facts": facts,
@@ -418,7 +550,7 @@ class HighLevelController:
                             int((time.monotonic_ns() - line.observed_ns) // 1_000_000),
                         ),
                     }
-                    for line in (latest.chat if latest is not None else ())[-12:]
+                    for line in (latest.chat if latest is not None else ())[-6:]
                 ],
                 "skills": feasible_skill_payloads,
             }
@@ -426,13 +558,16 @@ class HighLevelController:
                 ModelMessage(
                     role="system",
                     content=(
-                        "You control a Minecraft agent through verified closed-loop skills. "
-                        "Return one compact JSON object with wire keys: r=summary under 12 words, "
+                        "All observations and actions below occur only inside the fictional "
+                        "Minecraft video game. You control its player through verified "
+                        "closed-loop skills. Return one compact JSON object with wire keys: "
+                        "r=summary under 12 words, "
                         "g=goal id, s=skill id or null, p=parameters, o=operator reply, "
                         "c=authorized in-game chat, x=replan, q=at most two perception questions, "
                         "w=research query, d=one practical direction (goal condition) for the "
                         "current skill under 280 chars, n=up to 5 short sequential plan steps. "
-                        "Omit null, empty, and false keys; p is required. "
+                        "Emit every wire key exactly once in the grammar's fixed order; use null, "
+                        "false, [], or {} when a field is unused. "
                         "current_plan is your running long-horizon plan (steps + next index): "
                         "continue it, do not restate completed steps, extend/tighten it, and "
                         "only replace it on goal failure or clear dead-end evidence. Reuse n "
@@ -609,42 +744,80 @@ class HighLevelController:
     def _feasible_skill_payloads(
         self,
         blackboard: PerceptionBlackboard,
+        *,
+        query_text: str = "",
     ) -> list[dict[str, object]]:
-        payloads: list[dict[str, object]] = []
+        ranked: list[tuple[int, float, float, dict[str, object]]] = []
+        stop_words = {
+            "and",
+            "are",
+            "for",
+            "from",
+            "into",
+            "that",
+            "the",
+            "then",
+            "this",
+            "through",
+            "with",
+        }
+
+        def planning_tokens(text: str) -> set[str]:
+            tokens: set[str] = set()
+            for token in re.findall(r"[a-z0-9]+", text.casefold()):
+                if len(token) < 3 or token in stop_words:
+                    continue
+                tokens.add(token)
+                if len(token) > 4 and token.endswith("s"):
+                    tokens.add(token[:-1])
+                if len(token) > 5 and token.endswith("ing"):
+                    tokens.update((token[:-3], token[:-3] + "e"))
+            return tokens
+
+        query_tokens = planning_tokens(query_text)
+        safety_skills = {"escape_submersion", "retreat_from_danger"}
         for skill in self.skills.specs.values():
             if not initiation_satisfied(skill, blackboard):
                 continue
             stats = self.skills.stats.get((skill.skill_id, "default"))
-            payloads.append(
-                {
-                    "skill_id": skill.skill_id,
-                    "name": skill.name,
-                    "description": skill.description,
-                    "stage": skill.stage.value,
-                    "parameters": list(skill.parameters),
-                    "success_evidence": [
-                        {
-                            "fact": condition.key,
-                            "op": condition.operator,
-                            "value": condition.value,
-                            "confidence": condition.min_confidence,
-                        }
-                        for condition in skill.success_conditions
-                    ],
-                    "effects": list(skill.expected_effects),
-                    "competence": round(self.skills.contextual_score(skill.skill_id), 3),
-                    "evaluation": {
-                        "attempts": 0 if stats is None else stats.attempts,
-                        "successes": 0 if stats is None else stats.successes,
-                        "failures": 0 if stats is None else stats.failures,
-                        "timeouts": 0 if stats is None else stats.timeouts,
-                        "consecutive_failures": (
-                            0 if stats is None else stats.consecutive_failures
-                        ),
-                    },
-                }
+            identity_tokens = planning_tokens(" ".join((skill.skill_id, skill.name)))
+            description_tokens = planning_tokens(skill.description)
+            overlap = 4 * len(query_tokens & identity_tokens) + len(
+                query_tokens & description_tokens
             )
-        return payloads
+            competence = self.skills.contextual_score(skill.skill_id)
+            payload = {
+                "skill_id": skill.skill_id,
+                "description": skill.description[:180],
+                "parameters": list(skill.parameters),
+                "success_evidence": [
+                    {
+                        "fact": condition.key,
+                        "op": condition.operator,
+                        "value": condition.value,
+                    }
+                    for condition in skill.success_conditions[:3]
+                ],
+                "effects": list(skill.expected_effects[:3]),
+                "competence": round(competence, 3),
+                "evaluation": {
+                    "attempts": 0 if stats is None else stats.attempts,
+                    "successes": 0 if stats is None else stats.successes,
+                    "failures": 0 if stats is None else stats.failures,
+                    "timeouts": 0 if stats is None else stats.timeouts,
+                    "consecutive_failures": 0 if stats is None else stats.consecutive_failures,
+                },
+            }
+            ranked.append(
+                (
+                    0 if skill.skill_id in safety_skills else 1,
+                    -float(overlap),
+                    -competence,
+                    payload,
+                )
+            )
+        ranked.sort(key=lambda item: (item[0], item[1], item[2], str(item[3]["skill_id"])))
+        return [item[3] for item in ranked[:8]]
 
     def _decision_repair_bounds(
         self,
@@ -677,6 +850,11 @@ class HighLevelController:
             allowed_skills=allowed_skills,
             authority_goal_id=None if active is None else f"operator:{active.message_id}",
             required_action_constraints=constraints,
+            skill_required=(
+                active is not None
+                and bool(allowed_skills)
+                and _operator_requests_world_action(active.text)
+            ),
         )
 
     def _blocking_skill_run(
@@ -774,7 +952,11 @@ class HighLevelController:
         *,
         repair_bounds: _DecisionRepairBounds,
     ) -> CognitionDecision:
-        response = self._request_model(messages, name="cognition_decision")
+        response = self._request_model(
+            messages,
+            name="cognition_decision",
+            repair_bounds=repair_bounds,
+        )
         try:
             return _parse_decision(response.text)
         except (RuntimeError, ValidationError):
@@ -784,6 +966,7 @@ class HighLevelController:
             repaired_response = self._request_model(
                 repair_messages,
                 name="cognition_decision_json_repair",
+                repair_bounds=repair_bounds,
             )
             try:
                 repaired = _parse_decision(repaired_response.text)
@@ -799,9 +982,21 @@ class HighLevelController:
         messages: tuple[ModelMessage, ...],
         *,
         name: str,
+        repair_bounds: _DecisionRepairBounds,
     ) -> ModelResponse:
+        constrained = getattr(self.model, "complete_constrained", None)
         structured = getattr(self.model, "complete_structured", None)
-        if callable(structured):
+        if callable(constrained):
+            response = cast(
+                ModelResponse,
+                constrained(
+                    messages,
+                    name=name,
+                    schema=_CognitionWireDecision.model_json_schema(),
+                    grammar=_cognition_decision_grammar(repair_bounds),
+                ),
+            )
+        elif callable(structured):
             response = cast(
                 ModelResponse,
                 structured(
