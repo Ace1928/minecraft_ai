@@ -287,7 +287,7 @@ start_live_runtime() {
         --role "$selected_role" \
         --live \
         --capture-source "$CAPTURE_SOURCE" \
-        "${RUN_ARGS[@]}"
+        ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
     result=$?
     if [ "$result" -ne 0 ]; then
         abort_failed_start "$result"
