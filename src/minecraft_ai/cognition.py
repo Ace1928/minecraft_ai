@@ -529,7 +529,13 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
     retain the safe ``null`` decision instead of forcing an unrelated action.
     """
 
-    normalized = " ".join(text.casefold().split())
+    # Operators naturally copy the public skill IDs from telemetry. Treat
+    # their snake/kebab separators like spaces so a literal ``explore_forward``
+    # directive takes the same zero-latency path as "explore forward" instead
+    # of falling through to a slow model call that may alter its constraints.
+    normalized = " ".join(
+        text.casefold().replace("_", " ").replace("-", " ").split()
+    )
     # A terminal "then stop and reassess" clause describes what to do after
     # the requested skill succeeds; it must not negate the affirmative action.
     # Keep this deliberately narrow so directives such as "stop mining" still

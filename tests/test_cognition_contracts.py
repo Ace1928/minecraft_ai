@@ -888,6 +888,30 @@ def test_marked_dirt_instruction_uses_immediate_operator_fast_path(
     assert decision.request_replan is False
 
 
+def test_literal_snake_case_skill_id_uses_immediate_operator_fast_path() -> None:
+    message = OperatorMessage(
+        message_id="explore-snake-case",
+        created_ns=time.monotonic_ns(),
+        text="Execute explore_forward now. Jumping is explicitly allowed.",
+        kind=OperatorMessageKind.CORRECTION,
+        status=OperatorMessageStatus.QUEUED,
+    )
+    context = _context()
+    context.operator_messages = (message,)
+    model = _GrammarCapturingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    decision = controller.decide(_board(), context)
+
+    assert model.messages == ()
+    assert controller.metrics.calls == 0
+    assert decision.chosen_goal_id == "operator:explore-snake-case"
+    assert decision.skill_id == "explore_forward"
+    assert decision.skill_parameters == {}
+    assert decision.instruction == message.text
+    assert decision.say == "Starting that now."
+
+
 def test_direct_operator_action_uses_sampler_grammar_that_requires_a_skill() -> None:
     message = OperatorMessage(
         message_id="move-now",
