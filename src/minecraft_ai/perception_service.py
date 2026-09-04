@@ -1014,6 +1014,20 @@ _CLASSIC_HOTBAR_RAIL_MIN_LENGTH = 628
 _CLASSIC_HOTBAR_RAIL_MAX_LENGTH = 636
 _CLASSIC_HOTBAR_FIRST_SLOT_FROM_RAIL = 94
 _CLASSIC_HOTBAR_SLOT_PITCH = 80
+# Opaque perimeter cells of vanilla selected_hotbar_slot.png, SHA-256
+# 2322d7bcd5897e324ff56d0df840aa9ff027160a6cd58c90633cfb9331676286.
+# The installed 24x24 asset matches the selected fourth slot exactly at 4x
+# scale in raw-frame SHA-256
+# 20d6ed9445f6659324c03e4fb6a52dc43e17b6ce27466e2893900d43343b74c2.
+# Order: top/bottom inner rows, then left/right inner columns (corners once).
+_CLASSIC_HOTBAR_SELECTED_RGB = bytes.fromhex(
+    "fffffffdfdfdf6f6f6f7f9f7ddf0d8fcfefcd5e8d0d5e8d0cee1c9d4e7cfd5e8d0daedd5d5e8d0d5e8d0"
+    "d8ebd3d5e8d0cde0c8d5e8d0d5e8d0d5e8d0d5e8d0a1b29da1b29d5f6d5c5f6d5c647261647261596756"
+    "5c6a595f6d5c5f6d5c6674636775645f6d5c5f6d5c5f6d5c5f6d5c5e6c5b6674635f6d5c6e7c6b5f6d5c"
+    "566453606e5dfcfcfcf7f9f7ffffffd5e8d0d5e8d0d5e8d0caddc5d5e8d0d6e9d1d5e8d0daedd5d5e8d0"
+    "dcefd7d5e8d0dcefd7caddc5d3e6ced5e8d0d6e9d1d5e8d05e6c5b5f6d5c5f6d5c6674636573625f6d5c"
+    "5f6d5c5f6d5c5664536876655a68575f6d5c5f6d5c586655606e5d6573625f6d5c5563525f6d5c5f6d5c"
+)
 _CLASSIC_HOTBAR_LOG_RGB_5X13 = bytes.fromhex(
     "383d19685834937648ac8a56b28f58a98953a1824ba5854fad8f56a3844f91744563562f3e3f1c"
     "625030977d4d9c7c47b3915aa1814ba4854ea5864fa3824ba68750b3915ba98751a4855377623c"
@@ -1115,29 +1129,89 @@ def _classic_hotbar_geometry_matches(
     neutral = (high - low <= 18) & (rail[:, :, 2] >= 85) & (rail[:, :, 2] <= 235)
     before = pixels[rail_y : rail_y + 4, rail_x - 1, :3].astype(numpy.int16)
     after = pixels[rail_y : rail_y + 4, rail_x + rail_width, :3].astype(numpy.int16)
-    return bool(
+    ordinary_rail = bool(
         float(neutral.mean()) >= 0.98
         and not _classic_hotbar_neutral_column(before)
         and not _classic_hotbar_neutral_column(after)
         and _classic_hotbar_slot_dividers_match(pixels, geometry)
     )
+    return ordinary_rail or _classic_hotbar_selected_geometry_matches(pixels, geometry)
+
+
+@lru_cache(maxsize=1)
+def _classic_hotbar_selected_template() -> tuple[Any, Any, Any]:
+    numpy = importlib.import_module("numpy")
+    points = (
+        [(1, x) for x in range(1, 23)]
+        + [(22, x) for x in range(1, 23)]
+        + [(y, 1) for y in range(2, 22)]
+        + [(y, 22) for y in range(2, 22)]
+    )
+    rows = numpy.asarray([y * 4 for y, _x in points])[:, None, None]
+    columns = numpy.asarray([x * 4 for _y, x in points])[:, None, None]
+    rows = rows + numpy.arange(4)[None, :, None]
+    columns = columns + numpy.arange(4)[None, None, :]
+    rgb = numpy.frombuffer(_CLASSIC_HOTBAR_SELECTED_RGB, dtype=numpy.uint8)
+    return rows, columns, rgb.reshape(84, 1, 1, 3).astype(numpy.int16)
+
+
+def _classic_hotbar_selected_geometry_matches(
+    pixels: Any,
+    geometry: tuple[int, int],
+) -> bool:
+    """Validate the pinned selection frame where it interrupts normal slot rails."""
+
+    numpy = importlib.import_module("numpy")
+    first_slot_x, rail_y = geometry
+    height, width = pixels.shape[:2]
+    if first_slot_x < 2 or rail_y < 8 or first_slot_x + 734 > width or rail_y + 84 > height:
+        return False
+    rows, columns, reference = _classic_hotbar_selected_template()
+    for selected in range(9):
+        selection_x = first_slot_x - 2 + selected * _CLASSIC_HOTBAR_SLOT_PITCH
+        patch = pixels[rail_y - 8 + rows, selection_x + columns, :3]
+        difference = numpy.abs(patch[..., ::-1].astype(numpy.int16) - reference)
+        if int(difference.max()) > 2:
+            continue
+        rail_x = first_slot_x + 6
+        rail = pixels[rail_y : rail_y + 4, rail_x : rail_x + 720, :3].astype(numpy.int16)
+        outside = (
+            (numpy.arange(720) + rail_x < selection_x)
+            | (numpy.arange(720) + rail_x >= selection_x + 96)
+        )
+        rail = rail[:, outside]
+        neutral = (
+            (rail.max(axis=2) - rail.min(axis=2) <= 18)
+            & (rail[:, :, 2] >= 85)
+            & (rail[:, :, 2] <= 235)
+        )
+        if float(neutral.mean()) >= 0.98 and _classic_hotbar_slot_dividers_match(
+            pixels, geometry, selected_slot=selected,
+        ):
+            return True
+    return False
 
 
 def _classic_hotbar_slot_dividers_match(
     pixels: Any,
     geometry: tuple[int, int],
+    *,
+    selected_slot: int = 0,
 ) -> bool:
     """A horizontal world stripe is not a HUD: require its vertical slot grid."""
     numpy = importlib.import_module("numpy")
     first_slot_x, rail_y = geometry
-    # The first selected slot's border has different geometry; the seven
-    # subsequent dividers have the same pinned four-pixel neutral inner rail.
+    # The selected slot replaces its neighboring dividers. Every unaffected
+    # divider must retain the pinned four-pixel neutral inner rail.
     y0, y1 = rail_y + 12, rail_y + 54
     if y1 > pixels.shape[0]:
         return False
-    columns = first_slot_x + numpy.arange(2, 9) * _CLASSIC_HOTBAR_SLOT_PITCH
+    indices = numpy.asarray([
+        index for index in range(2, 9) if index not in {selected_slot, selected_slot + 1}
+    ])
+    columns = first_slot_x + indices * _CLASSIC_HOTBAR_SLOT_PITCH
     columns = (columns[:, None] + numpy.arange(4)).reshape(-1)
-    dividers = pixels[y0:y1, columns, :3].astype(numpy.int16).reshape(42, 7, 4, 3)
+    dividers = pixels[y0:y1, columns, :3].astype(numpy.int16).reshape(42, len(indices), 4, 3)
     high = dividers.max(axis=3)
     low = dividers.min(axis=3)
     neutral = (high - low <= 22) & (dividers[:, :, :, 2] >= 70)
@@ -1211,6 +1285,24 @@ def _classic_hotbar_geometry(pixels: Any) -> tuple[int, int] | None:
         geometry = first_slot_x, first_y
         if _classic_hotbar_geometry_matches(pixels, geometry):
             return geometry
+    # A selected middle slot splits the neutral rail into two runs; selecting
+    # the last slot leaves only the left run. Nominate the same centered grid
+    # from those fragments, then require the exact selection frame and all
+    # unaffected rail/divider pixels. A world stripe alone is insufficient.
+    tried: set[tuple[int, int]] = set()
+    for row, start, length in zip(start_rows, starts, lengths, strict=True):
+        if length < 72:
+            continue
+        for offset in (6, *(94 + 80 * slot for slot in range(8))):
+            first_slot_x = int(start) - offset
+            if abs(first_slot_x + 366 - width / 2) > 2:
+                continue
+            geometry = first_slot_x, int(y_start + row)
+            if geometry in tried:
+                continue
+            tried.add(geometry)
+            if _classic_hotbar_selected_geometry_matches(pixels, geometry):
+                return geometry
     return None
 
 

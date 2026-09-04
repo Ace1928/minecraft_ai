@@ -275,6 +275,16 @@ _VERIFIED_HOTBAR_DIRT_RGB_5X13 = bytes.fromhex(
     "5c43316549325f48366a4d357f5c41795538865f4089614674543c5f48344431213e2d1e423123"
     "5c422d60422b60432e74533963432b75543b7c5b40654a32412c1d4434294a36283e2d1f402d1e"
 )
+# Independently sampled opaque selection-frame perimeter from retained raw
+# 20d6ed9445f6659324c03e4fb6a52dc43e17b6ce27466e2893900d43343b74c2.
+_VERIFIED_HOTBAR_SELECTED_RGB = bytes.fromhex(
+    "fffffffdfdfdf6f6f6f7f9f7ddf0d8fcfefcd5e8d0d5e8d0cee1c9d4e7cfd5e8d0daedd5d5e8d0d5e8d0"
+    "d8ebd3d5e8d0cde0c8d5e8d0d5e8d0d5e8d0d5e8d0a1b29da1b29d5f6d5c5f6d5c647261647261596756"
+    "5c6a595f6d5c5f6d5c6674636775645f6d5c5f6d5c5f6d5c5f6d5c5e6c5b6674635f6d5c6e7c6b5f6d5c"
+    "566453606e5dfcfcfcf7f9f7ffffffd5e8d0d5e8d0d5e8d0caddc5d5e8d0d6e9d1d5e8d0daedd5d5e8d0"
+    "dcefd7d5e8d0dcefd7caddc5d3e6ced5e8d0d6e9d1d5e8d05e6c5b5f6d5c5f6d5c6674636573625f6d5c"
+    "5f6d5c5f6d5c5664536876655a68575f6d5c5f6d5c586655606e5d6573625f6d5c5563525f6d5c5f6d5c"
+)
 _HOTBAR_DIGITS = {
     0: (".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."),
     1: ("..#..", ".##..", "..#..", "..#..", "..#..", "..#..", "#####"),
@@ -294,6 +304,7 @@ def _classic_hotbar_frame(
     occupant: str = "empty",
     count: int = 1,
     slot: int = 0,
+    selected_slot: int | None = None,
 ) -> CapturedFrame:
     width, height = 1920, 1054
     image = Image.new("RGB", (width, height), (20, 20, 20))
@@ -359,6 +370,22 @@ def _classic_hotbar_frame(
                             ),
                             fill=(255, 255, 255),
                         )
+    if selected_slot is not None:
+        draw.rectangle((600, 966, 1319, 969), fill=(140, 140, 140))
+        selection_x = 592 + selected_slot * 80
+        draw.rectangle((selection_x, 966, selection_x + 95, 969), fill=(20, 20, 20))
+        points = (
+            [(x, 1) for x in range(1, 23)]
+            + [(x, 22) for x in range(1, 23)]
+            + [(1, y) for y in range(2, 22)]
+            + [(22, y) for y in range(2, 22)]
+        )
+        for index, (x, y) in enumerate(points):
+            color = tuple(_VERIFIED_HOTBAR_SELECTED_RGB[index * 3 : index * 3 + 3])
+            draw.rectangle(
+                (selection_x + x * 4, 958 + y * 4, selection_x + x * 4 + 3, 961 + y * 4),
+                fill=color,
+            )
     return CapturedFrame(
         frame_id=1,
         captured_ns=1,
@@ -649,6 +676,56 @@ def test_classic_hotbar_reads_only_calibrated_log_stack_counts(count: int) -> No
     assert facts["inventory.hotbar.logs"].confidence == 0.995
     assert facts["inventory.hotbar.logs"].expires_after_ms == 250
     assert "inventory.logs" not in facts
+
+
+@pytest.mark.parametrize("selected_slot", range(9))
+def test_classic_hotbar_tracks_selection_across_all_slots(selected_slot: int) -> None:
+    frame = _classic_hotbar_frame(occupant="log", count=6, slot=1, selected_slot=selected_slot)
+
+    assert bedrock_hotbar_log_count(frame) == 6
+
+
+def test_classic_hotbar_cached_geometry_survives_selection_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = perception_service._classic_hotbar_geometry
+    scans = 0
+
+    def counted_scan(pixels: object) -> tuple[int, int] | None:
+        nonlocal scans
+        scans += 1
+        return original(pixels)
+
+    monkeypatch.setattr(perception_service, "_classic_hotbar_geometry", counted_scan)
+    observer = BootstrapFastPerception()
+    for selected in (0, 3, 8, 1):
+        frame = _classic_hotbar_frame(occupant="log", count=6, slot=1, selected_slot=selected)
+        facts = {fact.key: fact for fact in observer.infer(frame)}
+        assert facts["inventory.hotbar.logs"].value == 6
+    assert scans == 1
+
+
+def test_classic_hotbar_selection_signature_cannot_replace_missing_slot_grid() -> None:
+    frame = _classic_hotbar_frame(occupant="log", count=6, slot=1, selected_slot=3)
+    image = Image.frombytes("RGBA", (frame.width, frame.height), frame.bgra, "raw", "BGRA")
+    draw = ImageDraw.Draw(image)
+    for slot in (2, 5, 6, 7, 8):
+        x = 594 + slot * 80
+        draw.rectangle((x, 978, x + 3, 1019), fill=(20, 20, 20, 255))
+    incomplete = CapturedFrame(
+        frame_id=2, captured_ns=2, width=frame.width, height=frame.height,
+        bgra=image.tobytes("raw", "BGRA"),
+    )
+
+    assert bedrock_hotbar_log_count(incomplete) is None
+
+
+def test_classic_hotbar_selected_geometry_does_not_certify_unknown_log_species() -> None:
+    frame = _classic_hotbar_frame(occupant="unrecognized_log", slot=1, selected_slot=3)
+    pixels = perception_service._numpy_bgra(frame)
+
+    assert perception_service._classic_hotbar_geometry(pixels) == (594, 966)
+    assert bedrock_hotbar_log_count(frame) is None
 
 
 def test_classic_hotbar_certifies_zero_for_dirt_and_empty_peers() -> None:
