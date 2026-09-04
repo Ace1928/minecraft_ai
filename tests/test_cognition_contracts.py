@@ -609,6 +609,75 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
     assert decision.say == "I am climbing the hill now."
 
 
+def test_high_level_prompt_bounds_strategic_facts_and_omits_motor_fingerprints() -> None:
+    now = time.monotonic_ns()
+    facts = [
+        PerceptionFact(
+            key="frame.content_hash",
+            value="f" * 1_000,
+            confidence=1.0,
+            observed_ns=now,
+            source="capture:" + ("verbose-" * 100),
+            expires_after_ms=10_000,
+        ),
+        PerceptionFact(
+            key="perception.luma_grid",
+            value="l" * 1_000,
+            confidence=1.0,
+            observed_ns=now,
+            source="capture:test",
+            expires_after_ms=10_000,
+        ),
+        PerceptionFact(
+            key="scene.observation_dhash",
+            value="a1b2c3d4e5f60718",
+            confidence=1.0,
+            observed_ns=now,
+            source="vlm:test",
+            expires_after_ms=10_000,
+        ),
+        PerceptionFact(
+            key="environment.time_of_day",
+            value="night" + ("-long" * 100),
+            confidence=0.9874,
+            observed_ns=now,
+            source="vlm:" + ("verbose-" * 100),
+            expires_after_ms=10_000,
+        ),
+        *(
+            PerceptionFact(
+                key=f"misc.fact_{index:02d}",
+                value="detail-" * 100,
+                confidence=0.9,
+                observed_ns=now,
+                source="test:" + ("verbose-" * 100),
+                expires_after_ms=10_000,
+            )
+            for index in range(24)
+        ),
+    ]
+    model = _CapturingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    controller.decide(_board(*facts), _context())
+
+    payload = json.loads(model.initial_messages[1].content)
+    strategic = payload["fresh_facts"]
+    assert len(strategic) == 16
+    assert "frame.content_hash" not in strategic
+    assert "perception.luma_grid" not in strategic
+    assert "scene.observation_dhash" not in strategic
+    assert strategic["environment.time_of_day"] == [
+        ("night" + ("-long" * 100))[:120],
+        0.987,
+    ]
+    assert all(isinstance(value, list) and len(value) == 2 for value in strategic.values())
+    combined = "".join(message.content for message in model.initial_messages)
+    assert "capture:" not in combined
+    assert "vlm:verbose" not in combined
+    assert len(combined) < 9_000
+
+
 @pytest.mark.parametrize(
     "status",
     (OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED),

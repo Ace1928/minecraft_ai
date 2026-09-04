@@ -266,6 +266,59 @@ _SEMANTIC_REPAIR_SYSTEM = (
 _MAX_REJECTED_OUTPUT_CHARS = 2_048
 _MAX_REPAIR_REASON_CHARS = 640
 _MAX_OPERATOR_FAST_PATH_INSTRUCTION_CHARS = 280
+_MAX_HIGH_LEVEL_FACTS = 16
+_MAX_HIGH_LEVEL_FACT_TEXT = 120
+_MOTOR_ONLY_FACT_PREFIXES = ("frame.", "perception.")
+_MOTOR_ONLY_FACT_KEYS = frozenset({"scene.observation_dhash"})
+
+
+def _high_level_fact_payload(blackboard: PerceptionBlackboard) -> dict[str, list[object]]:
+    """Return a bounded strategic view without motor-loop fingerprints.
+
+    Per-frame hashes, luma grids, and verbose provenance are useful to the
+    deterministic verifiers but waste a small local model's context. Facts are
+    already freshness/confidence filtered by the blackboard; the strategic
+    model only needs the value and confidence, in that order.
+    """
+
+    priority_prefixes = (
+        "danger.",
+        "player.",
+        "environment.",
+        "scene.",
+        "inventory.",
+        "target.",
+        "social.",
+        "obstacle.",
+        "terrain.",
+        "interaction.",
+    )
+
+    def rank(key: str) -> tuple[int, str]:
+        return (
+            next(
+                (index for index, prefix in enumerate(priority_prefixes) if key.startswith(prefix)),
+                len(priority_prefixes),
+            ),
+            key,
+        )
+
+    selected = sorted(
+        (
+            (key, fact)
+            for key, fact in blackboard.fresh_facts(min_confidence=0.35).items()
+            if not key.startswith(_MOTOR_ONLY_FACT_PREFIXES)
+            and key not in _MOTOR_ONLY_FACT_KEYS
+        ),
+        key=lambda item: rank(item[0]),
+    )[:_MAX_HIGH_LEVEL_FACTS]
+    payload: dict[str, list[object]] = {}
+    for key, fact in selected:
+        value: object = fact.value
+        if isinstance(value, str):
+            value = value[:_MAX_HIGH_LEVEL_FACT_TEXT]
+        payload[key] = [value, round(fact.confidence, 3)]
+    return payload
 
 
 def _operator_prompt_payload(message: OperatorMessage) -> dict[str, object]:
@@ -537,14 +590,7 @@ class HighLevelController:
                 context,
                 allowed_skill_ids={str(payload["skill_id"]) for payload in feasible_skill_payloads},
             )
-            facts = {
-                key: {
-                    "value": fact.value,
-                    "confidence": round(fact.confidence, 3),
-                    "source": fact.source,
-                }
-                for key, fact in blackboard.fresh_facts(min_confidence=0.35).items()
-            }
+            facts = _high_level_fact_payload(blackboard)
             payload: dict[str, Any] = {
                 "role": {
                     "id": context.role.role_id,
@@ -561,20 +607,20 @@ class HighLevelController:
                         "priority": goal.priority,
                         "domain": goal.domain,
                     }
-                    for goal in context.goals[:6]
+                    for goal in context.goals[:4]
                 ],
                 "memories": [
                     {
                         "id": memory.memory_id,
                         "kind": memory.kind.value,
-                        "text": memory.text[:240],
+                        "text": memory.text[:160],
                         "confidence": memory.confidence,
                         "importance": memory.importance,
                         "goals": memory.goal_tags[:4],
                         "entities": memory.entity_tags[:4],
                         "place": memory.location_key,
                     }
-                    for memory in context.memories[:6]
+                    for memory in context.memories[:4]
                 ],
                 "promises": [
                     {
@@ -585,7 +631,7 @@ class HighLevelController:
                         "goal": promise.goal_id,
                         "project": promise.project_id,
                     }
-                    for promise in context.promises[:6]
+                    for promise in context.promises[:4]
                 ],
                 "operator_messages": [
                     _operator_prompt_payload(message) for message in context.operator_messages[:2]
@@ -593,7 +639,7 @@ class HighLevelController:
                 "active_operator_message": None
                 if active_operator is None
                 else _operator_prompt_payload(active_operator),
-                "wiki_evidence": [item.model_dump(mode="json") for item in context.wiki[:4]],
+                "wiki_evidence": [item.model_dump(mode="json") for item in context.wiki[:2]],
                 "recent_skill_runs": [
                     {
                         "skill": run.skill_id,
@@ -601,7 +647,7 @@ class HighLevelController:
                         "context": run.context_key,
                         "failure": run.failure_reason,
                     }
-                    for run in context.recent_skill_runs[:6]
+                    for run in context.recent_skill_runs[:4]
                 ],
                 "current_plan": {
                     "goal": context.plan_goal_id,
@@ -634,7 +680,7 @@ class HighLevelController:
                                 if key in track.attributes
                             },
                         }
-                        for track in latest.tracks[:8]
+                        for track in latest.tracks[:4]
                     ],
                 },
                 "fresh_facts": facts,
@@ -647,7 +693,7 @@ class HighLevelController:
                             int((time.monotonic_ns() - line.observed_ns) // 1_000_000),
                         ),
                     }
-                    for line in (latest.chat if latest is not None else ())[-6:]
+                    for line in (latest.chat if latest is not None else ())[-4:]
                 ],
                 "skills": feasible_skill_payloads,
             }
@@ -669,7 +715,8 @@ class HighLevelController:
                         "continue it, do not restate completed steps, extend/tighten it, and "
                         "only replace it on goal failure or clear dead-end evidence. Reuse n "
                         "across decisions so you improve step-by-step over time. "
-                        "fresh_facts is the only authoritative observed game state. skills "
+                        "fresh_facts is the only authoritative observed game state; each "
+                        "entry is [value,confidence]. skills "
                         "contains only currently executable options: use only a listed skill_id, "
                         "prefer concrete progression with verifiable success evidence, and never "
                         "claim unobserved inventory, outcomes, or completion. Do not explore when "
@@ -683,7 +730,7 @@ class HighLevelController:
                         "friendly factual reply in c (world chat answers questions like an "
                         "in-game wiki: crafting recipes, block IDs, biome facts, command "
                         "syntax, game mechanics). Keep c under 160 chars. Continue the current "
-                        "world plan in s/p unless the question demands an action."
+                        "world plan in s/p unless the question demands an action. "
                         "Keep private reasoning in r. Encode explicit operator prohibitions as "
                         "allow_attack:false, allow_use:false, or allow_jump:false in p. "
                         "Treat recent_skill_runs and evaluation as empirical evidence. Avoid a "
@@ -945,7 +992,7 @@ class HighLevelController:
             ranking_score = max(0.0, competence - failure_penalty)
             payload = {
                 "skill_id": skill.skill_id,
-                "description": skill.description[:180],
+                "description": skill.description[:120],
                 "parameters": list(skill.parameters),
                 "success_evidence": [
                     {
@@ -957,13 +1004,15 @@ class HighLevelController:
                 ],
                 "effects": list(skill.expected_effects[:3]),
                 "competence": round(ranking_score, 3),
-                "evaluation": {
-                    "attempts": 0 if stats is None else stats.attempts,
-                    "successes": 0 if stats is None else stats.successes,
-                    "failures": 0 if stats is None else stats.failures,
-                    "timeouts": 0 if stats is None else stats.timeouts,
-                    "consecutive_failures": 0 if stats is None else stats.consecutive_failures,
-                },
+                "evaluation": (
+                    None
+                    if stats is None
+                    else {
+                        "attempts": stats.attempts,
+                        "successes": stats.successes,
+                        "consecutive_failures": stats.consecutive_failures,
+                    }
+                ),
             }
             if skill.skill_id in safety_skills:
                 rank_group = 0
