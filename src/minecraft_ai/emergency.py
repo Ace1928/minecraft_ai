@@ -19,6 +19,24 @@ CONTROL_FILE = RUNTIME_DIR / "control.json"
 _IS_LINUX = sys.platform.startswith("linux")
 
 
+def _open_pidfd(pid: int) -> int:
+    """Open the optional Linux process handle through a typed runtime lookup."""
+
+    opener = getattr(os, "pidfd_open", None)
+    if not callable(opener):
+        raise AttributeError("pidfd_open is unavailable")
+    return int(opener(pid, 0))
+
+
+def _send_pidfd_signal(pidfd: int, sent_signal: int) -> None:
+    """Signal an exact pidfd without requiring the API in non-Linux stubs."""
+
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if not callable(sender):
+        raise AttributeError("pidfd_send_signal is unavailable")
+    sender(pidfd, sent_signal)
+
+
 def emergency_stop_latched() -> bool:
     return EMERGENCY_STOP_FILE.exists()
 
@@ -95,7 +113,7 @@ def terminate_registered_supervisor() -> bool:
     if not _IS_LINUX:
         return False
     try:
-        pidfd = os.pidfd_open(pid, 0)
+        pidfd = _open_pidfd(pid)
     except (AttributeError, OSError):
         return False
     try:
@@ -104,7 +122,7 @@ def terminate_registered_supervisor() -> bool:
         if not _supervisor_identity_matches(pid, start_ticks, expected_digest):
             return False
         try:
-            signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+            _send_pidfd_signal(pidfd, signal.SIGTERM)
         except ProcessLookupError:
             return not _supervisor_identity_matches(pid, start_ticks, expected_digest)
         except (AttributeError, OSError):
@@ -117,7 +135,10 @@ def terminate_registered_supervisor() -> bool:
         if not _supervisor_identity_matches(pid, start_ticks, expected_digest):
             return True
         try:
-            signal.pidfd_send_signal(pidfd, getattr(signal, "SIGKILL", signal.SIGTERM))
+            _send_pidfd_signal(
+                pidfd,
+                getattr(signal, "SIGKILL", signal.SIGTERM),
+            )
         except ProcessLookupError:
             return not _supervisor_identity_matches(pid, start_ticks, expected_digest)
         except (AttributeError, OSError):

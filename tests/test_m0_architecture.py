@@ -152,9 +152,10 @@ def test_supervisor_accepts_unbound_host_display_input_when_targeted(
         target_window_id = None
 
         def __init__(self, display, *, target_window_id=None, allow_host=False,
-                     host_monitor_binding=None):
+                     host_monitor_binding=None, input_permitted=lambda: True):
             self.display_name = display
             self.target_window_id = target_window_id
+            self.input_permitted = input_permitted
 
         def probe_target(self) -> bool:
             return True

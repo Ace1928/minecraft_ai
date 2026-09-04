@@ -113,8 +113,8 @@ def _stop_agent() -> tuple[bool, dict[str, object]]:
     from .agent_lifecycle import AGENT_FILE, stop_agent_process
     from .supervisor import send_command, supervisor_alive
 
-    stopped = stop_agent_process()
     state: object = None
+    control_error: Exception | None = None
     if supervisor_alive():
         try:
             current = send_command("status")
@@ -122,13 +122,20 @@ def _stop_agent() -> tuple[bool, dict[str, object]]:
                 current = send_command("disarm")
             state = current.get("state")
         except Exception as exc:
-            return False, {"agent_stop_attempted": stopped, "error": f"{type(exc).__name__}: {exc}"}
+            control_error = exc
+    # Give the live runtime an explicit motor-revocation opportunity before
+    # SIGTERM starts its bounded trajectory and learning flush.
+    stopped = stop_agent_process()
     contained = not AGENT_FILE.exists()
-    return contained, {
+    detail: dict[str, object] = {
         "agent_stop_attempted": stopped,
         "agent_containment_confirmed": contained,
         "supervisor_state": state,
     }
+    if control_error is not None:
+        detail["error"] = f"{type(control_error).__name__}: {control_error}"
+        return False, detail
+    return contained, detail
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import pytest
 
+import minecraft_ai.eval.arena as arena_module
 from minecraft_ai.eval.arena import (
     ARENA_TASK_IDS,
     ARENA_TASK_BINDINGS,
@@ -21,7 +23,7 @@ from minecraft_ai.perception_service import RealtimePerceptionService
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.skills import SkillOutcome
-from minecraft_ai.trajectory import TrajectoryReader
+from minecraft_ai.trajectory import TrajectoryReader, TrajectoryRecorder
 
 
 @dataclass
@@ -154,7 +156,13 @@ def _runner(tmp_path: Path) -> tuple[BedrockArenaRunner, list[str], PerceptionBl
 
 def test_first_arena_task_plays_records_then_scores_without_label_leakage(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        arena_module,
+        "TrajectoryRecorder",
+        partial(TrajectoryRecorder, min_free_disk_bytes=0),
+    )
     runner, events, blackboard = _runner(tmp_path)
 
     result = runner.run("a_move_forward")

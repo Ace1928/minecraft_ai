@@ -93,7 +93,7 @@ def test_live_agent_launch_rechecks_pause_inside_intent_lock(
     assert calls == []
 
 
-def test_human_takeover_serializes_pause_revocation_and_service_stop(
+def test_human_takeover_serializes_pause_revocation_and_preserves_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -128,11 +128,6 @@ def test_human_takeover_serializes_pause_revocation_and_service_stop(
     )
     monkeypatch.setattr(
         cli,
-        "_stop_persistent_agent_service",
-        lambda: calls.append("service-stop") or True,
-    )
-    monkeypatch.setattr(
-        cli,
         "current_control_owner_state",
         lambda: calls.append("owner-state") or "verified-live",
     )
@@ -151,7 +146,6 @@ def test_human_takeover_serializes_pause_revocation_and_service_stop(
         "disarm",
         "agent-stop",
         "service-state",
-        "service-stop",
         "agent-stop",
         "owner-state",
         "pause-check",
@@ -159,7 +153,7 @@ def test_human_takeover_serializes_pause_revocation_and_service_stop(
     ]
 
 
-def test_human_takeover_refuses_recording_when_service_stop_is_unconfirmed(
+def test_human_takeover_refuses_recording_when_service_state_is_unconfirmed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -169,8 +163,7 @@ def test_human_takeover_refuses_recording_when_service_stop_is_unconfirmed(
     monkeypatch.setattr(cli, "supervisor_alive", lambda: False)
     monkeypatch.setattr(cli, "latch_operator_pause", lambda: None)
     monkeypatch.setattr(cli, "stop_agent_process", lambda **_kwargs: True)
-    monkeypatch.setattr(cli, "_persistent_agent_service_state", lambda: "active")
-    monkeypatch.setattr(cli, "_stop_persistent_agent_service", lambda: False)
+    monkeypatch.setattr(cli, "_persistent_agent_service_state", lambda: "unknown")
     monkeypatch.setattr(cli, "current_control_owner_state", lambda: "absent")
     monkeypatch.setattr(cli, "operator_pause_latched", lambda: True)
     monkeypatch.setattr(cli, "AGENT_FILE", tmp_path / "missing-agent.json")
@@ -180,7 +173,7 @@ def test_human_takeover_refuses_recording_when_service_stop_is_unconfirmed(
         lambda _request: pytest.fail("human input must not begin before containment"),
     )
 
-    with pytest.raises(typer.BadParameter, match="service shutdown"):
+    with pytest.raises(typer.BadParameter, match="service state"):
         cli.record_human(
             duration_s=1.0,
             capture_hz=20.0,
@@ -299,6 +292,145 @@ def test_record_human_resume_live_uses_shared_safe_resume_transaction(
     )
 
     assert calls == ["record", "safe-resume", "run"]
+
+
+def test_resume_waits_for_faulted_supervisor_generation_to_retire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "emergency_stop_latched", lambda: False)
+    monkeypatch.setattr(cli, "supervisor_alive", lambda: True)
+    monkeypatch.setattr(
+        cli,
+        "_command",
+        lambda command, **_kwargs: {
+            "state": "STOPPED",
+            "session_id": "retiring-generation",
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "_wait_for_supervisor_generation_retirement",
+        lambda session_id: calls.append(session_id),
+    )
+
+    cli._resume_operator_intent()
+
+    assert calls == ["retiring-generation"]
+
+
+def test_late_resume_race_also_waits_for_faulted_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alive = iter((False, True))
+    waited: list[str] = []
+
+    @contextmanager
+    def intent_lock() -> Iterator[None]:
+        yield
+
+    monkeypatch.setattr(cli, "emergency_stop_latched", lambda: False)
+    monkeypatch.setattr(cli, "supervisor_alive", lambda: next(alive))
+    monkeypatch.setattr(cli, "operator_intent_lock", intent_lock)
+    monkeypatch.setattr(
+        cli,
+        "_command",
+        lambda _command_name, **_kwargs: {
+            "state": "STOPPED",
+            "session_id": "late-retiring-generation",
+        },
+    )
+    monkeypatch.setattr(
+        cli,
+        "_wait_for_supervisor_generation_retirement",
+        lambda session_id: waited.append(session_id),
+    )
+
+    cli._resume_operator_intent()
+
+    assert waited == ["late-retiring-generation"]
+
+
+def test_retirement_wait_accepts_only_absence_or_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = iter(
+        (
+            {"state": "STOPPED", "session_id": "old"},
+            {"state": "SAFE_IDLE", "session_id": "new"},
+        )
+    )
+    calls: list[str] = []
+
+    def status(command: str, **_kwargs: object) -> dict[str, object]:
+        calls.append(command)
+        return next(observed)
+
+    monkeypatch.setattr(cli, "send_command", status)
+
+    cli._wait_for_supervisor_generation_retirement("old", timeout_s=1.0)
+
+    assert calls == ["status", "status"]
+
+
+def test_retirement_wait_fails_closed_while_exact_generation_lingers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "send_command",
+        lambda *_args, **_kwargs: {"state": "STOPPED", "session_id": "old"},
+    )
+
+    with pytest.raises(typer.BadParameter, match="did not release"):
+        cli._wait_for_supervisor_generation_retirement("old", timeout_s=0.01)
+
+
+def test_pause_control_timeout_covers_graceful_agent_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_timeout: list[float] = []
+    monkeypatch.setattr(cli, "supervisor_alive", lambda: True)
+    monkeypatch.setattr(cli, "AGENT_FILE", tmp_path / "missing-agent.json")
+    monkeypatch.setattr(
+        cli,
+        "_command",
+        lambda _command_name, *, timeout_s, **_kwargs: observed_timeout.append(timeout_s)
+        or {
+            "state": "PAUSED",
+            "operator_pause_persisted": True,
+            "agent_containment_confirmed": True,
+        },
+    )
+
+    cli.pause()
+
+    assert observed_timeout == [30.0]
+
+
+def test_stop_control_timeout_covers_graceful_agent_flush(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_timeout: list[float] = []
+    monkeypatch.setattr(cli, "supervisor_alive", lambda: True)
+    monkeypatch.setattr(cli, "AGENT_FILE", tmp_path / "missing-agent.json")
+    monkeypatch.setattr(cli, "current_control_owner_state", lambda: "absent")
+    monkeypatch.setattr(
+        cli,
+        "send_command",
+        lambda _command_name, *, timeout_s, **_kwargs: observed_timeout.append(timeout_s)
+        or {
+            "state": "STOPPED",
+            "operator_pause_persisted": True,
+            "agent_containment_confirmed": True,
+        },
+    )
+
+    cli.stop(transient=False)
+
+    assert observed_timeout == [30.0]
 
 
 def test_manual_stop_latches_before_supervisor_and_agent(

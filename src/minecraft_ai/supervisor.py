@@ -22,6 +22,7 @@ from platformdirs import user_data_dir, user_runtime_dir
 
 from .agent_lifecycle import (
     AGENT_FILE,
+    GRACEFUL_AGENT_STOP_TIMEOUT_S,
     _command_sha256,
     _linux_process_identity,
     _pid_alive,
@@ -46,6 +47,12 @@ STATUS_FILE = RUNTIME_DIR / "supervisor-state.json"
 LOCK_FILE = RUNTIME_DIR / "supervisor.lock"
 OPERATOR_PAUSE_FILE = Path(user_data_dir(APP_NAME)) / "OPERATOR_PAUSE"
 _IS_LINUX = sys.platform.startswith("linux")
+
+
+def _set_private_descriptor_mode(fd: int) -> None:
+    fchmod = getattr(os, "fchmod", None)
+    if callable(fchmod):
+        fchmod(fd, 0o600)
 
 
 def operator_pause_latched() -> bool:
@@ -123,7 +130,7 @@ def operator_intent_lock(*, timeout_s: float = 5.0) -> Iterator[None]:
                     raise RuntimeError("operator intent transaction is busy") from exc
                 time.sleep(0.01)
         try:
-            os.fchmod(handle.fileno(), 0o600)
+            _set_private_descriptor_mode(handle.fileno())
         except OSError:
             pass
         yield
@@ -218,6 +225,10 @@ def control_endpoint_process_state(endpoint: ControlEndpoint) -> str:
         and _supervisor_command(command)
     ):
         return "verified-live"
+    if _supervisor_command(command):
+        # A canonical supervisor with metadata drift is ambiguous ownership,
+        # not proof that the PID belongs to an unrelated process.
+        return "unverifiable"
     return "mismatch"
 
 
@@ -388,6 +399,7 @@ class Supervisor:
             target_window_id=window_id,
             allow_host=allow_host,
             host_monitor_binding=binding,
+            input_permitted=self._actuation_permitted,
         )
         try:
             self.replace_backend(
@@ -787,14 +799,17 @@ class Supervisor:
             if command == "status":
                 result = self.status()
             elif command == "pause":
-                with operator_intent_lock(), self._lock:
+                with operator_intent_lock():
                     pause_persisted = True
                     try:
                         latch_operator_pause()
                     except OSError:
                         pause_persisted = False
+                    # Revoke actuation first, then leave the supervisor lock
+                    # available while SIGTERM cleanup disarms its lease and
+                    # seals the trajectory/learning buffers.
                     self.pause()
-                    stop_agent_process(timeout_s=1.0)
+                    stop_agent_process(timeout_s=GRACEFUL_AGENT_STOP_TIMEOUT_S)
                     result = self.status()
                     result["operator_pause_persisted"] = pause_persisted
                     result["agent_containment_confirmed"] = not AGENT_FILE.exists()
@@ -804,15 +819,19 @@ class Supervisor:
                     clear_operator_pause()
                     result = self.status()
             elif command == "stop":
-                with operator_intent_lock(), self._lock:
+                with operator_intent_lock():
                     pause_persisted = True
                     if bool(payload.get("persistent_intent", True)):
                         try:
                             latch_operator_pause()
                         except OSError:
                             pause_persisted = False
+                    # Keep the control endpoint alive until the agent has had
+                    # a chance to disarm and flush its durable state. The
+                    # supervisor itself retires only after that bounded wait.
+                    self.pause()
+                    stop_agent_process(timeout_s=GRACEFUL_AGENT_STOP_TIMEOUT_S)
                     self.stop()
-                    stop_agent_process(timeout_s=1.0)
                     result = self.status()
                     result["operator_pause_persisted"] = pause_persisted
                     result["agent_containment_confirmed"] = not AGENT_FILE.exists()

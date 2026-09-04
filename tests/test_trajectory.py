@@ -110,6 +110,7 @@ def test_records_only_supervisor_accepted_actions_into_aligned_shards(tmp_path: 
         state_db_path=db_path,
         shard_steps=2,
         queue_size=32,
+        min_free_disk_bytes=0,
     )
     for index in range(3):
         captured_ns = time.monotonic_ns() + index
@@ -355,6 +356,7 @@ def test_replay_validation_rejects_frame_corruption(tmp_path: Path) -> None:
         artifact_root=tmp_path / "trajectories",
         state_db_path=tmp_path / "state.sqlite3",
         shard_steps=16,
+        min_free_disk_bytes=0,
     )
     captured_ns = time.monotonic_ns()
     frame = CapturedFrame(

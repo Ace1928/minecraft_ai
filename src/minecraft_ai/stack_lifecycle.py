@@ -36,6 +36,40 @@ _IS_WINDOWS = os.name == "nt"
 _IS_LINUX = sys.platform.startswith("linux")
 
 
+def _required_int_attribute(module: object, name: str) -> int:
+    value = getattr(module, name, None)
+    if not isinstance(value, int):
+        raise OSError(f"platform lock constant {name} is unavailable")
+    return value
+
+
+def _windows_lock_descriptor(fd: int, *, unlock: bool) -> None:
+    locking = getattr(msvcrt, "locking", None)
+    if not callable(locking):
+        raise OSError("Windows file locking is unavailable")
+    mode_name = "LK_UNLCK" if unlock else "LK_NBLCK"
+    locking(fd, _required_int_attribute(msvcrt, mode_name), 1)
+
+
+def _posix_lock_descriptor(fd: int, *, unlock: bool) -> None:
+    flock = getattr(fcntl, "flock", None)
+    if not callable(flock):
+        raise OSError("POSIX file locking is unavailable")
+    if unlock:
+        operation = _required_int_attribute(fcntl, "LOCK_UN")
+    else:
+        operation = _required_int_attribute(fcntl, "LOCK_EX") | _required_int_attribute(
+            fcntl, "LOCK_NB"
+        )
+    flock(fd, operation)
+
+
+def _set_private_descriptor_mode(fd: int) -> None:
+    fchmod = getattr(os, "fchmod", None)
+    if callable(fchmod):
+        fchmod(fd, 0o600)
+
+
 class ServiceMode(StrEnum):
     """How a stack service establishes its durable runtime state."""
 
@@ -560,20 +594,39 @@ class PortableStackLauncher:
                         break
                     time.sleep(max(0.001, min(self.poll_interval_s, 0.01)))
                 proc_start_ticks = observed_start_ticks
+            record = announce(
+                ServiceRecord(
+                    service_id=service.service_id,
+                    mode=service.mode,
+                    owned=True,
+                    pid=pid,
+                    started_wall_ns=time.time_ns(),
+                    command_digest=record_command_digest,
+                    proc_start_ticks=proc_start_ticks,
+                )
+            )
         else:
-            self._run_oneshot(service, service.command)
-
-        record = announce(
-            ServiceRecord(
+            record = ServiceRecord(
                 service_id=service.service_id,
                 mode=service.mode,
                 owned=True,
-                pid=pid,
+                pid=None,
                 started_wall_ns=time.time_ns(),
-                command_digest=record_command_digest,
-                proc_start_ticks=proc_start_ticks,
+                command_digest=command_digest,
+                proc_start_ticks=None,
             )
-        )
+
+            def announce_oneshot_start() -> None:
+                # Spawning the start helper is the ownership boundary. Persist
+                # it before waiting so rollback can run the inverse command if
+                # the helper fails after creating an out-of-process resource.
+                announce(record)
+
+            self._run_oneshot(
+                service,
+                service.command,
+                on_spawned=announce_oneshot_start,
+            )
         if _IS_LINUX and service.mode == ServiceMode.DAEMON and (
             identity is None or record_command_digest != command_digest
         ):
@@ -693,20 +746,53 @@ class PortableStackLauncher:
                 start_new_session=True,
             )
 
-    def _run_oneshot(self, service: ServiceSpec, command: tuple[str, ...]) -> None:
+    def _run_oneshot(
+        self,
+        service: ServiceSpec,
+        command: tuple[str, ...],
+        *,
+        on_spawned: Callable[[], None] | None = None,
+    ) -> None:
         process = self._spawn(service, command)
         self._children[process.pid] = process
+        proc_start_ticks: int | None = None
+        if _IS_LINUX:
+            identity_deadline = time.monotonic() + min(0.5, service.ready_timeout_s)
+            while proc_start_ticks is None and process.poll() is None:
+                proc_start_ticks = _linux_process_start_ticks(process.pid)
+                if proc_start_ticks is not None or time.monotonic() >= identity_deadline:
+                    break
+                time.sleep(max(0.001, min(self.poll_interval_s, 0.01)))
         try:
-            return_code = process.wait(timeout=service.ready_timeout_s)
-        except subprocess.TimeoutExpired as exc:
-            self._terminate_owned_pid(
-                process.pid,
-                service.stop_timeout_s,
-                _command_digest(command),
-            )
-            raise TimeoutError(
-                f"command for {service.service_id!r} exceeded {service.ready_timeout_s:.1f}s"
-            ) from exc
+            if on_spawned is not None:
+                try:
+                    on_spawned()
+                except Exception as exc:
+                    try:
+                        self._terminate_owned_pid(
+                            process.pid,
+                            service.stop_timeout_s,
+                            _command_digest(command),
+                            proc_start_ticks,
+                        )
+                    except Exception as cleanup_exc:
+                        exc.add_note(
+                            "failed to contain spawned oneshot command: "
+                            f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                        )
+                    raise
+            try:
+                return_code = process.wait(timeout=service.ready_timeout_s)
+            except subprocess.TimeoutExpired as exc:
+                self._terminate_owned_pid(
+                    process.pid,
+                    service.stop_timeout_s,
+                    _command_digest(command),
+                    proc_start_ticks,
+                )
+                raise TimeoutError(
+                    f"command for {service.service_id!r} exceeded {service.ready_timeout_s:.1f}s"
+                ) from exc
         finally:
             self._children.pop(process.pid, None)
         if return_code != 0:
@@ -793,10 +879,12 @@ class PortableStackLauncher:
                     "changed or is unverifiable"
                 )
         elif not child_running:
-            # The retained Popen proves this group was created by this launcher.
-            # Its descendants can outlive the reaped session leader, so group
-            # cleanup must continue rather than returning on child.poll().
+            # Once the retained leader exits, its handle no longer proves that
+            # the numeric process group still belongs to this launcher. Treat
+            # the surviving group like reconstructed state and revalidate the
+            # persisted Linux identity before signaling it.
             self._children.pop(pid, None)
+            child = None
 
         # Close the PID-reuse race between the initial check and killpg for a
         # launcher reconstructed from disk.  A live child handle does not need
@@ -829,6 +917,16 @@ class PortableStackLauncher:
                 return
             time.sleep(self.poll_interval_s)
 
+        identity_required = child is None or child.poll() is not None
+        if identity_required and not _persisted_process_or_orphan_group_matches(
+            pid,
+            command_digest=command_digest,
+            proc_start_ticks=proc_start_ticks,
+        ):
+            raise RuntimeError(
+                f"refusing to escalate process group {pid}: persisted process identity "
+                "changed or is unverifiable"
+            )
         try:
             kill_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         except ProcessLookupError:
@@ -889,11 +987,9 @@ class PortableStackLauncher:
                         handle.write(b"\0")
                         handle.flush()
                     handle.seek(0)
-                    msvcrt.locking(  # type: ignore[attr-defined]
-                        handle.fileno(), msvcrt.LK_NBLCK, 1  # type: ignore[attr-defined]
-                    )
+                    _windows_lock_descriptor(handle.fileno(), unlock=False)
                 else:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    _posix_lock_descriptor(handle.fileno(), unlock=False)
                 acquired = True
             except (BlockingIOError, OSError) as exc:
                 owner = _read_lock_owner(self.lock_path)
@@ -904,7 +1000,7 @@ class PortableStackLauncher:
             handle.write(json.dumps({"pid": os.getpid(), "token": token}).encode())
             handle.flush()
             try:
-                os.fchmod(handle.fileno(), 0o600)
+                _set_private_descriptor_mode(handle.fileno())
             except OSError:
                 pass
             yield
@@ -913,11 +1009,9 @@ class PortableStackLauncher:
                 try:
                     if os.name == "nt":
                         handle.seek(0)
-                        msvcrt.locking(  # type: ignore[attr-defined]
-                            handle.fileno(), msvcrt.LK_UNLCK, 1  # type: ignore[attr-defined]
-                        )
+                        _windows_lock_descriptor(handle.fileno(), unlock=True)
                     else:
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                        _posix_lock_descriptor(handle.fileno(), unlock=True)
                 except OSError:
                     pass
             handle.close()

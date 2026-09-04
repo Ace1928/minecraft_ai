@@ -271,7 +271,11 @@ def test_stale_or_unverifiable_descriptor_is_never_signaled(
 
     assert lifecycle.stop_agent_process() is False
     assert signals == []
-    if identity is None:
+    if identity is None or (
+        identity is not None
+        and len(identity[1]) >= 3
+        and identity[1][1:3] == ("-m", "minecraft_ai.agent_process")
+    ):
         assert descriptor.exists()
     else:
         assert not descriptor.exists()

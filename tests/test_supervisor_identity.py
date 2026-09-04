@@ -34,7 +34,7 @@ def _endpoint(*, session_id: str = "session-a") -> ControlEndpoint:
     ("identity", "expected"),
     [
         (None, "unverifiable"),
-        ((1111, _command()), "mismatch"),
+        ((1111, _command()), "unverifiable"),
         ((9876, (sys.executable, "-c", "pass")), "mismatch"),
         ((9876, _command()), "verified-live"),
     ],

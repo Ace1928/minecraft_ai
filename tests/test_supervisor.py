@@ -408,3 +408,71 @@ def test_resume_cannot_clear_later_durable_stop_intent(
     assert not later_thread.is_alive()
     assert supervisor.state == expected_state
     assert marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_state"),
+    [("pause", SupervisorState.PAUSED), ("stop", SupervisorState.STOPPED)],
+)
+def test_controlled_shutdown_allows_agent_cleanup_to_disarm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    expected_state: SupervisorState,
+) -> None:
+    marker = tmp_path / "OPERATOR_PAUSE"
+    missing_agent = tmp_path / "agent-process.json"
+    monkeypatch.setattr(supervisor_module, "RUNTIME_DIR", tmp_path)
+    monkeypatch.setattr(supervisor_module, "OPERATOR_PAUSE_FILE", marker)
+    monkeypatch.setattr(supervisor_module, "AGENT_FILE", missing_agent)
+    supervisor = Supervisor()
+    supervisor.start()
+    supervisor._endpoint = ControlEndpoint(
+        host="127.0.0.1",
+        port=1,
+        token="secret",
+        pid=1,
+        session_id="graceful-stop-test",
+    )
+
+    cleanup_completed = threading.Event()
+
+    def graceful_agent_stop(*, timeout_s: float) -> bool:
+        assert timeout_s == supervisor_module.GRACEFUL_AGENT_STOP_TIMEOUT_S
+        cleanup = threading.Thread(
+            target=lambda: (supervisor.disarm("agent-cleanup"), cleanup_completed.set())
+        )
+        cleanup.start()
+        cleanup.join(timeout=1.0)
+        assert not cleanup.is_alive(), "supervisor lock blocked agent cleanup disarm"
+        return True
+
+    class _Connection:
+        payload = {
+            "token": "secret",
+            "command": command,
+            "persistent_intent": True,
+        }
+
+        def close(self) -> None:
+            return
+
+    responses: list[dict[str, object]] = []
+    monkeypatch.setattr(supervisor_module, "stop_agent_process", graceful_agent_stop)
+    monkeypatch.setattr(
+        supervisor_module,
+        "_recv_json_line",
+        lambda connection: connection.payload,
+    )
+    monkeypatch.setattr(
+        supervisor_module,
+        "_send_json_line",
+        lambda _connection, payload: responses.append(payload),
+    )
+
+    supervisor._handle_connection(_Connection())  # type: ignore[arg-type]
+
+    assert cleanup_completed.is_set()
+    assert supervisor.state == expected_state
+    assert marker.exists()
+    assert responses[-1]["ok"] is True

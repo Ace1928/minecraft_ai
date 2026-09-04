@@ -18,6 +18,16 @@ DATA_DIR = Path(user_data_dir("minecraft-ai"))
 AGENT_FILE = RUNTIME_DIR / "agent-process.json"
 AGENT_LOG = DATA_DIR / "logs" / "agent.log"
 _IS_LINUX = sys.platform.startswith("linux")
+GRACEFUL_AGENT_STOP_TIMEOUT_S = 25.0
+
+
+def _signal_process_group(process_group_id: int, sent_signal: int) -> None:
+    """Call the optional POSIX process-group API without platform stub errors."""
+
+    kill_group = getattr(os, "killpg", None)
+    if not callable(kill_group):
+        raise OSError("process-group signaling is unavailable")
+    kill_group(process_group_id, sent_signal)
 
 
 @dataclass(frozen=True)
@@ -181,7 +191,11 @@ def launch_agent_process(
         raise
 
 
-def stop_agent_process(process: AgentProcess | None = None, *, timeout_s: float = 3.0) -> bool:
+def stop_agent_process(
+    process: AgentProcess | None = None,
+    *,
+    timeout_s: float = GRACEFUL_AGENT_STOP_TIMEOUT_S,
+) -> bool:
     current = process
     if current is None:
         try:
@@ -268,6 +282,11 @@ def _agent_process_state(process: AgentProcess) -> str:
         and _command_matches_descriptor(command, process)
     ):
         return "verified-live"
+    if len(command) >= 3 and command[1:3] == ("-m", "minecraft_ai.agent_process"):
+        # This is still an agent process, but altered/stale metadata cannot
+        # prove whether it is the recorded owner or a replacement generation.
+        # Keep the descriptor and fail closed instead of reporting PID reuse.
+        return "unverifiable"
     return "mismatch"
 
 
@@ -387,7 +406,7 @@ def _process_group_alive(process_group_id: int) -> bool:
     if process_group_id <= 0 or os.name != "posix":
         return False
     try:
-        os.killpg(process_group_id, 0)
+        _signal_process_group(process_group_id, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -431,7 +450,7 @@ def _terminate_spawned_agent_group(child: subprocess.Popen[bytes]) -> bool:
 
     if os.name == "posix":
         try:
-            os.killpg(child.pid, signal.SIGTERM)
+            _signal_process_group(child.pid, signal.SIGTERM)
         except ProcessLookupError:
             return not _process_group_alive(child.pid)
         except OSError:
@@ -460,7 +479,10 @@ def _terminate_spawned_agent_group(child: subprocess.Popen[bytes]) -> bool:
 
     if os.name == "posix":
         try:
-            os.killpg(child.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+            _signal_process_group(
+                child.pid,
+                getattr(signal, "SIGKILL", signal.SIGTERM),
+            )
         except ProcessLookupError:
             pass
         except OSError:

@@ -68,6 +68,7 @@ def _record_trial(
         artifact_root=trajectory_root,
         state_db_path=root / "state.sqlite3",
         shard_steps=16,
+        min_free_disk_bytes=0,
     )
     intent = MotorIntent(
         skill_id=skill_id,

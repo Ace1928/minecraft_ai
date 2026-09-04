@@ -30,8 +30,10 @@ def persistent_agent_service_state() -> str:
         return "active"
     if state in {"inactive", "failed"}:
         return "inactive"
+    # A transition is neither a stable owner nor a confirmed stopped owner.
+    # Callers use ``unknown`` fail-closed rather than racing systemd cleanup.
     if state in {"activating", "deactivating", "reloading"}:
-        return "active"
+        return "unknown"
     return "unknown"
 
 

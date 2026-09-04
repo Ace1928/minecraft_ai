@@ -13,6 +13,15 @@ from minecraft_ai.platforms.bedrock_session import BedrockSession
 from minecraft_ai.platforms.bedrock_x11 import IsolationError
 
 
+@pytest.fixture(autouse=True)
+def _disable_external_bedrock_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sessions.subprocess,
+        "run",
+        lambda *args, **kwargs: sessions.subprocess.CompletedProcess(args[0], 1),
+    )
+
+
 def _session(*, mode: str = "direct", with_identity: bool = True) -> BedrockSession:
     launcher_command = ("/usr/bin/bedrock-on-linux", "play")
     launcher_observed = ("python3", "/usr/bin/bedrock-on-linux", "play")
@@ -395,6 +404,48 @@ def test_graceful_window_close_precedes_and_avoids_process_signal(
     sessions.stop_bedrock_session()
 
     assert calls == ["window-close"]
+    assert not descriptor.exists()
+
+
+def test_prefix_scoped_stop_precedes_process_group_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = tmp_path / "bedrock-session.json"
+    session = _session()
+    leader_state = "verified-live"
+    calls: list[str] = []
+    monkeypatch.setattr(sessions, "BEDROCK_SESSION_FILE", descriptor)
+    monkeypatch.setattr(
+        sessions,
+        "_session_process_state",
+        lambda *_args, **_kwargs: leader_state,
+    )
+    monkeypatch.setattr(sessions, "find_minecraft_window", lambda *_args, **_kwargs: None)
+
+    def stop_prefix(_session: BedrockSession) -> bool:
+        nonlocal leader_state
+        calls.append("prefix-stop")
+        leader_state = "dead"
+        return True
+
+    monkeypatch.setattr(sessions, "_request_bedrock_prefix_stop", stop_prefix)
+    monkeypatch.setattr(sessions, "_process_group_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        sessions,
+        "_private_display_processes",
+        lambda _session, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        sessions,
+        "_terminate_verified_session_group",
+        lambda *_args, **_kwargs: pytest.fail("prefix stop must avoid group termination"),
+    )
+    session.persist()
+
+    sessions.stop_bedrock_session()
+
+    assert calls == ["prefix-stop"]
     assert not descriptor.exists()
 
 

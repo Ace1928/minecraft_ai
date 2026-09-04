@@ -58,3 +58,28 @@ def test_stack_cleanup_fails_when_agent_descriptor_remains(
 
     assert healthy is False
     assert detail["agent_containment_confirmed"] is False
+
+
+def test_stack_cleanup_disarms_before_graceful_agent_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(agent_lifecycle, "AGENT_FILE", tmp_path / "missing-agent.json")
+    monkeypatch.setattr(
+        agent_lifecycle,
+        "stop_agent_process",
+        lambda: calls.append("agent-stop") or True,
+    )
+    monkeypatch.setattr(supervisor, "supervisor_alive", lambda: True)
+    monkeypatch.setattr(
+        supervisor,
+        "send_command",
+        lambda command: calls.append(command)
+        or {"state": "RUNNING" if command == "status" else "PAUSED"},
+    )
+
+    healthy, _detail = stack_health._stop_agent()
+
+    assert healthy is True
+    assert calls == ["status", "disarm", "agent-stop"]

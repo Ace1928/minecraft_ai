@@ -345,7 +345,7 @@ def _prepare_human_recording_takeover() -> None:
     persistence_error: str | None = None
     revocation_error: Exception | None = None
     disarm_confirmed = False
-    service_stopped = False
+    recovery_owner_safe = False
     agent_contained = False
     pause_confirmed = False
     owner_state = "unreadable"
@@ -366,11 +366,13 @@ def _prepare_human_recording_takeover() -> None:
         finally:
             stop_agent_process()
 
-        service_state = _persistent_agent_service_state()
-        service_stopped = service_state == "inactive" or _stop_persistent_agent_service()
+        # Keep the service cgroup alive so its private Bedrock descendants remain
+        # available to the human recorder.  The durable pause makes an active
+        # recovery owner idle, and prevents a currently inactive owner from
+        # rearming if it is started later.
+        recovery_owner_safe = _persistent_agent_service_state() in {"active", "inactive"}
 
-        # Stopping the recovery owner can race its final child cleanup. Repeat
-        # containment while the durable operator intent is still serialized.
+        # Repeat containment while the durable operator intent is serialized.
         if revocation_error is not None:
             terminate_registered_supervisor()
         stop_agent_process()
@@ -383,9 +385,9 @@ def _prepare_human_recording_takeover() -> None:
         raise typer.BadParameter(
             "Durable operator pause could not be verified; human recording refused."
         )
-    if not service_stopped:
+    if not recovery_owner_safe:
         raise typer.BadParameter(
-            "Persistent recovery service shutdown could not be confirmed; recording refused."
+            "Persistent recovery service state could not be confirmed; recording refused."
         )
     if not agent_contained:
         raise typer.BadParameter(
@@ -493,6 +495,14 @@ def run(
     if not supervisor_alive():
         _start_supervisor(role)
     current = send_command("status")
+    if current.get("state") == "STOPPED":
+        retired_session_id = str(current.get("session_id") or "")
+        if not retired_session_id:
+            raise typer.BadParameter("Stopped supervisor has no verifiable generation identity.")
+        _wait_for_supervisor_generation_retirement(retired_session_id)
+        if not supervisor_alive():
+            _start_supervisor(role)
+        current = send_command("status")
     print(
         f"[green]Supervisor ready[/green] role={role} "
         f"edition={edition.value} state={current['state']}"
@@ -702,7 +712,7 @@ def pause() -> None:
     fallback_owner_state: str | None = None
     if supervisor_alive():
         try:
-            payload = _command("pause", timeout_s=5.0)
+            payload = _command("pause", timeout_s=30.0)
             if payload.get("operator_pause_persisted") is False:
                 persistence_error = "supervisor could not persist operator pause"
             if payload.get("agent_containment_confirmed") is not True:
@@ -748,13 +758,25 @@ def resume() -> None:
     _resume_operator_intent()
 
 
+def _resume_reachable_supervisor() -> dict[str, object]:
+    payload = _command("resume", timeout_s=5.0)
+    if payload.get("state") == "STOPPED":
+        retired_session_id = str(payload.get("session_id") or "")
+        if not retired_session_id:
+            raise typer.BadParameter(
+                "Faulted supervisor did not identify its retiring generation."
+            )
+        _wait_for_supervisor_generation_retirement(retired_session_id)
+    return payload
+
+
 def _resume_operator_intent() -> None:
     """Execute the shared fail-closed durable-resume transaction."""
 
     if emergency_stop_latched():
         raise typer.BadParameter("Emergency stop is latched; reset it explicitly first.")
     if supervisor_alive():
-        payload = _command("resume", timeout_s=5.0)
+        payload = _resume_reachable_supervisor()
         print(f"[green]{payload['state']}[/green] — persistent recovery is permitted.")
     else:
         late_supervisor = False
@@ -778,11 +800,36 @@ def _resume_operator_intent() -> None:
                     )
                 clear_operator_pause()
         if late_supervisor:
-            payload = _command("resume", timeout_s=5.0)
+            payload = _resume_reachable_supervisor()
             print(f"[green]{payload['state']}[/green] — persistent recovery is permitted.")
             return
         suffix = " and service started" if load_state == "loaded" else " for manual startup"
         print(f"[green]RESUME REQUESTED[/green] — recovery is permitted{suffix}.")
+
+
+def _wait_for_supervisor_generation_retirement(
+    retired_session_id: str,
+    *,
+    timeout_s: float = 10.0,
+) -> None:
+    """Wait until one exact STOPPED supervisor is gone or replaced."""
+
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            current = send_command("status", timeout_s=0.5)
+        except Exception:
+            if current_control_owner_state() in {"absent", "dead", "mismatch"}:
+                return
+        else:
+            if str(current.get("session_id") or "") != retired_session_id:
+                return
+        if time.monotonic() >= deadline:
+            raise typer.BadParameter(
+                "Retiring faulted supervisor did not release its control endpoint; "
+                "autonomous restart remains blocked."
+            )
+        time.sleep(0.05)
 
 
 @app.command()
@@ -800,7 +847,7 @@ def stop(
     if supervisor_alive():
         try:
             result = send_command(
-                "stop", timeout_s=5.0, persistent_intent=not transient
+                "stop", timeout_s=30.0, persistent_intent=not transient
             )
             if not transient and result.get("operator_pause_persisted") is False:
                 persistence_error = "supervisor could not persist operator pause"

@@ -569,6 +569,7 @@ class IsolatedX11InputBackend:
         target_window_id: int | None = None,
         allow_host: bool = False,
         host_monitor_binding: HostMonitorBinding | None = None,
+        input_permitted: Callable[[], bool] = lambda: True,
     ) -> None:
         require_isolated_display(display_name, host_display, allow_host=allow_host)
         if host_monitor_binding is not None:
@@ -604,6 +605,7 @@ class IsolatedX11InputBackend:
         self._held_keys: set[str] = set()
         self._held_buttons: set[str] = set()
         self._lease: MotorLease | None = None
+        self._input_permitted = input_permitted
         self.release_count = 0
         self.live_capable = True
         if target_window_id is not None and not self.probe_target():
@@ -721,6 +723,16 @@ class IsolatedX11InputBackend:
         event_type = self._x.KeyPress if down else self._x.KeyRelease
         self._xtest.fake_input(self._display, event_type, keycode)
 
+    def _require_positive_input_permitted(self) -> None:
+        """Fail closed at the final actuator boundary for positive input."""
+
+        try:
+            permitted = self._input_permitted()
+        except Exception as exc:
+            raise MotorRejected("actuation interlock could not be verified") from exc
+        if not permitted:
+            raise MotorRejected("actuation interlock is not clear")
+
     def probe_target(self) -> bool:
         if self.target_window_id is None:
             return True
@@ -800,16 +812,22 @@ class IsolatedX11InputBackend:
                     action.mouse_dx,
                     action.mouse_dy,
                 )
+                self._require_positive_input_permitted()
                 self._park_pointer_in_game()
+                self._require_positive_input_permitted()
                 self._relative_mouse.move(relative_x, relative_y)
             for key in action.keys_down:
-                self._send_key(self._keycode(key), down=True)
+                keycode = self._keycode(key)
+                self._require_positive_input_permitted()
+                self._send_key(keycode, down=True)
                 self._held_keys.add(key.lower())
             for button in action.buttons_down:
                 button_id = _BUTTONS.get(button.lower())
                 if button_id is None:
                     raise IsolationError(f"unsupported mouse button: {button!r}")
+                self._require_positive_input_permitted()
                 self._park_pointer_in_game()
+                self._require_positive_input_permitted()
                 self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
                 self._held_buttons.add(button.lower())
             self._display.sync()

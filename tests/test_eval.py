@@ -49,6 +49,7 @@ def _record_jump_trajectory(tmp_path: Path) -> Path:
         artifact_root=tmp_path / "trajectories",
         state_db_path=tmp_path / "state.sqlite3",
         shard_steps=16,
+        min_free_disk_bytes=0,
     )
     captured_ns = time.monotonic_ns()
     frame = CapturedFrame(

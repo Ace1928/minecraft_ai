@@ -94,3 +94,18 @@ def test_start_requires_explicit_active_state(
 
     assert service_control.start_persistent_agent_service() is True
     assert [call[2] for call in calls] == ["start", "is-active"]
+
+
+@pytest.mark.parametrize("state", ["activating", "deactivating", "reloading"])
+def test_transitional_service_state_is_not_treated_as_stable(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    monkeypatch.setattr(service_control.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(
+        service_control.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _completed(3, f"{state}\n"),
+    )
+
+    assert service_control.persistent_agent_service_state() == "unknown"

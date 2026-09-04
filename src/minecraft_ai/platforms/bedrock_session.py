@@ -36,6 +36,53 @@ DEFAULT_BEDROCK_HEIGHT = 1080
 _IS_LINUX = sys.platform.startswith("linux")
 
 
+def _required_int_attribute(module: object, name: str) -> int:
+    value = getattr(module, name, None)
+    if not isinstance(value, int):
+        raise OSError(f"platform lock constant {name} is unavailable")
+    return value
+
+
+def _flock_descriptor(lock_module: object, fd: int, *, unlock: bool) -> None:
+    flock = getattr(lock_module, "flock", None)
+    if not callable(flock):
+        raise OSError("POSIX file locking is unavailable")
+    if unlock:
+        operation = _required_int_attribute(lock_module, "LOCK_UN")
+    else:
+        operation = _required_int_attribute(
+            lock_module, "LOCK_EX"
+        ) | _required_int_attribute(lock_module, "LOCK_NB")
+    flock(fd, operation)
+
+
+def _set_private_descriptor_mode(fd: int) -> None:
+    fchmod = getattr(os, "fchmod", None)
+    if callable(fchmod):
+        fchmod(fd, 0o600)
+
+
+def _signal_process_group(process_group_id: int, sent_signal: int) -> None:
+    kill_group = getattr(os, "killpg", None)
+    if not callable(kill_group):
+        raise OSError("process-group signaling is unavailable")
+    kill_group(process_group_id, sent_signal)
+
+
+def _open_pidfd(pid: int) -> int:
+    opener = getattr(os, "pidfd_open", None)
+    if not callable(opener):
+        raise AttributeError("pidfd_open is unavailable")
+    return int(opener(pid, 0))
+
+
+def _send_pidfd_signal(pidfd: int, sent_signal: int) -> None:
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if not callable(sender):
+        raise AttributeError("pidfd_send_signal is unavailable")
+    sender(pidfd, sent_signal)
+
+
 @contextmanager
 def bedrock_lifecycle_lock(*, wait_timeout_s: float = 0.0) -> Iterator[None]:
     """Serialize check/stop/launch/persist across CLI and recovery processes."""
@@ -52,7 +99,7 @@ def bedrock_lifecycle_lock(*, wait_timeout_s: float = 0.0) -> Iterator[None]:
         deadline = time.monotonic() + wait_timeout_s
         while True:
             try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _flock_descriptor(fcntl, handle.fileno(), unlock=False)
                 break
             except BlockingIOError as exc:
                 if time.monotonic() >= deadline:
@@ -61,13 +108,13 @@ def bedrock_lifecycle_lock(*, wait_timeout_s: float = 0.0) -> Iterator[None]:
                     ) from exc
                 time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
         try:
-            os.fchmod(handle.fileno(), 0o600)
+            _set_private_descriptor_mode(handle.fileno())
         except OSError:
             pass
         yield
     finally:
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            _flock_descriptor(fcntl, handle.fileno(), unlock=True)
         except OSError:
             pass
         handle.close()
@@ -786,6 +833,38 @@ def wait_for_minecraft_window(
     raise IsolationError("timed out waiting for Minecraft window on display")
 
 
+def _request_bedrock_prefix_stop(session: BedrockSession) -> bool:
+    """Ask BedrockOnLinux to stop its exact Wine prefix before group fallback."""
+
+    command = list(session.launcher_command)
+    if not command:
+        return False
+    launcher_index = 0
+    launcher_name = Path(command[launcher_index]).name.casefold()
+    if launcher_name.startswith(("python", "pypy")) and len(command) > 1:
+        launcher_index = 1
+        launcher_name = Path(command[launcher_index]).name.casefold()
+    if launcher_name != "bedrock-on-linux":
+        return False
+    try:
+        play_index = command.index("play", launcher_index + 1)
+    except ValueError:
+        return False
+    stop_command = [*command[:play_index], "stop"]
+    try:
+        completed = subprocess.run(
+            stop_command,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
 def stop_bedrock_session(session: BedrockSession | None = None) -> None:
     current = session
     if current is None:
@@ -851,6 +930,19 @@ def stop_bedrock_session(session: BedrockSession | None = None) -> None:
                         errors.append("launcher identity changed during graceful shutdown")
                         break
                     time.sleep(0.1)
+        if not launcher_stopped and not errors and _request_bedrock_prefix_stop(current):
+            deadline = time.monotonic() + 12.0
+            while time.monotonic() < deadline:
+                leader_state = _session_process_state(current, launcher=True)
+                if leader_state == "dead" and not _process_group_alive(
+                    current.launcher_pid
+                ):
+                    launcher_stopped = True
+                    break
+                if leader_state in {"mismatch", "unverifiable"}:
+                    errors.append("launcher identity changed during prefix shutdown")
+                    break
+                time.sleep(0.1)
         if not launcher_stopped and not errors:
             leader_state = _session_process_state(current, launcher=True)
             try:
@@ -968,7 +1060,7 @@ def _process_group_alive(group_id: int) -> bool:
     if group_id <= 0 or os.name != "posix":
         return False
     try:
-        os.killpg(group_id, 0)
+        _signal_process_group(group_id, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -1023,14 +1115,17 @@ def _terminate_spawned_process_group(process: subprocess.Popen[bytes]) -> bool:
     if group_id <= 0 or os.name != "posix":
         return False
     try:
-        os.killpg(group_id, signal.SIGTERM)
+        _signal_process_group(group_id, signal.SIGTERM)
     except ProcessLookupError:
         return True
     except OSError:
         return False
     if not _wait_for_process_group_exit(group_id, timeout_s=2.0):
         try:
-            os.killpg(group_id, getattr(signal, "SIGKILL", signal.SIGTERM))
+            _signal_process_group(
+                group_id,
+                getattr(signal, "SIGKILL", signal.SIGTERM),
+            )
         except (OSError, ProcessLookupError):
             pass
         _wait_for_process_group_exit(group_id, timeout_s=1.0)
@@ -1053,7 +1148,7 @@ def _terminate_verified_session_group(
             return
         raise IsolationError(f"refusing to signal {label}: process identity changed")
     try:
-        os.killpg(pid, signal.SIGTERM)
+        _signal_process_group(pid, signal.SIGTERM)
     except ProcessLookupError:
         return
     except OSError as exc:
@@ -1063,7 +1158,7 @@ def _terminate_verified_session_group(
     # A non-empty process group retains its identity after the leader exits, so
     # this escalation cannot cross into a newly reused numeric PID group.
     try:
-        os.killpg(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        _signal_process_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     except ProcessLookupError:
         return
     except OSError as exc:
@@ -1078,7 +1173,7 @@ def _terminate_orphaned_process_group(group_id: int, *, label: str) -> None:
     if _pid_alive(group_id) or not _process_group_alive(group_id):
         raise IsolationError(f"refusing to signal {label}: orphaned group state changed")
     try:
-        os.killpg(group_id, signal.SIGTERM)
+        _signal_process_group(group_id, signal.SIGTERM)
     except ProcessLookupError:
         return
     except OSError as exc:
@@ -1086,7 +1181,10 @@ def _terminate_orphaned_process_group(group_id: int, *, label: str) -> None:
     if _wait_for_process_group_exit(group_id, timeout_s=3.0):
         return
     try:
-        os.killpg(group_id, getattr(signal, "SIGKILL", signal.SIGTERM))
+        _signal_process_group(
+            group_id,
+            getattr(signal, "SIGKILL", signal.SIGTERM),
+        )
     except ProcessLookupError:
         return
     except OSError as exc:
@@ -1190,7 +1288,7 @@ def _terminate_private_display_processes(
             return
         for pid, start_ticks in snapshot.items():
             try:
-                pidfd = os.pidfd_open(pid, 0)
+                pidfd = _open_pidfd(pid)
             except ProcessLookupError:
                 continue
             except AttributeError as exc:
@@ -1212,7 +1310,7 @@ def _terminate_private_display_processes(
                 ):
                     continue
                 try:
-                    signal.pidfd_send_signal(pidfd, sig)
+                    _send_pidfd_signal(pidfd, sig)
                 except ProcessLookupError:
                     continue
                 except (AttributeError, OSError) as exc:

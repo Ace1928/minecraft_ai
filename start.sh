@@ -48,17 +48,6 @@ emergency_latched() {
     "$CLI" status 2>/dev/null | grep -q '"emergency_stop_latched": true'
 }
 
-stop_bedrock_for_service_shutdown() {
-    # An ordinary durable pause is also the handoff protocol for human
-    # recording: stop every autonomous owner while preserving the isolated
-    # game session. Emergency and unrequested service shutdowns still close it.
-    if operator_paused && ! emergency_latched; then
-        echo "Preserving isolated Bedrock session for explicit operator takeover."
-        return 0
-    fi
-    stop_bedrock
-}
-
 reset_start_failures() {
     bedrock_start_failures=0
     bedrock_failure_started_s=0
@@ -71,6 +60,12 @@ abort_failed_start() {
     stop_runtime
     if [ "$result" -eq 64 ]; then
         return "$result"
+    fi
+    if emergency_latched; then
+        return 64
+    fi
+    if operator_paused; then
+        return 65
     fi
     now_s="$(date +%s)"
     if [ "$bedrock_failure_started_s" -eq 0 ]; then
@@ -99,14 +94,14 @@ cleanup() {
     local result=$?
     trap - EXIT INT TERM
     stop_runtime
-    stop_bedrock_for_service_shutdown
+    stop_bedrock
     exit "$result"
 }
 
 terminate() {
     trap - EXIT INT TERM
     stop_runtime
-    stop_bedrock_for_service_shutdown
+    stop_bedrock
     exit 0
 }
 trap cleanup EXIT
@@ -152,6 +147,10 @@ wait_for_bedrock_session() {
     return 1
 }
 
+bedrock_session_alive() {
+    "$CLI" bedrock status 2>/dev/null | grep -q '"alive": true'
+}
+
 wait_for_model() {
     local attempt
     for attempt in $(seq 1 60); do
@@ -175,6 +174,18 @@ start_live_runtime() {
     if operator_paused; then
         echo "Explicit operator pause is active; persistent startup remains suspended." >&2
         return 65
+    fi
+    # A live launcher intentionally owns the GPU marker, so Doctor reports it
+    # as busy. Run the host preflight only when a fresh GPU launch is needed.
+    if ! bedrock_session_alive && ! bedrock-on-linux doctor; then
+        # A supervised stop can be interrupted after Wine dies but before the
+        # launch marker is removed. BOL's dedicated recovery action only
+        # clears an exact dead same-boot marker under its global launch lock;
+        # it cannot acknowledge previous-boot driver incidents.
+        if ! bedrock-on-linux doctor --recover-interrupted-launch; then
+            echo "BedrockOnLinux preflight is blocked; automatic launch retries are suspended." >&2
+            return 67
+        fi
     fi
 
     if ! stop_runtime_required; then
@@ -237,6 +248,10 @@ start_live_runtime() {
             abort_failed_start 64
             return $?
         fi
+        if operator_paused; then
+            stop_runtime
+            return 65
+        fi
         sleep 2
     done
     echo "Agent did not become ready within 90 seconds." >&2
@@ -264,6 +279,9 @@ while true; do
     if [ "$result" -eq 64 ]; then
         trap - EXIT INT TERM
         exit 64
+    fi
+    if [ "$result" -eq 67 ]; then
+        exit 67
     fi
     if [ "$result" -eq 65 ]; then
         sleep "$CHECK_INTERVAL_S"
@@ -325,6 +343,9 @@ while true; do
         if [ "$result" -eq 64 ]; then
             trap - EXIT INT TERM
             exit 64
+        fi
+        if [ "$result" -eq 67 ]; then
+            exit 67
         fi
         if [ "$result" -eq 65 ]; then
             sleep "$CHECK_INTERVAL_S"

@@ -341,12 +341,17 @@ def test_posix_tracked_group_is_terminated_after_leader_exit(
     monkeypatch.setattr(stack_module, "_IS_WINDOWS", False)
     monkeypatch.setattr(stack_module, "_process_group_alive", lambda _pgid: group_alive)
     monkeypatch.setattr(
+        stack_module,
+        "_persisted_process_or_orphan_group_matches",
+        lambda _pid, **_kwargs: True,
+    )
+    monkeypatch.setattr(
         "minecraft_ai.stack_lifecycle.os.killpg",
         fake_killpg,
         raising=False,
     )
 
-    launcher._terminate_owned_pid(42, 0.1, None)
+    launcher._terminate_owned_pid(42, 0.1, "a" * 64, 1234)
 
     assert signals == [(42, signal.SIGTERM)]
     assert 42 not in launcher._children
@@ -385,12 +390,17 @@ def test_posix_group_waits_for_descendants_and_escalates(
     monkeypatch.setattr(stack_module, "_IS_WINDOWS", False)
     monkeypatch.setattr(stack_module, "_process_group_alive", lambda _pgid: group_alive)
     monkeypatch.setattr(
+        stack_module,
+        "_persisted_process_or_orphan_group_matches",
+        lambda _pid, **_kwargs: True,
+    )
+    monkeypatch.setattr(
         "minecraft_ai.stack_lifecycle.os.killpg",
         fake_killpg,
         raising=False,
     )
 
-    launcher._terminate_owned_pid(42, 0.01, None)
+    launcher._terminate_owned_pid(42, 0.01, "a" * 64, 1234)
 
     assert signals == [(42, signal.SIGTERM), (42, kill_signal)]
     assert 42 not in launcher._children
@@ -699,6 +709,152 @@ def test_stack_failure_rolls_back_only_owned_services(tmp_path: Path) -> None:
     assert reused.owned is False
     assert external_ready.read_text(encoding="utf-8") == "operator-owned"
     assert health["operator-model"] is True
+
+
+def test_failed_oneshot_is_provisionally_owned_before_wait_and_runs_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_command = ("resource-helper", "start")
+    stop_command = ("resource-helper", "stop")
+    service = ServiceSpec(
+        service_id="provisional-oneshot",
+        mode=ServiceMode.ONESHOT,
+        command=start_command,
+        stop_command=stop_command,
+        probes=(FileProbe(tmp_path / "never-ready"),),
+        log_path=tmp_path / "oneshot.log",
+        ready_timeout_s=0.1,
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="provisional-oneshot", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+    )
+    spawned_commands: list[tuple[str, ...]] = []
+    stop_ran = False
+
+    class _Process:
+        returncode: int | None = None
+
+        def __init__(self, pid: int, command: tuple[str, ...]) -> None:
+            self.pid = pid
+            self.command = command
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, *, timeout: float) -> int:
+            nonlocal stop_ran
+            assert timeout == service.ready_timeout_s
+            if self.command == start_command:
+                provisional = StackManifest.load(launcher.manifest_path)
+                assert len(provisional.services) == 1
+                assert provisional.services[0].service_id == service.service_id
+                assert provisional.services[0].owned is True
+                self.returncode = 17
+            else:
+                assert self.command == stop_command
+                stop_ran = True
+                self.returncode = 0
+            return self.returncode
+
+    def fake_spawn(
+        _service: ServiceSpec,
+        command: tuple[str, ...],
+    ) -> _Process:
+        spawned_commands.append(command)
+        return _Process(40 + len(spawned_commands), command)
+
+    monkeypatch.setattr(stack_module, "_IS_LINUX", False)
+    monkeypatch.setattr(launcher, "_spawn", fake_spawn)
+
+    with pytest.raises(StackStartError, match="exited with code 17"):
+        launcher.start()
+
+    assert spawned_commands == [start_command, stop_command]
+    assert stop_ran is True
+    failed = StackManifest.load(launcher.manifest_path)
+    assert failed.phase == StackPhase.FAILED
+    assert len(failed.services) == 1
+    assert failed.services[0].owned is False
+
+
+def test_oneshot_provisional_persist_failure_contains_helper_and_runs_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start_command = ("resource-helper", "start")
+    stop_command = ("resource-helper", "stop")
+    service = ServiceSpec(
+        service_id="provisional-persist-failure",
+        mode=ServiceMode.ONESHOT,
+        command=start_command,
+        stop_command=stop_command,
+        probes=(FileProbe(tmp_path / "never-ready"),),
+        log_path=tmp_path / "oneshot.log",
+        ready_timeout_s=0.1,
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="oneshot-persist-failure", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+    )
+    original_persist = stack_module.StackManifest.persist
+    persist_calls = 0
+    spawned_commands: list[tuple[str, ...]] = []
+    contained: list[tuple[int, str | None, int | None]] = []
+
+    class _Process:
+        returncode: int | None = None
+
+        def __init__(self, pid: int, command: tuple[str, ...]) -> None:
+            self.pid = pid
+            self.command = command
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout == service.ready_timeout_s
+            assert self.command == stop_command
+            self.returncode = 0
+            return self.returncode
+
+    def fake_spawn(
+        _service: ServiceSpec,
+        command: tuple[str, ...],
+    ) -> _Process:
+        spawned_commands.append(command)
+        return _Process(50 + len(spawned_commands), command)
+
+    def fail_provisional_persist(self: StackManifest, path: Path) -> None:
+        nonlocal persist_calls
+        persist_calls += 1
+        if persist_calls == 2:
+            raise OSError("injected provisional persistence failure")
+        original_persist(self, path)
+
+    def fake_terminate(
+        pid: int,
+        _timeout_s: float,
+        command_digest: str | None,
+        proc_start_ticks: int | None = None,
+    ) -> None:
+        contained.append((pid, command_digest, proc_start_ticks))
+
+    monkeypatch.setattr(stack_module, "_IS_LINUX", False)
+    monkeypatch.setattr(launcher, "_spawn", fake_spawn)
+    monkeypatch.setattr(launcher, "_terminate_owned_pid", fake_terminate)
+    monkeypatch.setattr(stack_module.StackManifest, "persist", fail_provisional_persist)
+
+    with pytest.raises(StackStartError, match="injected provisional persistence failure"):
+        launcher.start()
+
+    assert spawned_commands == [start_command, stop_command]
+    assert contained == [(51, stack_module._command_digest(start_command), None)]
+    failed = StackManifest.load(launcher.manifest_path)
+    assert failed.phase == StackPhase.FAILED
+    assert len(failed.services) == 1
+    assert failed.services[0].owned is False
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux procfs")

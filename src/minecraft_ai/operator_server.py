@@ -685,7 +685,7 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
                         result = {"state": "STOPPED", "fallback": "local-transaction"}
         if use_supervisor:
             try:
-                result = send_command("pause", timeout_s=5.0)
+                result = send_command("pause", timeout_s=30.0)
                 if result.get("operator_pause_persisted") is False:
                     persistence_error = "supervisor could not persist operator pause"
                 if result.get("agent_containment_confirmed") is not True:
@@ -762,7 +762,12 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
                     result = {"state": "STARTING", "recovery_pending": True}
             if late_supervisor:
                 result = send_command("resume", timeout_s=5.0)
-        self._send_json(HTTPStatus.OK, result)
+        if result.get("state") == "STOPPED":
+            result = {**result, "recovery_pending": True}
+        response_status = (
+            HTTPStatus.ACCEPTED if result.get("recovery_pending") is True else HTTPStatus.OK
+        )
+        self._send_json(response_status, result)
 
     def _send_json(self, status: HTTPStatus, payload: object) -> None:
         self._send_bytes(
