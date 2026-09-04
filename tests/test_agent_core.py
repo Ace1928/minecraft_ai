@@ -2253,6 +2253,51 @@ def test_actionable_operator_command_preempts_inflight_cognition_and_keepalive(
         assert persisted.response_text == "Starting that now."
 
 
+def test_gui_operator_fast_path_waits_for_running_local_inference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "minecraft_ai.runtime.local_model_inference_available",
+        lambda: True,
+    )
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime, stale_future, model, terminal, sent_actions = (
+            _runtime_with_inflight_operator_cognition(
+                database,
+                message_text="Craft wood planks now.",
+                target_reference=False,
+            )
+        )
+
+        runtime._start_cognition_if_due()
+
+        assert runtime._pending_decision is stale_future
+        assert stale_future.running()
+        assert runtime.executor.run is not None
+        assert runtime.executor.run.skill_id == "explore_forward"
+        assert terminal == []
+        assert sent_actions == []
+        assert database.load_operator_messages(limit=1)[0].status == (
+            OperatorMessageStatus.QUEUED
+        )
+
+        # Once the uninterruptible request releases the sole inference lane,
+        # the same deterministic operator decision can safely own the GUI.
+        stale_future.set_exception(RuntimeError("stale request released"))
+        runtime._start_cognition_if_due()
+
+        assert runtime._pending_decision is None
+        assert model.calls == 0
+        assert terminal[0].skill_id == "explore_forward"
+        assert terminal[0].outcome == SkillOutcome.CANCELLED
+        assert runtime.executor.run is not None
+        assert runtime.executor.run.skill_id == "craft_wood_planks"
+        assert database.load_operator_messages(limit=1)[0].status == (
+            OperatorMessageStatus.ACKNOWLEDGED
+        )
+
+
 def test_operator_fast_path_does_not_queue_behind_detached_busy_worker(
     tmp_path: Path,
 ) -> None:

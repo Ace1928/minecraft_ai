@@ -3,7 +3,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from .crafting_control import BoundedPlankCraftController, INVENTORY_TOGGLE_DURATION_MS
+from .crafting_control import (
+    BoundedPlankCraftController,
+    INVENTORY_TOGGLE_DURATION_MS,
+    PlankCraftPhase,
+)
 from .mining_control import MiningLeaseGuard
 from .motor import MotorIntent, MotorPolicy
 from .outcome_verifier import (
@@ -109,6 +113,16 @@ class SkillExecutor:
             blackboard,
             now_ns=now_ns,
         )
+
+    @property
+    def plank_crafting_phase(self) -> PlankCraftPhase | None:
+        return self._plank_crafter.phase
+
+    def note_plank_crafting_semantic_completion(self, phase: PlankCraftPhase) -> None:
+        self._plank_crafter.note_semantic_completion(phase)
+
+    def plank_crafting_semantic_time_remaining_ms(self, *, now_ns: int) -> int | None:
+        return self._plank_crafter.semantic_time_remaining_ms(now_ns)
 
     def start(
         self,

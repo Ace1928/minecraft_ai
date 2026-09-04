@@ -49,6 +49,8 @@ class BoundedPlankCraftController:
     outcome_timeout_ms: int = 80_000
     close_timeout_ms: int = 10_000
     retry_interval_ms: int = 2_000
+    inventory_settle_ms: int = 500
+    inventory_overlay_continuity_ms: int = 250
     max_toggle_attempts: int = 1
     max_recipe_attempts: int = 1
     minimum_confidence: float = 0.70
@@ -63,6 +65,9 @@ class BoundedPlankCraftController:
     _toggle_attempts: int = field(default=0, init=False)
     _recipe_attempts: int = field(default=0, init=False)
     _last_sequence: int = field(default=-1, init=False)
+    _inventory_overlay_visible_since_ns: int = field(default=0, init=False)
+    _inventory_overlay_last_observed_ns: int = field(default=0, init=False)
+    _semantic_completion_phase: PlankCraftPhase | None = field(default=None, init=False)
     _verified_counts: tuple[PerceptionFact, PerceptionFact] | None = field(
         default=None,
         init=False,
@@ -83,9 +88,13 @@ class BoundedPlankCraftController:
         now_ns: int,
     ) -> bool:
         """Admit slow GUI perception only after this transaction owns a GUI."""
+        if self._semantic_completion_phase == self._phase:
+            return False
         if self._phase == PlankCraftPhase.VERIFY_OUTPUT:
             return True
         if self._phase == PlankCraftPhase.LOCATE_RECIPE:
+            if not self._inventory_overlay_settled(blackboard, now_ns=now_ns):
+                return False
             observed = _inventory_gui_observation(
                 blackboard,
                 now_ns=now_ns,
@@ -124,17 +133,29 @@ class BoundedPlankCraftController:
                 # capture instead.
                 return False
             return True
-        return bool(
-            self._phase == PlankCraftPhase.OPEN_INVENTORY
-            and self._last_attempt_ns > 0
-            and _fresh_ui_overlay_observation(
-                blackboard,
-                now_ns=now_ns,
-                observed_after_ns=self._inventory_toggle_ns,
-                min_confidence=self.minimum_confidence,
-            )
-            is not None
-        )
+        # Scheduling precedes control each tick. Never bind the expensive scan
+        # to the first partially-rendered frame that advances OPEN_INVENTORY;
+        # LOCATE_RECIPE owns the settled-frame request.
+        return False
+
+    def note_semantic_completion(self, phase: PlankCraftPhase) -> None:
+        """Record one terminal VLM scan for the current transaction phase."""
+
+        if self._phase == phase:
+            self._semantic_completion_phase = phase
+
+    def semantic_time_remaining_ms(self, now_ns: int) -> int | None:
+        """Return the bounded time remaining for the current semantic phase."""
+
+        if self._phase is None:
+            return None
+        timeout_ms = {
+            PlankCraftPhase.LOCATE_RECIPE: self.locate_timeout_ms,
+            PlankCraftPhase.VERIFY_OUTPUT: self.outcome_timeout_ms,
+        }.get(self._phase)
+        if timeout_ms is None:
+            return None
+        return max(0, timeout_ms - self._elapsed_ms(now_ns))
 
     def reset(self) -> None:
         self._run_id = None
@@ -148,6 +169,9 @@ class BoundedPlankCraftController:
         self._toggle_attempts = 0
         self._recipe_attempts = 0
         self._last_sequence = -1
+        self._inventory_overlay_visible_since_ns = 0
+        self._inventory_overlay_last_observed_ns = 0
+        self._semantic_completion_phase = None
         self._verified_counts = None
 
     def step(
@@ -184,7 +208,7 @@ class BoundedPlankCraftController:
         sequence: int,
         now_ns: int,
     ) -> PlankCraftStep:
-        overlay = _fresh_ui_overlay_observation(
+        overlay = _fresh_inventory_overlay_observation(
             blackboard,
             now_ns=now_ns,
             observed_after_ns=self._inventory_toggle_ns,
@@ -193,6 +217,9 @@ class BoundedPlankCraftController:
         if self._last_attempt_ns > 0 and overlay is not None:
             self._phase = PlankCraftPhase.LOCATE_RECIPE
             self._phase_started_ns = now_ns
+            self._inventory_overlay_visible_since_ns = 0
+            self._inventory_overlay_last_observed_ns = 0
+            self._semantic_completion_phase = None
             return PlankCraftStep(
                 mode="craft_planks",
                 instruction="wait for grounded inventory GUI perception",
@@ -224,6 +251,8 @@ class BoundedPlankCraftController:
             evidence_captured_after_ns=self._inventory_toggle_ns,
         )
         if observed is None:
+            if self._semantic_completion_phase == PlankCraftPhase.LOCATE_RECIPE:
+                return self._fail("crafting-inventory-scan-inconclusive")
             if self._elapsed_ms(now_ns) >= self.locate_timeout_ms:
                 return self._fail("crafting-inventory-gui-not-verified")
             return PlankCraftStep(
@@ -253,6 +282,8 @@ class BoundedPlankCraftController:
                 if int(baseline.value) < 1:
                     return self._fail("crafting-no-logs-observed-in-inventory")
                 self._baseline_logs = int(baseline.value)
+            elif self._semantic_completion_phase == PlankCraftPhase.LOCATE_RECIPE:
+                return self._fail("crafting-baseline-log-count-unavailable")
         track = _fresh_planks_recipe_track(
             blackboard,
             observed_after_ns=self._inventory_observed_ns,
@@ -269,6 +300,7 @@ class BoundedPlankCraftController:
             self._interaction_ns = now_ns
             self._phase = PlankCraftPhase.VERIFY_OUTPUT
             self._phase_started_ns = now_ns
+            self._semantic_completion_phase = None
             center_x = track.region.x + track.region.width / 2.0
             center_y = track.region.y + track.region.height / 2.0
             return PlankCraftStep(
@@ -276,6 +308,8 @@ class BoundedPlankCraftController:
                 mode="craft_planks",
                 instruction="right-click the grounded craftable wood planks recipe once",
             )
+        if self._semantic_completion_phase == PlankCraftPhase.LOCATE_RECIPE:
+            return self._fail("crafting-planks-recipe-not-grounded")
         if self._elapsed_ms(now_ns) >= self.locate_timeout_ms:
             reason = (
                 "crafting-baseline-log-count-unavailable"
@@ -305,6 +339,8 @@ class BoundedPlankCraftController:
             self._last_attempt_ns = 0
             self._toggle_attempts = 0
             return self._close_inventory(blackboard, sequence=sequence, now_ns=now_ns)
+        if self._semantic_completion_phase == PlankCraftPhase.VERIFY_OUTPUT:
+            return self._fail("crafting-output-scan-inconclusive")
         if self._elapsed_ms(now_ns) < self.outcome_timeout_ms:
             return PlankCraftStep(
                 mode="craft_planks",
@@ -424,6 +460,41 @@ class BoundedPlankCraftController:
 
     def _elapsed_ms(self, now_ns: int) -> int:
         return max(0, (now_ns - self._phase_started_ns) // 1_000_000)
+
+    def _inventory_overlay_settled(
+        self,
+        blackboard: PerceptionBlackboard,
+        *,
+        now_ns: int,
+    ) -> bool:
+        overlay = _fresh_inventory_overlay_observation(
+            blackboard,
+            now_ns=now_ns,
+            observed_after_ns=self._inventory_toggle_ns,
+            min_confidence=self.minimum_confidence,
+        )
+        if overlay is None:
+            self._inventory_overlay_visible_since_ns = 0
+            self._inventory_overlay_last_observed_ns = 0
+            return False
+        observed_ns = min(item.observed_ns for item in overlay)
+        if (
+            self._inventory_overlay_visible_since_ns == 0
+            or (
+                observed_ns > self._inventory_overlay_last_observed_ns
+                and observed_ns - self._inventory_overlay_last_observed_ns
+                > self.inventory_overlay_continuity_ms * 1_000_000
+            )
+        ):
+            self._inventory_overlay_visible_since_ns = observed_ns
+        self._inventory_overlay_last_observed_ns = max(
+            self._inventory_overlay_last_observed_ns,
+            observed_ns,
+        )
+        return (
+            now_ns - self._inventory_overlay_visible_since_ns
+            >= self.inventory_settle_ms * 1_000_000
+        )
 
     def _tap_key(self, sequence: int, key: str) -> MotorAction:
         self._last_sequence = sequence
@@ -564,6 +635,33 @@ def _fresh_ui_overlay_observation(
     if not playable.source.startswith(("bootstrap:", "safety:")):
         return None
     return overlay, playable
+
+
+def _fresh_inventory_overlay_observation(
+    blackboard: PerceptionBlackboard,
+    *,
+    now_ns: int,
+    observed_after_ns: int,
+    min_confidence: float,
+) -> tuple[PerceptionFact, PerceptionFact, PerceptionFact] | None:
+    ui = _fresh_ui_overlay_observation(
+        blackboard,
+        now_ns=now_ns,
+        observed_after_ns=observed_after_ns,
+        min_confidence=min_confidence,
+    )
+    inventory = blackboard.fact(
+        "scene.inventory_overlay",
+        min_confidence=min_confidence,
+        now_ns=now_ns,
+    )
+    if ui is None or inventory is None:
+        return None
+    if inventory.observed_ns <= observed_after_ns or inventory.value is not True:
+        return None
+    if not inventory.source.startswith(("bootstrap:", "safety:")):
+        return None
+    return (*ui, inventory)
 
 
 def _playable_world_observation(

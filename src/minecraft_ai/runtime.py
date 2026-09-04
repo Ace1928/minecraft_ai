@@ -19,11 +19,13 @@ from .cognition import (
 )
 from .action_levels import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
+from .crafting_control import PlankCraftPhase
 from .daemon_executor import SingleWorkerDaemonExecutor
 from .episodes import RuntimeEvent, RuntimeEventKind
 from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
 from .grounded_perception import resolve_grounded_output_keys
 from .memory import MemoryKind, MemoryRecord, MemoryStore
+from .models import local_model_inference_available
 from .motor import MotorIntent
 from .outcome_verifier import OutcomeSignal, OutcomeStatus, OutcomeVerification
 from .perception import ActivePerceptionQuery, PerceptionBlackboard, PerceptionFact, Track
@@ -54,6 +56,15 @@ _RECORDED_RUN_ID_LIMIT = 4_096
 _COGNITION_RETRY_BASE_NS = 2_000_000_000
 _COGNITION_RETRY_MAX_NS = 30_000_000_000
 _OPERATOR_FOLLOWUP_DELAY_NS = 250_000_000
+_CRAFT_SEMANTIC_LATENCY_MARGIN = 1.25
+_CRAFT_SEMANTIC_MAX_REQUIRED_BUDGET_MS = 60_000
+
+
+@dataclass(frozen=True)
+class _CraftSemanticProbe:
+    run_id: str
+    phase: PlankCraftPhase
+    terminal_count_before: int
 
 
 def _expected_keepalive_expiry(run: SkillRun) -> bool:
@@ -804,6 +815,8 @@ class AgentRuntime:
     _plan_step_completed_ns: int = field(default=0, init=False)
     _last_operator_target_id: str | None = field(default=None, init=False)
     _policy_warmup_error: str | None = field(default=None, init=False)
+    _gui_fast_path_deferred: bool = field(default=False, init=False)
+    _craft_semantic_probe: _CraftSemanticProbe | None = field(default=None, init=False)
     _cognition_requested: bool = field(default=True, init=False)
     _cognition_retry_count: int = field(default=0, init=False)
     _cognition_retry_not_before_ns: int = field(default=0, init=False)
@@ -1280,15 +1293,16 @@ class AgentRuntime:
         skill_id = active.skill_id if active is not None else None
         crafting_event = skill_id == "craft_wood_planks"
         now = time.monotonic_ns()
-        if crafting_event and not self.executor.plank_crafting_semantics_ready(
-            self.blackboard,
-            now_ns=now,
-        ):
-            # Runtime scheduling precedes motor execution in each loop. Do not
-            # spend a 30s+ VLM call on the world frame immediately before the
-            # controller's inventory toggle; wait for a fresh fast overlay
-            # observation proving that this transaction opened a GUI.
-            return
+        if crafting_event and active is not None:
+            self._reconcile_craft_semantic_probe(active)
+            if not self.executor.plank_crafting_semantics_ready(
+                self.blackboard,
+                now_ns=now,
+            ):
+                # Runtime scheduling precedes motor execution in each loop. Do
+                # not bind a 30s+ request to either the pre-toggle world or the
+                # first partially-rendered inventory frame.
+                return
         if not _semantic_refresh_allowed(
             cognition_requested=self._cognition_requested,
             cognition_pending=self._pending_decision is not None,
@@ -1299,6 +1313,12 @@ class AgentRuntime:
         effective_hz = self.semantic_hz if self.semantic_hz > 0 else 0.5
         interval = int(1e9 / effective_hz)
         if now - self._last_semantic_ns < interval:
+            return
+        terminal_count_before = self._active_vlm_terminal_count()
+        if crafting_event and not self._craft_semantic_budget_available(now_ns=now):
+            phase = self.executor.plank_crafting_phase
+            if phase is not None:
+                self.executor.note_plank_crafting_semantic_completion(phase)
             return
         question = self._semantic_question(skill_id)
         output_keys = list(
@@ -1341,6 +1361,75 @@ class AgentRuntime:
         if self.perception.request_semantics(query):
             self.metrics.semantic_requests += 1
             self._last_semantic_ns = now
+            phase = self.executor.plank_crafting_phase
+            if (
+                crafting_event
+                and active is not None
+                and phase is not None
+                and terminal_count_before is not None
+            ):
+                self._craft_semantic_probe = _CraftSemanticProbe(
+                    run_id=active.run_id,
+                    phase=phase,
+                    terminal_count_before=terminal_count_before,
+                )
+
+    def _active_vlm_status(self) -> dict[str, object]:
+        active_vlm = self.perception.active_vlm
+        status = getattr(active_vlm, "status", None)
+        if not callable(status):
+            return {}
+        try:
+            result = status()
+        except Exception:
+            return {}
+        return result if isinstance(result, dict) else {}
+
+    def _active_vlm_terminal_count(self) -> int | None:
+        status = self._active_vlm_status()
+        completed = status.get("completed")
+        failures = status.get("failures")
+        if (
+            not isinstance(completed, int)
+            or isinstance(completed, bool)
+            or not isinstance(failures, int)
+            or isinstance(failures, bool)
+        ):
+            return None
+        return completed + failures
+
+    def _reconcile_craft_semantic_probe(self, active: SkillRun) -> None:
+        probe = getattr(self, "_craft_semantic_probe", None)
+        if probe is None:
+            return
+        phase = self.executor.plank_crafting_phase
+        if active.run_id != probe.run_id or phase != probe.phase:
+            self._craft_semantic_probe = None
+            return
+        # ActiveVLMWorker only becomes available after metrics and blackboard
+        # publication are complete, avoiding a completion/publication race.
+        if not self.perception.semantic_available():
+            return
+        terminal_count = self._active_vlm_terminal_count()
+        if terminal_count is None or terminal_count <= probe.terminal_count_before:
+            return
+        self.executor.note_plank_crafting_semantic_completion(probe.phase)
+        self._craft_semantic_probe = None
+
+    def _craft_semantic_budget_available(self, *, now_ns: int) -> bool:
+        remaining_ms = self.executor.plank_crafting_semantic_time_remaining_ms(
+            now_ns=now_ns
+        )
+        if remaining_ms is None:
+            return False
+        latency = self._active_vlm_status().get("last_latency_ms")
+        if not isinstance(latency, (int, float)) or isinstance(latency, bool) or latency <= 0:
+            return remaining_ms >= 5_000
+        required_ms = min(
+            _CRAFT_SEMANTIC_MAX_REQUIRED_BUDGET_MS,
+            max(5_000, int(float(latency) * _CRAFT_SEMANTIC_LATENCY_MARGIN)),
+        )
+        return remaining_ms >= required_ms
 
     def _merge_operator_target(self) -> None:
         """Publish a newly selected operator region as ROCKET's reference target."""
@@ -1470,6 +1559,11 @@ class AgentRuntime:
             self.metrics.cognition_calls += 1
             self._consume_cognition()
             return
+        if getattr(self, "_gui_fast_path_deferred", False):
+            # Keep the world visible while the sole local-model lane drains.
+            # Starting slow cognition here would only queue behind that same
+            # lane and postpone the pixel-grounded GUI transaction again.
+            return
         self._pending_operator_message_ids = tuple(
             message.message_id
             for message in context.operator_messages
@@ -1519,6 +1613,7 @@ class AgentRuntime:
         stale_future: concurrent.futures.Future[CognitionDecision] | None = None,
     ) -> bool:
         """Stage one executable operator decision without occupying the model worker."""
+        self._gui_fast_path_deferred = False
         if self.high_level is None or self.state_db is None:
             return False
         fast_path = getattr(self.high_level, "_operator_fast_path_decision", None)
@@ -1535,6 +1630,17 @@ class AgentRuntime:
         selected_id = _selected_operator_message_id(decision, pending_ids)
         if selected_id is None:
             return False
+        if decision.skill_id is not None:
+            requested = self.skills.get(decision.skill_id)
+            stale_request_running = stale_future is not None and not stale_future.done()
+            if requested.action_level == ActionLevel.GUI and (
+                stale_request_running or not local_model_inference_available()
+            ):
+                # A running HTTP request cannot be interrupted by Future.cancel.
+                # Do not open a modal game GUI while its required semantic scan
+                # is known to be queued behind that request.
+                self._gui_fast_path_deferred = True
+                return False
 
         running = self.executor.run
         if (

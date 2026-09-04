@@ -12,6 +12,20 @@ from pydantic import BaseModel, ConfigDict, Field
 _LOCAL_MODEL_INFERENCE_LOCK = threading.Lock()
 
 
+def local_model_inference_available() -> bool:
+    """Return whether the process-wide local inference lane is currently idle.
+
+    This is an advisory scheduling check used to avoid opening a blocking game
+    GUI behind an already-running request. Model adapters remain the
+    authoritative serialization boundary.
+    """
+
+    acquired = _LOCAL_MODEL_INFERENCE_LOCK.acquire(blocking=False)
+    if acquired:
+        _LOCAL_MODEL_INFERENCE_LOCK.release()
+    return acquired
+
+
 class ModelMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

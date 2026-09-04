@@ -160,8 +160,70 @@ def _merge_fast_overlay(board: PerceptionBlackboard, *, observed_ns: int) -> Non
                 observed_ns=observed_ns,
                 source="bootstrap:bootstrap-rgb-v1:not-training-label",
             ),
+            _fact(
+                "scene.inventory_overlay",
+                True,
+                observed_ns=observed_ns,
+                source="bootstrap:bootstrap-rgb-v1:not-training-label",
+            ),
         ),
     )
+
+
+class _TrackedActiveVLM:
+    def __init__(self, *, last_latency_ms: float = 0.0) -> None:
+        self.completed = 0
+        self.failures = 0
+        self.last_latency_ms = last_latency_ms
+
+    def status(self) -> dict[str, object]:
+        return {
+            "completed": self.completed,
+            "failures": self.failures,
+            "last_latency_ms": self.last_latency_ms,
+        }
+
+
+class _TrackedPerception:
+    def __init__(self, *, last_latency_ms: float = 0.0) -> None:
+        self.active_vlm = _TrackedActiveVLM(last_latency_ms=last_latency_ms)
+        self.requests: list[object] = []
+        self.available = True
+
+    def semantic_available(self) -> bool:
+        return self.available
+
+    def request_semantics(self, query: object) -> bool:
+        if not self.available:
+            return False
+        self.requests.append(query)
+        self.available = False
+        return True
+
+    def complete(self, *, latency_ms: float) -> None:
+        self.active_vlm.completed += 1
+        self.active_vlm.last_latency_ms = latency_ms
+        self.available = True
+
+
+def _craft_semantic_runtime(
+    board: PerceptionBlackboard,
+    executor: SkillExecutor,
+    perception: _TrackedPerception,
+) -> AgentRuntime:
+    runtime = object.__new__(AgentRuntime)
+    runtime.blackboard = board
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = executor
+    runtime.perception = perception  # type: ignore[assignment]
+    runtime.semantic_hz = 0.0
+    runtime._cognition_requested = False
+    runtime._pending_decision = None
+    runtime._pending_operator_message_ids = ()
+    runtime._last_semantic_ns = 0
+    runtime._craft_semantic_probe = None
+    runtime.metrics = RuntimeMetrics()
+    return runtime
 
 
 def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes() -> None:
@@ -241,8 +303,12 @@ def test_fresh_world_skill_opens_crafts_verifies_delta_and_closes() -> None:
     assert finished.action is not None and finished.action.sequence == 5
 
 
-def test_runtime_does_not_submit_crafting_semantics_before_its_gui_toggle() -> None:
+def test_runtime_waits_for_locate_phase_and_settled_inventory_before_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     now = time.monotonic_ns()
+    clock = [now]
+    monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock[0])
     board = _board(now)
     skills = build_bootstrap_skill_library()
     executor = SkillExecutor(_UnusedPolicy())
@@ -286,10 +352,28 @@ def test_runtime_does_not_submit_crafting_semantics_before_its_gui_toggle() -> N
     runtime._request_semantics_if_due(frame_id=2)
     assert perception.requests == []
 
-    _merge_fast_overlay(board, observed_ns=now + 100_000_000)
+    clock[0] = now + 100_000_000
+    _merge_fast_overlay(board, observed_ns=clock[0])
     runtime._request_semantics_if_due(frame_id=3)
+    assert perception.requests == []
+
+    # Control owns the detected inventory first; its initial shell is not yet a
+    # trustworthy inventory-content frame.
+    executor.tick(board, sequence=2, now_ns=clock[0])
+    runtime._request_semantics_if_due(frame_id=4)
+    assert perception.requests == []
+
+    for frame_id, offset_ms in ((5, 300), (6, 500)):
+        clock[0] = now + offset_ms * 1_000_000
+        _merge_fast_overlay(board, observed_ns=clock[0])
+        runtime._request_semantics_if_due(frame_id=frame_id)
+        assert perception.requests == []
+    clock[0] = now + 600_000_000
+    _merge_fast_overlay(board, observed_ns=clock[0])
+    runtime._request_semantics_if_due(frame_id=7)
 
     assert len(perception.requests) == 1
+    assert perception.requests[0].frame_id == 7
 
 
 def test_runtime_reserves_first_post_click_semantic_request_for_outcome(
@@ -338,10 +422,23 @@ def test_runtime_reserves_first_post_click_semantic_request_for_outcome(
     clock[0] = now + 100_000_000
     _merge_fast_overlay(board, observed_ns=clock[0])
 
-    # This is the one request that discovers the log baseline and recipe.
+    # The first overlay capture advances control but is deliberately not sent
+    # to the slow model until it has remained visible through the settle window.
     runtime._request_semantics_if_due(frame_id=2)
-    assert len(perception.requests) == 1
+    assert perception.requests == []
     executor.tick(board, sequence=2, now_ns=clock[0])
+    runtime._request_semantics_if_due(frame_id=3)
+    assert perception.requests == []
+
+    for frame_id, offset_ms in ((4, 300), (5, 500)):
+        clock[0] = now + offset_ms * 1_000_000
+        _merge_fast_overlay(board, observed_ns=clock[0])
+        runtime._request_semantics_if_due(frame_id=frame_id)
+        assert perception.requests == []
+    clock[0] = now + 600_000_000
+    _merge_fast_overlay(board, observed_ns=clock[0])
+    runtime._request_semantics_if_due(frame_id=6)
+    assert len(perception.requests) == 1
 
     clock[0] = now + 3 * _SECOND
     _merge_inventory(
@@ -354,16 +451,87 @@ def test_runtime_reserves_first_post_click_semantic_request_for_outcome(
 
     # Scheduling precedes control on every runtime loop. The click-ready facts
     # must suppress a redundant request from this still-pre-click frame.
-    runtime._request_semantics_if_due(frame_id=3)
+    runtime._request_semantics_if_due(frame_id=7)
     assert len(perception.requests) == 1
     clicked = executor.tick(board, sequence=3, now_ns=clock[0])
     assert clicked.action is not None and clicked.action.buttons_down == ("right",)
 
     # The next captured frame is the first request after interaction.
     clock[0] += 100_000_000
-    runtime._request_semantics_if_due(frame_id=4)
+    runtime._request_semantics_if_due(frame_id=8)
     assert len(perception.requests) == 2
-    assert perception.requests[-1].frame_id == 4
+    assert perception.requests[-1].frame_id == 8
+
+
+def test_completed_unknown_inventory_scan_fails_closed_without_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.monotonic_ns()
+    clock = [now]
+    monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock[0])
+    board = _board(now)
+    executor = SkillExecutor(_UnusedPolicy())
+    executor.start(
+        build_bootstrap_skill_library().get("craft_wood_planks"),
+        run_id="craft:one-unknown-scan",
+        now_ns=now - 1,
+    )
+    perception = _TrackedPerception()
+    runtime = _craft_semantic_runtime(board, executor, perception)
+
+    opened = executor.tick(board, sequence=1, now_ns=now)
+    assert opened.action is not None and opened.action.keys_down == ("e",)
+    clock[0] = now + 100_000_000
+    _merge_fast_overlay(board, observed_ns=clock[0])
+    executor.tick(board, sequence=2, now_ns=clock[0])
+    for frame_id, offset_ms in ((2, 100), (3, 300), (4, 500), (5, 600)):
+        clock[0] = now + offset_ms * 1_000_000
+        _merge_fast_overlay(board, observed_ns=clock[0])
+        runtime._request_semantics_if_due(frame_id=frame_id)
+
+    assert len(perception.requests) == 1
+    perception.complete(latency_ms=37_000.0)
+    clock[0] = now + 700_000_000
+    _merge_fast_overlay(board, observed_ns=clock[0])
+    runtime._request_semantics_if_due(frame_id=6)
+    failed = executor.tick(board, sequence=3, now_ns=clock[0])
+
+    assert failed.run.outcome == SkillOutcome.FAILED
+    assert failed.run.failure_reason == "crafting-inventory-scan-inconclusive"
+    runtime._request_semantics_if_due(frame_id=7)
+    assert len(perception.requests) == 1
+
+
+def test_craft_scan_is_not_started_without_measured_time_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.monotonic_ns()
+    clock = [now]
+    monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock[0])
+    board = _board(now)
+    executor = SkillExecutor(_UnusedPolicy())
+    executor._plank_crafter.locate_timeout_ms = 2_000
+    executor.start(
+        build_bootstrap_skill_library().get("craft_wood_planks"),
+        run_id="craft:no-scan-budget",
+        now_ns=now - 1,
+    )
+    perception = _TrackedPerception(last_latency_ms=4_000.0)
+    runtime = _craft_semantic_runtime(board, executor, perception)
+
+    executor.tick(board, sequence=1, now_ns=now)
+    clock[0] = now + 100_000_000
+    _merge_fast_overlay(board, observed_ns=clock[0])
+    executor.tick(board, sequence=2, now_ns=clock[0])
+    for frame_id, offset_ms in ((2, 100), (3, 300), (4, 500), (5, 600)):
+        clock[0] = now + offset_ms * 1_000_000
+        _merge_fast_overlay(board, observed_ns=clock[0])
+        runtime._request_semantics_if_due(frame_id=frame_id)
+
+    failed = executor.tick(board, sequence=3, now_ns=clock[0])
+    assert perception.requests == []
+    assert failed.run.outcome == SkillOutcome.FAILED
+    assert failed.run.failure_reason == "crafting-inventory-scan-inconclusive"
 
 
 def test_near_miss_recipe_label_never_authorizes_click() -> None:
