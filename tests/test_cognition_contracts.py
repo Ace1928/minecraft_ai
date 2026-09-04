@@ -1326,6 +1326,32 @@ def test_top_level_research_request_does_not_buy_unrelated_visual_work(
 
 
 @pytest.mark.parametrize(
+    ("questions", "expected"),
+    (
+        (("scene.horizon_visibility",), ("obstacle.ahead",)),
+        (("player.location",), ("obstacle.ahead",)),
+        (("target.visible",), ("target.visible",)),
+    ),
+)
+def test_selected_skill_with_unresolvable_question_requests_its_prerequisites(
+    monkeypatch: pytest.MonkeyPatch,
+    questions: tuple[str, ...],
+    expected: tuple[str, ...],
+) -> None:
+    controller = HighLevelController(_IdleCapturingModel(), build_bootstrap_skill_library())
+    monkeypatch.setattr(controller, "_complete", lambda *_args, **_kwargs: CognitionDecision(
+        skill_id="explore_forward", ask_perception=questions,
+        skill_parameters={"allow_attack": False},
+    ))
+
+    decision = controller.decide(_board(), _context())
+
+    assert decision.skill_id == "explore_forward"
+    assert decision.ask_perception == expected
+    assert decision.skill_parameters["allow_attack"] is False
+
+
+@pytest.mark.parametrize(
     ("failed_skill", "provided_keys", "expected_keys"),
     (
         ("mine_visible_block", (), ("target.visible", "target.mineable")),

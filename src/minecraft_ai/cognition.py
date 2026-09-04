@@ -1113,6 +1113,19 @@ class HighLevelController:
         context: CognitionContext,
     ) -> CognitionDecision:
         decision = self._scope_operator_decision(decision, blackboard, context)
+        if (
+            decision.skill_id is not None
+            and decision.ask_perception
+            and not any(
+                resolve_grounded_output_keys((), question)
+                for question in decision.ask_perception
+            )
+        ):
+            # Runtime defers skill+question decisions too. An invented question
+            # must not strand that selected skill outside the null fallback.
+            decision = decision.model_copy(update={
+                "ask_perception": self._prerequisite_perception_keys(decision.skill_id),
+            })
         operator_goal_ids = {
             f"operator:{message.message_id}" for message in context.operator_messages
         }
