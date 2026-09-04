@@ -581,7 +581,7 @@ class AgentRuntime:
         # would make the supervisor watchdog expire the lease during a cold
         # start. An immediate, generous renewal hands ownership to the agent.
         try:
-            send_command("renew", lease_id=self.lease_id, ttl_ms=10_000)
+            send_command("renew", lease_id=self.lease_id, ttl_ms=5_000)
             self._last_renew_ns = time.monotonic_ns()
         except Exception as exc:
             self._lease_fault = f"{type(exc).__name__}: {exc}"
@@ -780,7 +780,7 @@ class AgentRuntime:
     def _lease_heartbeat(self) -> None:
         """Keep the motor lease alive independently of inference/cognition latency."""
         interval_s = self.lease_renew_ms / 1000.0
-        ttl_ms = min(10_000, max(5_000, self.lease_renew_ms * 12))
+        ttl_ms = min(5_000, max(3_000, self.lease_renew_ms * 12))
         missing = 0
         while not self._stop.is_set():
             try:
