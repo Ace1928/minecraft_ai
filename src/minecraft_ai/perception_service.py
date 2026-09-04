@@ -482,6 +482,18 @@ class BootstrapFastPerception:
             ("perception.bootstrap_active", True, 1.0, 500),
             ("frame.dhash", frame_dhash(frame), 1.0, 500),
             ("frame.ui_dhash", frame_region_dhash(frame, y_start=0.0, y_end=0.18), 1.0, 500),
+            (
+                "frame.crosshair_dhash",
+                frame_region_dhash(
+                    frame,
+                    x_start=0.38,
+                    x_end=0.62,
+                    y_start=0.34,
+                    y_end=0.66,
+                ),
+                1.0,
+                500,
+            ),
         )
         if bedrock_ui_chrome_present(frame):
             # A deterministic negative-only interlock is appropriate here: it
@@ -634,14 +646,16 @@ def frame_dhash(frame: CapturedFrame) -> str:
 def frame_region_dhash(
     frame: CapturedFrame,
     *,
+    x_start: float = 0.0,
+    x_end: float = 1.0,
     y_start: float,
     y_end: float,
 ) -> str:
-    """Return a dHash for one normalized horizontal band of a captured frame."""
+    """Return a dHash for one normalized rectangle of a captured frame."""
     if not frame.bgra or frame.width < 2 or frame.height < 1:
         return "0" * 16
-    if not 0.0 <= y_start < y_end <= 1.0:
-        raise ValueError("normalized dHash band must satisfy 0 <= start < end <= 1")
+    if not 0.0 <= x_start < x_end <= 1.0 or not 0.0 <= y_start < y_end <= 1.0:
+        raise ValueError("normalized dHash rectangle must satisfy 0 <= start < end <= 1")
     source = memoryview(frame.bgra)
     comparisons = 0
     bit = 1
@@ -650,7 +664,8 @@ def frame_region_dhash(
         y = min(frame.height - 1, int(normalized_y * frame.height))
         previous: int | None = None
         for column in range(9):
-            x = min(frame.width - 1, int((column + 0.5) * frame.width / 9))
+            normalized_x = x_start + (column + 0.5) * (x_end - x_start) / 9
+            x = min(frame.width - 1, int(normalized_x * frame.width))
             offset = (y * frame.width + x) * 4
             blue, green, red = source[offset : offset + 3]
             luma = 29 * int(blue) + 150 * int(green) + 77 * int(red)

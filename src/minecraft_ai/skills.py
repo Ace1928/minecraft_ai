@@ -80,6 +80,26 @@ class SkillOutcome(StrEnum):
     CANCELLED = "cancelled"
 
 
+class SkillFailureCode(StrEnum):
+    """Stable machine-readable causes emitted by deterministic execution guards."""
+
+    MINING_UNSAFE_SCENE = "mining.unsafe_scene"
+    MINING_TARGET_UNVERIFIED = "mining.target_unverified"
+    MINING_TARGET_MISMATCH = "mining.target_mismatch"
+    MINING_TOOL_UNVERIFIED = "mining.tool_unverified"
+    MINING_WRONG_TOOL = "mining.wrong_tool"
+    MINING_TARGET_CHANGED = "mining.target_changed"
+    MINING_TOOL_CHANGED = "mining.tool_changed"
+    MINING_CAMERA_CHANGED = "mining.camera_changed"
+    MINING_MOVEMENT_CHANGED = "mining.movement_changed"
+    MINING_CONFLICTING_INPUT = "mining.conflicting_input"
+    MINING_EPISODE_CHANGED = "mining.episode_changed"
+    MINING_VISUAL_SIGNAL_LOST = "mining.visual_signal_lost"
+    MINING_VISUAL_STAGNATION = "mining.visual_stagnation"
+    MINING_ACQUISITION_TIMEOUT = "mining.acquisition_timeout"
+    MINING_LEASE_EXPIRED = "mining.lease_expired"
+
+
 class SkillRun(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -91,6 +111,7 @@ class SkillRun(BaseModel):
     context_key: str = "default"
     parameters: dict[str, str | int | float | bool] = Field(default_factory=dict)
     failure_reason: str | None = None
+    failure_code: SkillFailureCode | None = None
 
 
 @dataclass

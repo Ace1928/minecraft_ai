@@ -86,7 +86,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="mine_visible_block",
-            version=4,
+            version=5,
             name="Mine visible block",
             description=(
                 "Approach the visible mineable block, aim at its center, hold attack until it "
@@ -97,6 +97,9 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             preconditions=(
                 SkillCondition(key="target.visible", operator="truthy"),
                 SkillCondition(key="target.mineable", operator="truthy"),
+            ),
+            initiation_alternatives=(
+                (SkillCondition(key="target.reference_available", operator="truthy"),),
             ),
             success_conditions=(SkillCondition(key="target.broken", operator="truthy"),),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
@@ -110,6 +113,13 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             action_level=ActionLevel.GROUNDED,
             policy_ref="mine",
             policy_instruction="mine the target block",
+            action_permissions=SkillActionPermissions(
+                allow_use=False,
+                allow_jump=False,
+                allow_drop=False,
+                allow_inventory=False,
+                allow_hotbar=False,
+            ),
         ),
         SkillSpec(
             skill_id="attack_visible_hostile",
@@ -386,7 +396,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="gather_nearby_wood",
-            version=4,
+            version=5,
             name="Gather nearby wood",
             description=(
                 "Find a nearby tree, approach a visible trunk rather than leaves, mine connected "
@@ -407,7 +417,12 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             action_level=ActionLevel.GROUNDED,
             policy_ref="gather_wood",
             policy_instruction="mine log",
-            action_permissions=SkillActionPermissions(allow_use=False),
+            action_permissions=SkillActionPermissions(
+                allow_use=False,
+                allow_drop=False,
+                allow_inventory=False,
+                allow_hotbar=False,
+            ),
         ),
         SkillSpec(
             skill_id="craft_wood_planks",

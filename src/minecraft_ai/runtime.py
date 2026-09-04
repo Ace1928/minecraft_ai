@@ -49,6 +49,9 @@ _BOUNDED_KEEPALIVE_SKILL_IDS = frozenset(
 _KEEPALIVE_FAILURE_THRESHOLD = 2
 _KEEPALIVE_STATIC_DHASH_DISTANCE = 6
 _RECORDED_RUN_ID_LIMIT = 4_096
+_COGNITION_RETRY_BASE_NS = 2_000_000_000
+_COGNITION_RETRY_MAX_NS = 30_000_000_000
+_OPERATOR_FOLLOWUP_DELAY_NS = 250_000_000
 
 
 def _expected_keepalive_expiry(run: SkillRun) -> bool:
@@ -263,6 +266,8 @@ def _terminal_run_event(
         payload["duration_ms"] = (run.ended_ns - run.started_ns) / 1_000_000
     if run.failure_reason is not None:
         payload["reported_reason"] = run.failure_reason
+    if run.failure_code is not None:
+        payload["failure_code"] = run.failure_code.value
     return RuntimeEvent(
         event_id=f"skill-run:{run.run_id}:terminal",
         kind=kind,
@@ -338,6 +343,8 @@ def _terminal_run_memory(
     else:
         reason = run.failure_reason if run.failure_reason is not None else "none reported"
         metadata["reported_reason"] = reason
+        if run.failure_code is not None:
+            metadata["failure_code"] = run.failure_code.value
         text = (
             f"Observed {run.outcome.value} for skill '{run.skill_id}' in context "
             f"'{run.context_key}'; reported reason: '{reason}' "
@@ -717,6 +724,8 @@ class AgentRuntime:
     _last_operator_target_id: str | None = field(default=None, init=False)
     _policy_warmup_error: str | None = field(default=None, init=False)
     _cognition_requested: bool = field(default=True, init=False)
+    _cognition_retry_count: int = field(default=0, init=False)
+    _cognition_retry_not_before_ns: int = field(default=0, init=False)
     _pending_skill_stats: dict[tuple[str, str], SkillStats] = field(
         default_factory=dict,
         init=False,
@@ -1253,6 +1262,17 @@ class AgentRuntime:
         if self._pending_decision is not None:
             return
         now = time.monotonic_ns()
+        new_operator_message = self._new_queued_operator_message_waiting()
+        if (
+            now < getattr(self, "_cognition_retry_not_before_ns", 0)
+            and not new_operator_message
+        ):
+            return
+        if new_operator_message:
+            # New operator authority is a new decision problem, not another
+            # attempt at the failed snapshot. It may bypass the old backoff
+            # once; marking it DELIVERED below makes later retries wait.
+            self._clear_cognition_retry()
         interval = int(1e9 / self.cognition_hz)
         operator_waiting = self._queued_operator_message_waiting()
         if (
@@ -1303,9 +1323,13 @@ class AgentRuntime:
         try:
             decision = future.result()
         except Exception:
-            self._last_cognition_ns = time.monotonic_ns()
+            now = time.monotonic_ns()
+            self._last_cognition_ns = now
+            self._pending_operator_message_ids = ()
+            self._schedule_cognition_retry(now_ns=now)
             return
-        self._last_cognition_ns = time.monotonic_ns()
+        now = time.monotonic_ns()
+        self._last_cognition_ns = now
         if self._pending_execution_revision != self._execution_revision:
             # The decision was sampled before the option produced terminal
             # evidence. Re-evaluate with that failure/success in context rather
@@ -1313,7 +1337,7 @@ class AgentRuntime:
             self._pending_operator_message_ids = ()
             self._cognition_requested = True
             return
-        if self._queued_operator_message_waiting():
+        if self._operator_message_arrived_after_snapshot():
             # This decision was produced from an older context snapshot. A
             # fresh operator message has higher authority and must be included
             # before any skill switch or acknowledgement is applied.
@@ -1322,14 +1346,15 @@ class AgentRuntime:
             return
         self._last_decision = decision
         self._adopt_plan_if_revised(decision)
+        operator_acknowledged = False
         if self.state_db is not None and self._pending_operator_message_ids:
             selected_message_id = _selected_operator_message_id(
                 decision,
                 self._pending_operator_message_ids,
             )
-            if selected_message_id is not None:
+            if selected_message_id is not None and not decision.request_replan:
                 response = decision.say or decision.reasoning_summary
-                self._persist_operator_message_status(
+                operator_acknowledged = self._persist_operator_message_status(
                     selected_message_id,
                     OperatorMessageStatus.ACKNOWLEDGED,
                     timestamp_ns=time.time_ns(),
@@ -1392,6 +1417,39 @@ class AgentRuntime:
                     parameters=decision.skill_parameters,
                     instruction=decision.instruction,
                 )
+        operator_waiting = self._queued_operator_message_waiting()
+        if decision.request_replan:
+            self._schedule_cognition_retry(now_ns=now)
+        elif operator_waiting and operator_acknowledged:
+            self._schedule_operator_followup(now_ns=now)
+        elif operator_waiting:
+            # The model returned a valid shape but ignored pending operator
+            # authority (or its acknowledgement could not be stored). Treat it
+            # as an unfinished decision and retain bounded retry pressure.
+            self._schedule_cognition_retry(now_ns=now)
+        else:
+            self._clear_cognition_retry()
+
+    def _schedule_cognition_retry(self, *, now_ns: int) -> None:
+        """Retry a failed/unfinished strategic decision without a hot loop."""
+        retry_count = min(5, getattr(self, "_cognition_retry_count", 0) + 1)
+        delay_ns = min(
+            _COGNITION_RETRY_MAX_NS,
+            _COGNITION_RETRY_BASE_NS * (2 ** (retry_count - 1)),
+        )
+        self._cognition_retry_count = retry_count
+        self._cognition_retry_not_before_ns = now_ns + delay_ns
+        self._cognition_requested = True
+
+    def _clear_cognition_retry(self) -> None:
+        self._cognition_retry_count = 0
+        self._cognition_retry_not_before_ns = 0
+
+    def _schedule_operator_followup(self, *, now_ns: int) -> None:
+        """Drain another valid operator message promptly without failure backoff."""
+        self._clear_cognition_retry()
+        self._cognition_retry_not_before_ns = now_ns + _OPERATOR_FOLLOWUP_DELAY_NS
+        self._cognition_requested = True
 
     def _advance_plan_on_step_complete(self, run: SkillRun) -> None:
         """Mark one persistent plan step done after a skill succeeds.
@@ -1689,30 +1747,70 @@ class AgentRuntime:
             self.metrics.last_storage_error = None
 
     def _queued_operator_message_waiting(self) -> bool:
+        """Return whether any operator message still awaits acknowledgement."""
         if self.state_db is None:
             return False
         return bool(
             self.state_db.load_operator_messages(
-                statuses={OperatorMessageStatus.QUEUED},
+                statuses={
+                    OperatorMessageStatus.QUEUED,
+                    OperatorMessageStatus.DELIVERED,
+                },
                 limit=1,
             )
         )
+
+    def _operator_message_arrived_after_snapshot(self) -> bool:
+        """Detect pending authority that was absent from the in-flight decision."""
+        if self.state_db is None:
+            return False
+        sampled = set(self._pending_operator_message_ids)
+        pending = self.state_db.load_operator_messages(
+            statuses={
+                OperatorMessageStatus.QUEUED,
+                OperatorMessageStatus.DELIVERED,
+            },
+            limit=20,
+        )
+        return any(message.message_id not in sampled for message in pending)
+
+    def _new_queued_operator_message_waiting(self) -> bool:
+        """Return whether fresh operator authority may bypass an old retry delay."""
+        if self.state_db is None:
+            return False
+        pending_delivery = {
+            message_id
+            for message_id, update in self._pending_operator_status_updates.items()
+            if update[0]
+            in {
+                OperatorMessageStatus.DELIVERED,
+                OperatorMessageStatus.ACKNOWLEDGED,
+            }
+        }
+        queued = self.state_db.load_operator_messages(
+            statuses={OperatorMessageStatus.QUEUED},
+            limit=20,
+        )
+        return any(message.message_id not in pending_delivery for message in queued)
 
     def _cognition_context(self) -> CognitionContext:
         goals = tuple((*role_standing_goals(self.role), *self.custom_goals))
         memories = tuple(self.memories.retrieve(limit=20))
         operator_messages: tuple[OperatorMessage, ...] = ()
         if self.state_db is not None:
-            operator_messages = _active_operator_messages(
-                self.state_db.load_operator_messages(
-                    statuses={
-                        OperatorMessageStatus.QUEUED,
-                        OperatorMessageStatus.DELIVERED,
-                        OperatorMessageStatus.ACKNOWLEDGED,
-                    },
+            messages = self.state_db.load_operator_messages(
+                statuses={
+                    OperatorMessageStatus.QUEUED,
+                    OperatorMessageStatus.DELIVERED,
+                },
+                limit=20,
+            )
+            if not messages:
+                messages = self.state_db.load_operator_messages(
+                    statuses={OperatorMessageStatus.ACKNOWLEDGED},
                     limit=20,
                 )
-            )
+            operator_messages = _active_operator_messages(messages)
         return CognitionContext(
             role=self.role,
             goals=goals,

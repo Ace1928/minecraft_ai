@@ -42,7 +42,12 @@ from minecraft_ai.runtime import (
     _skill_stats_totals,
 )
 from minecraft_ai.safety import MotorAction
-from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
+from minecraft_ai.social import (
+    OperatorMessage,
+    OperatorMessageKind,
+    OperatorMessageStatus,
+    SocialState,
+)
 from minecraft_ai.skills import (
     SkillLibrary,
     SkillOutcome,
@@ -1554,3 +1559,321 @@ def test_same_skill_cognition_takes_ownership_from_disposable_keepalive() -> Non
     assert runtime.executor.run.run_id != "keepalive-run"
     assert runtime.executor.run.context_key == "default"
     assert runtime.executor.instruction == "Explore toward open ground."
+
+
+def _runtime_with_completed_decision(
+    decision: CognitionDecision,
+    *,
+    database: StateDatabase | None = None,
+    pending_message_ids: tuple[str, ...] = (),
+) -> AgentRuntime:
+    runtime = object.__new__(AgentRuntime)
+    future: Future[CognitionDecision] = Future()
+    future.set_result(decision)
+    runtime._pending_decision = future
+    runtime._pending_execution_revision = 0
+    runtime._execution_revision = 0
+    runtime._pending_operator_message_ids = pending_message_ids
+    runtime._cognition_requested = False
+    runtime._cognition_retry_count = 0
+    runtime._cognition_retry_not_before_ns = 0
+    runtime._last_cognition_ns = 0
+    runtime._last_decision = None
+    runtime._last_player_chat_replied_ns = None
+    runtime.state_db = database
+    runtime.blackboard = PerceptionBlackboard()
+    runtime.metrics = RuntimeMetrics()
+    runtime._pending_skill_stats = {}
+    runtime._pending_runtime_events = {}
+    runtime._pending_memories = {}
+    runtime._pending_operator_status_updates = {}
+    runtime._adopt_plan_if_revised = lambda _decision: None  # type: ignore[method-assign]
+    return runtime
+
+
+def test_request_replan_rearms_cognition_with_bounded_backoff() -> None:
+    runtime = _runtime_with_completed_decision(
+        CognitionDecision(
+            reasoning_summary="Structured decision failed closed.",
+            request_replan=True,
+        )
+    )
+
+    runtime._consume_cognition()
+
+    assert runtime._cognition_requested is True
+    assert runtime._cognition_retry_count == 1
+    assert runtime._cognition_retry_not_before_ns > runtime._last_cognition_ns
+    retry_deadline = runtime._cognition_retry_not_before_ns
+
+    runtime._pending_decision = None
+    runtime._start_cognition_if_due()
+
+    assert runtime._pending_decision is None
+    assert runtime._cognition_retry_not_before_ns == retry_deadline
+
+
+def test_cognition_retry_backoff_is_exponential_and_capped() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime._cognition_retry_count = 0
+    runtime._cognition_retry_not_before_ns = 0
+    runtime._cognition_requested = False
+    delays: list[int] = []
+
+    for attempt in range(8):
+        now = attempt * 100
+        runtime._schedule_cognition_retry(now_ns=now)
+        delays.append(runtime._cognition_retry_not_before_ns - now)
+
+    assert delays[:5] == [
+        2_000_000_000,
+        4_000_000_000,
+        8_000_000_000,
+        16_000_000_000,
+        30_000_000_000,
+    ]
+    assert delays[5:] == [30_000_000_000] * 3
+
+
+def test_new_queued_operator_message_bypasses_old_backoff_once(tmp_path: Path) -> None:
+    class _RecordingPool:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def submit(self, _function, *_args):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return Future()
+
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    try:
+        message = OperatorMessage(
+            message_id="new-instruction",
+            created_ns=1,
+            text="Climb toward the surface.",
+        )
+        database.save_operator_message(message)
+        runtime = object.__new__(AgentRuntime)
+        runtime._pending_decision = None
+        runtime._cognition_requested = True
+        runtime._cognition_retry_count = 5
+        runtime._cognition_retry_not_before_ns = 2**63 - 1
+        runtime._last_cognition_ns = 0
+        runtime._execution_revision = 3
+        runtime._pending_operator_message_ids = ()
+        runtime._pending_operator_status_updates = {}
+        runtime._pending_skill_stats = {}
+        runtime._pending_runtime_events = {}
+        runtime._pending_memories = {}
+        runtime.state_db = database
+        runtime.high_level = SimpleNamespace(decide=lambda *_args: None)
+        runtime.blackboard = PerceptionBlackboard()
+        runtime.cognition_hz = 0.03
+        runtime.metrics = RuntimeMetrics()
+        pool = _RecordingPool()
+        runtime._pool = pool  # type: ignore[assignment]
+        runtime._cognition_context = lambda: SimpleNamespace(  # type: ignore[method-assign]
+            operator_messages=(message,)
+        )
+
+        runtime._start_cognition_if_due()
+
+        assert pool.calls == 1
+        assert runtime._pending_decision is not None
+        assert runtime._cognition_retry_count == 0
+        assert database.load_operator_messages(limit=1)[0].status == (
+            OperatorMessageStatus.DELIVERED
+        )
+
+        # Once delivered, the same message no longer bypasses a failed
+        # snapshot's retry deadline.
+        runtime._pending_decision = None
+        runtime._cognition_requested = True
+        runtime._cognition_retry_not_before_ns = 2**63 - 1
+        runtime._start_cognition_if_due()
+        assert pool.calls == 1
+    finally:
+        database.close()
+
+
+def test_delivered_operator_message_remains_waiting_until_acknowledged(tmp_path: Path) -> None:
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    try:
+        database.save_operator_message(
+            OperatorMessage(
+                message_id="climb-out",
+                created_ns=1,
+                text="Look up and build stairs to the surface.",
+                status=OperatorMessageStatus.DELIVERED,
+                delivered_ns=2,
+            )
+        )
+        runtime = object.__new__(AgentRuntime)
+        runtime.state_db = database
+        runtime._pending_operator_message_ids = ("climb-out",)
+
+        assert runtime._queued_operator_message_waiting() is True
+        assert runtime._operator_message_arrived_after_snapshot() is False
+
+        database.save_operator_message(
+            OperatorMessage(
+                message_id="new-correction",
+                created_ns=3,
+                text="Stop if you see lava.",
+                kind=OperatorMessageKind.CORRECTION,
+            )
+        )
+
+        assert runtime._operator_message_arrived_after_snapshot() is True
+    finally:
+        database.close()
+
+
+def test_pending_operator_message_is_not_hidden_by_newer_acknowledged_history(
+    tmp_path: Path,
+) -> None:
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    try:
+        database.save_operator_message(
+            OperatorMessage(
+                message_id="old-pending",
+                created_ns=1,
+                text="Keep climbing toward the surface.",
+                status=OperatorMessageStatus.DELIVERED,
+                delivered_ns=2,
+            )
+        )
+        for index in range(2, 22):
+            database.save_operator_message(
+                OperatorMessage(
+                    message_id=f"acknowledged-{index}",
+                    created_ns=index,
+                    text=f"Previous instruction {index}.",
+                    status=OperatorMessageStatus.ACKNOWLEDGED,
+                    delivered_ns=index,
+                    acknowledged_ns=index,
+                )
+            )
+
+        runtime = object.__new__(AgentRuntime)
+        runtime.state_db = database
+        runtime.role = get_role("generalist")
+        runtime.custom_goals = []
+        runtime.memories = MemoryStore()
+        runtime.social = SocialState()
+        runtime._recent_skill_runs = deque(maxlen=8)
+        runtime._plan_steps = ()
+        runtime._plan_index = 0
+        runtime._plan_goal_id = None
+        runtime._plan_started_ns = 0
+
+        context = runtime._cognition_context()
+
+        assert tuple(message.message_id for message in context.operator_messages) == (
+            "old-pending",
+        )
+    finally:
+        database.close()
+
+
+def test_replan_does_not_acknowledge_delivered_operator_message(tmp_path: Path) -> None:
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    try:
+        message = OperatorMessage(
+            message_id="climb-out",
+            created_ns=1,
+            text="Look up and build stairs to the surface.",
+            status=OperatorMessageStatus.DELIVERED,
+            delivered_ns=2,
+        )
+        database.save_operator_message(message)
+        runtime = _runtime_with_completed_decision(
+            CognitionDecision(
+                chosen_goal_id="operator:climb-out",
+                reasoning_summary="Invalid structured response; retry.",
+                request_replan=True,
+            ),
+            database=database,
+            pending_message_ids=("climb-out",),
+        )
+
+        runtime._consume_cognition()
+
+        persisted = database.load_operator_messages(limit=1)[0]
+        assert persisted.status == OperatorMessageStatus.DELIVERED
+        assert runtime._cognition_requested is True
+        assert runtime._cognition_retry_count == 1
+    finally:
+        database.close()
+
+
+def test_valid_decision_acknowledges_its_own_delivered_message(tmp_path: Path) -> None:
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    try:
+        message = OperatorMessage(
+            message_id="status-question",
+            created_ns=1,
+            text="What are you doing?",
+            kind=OperatorMessageKind.QUESTION,
+            status=OperatorMessageStatus.DELIVERED,
+            delivered_ns=2,
+        )
+        database.save_operator_message(message)
+        runtime = _runtime_with_completed_decision(
+            CognitionDecision(
+                chosen_goal_id="operator:status-question",
+                reasoning_summary="Continuing safe exploration.",
+                say="I am exploring for a route out.",
+            ),
+            database=database,
+            pending_message_ids=("status-question",),
+        )
+
+        runtime._consume_cognition()
+
+        persisted = database.load_operator_messages(limit=1)[0]
+        assert persisted.status == OperatorMessageStatus.ACKNOWLEDGED
+        assert persisted.response_text == "I am exploring for a route out."
+        assert runtime._cognition_requested is False
+        assert runtime._cognition_retry_count == 0
+    finally:
+        database.close()
+
+
+def test_valid_acknowledgement_drains_next_message_without_failure_backoff(
+    tmp_path: Path,
+) -> None:
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    try:
+        for message_id, created_ns in (("first", 2), ("second", 1)):
+            database.save_operator_message(
+                OperatorMessage(
+                    message_id=message_id,
+                    created_ns=created_ns,
+                    text=f"Handle {message_id} request.",
+                    status=OperatorMessageStatus.DELIVERED,
+                    delivered_ns=created_ns,
+                )
+            )
+        runtime = _runtime_with_completed_decision(
+            CognitionDecision(
+                chosen_goal_id="operator:first",
+                reasoning_summary="Handled the first request.",
+                say="First request handled.",
+            ),
+            database=database,
+            pending_message_ids=("first", "second"),
+        )
+
+        runtime._consume_cognition()
+
+        messages = {
+            message.message_id: message for message in database.load_operator_messages(limit=10)
+        }
+        assert messages["first"].status == OperatorMessageStatus.ACKNOWLEDGED
+        assert messages["second"].status == OperatorMessageStatus.DELIVERED
+        assert runtime._cognition_requested is True
+        assert runtime._cognition_retry_count == 0
+        delay = runtime._cognition_retry_not_before_ns - runtime._last_cognition_ns
+        assert 0 < delay <= 250_000_000
+    finally:
+        database.close()

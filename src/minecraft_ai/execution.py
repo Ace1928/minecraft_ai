@@ -3,10 +3,18 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
+from .mining_control import MiningLeaseGuard
 from .motor import MotorIntent, MotorPolicy
 from .perception import PerceptionBlackboard
 from .safety import MotorAction
-from .skills import SkillActionPermissions, SkillCondition, SkillOutcome, SkillRun, SkillSpec
+from .skills import (
+    SkillActionPermissions,
+    SkillCondition,
+    SkillFailureCode,
+    SkillOutcome,
+    SkillRun,
+    SkillSpec,
+)
 from .trajectory import ActionOrigin
 
 
@@ -31,6 +39,7 @@ class SkillExecutor:
         self._instruction_override: str | None = None
         self._initiated = False
         self._last_intent: MotorIntent | None = None
+        self._mining_guard = MiningLeaseGuard()
 
     @property
     def run(self) -> SkillRun | None:
@@ -79,6 +88,7 @@ class SkillExecutor:
         self._instruction_override = instruction
         self._initiated = False
         self._last_intent = None
+        self._mining_guard.reset()
         self._run = SkillRun(
             run_id=run_id,
             skill_id=spec.skill_id,
@@ -149,11 +159,24 @@ class SkillExecutor:
         )
         action = self.policy.act(blackboard, intent, sequence=sequence)
         self._last_intent = intent
+        mining = self._mining_guard.inspect(action, blackboard, intent, now_ns=now)
+        if mining.failure_code is not None:
+            return self._finish(
+                SkillOutcome.FAILED,
+                now,
+                mining.failure_code.value,
+                recover=True,
+                failure_code=mining.failure_code,
+                force_release_left=mining.force_release_left,
+                force_release_keys=mining.force_release_keys,
+                force_release_buttons=mining.force_release_buttons,
+            )
         return ExecutionTick(
             run=self._run,
-            action=action,
+            action=mining.action,
             motor_intent=intent,
             policy_status=_policy_status_snapshot(self.policy),
+            action_origin=(ActionOrigin.SYNTHETIC if mining.synthetic else ActionOrigin.POLICY),
         )
 
     def cancel(self, *, now_ns: int | None = None) -> ExecutionTick:
@@ -169,6 +192,10 @@ class SkillExecutor:
         reason: str | None,
         *,
         recover: bool = False,
+        failure_code: SkillFailureCode | None = None,
+        force_release_left: bool = False,
+        force_release_keys: tuple[str, ...] = (),
+        force_release_buttons: tuple[str, ...] = (),
     ) -> ExecutionTick:
         if self._run is None or self._spec is None:
             raise RuntimeError("no skill is running")
@@ -178,10 +205,21 @@ class SkillExecutor:
                 "ended_ns": ended_ns,
                 "outcome": outcome,
                 "failure_reason": reason,
+                "failure_code": failure_code,
             }
         )
         motor_intent = self._last_intent
+        guard_keys = self._mining_guard.held_keys
+        guard_buttons = self._mining_guard.held_buttons
+        mining_held = self._mining_guard.reset()
         release = self.policy.reset()
+        if mining_held or force_release_left:
+            release = _force_button_release(release, "left")
+        for button in tuple(sorted({*guard_buttons, *force_release_buttons})):
+            release = _force_button_release(release, button)
+        all_release_keys = tuple(sorted({*guard_keys, *force_release_keys}))
+        if all_release_keys:
+            release = _force_key_release(release, all_release_keys)
         policy_status = _policy_status_snapshot(self.policy)
         self._last_intent = None
         recovery = self._spec.recovery_skills if recover else ()
@@ -193,6 +231,25 @@ class SkillExecutor:
             policy_status=policy_status,
             action_origin=ActionOrigin.RESET,
         )
+
+
+def _force_button_release(action: MotorAction, button: str) -> MotorAction:
+    return action.model_copy(
+        update={
+            "buttons_down": tuple(item for item in action.buttons_down if item != button),
+            "buttons_up": tuple(sorted({*action.buttons_up, button})),
+        }
+    )
+
+
+def _force_key_release(action: MotorAction, keys: tuple[str, ...]) -> MotorAction:
+    requested = set(keys)
+    return action.model_copy(
+        update={
+            "keys_down": tuple(item for item in action.keys_down if item not in requested),
+            "keys_up": tuple(sorted({*action.keys_up, *requested})),
+        }
+    )
 
 
 def _policy_status_snapshot(policy: MotorPolicy) -> dict[str, object]:

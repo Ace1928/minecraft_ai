@@ -182,9 +182,9 @@ def test_skill_success_releases_held_input() -> None:
     policy = BootstrapMotorPolicy()
     executor = SkillExecutor(policy)
     spec = SkillSpec(
-        skill_id="mine",
-        name="Mine",
-        policy_ref="mine",
+        skill_id="attack",
+        name="Attack",
+        policy_ref="attack",
         success_conditions=(SkillCondition(key="done", operator="truthy"),),
     )
     executor.start(spec, run_id="r1", now_ns=100)
