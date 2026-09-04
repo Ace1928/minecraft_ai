@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import socket
 import threading
-import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -261,6 +260,8 @@ def test_expired_gate_revokes_remote_inputs() -> None:
         )
         gate.apply(lease.lease_id, MotorAction(sequence=0, keys_down=("w",)))
         assert bridge.held_keys == {"w"}
-        time.sleep(0.06)
-        assert gate.check_expiry()
+        # Drive the watchdog with its explicit clock input. Sleeping only ten
+        # milliseconds past the lease made this safety test scheduler-dependent
+        # on busy Windows CI hosts without exercising any additional behavior.
+        assert gate.check_expiry(now_ns=lease.expires_monotonic_ns)
         assert bridge.held_keys == set()
