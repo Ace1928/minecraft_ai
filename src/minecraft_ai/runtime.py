@@ -27,7 +27,7 @@ from .grounded_perception import resolve_grounded_output_keys
 from .memory import MemoryKind, MemoryRecord, MemoryStore
 from .models import local_model_inference_available
 from .motor import MotorIntent
-from .outcome_verifier import OutcomeSignal, OutcomeStatus, OutcomeVerification
+from .outcome_verifier import OutcomeKind, OutcomeSignal, OutcomeStatus, OutcomeVerification
 from .perception import ActivePerceptionQuery, PerceptionBlackboard, PerceptionFact, Track
 from .perception_service import RealtimePerceptionService, perceptual_hash_distance
 from .planning import Goal
@@ -56,6 +56,7 @@ _EXPLORE_KEEPALIVE_CONTEXT = "explore-keepalive"
 _BOUNDED_KEEPALIVE_SKILL_IDS = frozenset(
     {"explore_forward", "traverse_level_ground", "traverse_visible_obstacle"}
 )
+_ATOMIC_SKILL_IDS = frozenset({"close_open_inventory", "collect_recent_drop"})
 _RECORDED_RUN_ID_LIMIT = 4_096
 _COGNITION_RETRY_BASE_NS = 2_000_000_000
 _COGNITION_RETRY_MAX_NS = 30_000_000_000
@@ -77,6 +78,21 @@ def _expected_keepalive_expiry(run: SkillRun) -> bool:
         and run.context_key == _EXPLORE_KEEPALIVE_CONTEXT
         and run.skill_id in _BOUNDED_KEEPALIVE_SKILL_IDS
     )
+
+
+def _verified_log_break(verification: OutcomeVerification | None) -> bool:
+    """Return whether exact bound mining evidence identifies a vanilla log."""
+
+    if (
+        verification is None
+        or verification.kind != OutcomeKind.MINING
+        or verification.status != OutcomeStatus.SUCCEEDED
+        or verification.signal != OutcomeSignal.BLOCK_BROKEN
+        or not isinstance(verification.target_kind, str)
+    ):
+        return False
+    target = verification.target_kind.casefold().removeprefix("minecraft:")
+    return target == "log" or target.endswith("_log")
 
 
 def _semantic_deadline_ms(semantic_hz: float) -> int:
@@ -327,20 +343,23 @@ def _verified_outcome_event(
         or verification.signal != OutcomeSignal.BLOCK_BROKEN
     ):
         return None
+    payload: dict[str, str | int | float | bool] = {
+        "run_id": run.run_id,
+        "skill_id": run.skill_id,
+        "signal": verification.signal.value,
+        "confidence": verification.confidence,
+        "verified_monotonic_ns": verification.observed_ns,
+        "reason": verification.reason,
+        "evidence_keys_json": json.dumps(verification.evidence_keys),
+    }
+    if verification.target_kind is not None:
+        payload["target_kind"] = verification.target_kind
     return RuntimeEvent(
         event_id=f"skill-run:{run.run_id}:block-broken",
         kind=RuntimeEventKind.BLOCK_BROKEN,
         observed_ns=observed_ns,
         trajectory_id=trajectory_id,
-        payload={
-            "run_id": run.run_id,
-            "skill_id": run.skill_id,
-            "signal": verification.signal.value,
-            "confidence": verification.confidence,
-            "verified_monotonic_ns": verification.observed_ns,
-            "reason": verification.reason,
-            "evidence_keys_json": json.dumps(verification.evidence_keys),
-        },
+        payload=payload,
     )
 
 
@@ -413,6 +432,8 @@ def _terminal_run_memory(
                 ),
             }
         )
+        if outcome_verification.target_kind is not None:
+            metadata["verified_target_kind"] = outcome_verification.target_kind
     if run.outcome == SkillOutcome.SUCCEEDED:
         text = (
             f"Verified success for skill '{run.skill_id}' in context "
@@ -1024,20 +1045,67 @@ class AgentRuntime:
             now_ns=time.monotonic_ns(),
         )
         self._merge_policy_perception()
+        if (
+            result.run.skill_id == "collect_recent_drop"
+            and result.run.outcome != SkillOutcome.RUNNING
+        ):
+            self.blackboard.merge_semantics(
+                instance_id=self.perception.instance_id,
+                facts=(
+                    PerceptionFact(
+                        key="collection.recent_log_break",
+                        value=False,
+                        confidence=0.995,
+                        observed_ns=time.monotonic_ns(),
+                        source=f"runtime:{result.run.run_id}:collection-terminal",
+                        expires_after_ms=250,
+                    ),
+                ),
+            )
+        collect_recent_drop = bool(
+            result.run.outcome == SkillOutcome.SUCCEEDED
+            and result.run.skill_id == "mine_visible_block"
+            and _verified_log_break(result.outcome_verification)
+            and "collect_recent_drop" in self.skills.specs
+        )
         try:
             if result.action is not None:
                 self._send_motor(result.action, execution=result)
         finally:
             if result.run.outcome != SkillOutcome.RUNNING:
                 if result.outcome_verification is None:
-                    self._record_terminal_run(result.run)
+                    self._record_terminal_run(
+                        result.run,
+                        advance_plan=not collect_recent_drop,
+                    )
                 else:
                     self._record_terminal_run(
                         result.run,
                         outcome_verification=result.outcome_verification,
+                        advance_plan=not collect_recent_drop,
                     )
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
         if result.run.outcome != SkillOutcome.RUNNING:
+            if collect_recent_drop:
+                self.blackboard.merge_semantics(
+                    instance_id=self.perception.instance_id,
+                    facts=(
+                        PerceptionFact(
+                            key="collection.recent_log_break",
+                            value=True,
+                            confidence=0.995,
+                            observed_ns=time.monotonic_ns(),
+                            source=f"verified:{result.run.run_id}:block-broken",
+                            expires_after_ms=6_000,
+                        ),
+                    ),
+                )
+                self.executor.start(
+                    self.skills.get("collect_recent_drop"),
+                    run_id=uuid.uuid4().hex,
+                    context_key=result.run.context_key,
+                )
+                return
             recovery = _first_feasible_recovery(
                 self.skills,
                 result.recovery_skills,
@@ -1490,11 +1558,11 @@ class AgentRuntime:
         if (
             active is not None
             and active.outcome == SkillOutcome.RUNNING
-            and active.skill_id == "close_open_inventory"
+            and active.skill_id in _ATOMIC_SKILL_IDS
         ):
-            # Inventory cleanup is a short verified safety transaction. Keep
-            # both new and already-running decisions from replacing it before
-            # the playable world has actually returned.
+            # Short closed-loop transactions retain ownership until their
+            # bounded verifier or timeout finishes. Safety scene recovery and
+            # the supervisor's pause/emergency paths remain independent.
             return
         if self._pending_decision is not None:
             if self._preempt_pending_cognition_for_operator():
@@ -1672,7 +1740,7 @@ class AgentRuntime:
         if (
             active is not None
             and active.outcome == SkillOutcome.RUNNING
-            and active.skill_id == "close_open_inventory"
+            and active.skill_id in _ATOMIC_SKILL_IDS
         ):
             return
         future = self._pending_decision
@@ -2015,6 +2083,7 @@ class AgentRuntime:
         run: SkillRun,
         *,
         outcome_verification: OutcomeVerification | None = None,
+        advance_plan: bool = True,
     ) -> None:
         """Record one terminal option exactly once across every exit path."""
 
@@ -2032,7 +2101,8 @@ class AgentRuntime:
 
         if run.outcome == SkillOutcome.SUCCEEDED:
             self.metrics.skill_successes += 1
-            self._advance_plan_on_step_complete(run)
+            if advance_plan:
+                self._advance_plan_on_step_complete(run)
         elif run.outcome == SkillOutcome.FAILED:
             self.metrics.skill_failures += 1
             self.metrics.skill_failed_outcomes += 1

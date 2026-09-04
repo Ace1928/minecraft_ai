@@ -186,6 +186,7 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     exploration = skills.get("explore_forward")
     level_ground = skills.get("traverse_level_ground")
     obstacle = skills.get("traverse_visible_obstacle")
+    collect_drop = skills.get("collect_recent_drop")
 
     assert "visible trunk" in gather.description
     assert approach.initiation_alternatives[0][0].key == "target.reference_available"
@@ -216,6 +217,16 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert obstacle.action_permissions.allow_jump is True
     assert obstacle.action_permissions.allow_attack is False
     assert obstacle.action_permissions.allow_use is False
+    assert collect_drop.action_level == ActionLevel.LATENT
+    assert collect_drop.policy_ref == "navigate"
+    assert collect_drop.policy_instruction == "collect the dropped item"
+    assert collect_drop.preconditions[0].key == "collection.recent_log_break"
+    assert collect_drop.max_duration_ms == 5_000
+    assert collect_drop.action_permissions.allow_attack is False
+    assert collect_drop.action_permissions.allow_use is False
+    assert collect_drop.action_permissions.allow_drop is False
+    assert collect_drop.action_permissions.allow_inventory is False
+    assert collect_drop.action_permissions.allow_hotbar is False
     assert open_inventory.policy_ref == "open_inventory"
     assert open_inventory.version == 2
     assert open_inventory.action_level == ActionLevel.GUI

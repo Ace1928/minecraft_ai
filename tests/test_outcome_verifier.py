@@ -611,7 +611,7 @@ def test_damage_phases_that_clear_to_baseline_remain_unverified() -> None:
 def test_stable_replacement_plus_fresh_target_loss_verifies_block_break() -> None:
     now = time.monotonic_ns()
     board = _board(now)
-    _publish_target(board, now, visible=True)
+    _publish_target(board, now, visible=True, label="oak_log")
     verifier = TemporalOutcomeVerifier()
     verifier.begin("mine-3", OutcomeKind.MINING, board, now_ns=now)
     verifier.observe(
@@ -628,7 +628,7 @@ def test_stable_replacement_plus_fresh_target_loss_verifies_block_break() -> Non
             frame_hash="ffffffffffffffff",
             crosshair_hash="ffffffffffffffff",
         )
-        _publish_target(board, sample_ns, visible=False)
+        _publish_target(board, sample_ns, visible=False, label="oak_log")
         verdict = verifier.observe(board, now_ns=sample_ns)
 
     assert verdict is not None
@@ -647,11 +647,12 @@ def test_stable_replacement_plus_fresh_target_loss_verifies_block_break() -> Non
         frame_hash="ffffffffffffffff",
         crosshair_hash="ffffffffffffffff",
     )
-    _publish_target(board, settled_ns, visible=False)
+    _publish_target(board, settled_ns, visible=False, label="oak_log")
     verdict = verifier.observe(board, now_ns=settled_ns)
 
     assert verdict.status == OutcomeStatus.SUCCEEDED
     assert verdict.signal == OutcomeSignal.BLOCK_BROKEN
+    assert verdict.target_kind == "oak_log"
     assert verdict.terminal is True
     assert "target.exists_probability" in verdict.evidence_keys
     assert "target.visible" not in verdict.evidence_keys

@@ -17,6 +17,12 @@ from minecraft_ai.episodes import RuntimeEventKind
 from minecraft_ai.knowledge import Edition, GameVersion, KnowledgeGraph
 from minecraft_ai.memory import MemoryKind, MemoryRecord, MemoryStore
 from minecraft_ai.models import ModelMessage, ModelResponse
+from minecraft_ai.outcome_verifier import (
+    OutcomeKind,
+    OutcomeSignal,
+    OutcomeStatus,
+    OutcomeVerification,
+)
 from minecraft_ai.perception import (
     FrameState,
     PerceptionBlackboard,
@@ -43,6 +49,7 @@ from minecraft_ai.runtime import (
     _semantic_deadline_ms,
     _semantic_refresh_allowed,
     _skill_stats_totals,
+    _verified_log_break,
 )
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.social import (
@@ -1172,6 +1179,25 @@ def test_recovery_preserves_only_matching_failed_run_parameters() -> None:
     assert _compatible_recovery_parameters(failed_run, recovery) == {"target": "dirt"}
 
 
+def test_only_verified_log_breaks_trigger_drop_collection() -> None:
+    verified = OutcomeVerification(
+        run_id="mine-log",
+        kind=OutcomeKind.MINING,
+        status=OutcomeStatus.SUCCEEDED,
+        signal=OutcomeSignal.BLOCK_BROKEN,
+        observed_ns=100,
+        confidence=0.92,
+        reason="verified bound target break",
+        target_kind="minecraft:oak_log",
+    )
+
+    assert _verified_log_break(verified) is True
+    assert _verified_log_break(verified.model_copy(update={"target_kind": "dirt"})) is False
+    assert _verified_log_break(verified.model_copy(update={"status": OutcomeStatus.PROGRESS})) is (
+        False
+    )
+
+
 def test_newest_acknowledged_operator_directive_remains_active() -> None:
     messages = (
         OperatorMessage(
@@ -1656,6 +1682,69 @@ def test_terminal_runs_persist_stats_events_and_factual_memories(tmp_path: Path)
     assert procedural_memories[0].metadata["occurrences"] == 1
     assert procedural_memories[0].text.startswith("Verified success")
     assert all(memory.created_ns > 1_000_000_000_000_000_000 for memory in memories)
+
+
+def test_intermediate_mine_success_does_not_advance_plan_before_collection(
+    tmp_path: Path,
+) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime_for_learning(database)
+        runtime._plan_steps = ("mine a log", "craft planks")
+        runtime._plan_goal_id = "progression:wood"
+        runtime._plan_index = 0
+        runtime._last_decision = CognitionDecision(chosen_goal_id="progression:wood")
+        runtime._record_terminal_run(
+            SkillRun(
+                run_id="mine-before-collection",
+                skill_id="mine_visible_block",
+                context_key="progression:wood",
+                started_ns=1,
+                ended_ns=2,
+                outcome=SkillOutcome.SUCCEEDED,
+            ),
+            advance_plan=False,
+        )
+
+        assert runtime._plan_index == 0
+
+
+def test_pending_cognition_cannot_replace_atomic_collection() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime.blackboard = PerceptionBlackboard()
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=time.monotonic_ns(),
+            instance_id="bedrock:test",
+            width=1280,
+            height=720,
+            facts=(
+                PerceptionFact(
+                    key="collection.recent_log_break",
+                    value=True,
+                    confidence=1.0,
+                    observed_ns=time.monotonic_ns(),
+                    source="test",
+                    expires_after_ms=10_000,
+                ),
+            ),
+        )
+    )
+    runtime.executor.start(
+        runtime.skills.get("collect_recent_drop"),
+        run_id="atomic-collection",
+    )
+    future: Future[CognitionDecision] = Future()
+    future.set_result(CognitionDecision(skill_id="explore_forward"))
+    runtime._pending_decision = future
+
+    runtime._consume_cognition()
+
+    assert runtime._pending_decision is future
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.run_id == "atomic-collection"
 
 
 def test_keepalive_timeout_is_an_event_not_a_permanent_failure_memory(

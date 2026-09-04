@@ -177,6 +177,14 @@ class SkillExecutor:
         if self._pending_mining_verification is not None:
             return self._verify_released_mining_outcome(blackboard, now_ns=now)
         if now - self._run.started_ns >= self._spec.max_duration_ms * 1_000_000:
+            if self._spec.skill_id == "collect_recent_drop":
+                return self._finish(
+                    SkillOutcome.FAILED,
+                    now,
+                    SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED.value,
+                    failure_code=SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED,
+                    force_release_keys=_LOCOMOTION_RELEASE_KEYS,
+                )
             return self._finish(
                 SkillOutcome.TIMED_OUT,
                 now,

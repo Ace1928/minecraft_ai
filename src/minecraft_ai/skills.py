@@ -84,6 +84,7 @@ class SkillFailureCode(StrEnum):
     """Stable machine-readable causes emitted by deterministic execution guards."""
 
     LOCOMOTION_STALLED = "locomotion.stalled"
+    RESOURCE_PICKUP_UNVERIFIED = "resource.pickup_unverified"
     MINING_UNSAFE_SCENE = "mining.unsafe_scene"
     MINING_TARGET_UNVERIFIED = "mining.target_unverified"
     MINING_TARGET_MISMATCH = "mining.target_mismatch"

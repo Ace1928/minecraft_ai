@@ -88,11 +88,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="mine_visible_block",
-            version=5,
+            version=6,
             name="Mine visible block",
             description=(
-                "Approach the visible mineable block, aim at its center, hold attack until it "
-                "breaks, and collect the dropped resource"
+                "Approach the visible mineable block, aim at its center, and hold attack until "
+                "the bound block is visually verified broken"
             ),
             stage=SkillStage.EXPERIMENTAL,
             parameters=("target",),
@@ -105,7 +105,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             ),
             success_conditions=(SkillCondition(key="target.broken", operator="truthy"),),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
-            expected_effects=("block_broken", "resource_gathered"),
+            expected_effects=("block_broken",),
             recovery_skills=(
                 "escape_submersion",
                 "reacquire_target",
@@ -118,6 +118,38 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             action_permissions=SkillActionPermissions(
                 allow_use=False,
                 allow_jump=False,
+                allow_drop=False,
+                allow_inventory=False,
+                allow_hotbar=False,
+            ),
+        ),
+        SkillSpec(
+            skill_id="collect_recent_drop",
+            version=1,
+            name="Collect recent drop",
+            description=(
+                "For a few seconds after a verified log break, move over the nearby dropped "
+                "item without attacking, using, dropping, opening inventory, or switching slots"
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            preconditions=(
+                SkillCondition(
+                    key="collection.recent_log_break",
+                    operator="truthy",
+                    min_confidence=0.99,
+                ),
+            ),
+            failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
+            expected_effects=("resource_pickup_attempted",),
+            recovery_skills=("escape_submersion", "retreat_from_danger"),
+            max_duration_ms=5_000,
+            action_level=ActionLevel.LATENT,
+            policy_ref="navigate",
+            policy_instruction="collect the dropped item",
+            action_permissions=SkillActionPermissions(
+                allow_attack=False,
+                allow_use=False,
+                allow_jump=True,
                 allow_drop=False,
                 allow_inventory=False,
                 allow_hotbar=False,

@@ -33,6 +33,7 @@ def _block_broken() -> tuple[SkillRun, OutcomeVerification]:
         confidence=0.92,
         reason="bound target was replaced after the released attack",
         evidence_keys=("frame.crosshair_dhash", "target.visible", "target.track_id"),
+        target_kind="oak_log",
     )
     return run, verification
 
@@ -64,9 +65,11 @@ def test_block_broken_evidence_reaches_event_trajectory_and_memory() -> None:
     assert event.payload["evidence_keys_json"] == (
         '["frame.crosshair_dhash", "target.visible", "target.track_id"]'
     )
+    assert event.payload["target_kind"] == "oak_log"
     assert memory is not None
     assert memory.metadata["verified_outcome"] == "block_broken"
     assert memory.metadata["verified_outcome_confidence"] == 0.92
+    assert memory.metadata["verified_target_kind"] == "oak_log"
 
 
 def test_non_terminal_or_mismatched_evidence_never_claims_block_broken() -> None:
@@ -84,4 +87,3 @@ def test_non_terminal_or_mismatched_evidence_never_claims_block_broken() -> None
         )
         is None
     )
-

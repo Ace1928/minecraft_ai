@@ -54,6 +54,7 @@ class OutcomeVerification(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reason: str = Field(min_length=1, max_length=512)
     evidence_keys: tuple[str, ...] = ()
+    target_kind: str | None = Field(default=None, max_length=128)
 
     @property
     def terminal(self) -> bool:
@@ -743,6 +744,11 @@ class TemporalOutcomeVerifier:
         evidence_keys: tuple[str, ...] = (),
     ) -> OutcomeVerification:
         assert self._run_id is not None and self._kind is not None
+        target_kind = (
+            self._state.target_kind
+            if self._kind == OutcomeKind.MINING and isinstance(self._state, _MiningState)
+            else None
+        )
         return OutcomeVerification(
             run_id=self._run_id,
             kind=self._kind,
@@ -752,6 +758,7 @@ class TemporalOutcomeVerifier:
             confidence=confidence,
             reason=reason,
             evidence_keys=tuple(dict.fromkeys(evidence_keys)),
+            target_kind=target_kind,
         )
 
 

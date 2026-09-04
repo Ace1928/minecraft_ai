@@ -15,6 +15,7 @@ from minecraft_ai.perception import (
 )
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.skills import SkillActionPermissions, SkillCondition, SkillOutcome, SkillSpec
+from minecraft_ai.skills import SkillFailureCode
 from minecraft_ai.trajectory import ActionOrigin
 
 
@@ -188,6 +189,34 @@ def test_open_inventory_success_requires_grounded_inventory_gui() -> None:
             _fact("gui.mode", "inventory"),
         ),
     )
+
+
+def test_collect_recent_drop_is_bounded_and_disables_interactions() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("collect_recent_drop")
+    board = _board(_fact("collection.recent_log_break", True))
+    executor.start(spec, run_id="collect-log", now_ns=100)
+
+    running = executor.tick(board, sequence=1, now_ns=200)
+
+    assert running.run.outcome == SkillOutcome.RUNNING
+    assert policy.intent is not None
+    assert policy.intent.instruction == "collect the dropped item"
+    assert policy.intent.parameters == {
+        "allow_attack": False,
+        "allow_drop": False,
+        "allow_hotbar": False,
+        "allow_inventory": False,
+        "allow_jump": True,
+        "allow_use": False,
+    }
+
+    terminal = executor.tick(board, sequence=2, now_ns=5_000_000_101)
+
+    assert terminal.run.outcome == SkillOutcome.FAILED
+    assert terminal.run.failure_code == SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED
+    assert terminal.run.failure_reason == "resource.pickup_unverified"
 
 
 def test_close_inventory_emits_one_bounded_toggle_then_waits_for_proof() -> None:
