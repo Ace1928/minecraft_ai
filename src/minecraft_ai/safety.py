@@ -73,6 +73,15 @@ class MotorRejected(RuntimeError):
     pass
 
 
+MIN_MOTOR_LEASE_TTL_MS = 50
+MAX_MOTOR_LEASE_TTL_MS = 5_000
+
+
+def _validate_motor_lease_ttl(ttl_ms: int) -> None:
+    if ttl_ms < MIN_MOTOR_LEASE_TTL_MS or ttl_ms > MAX_MOTOR_LEASE_TTL_MS:
+        raise MotorRejected("lease ttl outside safety bounds")
+
+
 class MotorAction(BaseModel):
     """Bounded human-style input semantics accepted by a motor backend."""
 
@@ -209,8 +218,7 @@ class MotorGate:
     ) -> MotorLease:
         if not target_instance:
             raise MotorRejected("target instance identity is required")
-        if ttl_ms < 50 or ttl_ms > 5000:
-            raise MotorRejected("lease ttl outside safety bounds")
+        _validate_motor_lease_ttl(ttl_ms)
         if max_action_duration_ms < 1 or max_action_duration_ms > 1000:
             raise MotorRejected("action duration outside safety bounds")
         with self._lock:
@@ -233,8 +241,7 @@ class MotorGate:
             return lease
 
     def renew(self, lease_id: str, *, ttl_ms: int = 750) -> MotorLease:
-        if ttl_ms < 50 or ttl_ms > 5000:
-            raise MotorRejected("lease ttl outside safety bounds")
+        _validate_motor_lease_ttl(ttl_ms)
         with self._lock:
             lease = self._require_lease(lease_id)
             if lease.expired():
@@ -254,7 +261,22 @@ class MotorGate:
             self._lease = renewed
             return renewed
 
-    def apply(self, lease_id: str, action: MotorAction) -> None:
+    def apply(
+        self,
+        lease_id: str,
+        action: MotorAction,
+        *,
+        accepted_action_ttl_ms: int | None = None,
+    ) -> None:
+        """Apply one action and optionally refresh its authenticated lease.
+
+        Refresh happens only after the backend accepts a valid, in-order action
+        and remains bounded by the same fixed TTL ceiling as an explicit
+        heartbeat. The gate lock makes acceptance and refresh atomic with
+        respect to the watchdog, while inactivity still expires normally.
+        """
+        if accepted_action_ttl_ms is not None:
+            _validate_motor_lease_ttl(accepted_action_ttl_ms)
         with self._lock:
             lease = self._require_lease(lease_id)
             if lease.expired():
@@ -269,8 +291,34 @@ class MotorGate:
             if not action.action_kinds().issubset(lease.allowed_actions):
                 self._revoke_locked("action-not-allowed")
                 raise MotorRejected("action kind not allowed by lease")
-            self.backend.apply(action)
+            try:
+                self.backend.apply(action)
+            except Exception:
+                # A physical backend can fail after emitting only part of an
+                # action. Revoke synchronously so a pressed key/button is not
+                # left behind while the runtime attempts a separate fault IPC.
+                self._revoke_locked("backend-apply-failed")
+                raise
             self._last_sequence = action.sequence
+            if accepted_action_ttl_ms is not None:
+                refreshed = MotorLease(
+                    lease_id=lease.lease_id,
+                    session_id=lease.session_id,
+                    target_instance=lease.target_instance,
+                    backend_id=lease.backend_id,
+                    expires_monotonic_ns=(
+                        time.monotonic_ns() + accepted_action_ttl_ms * 1_000_000
+                    ),
+                    allowed_actions=lease.allowed_actions,
+                    max_action_duration_ms=lease.max_action_duration_ms,
+                    first_sequence=lease.first_sequence,
+                )
+                try:
+                    self.backend.bind_lease(refreshed)
+                except Exception:
+                    self._revoke_locked("accepted-action-refresh-failed")
+                    raise
+                self._lease = refreshed
 
     def release_inputs(self, lease_id: str) -> None:
         """Release held input without revoking an otherwise healthy lease."""

@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
-from platformdirs import user_runtime_dir
+from platformdirs import user_data_dir, user_runtime_dir
 
 import minecraft_ai.supervisor as supervisor_module
 from minecraft_ai.supervisor import send_command, supervisor_alive
@@ -21,12 +21,19 @@ def test_supervisor_process_ipc_lifecycle(
         monkeypatch.setenv("WIN_PD_OVERRIDE_LOCAL_APPDATA", str(tmp_path))
     else:
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     runtime_dir = Path(user_runtime_dir("minecraft-ai"))
+    data_dir = Path(user_data_dir("minecraft-ai"))
     control_file = runtime_dir / "control.json"
     monkeypatch.setattr(supervisor_module, "RUNTIME_DIR", runtime_dir)
     monkeypatch.setattr(supervisor_module, "CONTROL_FILE", control_file)
     monkeypatch.setattr(supervisor_module, "STATUS_FILE", runtime_dir / "supervisor-state.json")
     monkeypatch.setattr(supervisor_module, "LOCK_FILE", runtime_dir / "supervisor.lock")
+    monkeypatch.setattr(
+        supervisor_module,
+        "OPERATOR_PAUSE_FILE",
+        data_dir / "OPERATOR_PAUSE",
+    )
     env = os.environ.copy()
 
     process = subprocess.Popen(
@@ -56,6 +63,7 @@ def test_supervisor_process_ipc_lifecycle(
 
         stopped = send_command("stop")
         assert stopped["state"] == "STOPPED"
+        assert (data_dir / "OPERATOR_PAUSE").exists()
 
         process.wait(timeout=5.0)
         assert process.returncode == 0

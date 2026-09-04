@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -18,7 +20,9 @@ from minecraft_ai.stack_lifecycle import (
     PortableStackLauncher,
     ProcessProbe,
     ServiceMode,
+    ServiceRecord,
     ServiceSpec,
+    StackManifest,
     StackPhase,
     StackPlan,
     StackStartError,
@@ -39,9 +43,7 @@ def _sleeper_command(ready: Path, *, marker: Path | None = None) -> tuple[str, .
 def _wait_dead(pid: int, timeout_s: float = 3.0) -> None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except OSError:
+        if not stack_module._pid_alive(pid):
             return
         time.sleep(0.02)
     pytest.fail(f"process {pid} remained alive")
@@ -88,7 +90,7 @@ def test_windows_spawn_avoids_runner_incompatible_process_group(
         runtime_dir=tmp_path / "runtime",
     )
     monkeypatch.setattr(stack_module, "_IS_WINDOWS", True)
-    monkeypatch.setattr(stack_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr("minecraft_ai.stack_lifecycle.subprocess.Popen", fake_popen)
 
     result = launcher._spawn(service, service.command)
 
@@ -97,6 +99,441 @@ def test_windows_spawn_avoids_runner_incompatible_process_group(
     assert calls[0][0] == ("program",)
     assert calls[0][1]["close_fds"] is True
     assert "creationflags" not in calls[0][1]
+
+
+def test_windows_termination_stops_tracked_process_tree_and_checks_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    taskkill_calls: list[list[str]] = []
+
+    class _Child:
+        def poll(self) -> None:
+            return None
+
+        def wait(self, *, timeout: float) -> int:
+            calls.append(f"wait:{timeout}")
+            return 0
+
+        def kill(self) -> None:
+            calls.append("kill")
+
+    service = ServiceSpec(
+        service_id="daemon",
+        mode=ServiceMode.DAEMON,
+        command=("program",),
+        probes=(ProcessProbe(),),
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="windows-stop", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+    )
+    launcher._children[42] = _Child()  # type: ignore[assignment]
+    monkeypatch.setattr(stack_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(stack_module, "_pid_alive", lambda _pid: True)
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        taskkill_calls.append(command)
+        return subprocess.CompletedProcess(command, 255, b"", b"runner-specific status")
+
+    monkeypatch.setattr("minecraft_ai.stack_lifecycle.subprocess.run", fake_run)
+
+    launcher._terminate_owned_pid(42, 2.0, None)
+
+    assert taskkill_calls == [["taskkill", "/PID", "42", "/T", "/F"]]
+    assert calls == ["wait:2.0"]
+    assert 42 not in launcher._children
+
+
+def test_windows_reconstructed_process_is_never_signaled_from_pid_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ServiceSpec(
+        service_id="daemon",
+        mode=ServiceMode.DAEMON,
+        command=("program",),
+        probes=(ProcessProbe(),),
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="windows-persisted-stop", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr(stack_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(stack_module, "_pid_alive", lambda _pid: True)
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 255, b"", b"runner-specific status")
+
+    monkeypatch.setattr("minecraft_ai.stack_lifecycle.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError, match="identity is unverifiable"):
+        launcher._terminate_owned_pid(42, 2.0, None)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("command_digest", "proc_start_ticks", "identity"),
+    [
+        (None, 1234, (1234, ("daemon",))),
+        (stack_module._command_digest(("daemon",)), None, (1234, ("daemon",))),
+        (stack_module._command_digest(("daemon",)), 1234, None),
+        (stack_module._command_digest(("daemon",)), 1234, (9999, ("daemon",))),
+        (stack_module._command_digest(("daemon",)), 1234, (1234, ("replacement",))),
+    ],
+    ids=(
+        "missing-command",
+        "legacy-missing-start-token",
+        "missing-proc-identity",
+        "reused-pid",
+        "changed-command",
+    ),
+)
+def test_posix_reconstructed_process_requires_complete_matching_identity(
+    command_digest: str | None,
+    proc_start_ticks: int | None,
+    identity: tuple[int, tuple[str, ...]] | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ServiceSpec(
+        service_id="daemon",
+        mode=ServiceMode.DAEMON,
+        command=("daemon",),
+        probes=(ProcessProbe(),),
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="posix-identity", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr(stack_module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(stack_module, "_IS_LINUX", True)
+    monkeypatch.setattr(stack_module, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(stack_module, "_process_group_alive", lambda _pgid: True)
+    monkeypatch.setattr(stack_module, "_linux_process_identity", lambda _pid: identity)
+    monkeypatch.setattr(
+        "minecraft_ai.stack_lifecycle.os.killpg",
+        lambda _pid, _signal: pytest.fail("unverified process group must not be signaled"),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="identity changed or is unverifiable"):
+        launcher._terminate_owned_pid(
+            42,
+            0.1,
+            command_digest,
+            proc_start_ticks,
+        )
+
+
+def test_posix_reconstructed_process_identity_is_rechecked_before_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = ("daemon", "--serve")
+    digest = stack_module._command_digest(command)
+    identities = iter(((1234, command), (9999, command)))
+    service = ServiceSpec(
+        service_id="daemon",
+        mode=ServiceMode.DAEMON,
+        command=command,
+        probes=(ProcessProbe(),),
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="posix-recheck", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+    )
+    monkeypatch.setattr(stack_module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(stack_module, "_IS_LINUX", True)
+    monkeypatch.setattr(stack_module, "_pid_alive", lambda _pid: True)
+    monkeypatch.setattr(stack_module, "_process_group_alive", lambda _pgid: True)
+    monkeypatch.setattr(
+        stack_module,
+        "_linux_process_identity",
+        lambda _pid: next(identities),
+    )
+    monkeypatch.setattr(
+        "minecraft_ai.stack_lifecycle.os.killpg",
+        lambda _pid, _signal: pytest.fail("reused process group must not be signaled"),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="identity changed or is unverifiable"):
+        launcher._terminate_owned_pid(42, 0.1, digest, 1234)
+
+
+def test_linux_spawn_retries_transient_proc_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = ("daemon", "--serve")
+
+    class _Child:
+        pid = 42
+        returncode: int | None = None
+
+        def poll(self) -> None:
+            return None
+
+    service = ServiceSpec(
+        service_id="daemon",
+        mode=ServiceMode.DAEMON,
+        command=command,
+        probes=(ProcessProbe(),),
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="identity-retry", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+    )
+    identities = iter((None, (1234, command)))
+    monkeypatch.setattr(stack_module, "_IS_LINUX", True)
+    monkeypatch.setattr(launcher, "_spawn", lambda _service, _command: _Child())
+    monkeypatch.setattr(
+        launcher,
+        "_healthy",
+        lambda _service, *, pid, reuse_check=False: not reuse_check,
+    )
+    monkeypatch.setattr(
+        stack_module,
+        "_linux_process_identity",
+        lambda _pid: next(identities),
+    )
+
+    record = launcher._start_service(service)
+
+    assert record.pid == 42
+    assert record.proc_start_ticks == 1234
+    assert record.command_digest == stack_module._command_digest(command)
+
+
+def test_posix_tracked_group_is_terminated_after_leader_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ExitedChild:
+        def poll(self) -> int:
+            return 0
+
+    service = ServiceSpec(
+        service_id="daemon",
+        mode=ServiceMode.DAEMON,
+        command=("daemon",),
+        probes=(ProcessProbe(),),
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="orphan-group", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+        poll_interval_s=0.001,
+    )
+    launcher._children[42] = _ExitedChild()  # type: ignore[assignment]
+    group_alive = True
+    signals: list[tuple[int, signal.Signals]] = []
+
+    def fake_killpg(pid: int, sent_signal: signal.Signals) -> None:
+        nonlocal group_alive
+        signals.append((pid, sent_signal))
+        group_alive = False
+
+    monkeypatch.setattr(stack_module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(stack_module, "_process_group_alive", lambda _pgid: group_alive)
+    monkeypatch.setattr(
+        "minecraft_ai.stack_lifecycle.os.killpg",
+        fake_killpg,
+        raising=False,
+    )
+
+    launcher._terminate_owned_pid(42, 0.1, None)
+
+    assert signals == [(42, signal.SIGTERM)]
+    assert 42 not in launcher._children
+
+
+def test_posix_group_waits_for_descendants_and_escalates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ExitedChild:
+        def poll(self) -> int:
+            return 0
+
+    service = ServiceSpec(
+        service_id="daemon",
+        mode=ServiceMode.DAEMON,
+        command=("daemon",),
+        probes=(ProcessProbe(),),
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="orphan-escalation", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+        poll_interval_s=0.001,
+    )
+    launcher._children[42] = _ExitedChild()  # type: ignore[assignment]
+    group_alive = True
+    signals: list[tuple[int, signal.Signals]] = []
+    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+    def fake_killpg(pid: int, sent_signal: signal.Signals) -> None:
+        nonlocal group_alive
+        signals.append((pid, sent_signal))
+        if len(signals) == 2:
+            group_alive = False
+
+    monkeypatch.setattr(stack_module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(stack_module, "_process_group_alive", lambda _pgid: group_alive)
+    monkeypatch.setattr(
+        "minecraft_ai.stack_lifecycle.os.killpg",
+        fake_killpg,
+        raising=False,
+    )
+
+    launcher._terminate_owned_pid(42, 0.01, None)
+
+    assert signals == [(42, signal.SIGTERM), (42, kill_signal)]
+    assert 42 not in launcher._children
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux procfs")
+def test_real_reconstructed_orphan_group_is_killed_after_leader_exits(tmp_path: Path) -> None:
+    descendant_ready = tmp_path / "descendant.ready"
+    leader_exit = tmp_path / "leader.exit"
+    descendant_program = (
+        "import os,pathlib,signal,time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"pathlib.Path({str(descendant_ready)!r}).write_text(str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    leader_program = (
+        "import pathlib,subprocess,sys,time\n"
+        f"subprocess.Popen([sys.executable, '-c', {descendant_program!r}])\n"
+        f"p=pathlib.Path({str(descendant_ready)!r})\n"
+        f"exit_gate=pathlib.Path({str(leader_exit)!r})\n"
+        "deadline=time.monotonic()+3\n"
+        "while not p.exists() and time.monotonic()<deadline:\n"
+        "    time.sleep(0.01)\n"
+        "while not exit_gate.exists():\n"
+        "    time.sleep(0.01)\n"
+    )
+    service = ServiceSpec(
+        service_id="real-orphan",
+        mode=ServiceMode.DAEMON,
+        command=(sys.executable, "-c", leader_program),
+        probes=(ProcessProbe(),),
+        log_path=tmp_path / "real-orphan.log",
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="real-orphan", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+        poll_interval_s=0.005,
+    )
+    leader = launcher._spawn(service, service.command)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and not descendant_ready.exists():
+        time.sleep(0.01)
+    assert descendant_ready.exists()
+    identity = stack_module._linux_process_identity(leader.pid)
+    assert identity is not None
+    proc_start_ticks, actual_command = identity
+    command_digest = stack_module._command_digest(actual_command)
+    leader_exit.write_text("exit", encoding="utf-8")
+    assert leader.wait(timeout=3.0) == 0
+    assert not stack_module._pid_alive(leader.pid)
+    assert stack_module._process_group_alive(leader.pid)
+
+    try:
+        reconstructed = PortableStackLauncher(
+            launcher.plan,
+            runtime_dir=tmp_path / "reconstructed-runtime",
+            poll_interval_s=0.005,
+        )
+        reconstructed._terminate_owned_pid(
+            leader.pid,
+            0.05,
+            command_digest,
+            proc_start_ticks,
+        )
+        assert not stack_module._process_group_alive(leader.pid)
+    finally:
+        if stack_module._process_group_alive(leader.pid):
+            os.killpg(leader.pid, signal.SIGKILL)
+
+
+def test_reconstructed_orphan_group_survivor_retains_owned_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ServiceSpec(
+        service_id="daemon",
+        mode=ServiceMode.DAEMON,
+        command=("daemon",),
+        probes=(ProcessProbe(),),
+        stop_timeout_s=0.1,
+    )
+    plan = StackPlan(profile_id="orphan-survivor", services=(service,))
+    launcher = PortableStackLauncher(
+        plan,
+        runtime_dir=tmp_path / "runtime",
+        poll_interval_s=0.05,
+    )
+    record = ServiceRecord(
+        service_id="daemon",
+        mode=ServiceMode.DAEMON,
+        owned=True,
+        pid=42,
+        started_wall_ns=1,
+        command_digest=stack_module._command_digest(service.command),
+        proc_start_ticks=1234,
+    )
+    StackManifest(
+        schema_version=1,
+        transaction_id="transaction",
+        profile_id=plan.profile_id,
+        plan_digest=plan.digest,
+        phase=StackPhase.RUNNING,
+        created_wall_ns=1,
+        updated_wall_ns=1,
+        services=(record,),
+    ).persist(launcher.manifest_path)
+    clock = 0.0
+    signals: list[tuple[int, signal.Signals]] = []
+
+    def fake_monotonic() -> float:
+        return clock
+
+    def fake_sleep(seconds: float) -> None:
+        nonlocal clock
+        clock += seconds
+
+    monkeypatch.setattr(stack_module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(stack_module, "_IS_LINUX", True)
+    monkeypatch.setattr(stack_module, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(stack_module, "_process_group_alive", lambda _pgid: True)
+    monkeypatch.setattr(
+        stack_module,
+        "_linux_process_group_members",
+        lambda _pgid: ((43, "S"),),
+    )
+    monkeypatch.setattr(
+        "minecraft_ai.stack_lifecycle.os.killpg",
+        lambda pid, sent_signal: signals.append((pid, sent_signal)),
+        raising=False,
+    )
+    monkeypatch.setattr("minecraft_ai.stack_lifecycle.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("minecraft_ai.stack_lifecycle.time.sleep", fake_sleep)
+
+    with pytest.raises(StackStartError, match="process group 42 did not terminate"):
+        launcher.stop()
+
+    failed = StackManifest.load(launcher.manifest_path)
+    assert failed.phase == StackPhase.FAILED
+    assert failed.services == (record,)
+    assert signals == [
+        (42, signal.SIGTERM),
+        (42, getattr(signal, "SIGKILL", signal.SIGTERM)),
+    ]
 
 
 def test_stack_starts_in_dependency_order_is_idempotent_and_stops(tmp_path: Path) -> None:
@@ -136,12 +573,82 @@ def test_stack_starts_in_dependency_order_is_idempotent_and_stops(tmp_path: Path
         assert tuple(record.pid for record in again.services if record.pid is not None) == pids
         persisted = json.loads(launcher.manifest_path.read_text(encoding="utf-8"))
         assert persisted["plan_digest"] == plan.digest
-        assert launcher.manifest_path.stat().st_mode & 0o777 == 0o600
+        if sys.platform.startswith("linux"):
+            for record in manifest.services:
+                assert record.pid is not None
+                assert record.proc_start_ticks is not None
+                assert record.proc_start_ticks > 0
+                assert record.command_digest is not None
+                assert stack_module._persisted_pid_matches(
+                    record.pid,
+                    command_digest=record.command_digest,
+                    proc_start_ticks=record.proc_start_ticks,
+                )
+        if os.name != "nt":
+            assert launcher.manifest_path.stat().st_mode & 0o777 == 0o600
     finally:
         stopped = launcher.stop()
     assert stopped is not None and stopped.phase == StackPhase.STOPPED
     for pid in pids:
         _wait_dead(pid)
+
+
+def test_stack_kernel_lock_cannot_be_replaced_by_concurrent_launcher(
+    tmp_path: Path,
+) -> None:
+    service = ServiceSpec(
+        service_id="external",
+        mode=ServiceMode.EXTERNAL,
+        probes=(FileProbe(tmp_path / "ready"),),
+    )
+    plan = StackPlan(profile_id="lock-test", services=(service,))
+    first = PortableStackLauncher(plan, runtime_dir=tmp_path / "runtime")
+    second = PortableStackLauncher(plan, runtime_dir=tmp_path / "runtime")
+
+    with first._lock():
+        with pytest.raises(RuntimeError, match="lifecycle operation is active"):
+            with second._lock():
+                pytest.fail("concurrent lifecycle operation acquired the same kernel lock")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux procfs")
+def test_legacy_manifest_loads_but_cannot_signal_unverifiable_process(tmp_path: Path) -> None:
+    ready = tmp_path / "legacy.ready"
+    service = ServiceSpec(
+        service_id="daemon",
+        mode=ServiceMode.DAEMON,
+        command=_sleeper_command(ready),
+        probes=(ProcessProbe(), FileProbe(ready)),
+        log_path=tmp_path / "legacy.log",
+        ready_timeout_s=3.0,
+    )
+    plan = StackPlan(profile_id="legacy-manifest", services=(service,))
+    launcher = PortableStackLauncher(plan, runtime_dir=tmp_path / "runtime")
+    manifest = launcher.start()
+    record = manifest.services[0]
+    assert record.pid is not None
+    assert record.proc_start_ticks is not None
+    raw = json.loads(launcher.manifest_path.read_text(encoding="utf-8"))
+    del raw["services"][0]["proc_start_ticks"]
+    launcher.manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+    reconstructed = PortableStackLauncher(plan, runtime_dir=tmp_path / "runtime")
+
+    try:
+        loaded, health = reconstructed.status()
+        assert loaded is not None
+        assert loaded.services[0].proc_start_ticks is None
+        assert health == {"daemon": False}
+        with pytest.raises(StackStartError, match="persisted process identity"):
+            reconstructed.stop()
+        assert stack_module._pid_alive(record.pid)
+    finally:
+        launcher._terminate_owned_pid(
+            record.pid,
+            service.stop_timeout_s,
+            record.command_digest,
+            record.proc_start_ticks,
+        )
+    _wait_dead(record.pid)
 
 
 def test_stack_failure_rolls_back_only_owned_services(tmp_path: Path) -> None:
@@ -192,6 +699,196 @@ def test_stack_failure_rolls_back_only_owned_services(tmp_path: Path) -> None:
     assert reused.owned is False
     assert external_ready.read_text(encoding="utf-8") == "operator-owned"
     assert health["operator-model"] is True
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux procfs")
+def test_post_spawn_manifest_failure_always_rolls_back_owned_daemon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ready = tmp_path / "daemon.ready"
+    service = ServiceSpec(
+        service_id="owned-daemon",
+        mode=ServiceMode.DAEMON,
+        command=_sleeper_command(ready),
+        probes=(ProcessProbe(), FileProbe(ready)),
+        log_path=tmp_path / "owned.log",
+        ready_timeout_s=3.0,
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="persist-failure", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+        poll_interval_s=0.005,
+    )
+    original_persist = stack_module.StackManifest.persist
+    original_spawn = launcher._spawn
+    persist_calls = 0
+    spawned_pids: list[int] = []
+
+    def capture_spawn(
+        selected_service: ServiceSpec,
+        command: tuple[str, ...],
+    ) -> subprocess.Popen[bytes]:
+        process = original_spawn(selected_service, command)
+        spawned_pids.append(process.pid)
+        return process
+
+    def fail_after_spawn(self: object, path: Path) -> None:
+        nonlocal persist_calls
+        persist_calls += 1
+        if persist_calls >= 2:
+            raise OSError("injected manifest persistence failure")
+        original_persist(self, path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(launcher, "_spawn", capture_spawn)
+    monkeypatch.setattr(stack_module.StackManifest, "persist", fail_after_spawn)
+
+    with pytest.raises(StackStartError, match="manifest persistence failure") as raised:
+        launcher.start()
+
+    assert len(spawned_pids) == 1
+    pid = spawned_pids[0]
+    _wait_dead(pid)
+    assert not stack_module._process_group_alive(pid)
+    assert any("could not persist" in error for error in raised.value.rollback_errors)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux procfs")
+def test_pre_ready_daemon_exit_reaps_same_group_descendant(tmp_path: Path) -> None:
+    leader_pid_path = tmp_path / "leader.pid"
+    descendant_pid_path = tmp_path / "descendant.pid"
+    never_ready = tmp_path / "never.ready"
+    descendant_program = (
+        "import os,pathlib,signal,time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"pathlib.Path({str(descendant_pid_path)!r}).write_text(str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    leader_program = (
+        "import os,pathlib,subprocess,sys,time\n"
+        f"pathlib.Path({str(leader_pid_path)!r}).write_text(str(os.getpid()))\n"
+        f"subprocess.Popen([sys.executable, '-c', {descendant_program!r}])\n"
+        f"descendant=pathlib.Path({str(descendant_pid_path)!r})\n"
+        "deadline=time.monotonic()+3\n"
+        "while not descendant.exists() and time.monotonic()<deadline:\n"
+        "    time.sleep(0.01)\n"
+        "time.sleep(0.2)\n"
+    )
+    service = ServiceSpec(
+        service_id="pre-ready-orphan",
+        mode=ServiceMode.DAEMON,
+        command=(sys.executable, "-c", leader_program),
+        probes=(ProcessProbe(), FileProbe(never_ready)),
+        log_path=tmp_path / "pre-ready-orphan.log",
+        ready_timeout_s=2.0,
+        stop_timeout_s=0.1,
+    )
+    launcher = PortableStackLauncher(
+        StackPlan(profile_id="pre-ready-orphan", services=(service,)),
+        runtime_dir=tmp_path / "runtime",
+        poll_interval_s=0.005,
+    )
+
+    try:
+        with pytest.raises(StackStartError, match="exited with code 0"):
+            launcher.start()
+        leader_pid = int(leader_pid_path.read_text(encoding="utf-8"))
+        assert descendant_pid_path.exists()
+        assert not stack_module._process_group_alive(leader_pid)
+        assert not stack_module._pid_alive(leader_pid)
+        failed = StackManifest.load(launcher.manifest_path)
+        assert failed.phase == StackPhase.FAILED
+        assert len(failed.services) == 1
+        assert failed.services[0].owned is False
+        assert failed.services[0].pid is None
+    finally:
+        if leader_pid_path.exists():
+            leader_pid = int(leader_pid_path.read_text(encoding="utf-8"))
+            if stack_module._process_group_alive(leader_pid):
+                os.killpg(leader_pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("identity_mismatch", [False, True])
+def test_pre_ready_cleanup_survivor_retains_provisional_identity(
+    identity_mismatch: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = ("daemon", "--serve")
+    observed_command = ("replacement", "--serve") if identity_mismatch else command
+
+    class _ExitedChild:
+        pid = 42
+        returncode = 17
+
+        def poll(self) -> int:
+            return self.returncode
+
+    service = ServiceSpec(
+        service_id="provisional-daemon",
+        mode=ServiceMode.DAEMON,
+        command=command,
+        probes=(ProcessProbe(),),
+        ready_timeout_s=0.1,
+        stop_timeout_s=0.1,
+    )
+    plan = StackPlan(profile_id="provisional-survivor", services=(service,))
+    launcher = PortableStackLauncher(
+        plan,
+        runtime_dir=tmp_path / "runtime",
+        poll_interval_s=0.05,
+    )
+    clock = 0.0
+    signals: list[tuple[int, signal.Signals]] = []
+
+    def fake_monotonic() -> float:
+        return clock
+
+    def fake_sleep(seconds: float) -> None:
+        nonlocal clock
+        clock += seconds
+
+    monkeypatch.setattr(stack_module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(stack_module, "_IS_LINUX", True)
+    monkeypatch.setattr(launcher, "_spawn", lambda _service, _command: _ExitedChild())
+    monkeypatch.setattr(
+        launcher,
+        "_healthy",
+        lambda _service, *, pid, reuse_check=False: False,
+    )
+    monkeypatch.setattr(stack_module, "_linux_process_start_ticks", lambda _pid: 1234)
+    monkeypatch.setattr(
+        stack_module,
+        "_linux_process_identity",
+        lambda _pid: (1234, observed_command),
+    )
+    monkeypatch.setattr(stack_module, "_process_group_alive", lambda _pgid: True)
+    monkeypatch.setattr(
+        "minecraft_ai.stack_lifecycle.os.killpg",
+        lambda pid, sent_signal: signals.append((pid, sent_signal)),
+        raising=False,
+    )
+    monkeypatch.setattr("minecraft_ai.stack_lifecycle.time.monotonic", fake_monotonic)
+    monkeypatch.setattr("minecraft_ai.stack_lifecycle.time.sleep", fake_sleep)
+    expected = (
+        "could not establish process identity" if identity_mismatch else "exited with code 17"
+    )
+
+    with pytest.raises(StackStartError, match=expected):
+        launcher.start()
+
+    failed = StackManifest.load(launcher.manifest_path)
+    assert failed.phase == StackPhase.FAILED
+    assert len(failed.services) == 1
+    provisional = failed.services[0]
+    assert provisional.owned is True
+    assert provisional.pid == 42
+    assert provisional.proc_start_ticks == 1234
+    assert provisional.command_digest == stack_module._command_digest(observed_command)
+    assert signals == [
+        (42, signal.SIGTERM),
+        (42, getattr(signal, "SIGKILL", signal.SIGTERM)),
+    ]
 
 
 def test_external_gate_waits_for_readiness_without_claiming_ownership(tmp_path: Path) -> None:

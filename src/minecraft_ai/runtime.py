@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Iterable
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,9 +19,10 @@ from .cognition import (
 )
 from .action_levels import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
+from .episodes import RuntimeEvent, RuntimeEventKind
 from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
 from .grounded_perception import resolve_grounded_output_keys
-from .memory import MemoryStore
+from .memory import MemoryKind, MemoryRecord, MemoryStore
 from .motor import MotorIntent
 from .perception import ActivePerceptionQuery, PerceptionBlackboard, PerceptionFact, Track
 from .perception_service import RealtimePerceptionService, perceptual_hash_distance
@@ -37,6 +40,23 @@ from .telemetry import TelemetryPublisher
 from .trajectory import ActionOrigin, ActionProvenance, TrajectoryRecorder, motor_condition_id
 from .storage import StateDatabase
 from .supervisor import send_command
+
+
+_EXPLORE_KEEPALIVE_CONTEXT = "explore-keepalive"
+_BOUNDED_KEEPALIVE_SKILL_IDS = frozenset(
+    {"explore_forward", "traverse_level_ground", "traverse_visible_obstacle"}
+)
+_KEEPALIVE_FAILURE_THRESHOLD = 2
+_KEEPALIVE_STATIC_DHASH_DISTANCE = 6
+_RECORDED_RUN_ID_LIMIT = 4_096
+
+
+def _expected_keepalive_expiry(run: SkillRun) -> bool:
+    return (
+        run.outcome == SkillOutcome.TIMED_OUT
+        and run.context_key == _EXPLORE_KEEPALIVE_CONTEXT
+        and run.skill_id in _BOUNDED_KEEPALIVE_SKILL_IDS
+    )
 
 
 def _semantic_deadline_ms(semantic_hz: float) -> int:
@@ -206,6 +226,153 @@ def _semantic_refresh_allowed(
 def _sqlite_writer_contention(exc: sqlite3.OperationalError) -> bool:
     detail = str(exc).casefold()
     return "locked" in detail or "busy" in detail
+
+
+def _terminal_run_event(
+    run: SkillRun,
+    *,
+    observed_ns: int,
+    trajectory_id: str | None,
+) -> RuntimeEvent:
+    """Build the append-only fact for one terminal skill execution."""
+
+    event_kinds = {
+        SkillOutcome.SUCCEEDED: RuntimeEventKind.SKILL_SUCCEEDED,
+        SkillOutcome.FAILED: RuntimeEventKind.SKILL_FAILED,
+        SkillOutcome.TIMED_OUT: RuntimeEventKind.SKILL_TIMED_OUT,
+        SkillOutcome.CANCELLED: RuntimeEventKind.SKILL_CANCELLED,
+    }
+    try:
+        kind = event_kinds[run.outcome]
+    except KeyError as exc:
+        raise ValueError("cannot create an event for a running skill") from exc
+    payload: dict[str, str | int | float | bool] = {
+        "run_id": run.run_id,
+        "skill_id": run.skill_id,
+        "context_key": run.context_key,
+        "outcome": run.outcome.value,
+        "started_monotonic_ns": run.started_ns,
+        "parameters_json": json.dumps(
+            run.parameters,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+    if run.ended_ns is not None:
+        payload["ended_monotonic_ns"] = run.ended_ns
+        payload["duration_ms"] = (run.ended_ns - run.started_ns) / 1_000_000
+    if run.failure_reason is not None:
+        payload["reported_reason"] = run.failure_reason
+    return RuntimeEvent(
+        event_id=f"skill-run:{run.run_id}:terminal",
+        kind=kind,
+        observed_ns=observed_ns,
+        trajectory_id=trajectory_id,
+        payload=payload,
+    )
+
+
+def _terminal_run_memory(
+    run: SkillRun,
+    stats: SkillStats,
+    *,
+    observed_ns: int,
+    existing: dict[str, MemoryRecord],
+) -> MemoryRecord | None:
+    """Create a stable, factual memory from a verified terminal outcome.
+
+    Success/failure detection belongs to the skill contract. This function does
+    not infer a cause or remedy from pixels; it only accumulates what the
+    executor actually verified.
+    """
+
+    if run.outcome == SkillOutcome.CANCELLED:
+        return None
+    if _expected_keepalive_expiry(run):
+        # Keepalives are deliberately bounded controller chunks. Expiry is the
+        # normal scheduling boundary, not evidence that the skill is bad.
+        return None
+    if run.outcome == SkillOutcome.SUCCEEDED:
+        kind = MemoryKind.PROCEDURAL
+        identity = f"success:{run.skill_id}:{run.context_key}"
+        prefix = "skill-procedural"
+    elif run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
+        kind = MemoryKind.FAILURE
+        reason = run.failure_reason if run.failure_reason is not None else "<none-reported>"
+        identity = f"{run.outcome.value}:{run.skill_id}:{run.context_key}:{reason}"
+        prefix = "skill-failure"
+    else:
+        raise ValueError("cannot create memory for a running skill")
+
+    memory_id = f"{prefix}:{uuid.uuid5(uuid.NAMESPACE_URL, f'minecraft-ai:{identity}').hex}"
+    previous = existing.get(memory_id)
+    previous_occurrences = 0
+    if previous is not None:
+        value = previous.metadata.get("occurrences", 0)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            previous_occurrences = value
+    occurrences = previous_occurrences + 1
+    updated_ns = max(observed_ns, 0 if previous is None else previous.updated_ns)
+    created_ns = updated_ns if previous is None else previous.created_ns
+    suffix = "occurrence" if occurrences == 1 else "occurrences"
+
+    metadata: dict[str, str | int | float | bool] = {
+        "occurrences": occurrences,
+        "latest_run_id": run.run_id,
+        "skill_id": run.skill_id,
+        "context_key": run.context_key,
+        "outcome": run.outcome.value,
+        "context_successes": stats.successes,
+        "context_failures": stats.failures,
+        "context_timeouts": stats.timeouts,
+        "context_consecutive_failures": stats.consecutive_failures,
+    }
+    if run.ended_ns is not None:
+        metadata["latest_duration_ms"] = (run.ended_ns - run.started_ns) / 1_000_000
+    if run.outcome == SkillOutcome.SUCCEEDED:
+        text = (
+            f"Verified success for skill '{run.skill_id}' in context "
+            f"'{run.context_key}' ({occurrences} {suffix})."
+        )
+        importance = 0.65
+    else:
+        reason = run.failure_reason if run.failure_reason is not None else "none reported"
+        metadata["reported_reason"] = reason
+        text = (
+            f"Observed {run.outcome.value} for skill '{run.skill_id}' in context "
+            f"'{run.context_key}'; reported reason: '{reason}' "
+            f"({occurrences} {suffix})."
+        )
+        importance = 0.75
+    return MemoryRecord(
+        memory_id=memory_id,
+        kind=kind,
+        text=text,
+        created_ns=created_ns,
+        updated_ns=updated_ns,
+        confidence=1.0,
+        importance=importance,
+        entity_tags=(run.skill_id,),
+        source="runtime:verified-skill-outcome",
+        metadata=metadata,
+    )
+
+
+def _skill_stats_totals(stats: Iterable[SkillStats]) -> dict[str, int]:
+    totals = {
+        "succeeded": 0,
+        "failed": 0,
+        "timed_out": 0,
+        "cancelled": 0,
+        "attempts": 0,
+    }
+    for item in stats:
+        totals["succeeded"] += item.successes
+        totals["failed"] += item.failures
+        totals["timed_out"] += item.timeouts
+        totals["cancelled"] += item.cancellations
+        totals["attempts"] += item.attempts
+    return totals
 
 
 def _operator_target_facts(
@@ -482,6 +649,9 @@ class RuntimeMetrics:
     game_chat_messages: int = 0
     skill_successes: int = 0
     skill_failures: int = 0
+    skill_failed_outcomes: int = 0
+    skill_timeouts: int = 0
+    skill_cancellations: int = 0
     started_ns: int = field(default_factory=time.monotonic_ns)
     last_capture_ms: float = 0.0
     last_motor_ms: float = 0.0
@@ -512,6 +682,7 @@ class AgentRuntime:
     metrics: RuntimeMetrics = field(default_factory=RuntimeMetrics)
     telemetry: TelemetryPublisher = field(default_factory=TelemetryPublisher)
     trajectory: TrajectoryRecorder | None = None
+    trajectory_disabled_reason: str | None = None
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
     _sequence: int = field(default=0, init=False)
     _last_renew_ns: int = field(default=0, init=False)
@@ -550,8 +721,18 @@ class AgentRuntime:
         default_factory=dict,
         init=False,
     )
+    _pending_runtime_events: dict[str, RuntimeEvent] = field(default_factory=dict, init=False)
+    _pending_memories: dict[str, MemoryRecord] = field(default_factory=dict, init=False)
+    _recorded_run_ids: set[str] = field(default_factory=set, init=False)
+    _recorded_run_order: deque[str] = field(
+        default_factory=lambda: deque(maxlen=_RECORDED_RUN_ID_LIMIT),
+        init=False,
+    )
     _last_storage_retry_ns: int = field(default=0, init=False)
     _last_operator_storage_retry_ns: int = field(default=0, init=False)
+    _keepalive_start_dhash: str | None = field(default=None, init=False)
+    _keepalive_stagnant_failures: int = field(default=0, init=False)
+    _last_keepalive_skill_id: str | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz < 0:
@@ -616,8 +797,11 @@ class AgentRuntime:
                 current = self.executor.run
                 if current is not None and current.outcome == SkillOutcome.RUNNING:
                     cancelled = self.executor.cancel()
-                    if cancelled.action is not None:
-                        self._send_motor(cancelled.action, execution=cancelled)
+                    try:
+                        if cancelled.action is not None:
+                            self._send_motor(cancelled.action, execution=cancelled)
+                    finally:
+                        self._record_terminal_run(cancelled.run)
             except Exception:
                 pass
             try:
@@ -631,6 +815,11 @@ class AgentRuntime:
                     self.trajectory.close()
                 except Exception as exc:
                     self._failsafe(f"trajectory-flush:{type(exc).__name__}:{exc}")
+            try:
+                self._flush_pending_skill_stats(force=True)
+                self._flush_pending_learning_records(force=True)
+            except Exception as exc:
+                self._failsafe(f"learning-flush:{type(exc).__name__}:{exc}")
             self.telemetry.publish(self._telemetry_payload(state="stopped"), force=True)
             self._pool.shutdown(wait=False, cancel_futures=True)
 
@@ -677,6 +866,8 @@ class AgentRuntime:
                 )
             return
         self.metrics.consecutive_stale_frames = 0
+        self._flush_pending_skill_stats()
+        self._flush_pending_learning_records()
         self._flush_pending_operator_status_updates()
         self.telemetry.publish(self._telemetry_payload(state="running"))
         self._publish_player_chat_facts()
@@ -695,8 +886,9 @@ class AgentRuntime:
                 self.executor.start(
                     rescue,
                     run_id=uuid.uuid4().hex,
-                    context_key="explore-keepalive",
+                    context_key=_EXPLORE_KEEPALIVE_CONTEXT,
                 )
+                self._mark_keepalive_start()
                 active = self.executor.run
             if active is None or active.outcome != SkillOutcome.RUNNING:
                 self._flush_pending_skill_stats()
@@ -708,27 +900,22 @@ class AgentRuntime:
             now_ns=time.monotonic_ns(),
         )
         self._merge_policy_perception()
-        if result.action is not None:
-            self._send_motor(result.action, execution=result)
+        try:
+            if result.action is not None:
+                self._send_motor(result.action, execution=result)
+        finally:
+            if result.run.outcome != SkillOutcome.RUNNING:
+                self._record_terminal_run(result.run)
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
         if result.run.outcome != SkillOutcome.RUNNING:
-            self._recent_skill_runs.appendleft(result.run)
-            self._execution_revision += 1
-            self._cognition_requested = True
-            stats = self.skills.record(result.run)
-            if self.state_db is not None:
-                self._pending_skill_stats[(result.run.skill_id, result.run.context_key)] = stats
-                self._flush_pending_skill_stats(force=True)
-            if result.run.outcome == SkillOutcome.SUCCEEDED:
-                self.metrics.skill_successes += 1
-                self._advance_plan_on_step_complete(result.run)
-            elif result.run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
-                self.metrics.skill_failures += 1
-
             recovery = _first_feasible_recovery(
                 self.skills,
                 result.recovery_skills,
                 self.blackboard,
+            )
+            self._note_terminal_for_cognition(
+                result.run,
+                recovery_started=recovery is not None,
             )
             if recovery is not None:
                 self.executor.start(
@@ -747,8 +934,104 @@ class AgentRuntime:
         idle freeze that the latent STEVE body produces while cognition is in
         flight.
         """
-        for skill_id in ("traverse_level_ground", "explore_forward"):
-            return self.skills.specs.get(skill_id)
+        candidates: list[tuple[int, SkillSpec, SkillStats | None]] = []
+        for order, skill_id in enumerate(("traverse_level_ground", "explore_forward")):
+            skill = self.skills.specs.get(skill_id)
+            if skill is None:
+                continue
+            stats = self.skills.stats.get((skill_id, _EXPLORE_KEEPALIVE_CONTEXT))
+            candidates.append((order, skill, stats))
+        if not candidates:
+            return None
+        repeatedly_failed = all(
+            stats is not None
+            and stats.consecutive_failures >= _KEEPALIVE_FAILURE_THRESHOLD
+            for _order, _skill, stats in candidates
+        )
+        if repeatedly_failed and getattr(self, "_keepalive_stagnant_failures", 0) >= 1:
+            # Both ordinary keepalive routes have repeatedly terminated and the
+            # latest option produced negligible visual displacement. Rotate
+            # between the existing fast learned VPT movement envelopes instead
+            # of selecting the option with the smaller lifetime timeout count
+            # for hundreds more attempts. Obstacle traversal differs only by
+            # allowing the learned policy's jump output; no action is scripted.
+            recovery_ids = ("traverse_visible_obstacle", "traverse_level_ground")
+            available = [skill_id for skill_id in recovery_ids if skill_id in self.skills.specs]
+            if available:
+                last_recovery_id = getattr(self, "_last_keepalive_skill_id", None)
+                if last_recovery_id is None:
+                    return self.skills.get(available[0])
+                if last_recovery_id not in available:
+                    return self.skills.get(available[0])
+                next_index = (available.index(last_recovery_id) + 1) % len(available)
+                return self.skills.get(available[next_index])
+        healthy = [
+            candidate
+            for candidate in candidates
+            if candidate[2] is None or candidate[2].consecutive_failures < 2
+        ]
+        pool = healthy or candidates
+        return min(
+            pool,
+            key=lambda candidate: (
+                0 if candidate[2] is None else candidate[2].consecutive_failures,
+                0 if candidate[2] is None else candidate[2].attempts,
+                candidate[0],
+            ),
+        )[1]
+
+    def _mark_keepalive_start(self) -> None:
+        current = self.blackboard.fact("frame.dhash", min_confidence=1.0)
+        self._keepalive_start_dhash = (
+            current.value if current is not None and isinstance(current.value, str) else None
+        )
+
+    def _update_keepalive_stagnation(self, run: SkillRun) -> None:
+        if run.context_key != _EXPLORE_KEEPALIVE_CONTEXT:
+            return
+        reference = getattr(self, "_keepalive_start_dhash", None)
+        self._keepalive_start_dhash = None
+        if run.outcome == SkillOutcome.CANCELLED:
+            return
+        if run.outcome == SkillOutcome.SUCCEEDED:
+            self._keepalive_stagnant_failures = 0
+            return
+        blackboard = getattr(self, "blackboard", None)
+        if reference is None or blackboard is None:
+            return
+        current = blackboard.fact("frame.dhash", min_confidence=1.0)
+        if current is None or not isinstance(current.value, str):
+            return
+        try:
+            static = (
+                perceptual_hash_distance(reference, current.value)
+                <= _KEEPALIVE_STATIC_DHASH_DISTANCE
+            )
+        except ValueError:
+            return
+        self._keepalive_stagnant_failures = (
+            getattr(self, "_keepalive_stagnant_failures", 0) + 1 if static else 0
+        )
+
+    def _note_terminal_for_cognition(
+        self,
+        run: SkillRun,
+        *,
+        recovery_started: bool,
+    ) -> None:
+        """Invalidate cognition only for execution changes it must observe.
+
+        An exploration keepalive is explicitly disposable continuity work while
+        cognition is pending. Its timeout must not discard that already-running
+        strategic/operator decision. A failure that routes into a recovery, or
+        any non-keepalive terminal result, still invalidates the old snapshot.
+        """
+        invalidates = run.context_key != _EXPLORE_KEEPALIVE_CONTEXT or recovery_started
+        if invalidates:
+            self._execution_revision += 1
+            self._cognition_requested = True
+        elif self._pending_decision is None:
+            self._cognition_requested = True
 
     def _route_observed_scene_recovery(self) -> None:
         """Preempt stale world work when a verified blocking scene event arrives."""
@@ -766,9 +1049,11 @@ class AgentRuntime:
         if running is not None and running.outcome == SkillOutcome.RUNNING:
             context_key = running.context_key
             cancelled = self.executor.cancel()
-            if cancelled.action is not None:
-                self._send_motor(cancelled.action, execution=cancelled)
-            self._recent_skill_runs.appendleft(cancelled.run)
+            try:
+                if cancelled.action is not None:
+                    self._send_motor(cancelled.action, execution=cancelled)
+            finally:
+                self._record_terminal_run(cancelled.run)
             self._execution_revision += 1
         self.executor.start(
             recovery,
@@ -821,18 +1106,23 @@ class AgentRuntime:
             blackboard = self.blackboard.latest()
             if frame is not None and blackboard is not None:
                 running = self.executor.run if execution is None else execution.run
-                self.trajectory.record_accepted(
-                    action=action,
-                    provenance=provenance,
-                    supervisor_response=accepted,
-                    frame=frame,
-                    blackboard=blackboard,
-                    skill_run_id=None if running is None else running.run_id,
-                    skill_id=None if running is None else running.skill_id,
-                    goal_id=None
-                    if self._last_decision is None
-                    else self._last_decision.chosen_goal_id,
-                )
+                try:
+                    self.trajectory.record_accepted(
+                        action=action,
+                        provenance=provenance,
+                        supervisor_response=accepted,
+                        frame=frame,
+                        blackboard=blackboard,
+                        skill_run_id=None if running is None else running.run_id,
+                        skill_id=None if running is None else running.skill_id,
+                        goal_id=None
+                        if self._last_decision is None
+                        else self._last_decision.chosen_goal_id,
+                    )
+                except Exception as exc:
+                    reason = f"{type(exc).__name__}: {exc}"
+                    self.trajectory.disable(reason)
+                    self.trajectory_disabled_reason = reason
         self._sequence = action.sequence + 1
         self.metrics.motor_actions += 1
 
@@ -1078,11 +1368,14 @@ class AgentRuntime:
                 if (
                     running.skill_id != decision.skill_id
                     or self.executor.parameters != decision.skill_parameters
+                    or running.context_key == _EXPLORE_KEEPALIVE_CONTEXT
                 ):
                     cancelled = self.executor.cancel()
-                    if cancelled.action is not None:
-                        self._send_motor(cancelled.action, execution=cancelled)
-                    self._recent_skill_runs.appendleft(cancelled.run)
+                    try:
+                        if cancelled.action is not None:
+                            self._send_motor(cancelled.action, execution=cancelled)
+                    finally:
+                        self._record_terminal_run(cancelled.run)
                     self._execution_revision += 1
                     spec = self.skills.get(decision.skill_id)
                     self.executor.start(
@@ -1180,7 +1473,10 @@ class AgentRuntime:
         latest_line = None
         for line in latest.chat:
             if line.speaker is None or line.speaker.casefold() in {
-                self.cfg_role().casefold(), "eidos", "you", "console",
+                self.role.role_id.casefold(),
+                "eidos",
+                "you",
+                "console",
             }:
                 continue
             if now_ns - line.observed_ns > 60_000_000_000:
@@ -1212,6 +1508,65 @@ class AgentRuntime:
             ),
         )
 
+    def _record_terminal_run(self, run: SkillRun) -> None:
+        """Record one terminal option exactly once across every exit path."""
+
+        if run.outcome == SkillOutcome.RUNNING:
+            raise ValueError("cannot record a running skill")
+        if run.run_id in self._recorded_run_ids:
+            return
+        stats = self.skills.record(run)
+        if len(self._recorded_run_order) == _RECORDED_RUN_ID_LIMIT:
+            self._recorded_run_ids.discard(self._recorded_run_order.popleft())
+        self._recorded_run_order.append(run.run_id)
+        self._recorded_run_ids.add(run.run_id)
+        if (
+            run.context_key == _EXPLORE_KEEPALIVE_CONTEXT
+            and run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}
+        ):
+            self._last_keepalive_skill_id = run.skill_id
+        if not _expected_keepalive_expiry(run):
+            self._recent_skill_runs.appendleft(run)
+        self._update_keepalive_stagnation(run)
+
+        if run.outcome == SkillOutcome.SUCCEEDED:
+            self.metrics.skill_successes += 1
+            self._advance_plan_on_step_complete(run)
+        elif run.outcome == SkillOutcome.FAILED:
+            self.metrics.skill_failures += 1
+            self.metrics.skill_failed_outcomes += 1
+        elif run.outcome == SkillOutcome.TIMED_OUT:
+            self.metrics.skill_failures += 1
+            self.metrics.skill_timeouts += 1
+        elif run.outcome == SkillOutcome.CANCELLED:
+            self.metrics.skill_cancellations += 1
+
+        observed_ns = time.time_ns()
+        event = _terminal_run_event(
+            run,
+            observed_ns=observed_ns,
+            trajectory_id=(
+                None if self.trajectory is None else self.trajectory.manifest.trajectory_id
+            ),
+        )
+        memory = _terminal_run_memory(
+            run,
+            stats,
+            observed_ns=observed_ns,
+            existing=self.memories.records,
+        )
+        if memory is not None:
+            self.memories.upsert(memory)
+
+        if self.state_db is None:
+            return
+        self._pending_skill_stats[(run.skill_id, run.context_key)] = stats
+        self._pending_runtime_events[event.event_id] = event
+        if memory is not None:
+            self._pending_memories[memory.memory_id] = memory
+        self._flush_pending_skill_stats(force=True)
+        self._flush_pending_learning_records(force=True)
+
     def _flush_pending_skill_stats(self, *, force: bool = False) -> None:
         if self.state_db is None or not self._pending_skill_stats:
             return
@@ -1231,6 +1586,39 @@ class AgentRuntime:
             else:
                 self._pending_skill_stats.pop(key, None)
                 self._clear_storage_error_if_drained()
+
+    def _flush_pending_learning_records(self, *, force: bool = False) -> None:
+        if self.state_db is None or not (
+            self._pending_runtime_events or self._pending_memories
+        ):
+            return
+        now = time.monotonic_ns()
+        if not force and now - self._last_storage_retry_ns < 1_000_000_000:
+            return
+        self._last_storage_retry_ns = now
+        for event_id, event in tuple(self._pending_runtime_events.items()):
+            try:
+                self.state_db.save_runtime_event(event)
+            except sqlite3.OperationalError as exc:
+                if not _sqlite_writer_contention(exc):
+                    raise
+                self.metrics.storage_contentions += 1
+                self.metrics.last_storage_error = f"{type(exc).__name__}: {exc}"
+                return
+            else:
+                self._pending_runtime_events.pop(event_id, None)
+        for memory_id, memory in tuple(self._pending_memories.items()):
+            try:
+                self.state_db.save_memory(memory)
+            except sqlite3.OperationalError as exc:
+                if not _sqlite_writer_contention(exc):
+                    raise
+                self.metrics.storage_contentions += 1
+                self.metrics.last_storage_error = f"{type(exc).__name__}: {exc}"
+                return
+            else:
+                self._pending_memories.pop(memory_id, None)
+        self._clear_storage_error_if_drained()
 
     def _persist_operator_message_status(
         self,
@@ -1292,7 +1680,12 @@ class AgentRuntime:
                 return
 
     def _clear_storage_error_if_drained(self) -> None:
-        if not self._pending_skill_stats and not self._pending_operator_status_updates:
+        if not (
+            self._pending_skill_stats
+            or self._pending_runtime_events
+            or self._pending_memories
+            or self._pending_operator_status_updates
+        ):
             self.metrics.last_storage_error = None
 
     def _queued_operator_message_waiting(self) -> bool:
@@ -1372,6 +1765,31 @@ class AgentRuntime:
         perception_status["tracks"] = (
             [] if latest is None else [track.model_dump(mode="json") for track in latest.tracks]
         )
+        session_skill_totals = {
+            "succeeded": self.metrics.skill_successes,
+            "failed": self.metrics.skill_failed_outcomes,
+            "timed_out": self.metrics.skill_timeouts,
+            "cancelled": self.metrics.skill_cancellations,
+            "attempts": (
+                self.metrics.skill_successes
+                + self.metrics.skill_failed_outcomes
+                + self.metrics.skill_timeouts
+                + self.metrics.skill_cancellations
+            ),
+        }
+        trajectory_status = (
+            self.trajectory.status()
+            if self.trajectory is not None
+            else {
+                "enabled": False,
+                "disabled_reason": self.trajectory_disabled_reason
+                or "disabled-by-configuration",
+                "written_steps": 0,
+                "dropped_steps": 0,
+                "queued_samples": 0,
+                "queue_capacity": 0,
+            }
+        )
         return {
             "schema_version": 1,
             "state": state,
@@ -1388,15 +1806,23 @@ class AgentRuntime:
             "chat_messages": self.metrics.game_chat_messages,
             "skill_successes": self.metrics.skill_successes,
             "skill_failures": self.metrics.skill_failures,
+            "skill_totals": {
+                "session": session_skill_totals,
+                "lifetime": _skill_stats_totals(self.skills.stats.values()),
+            },
             "last_capture_ms": round(self.metrics.last_capture_ms, 3),
             "last_motor_ms": round(self.metrics.last_motor_ms, 3),
             "stale_frame_skips": self.metrics.stale_frame_skips,
             "consecutive_stale_frames": self.metrics.consecutive_stale_frames,
             "storage_contentions": self.metrics.storage_contentions,
             "storage_backlog": (
-                len(self._pending_skill_stats) + len(self._pending_operator_status_updates)
+                len(self._pending_skill_stats)
+                + len(self._pending_runtime_events)
+                + len(self._pending_memories)
+                + len(self._pending_operator_status_updates)
             ),
             "last_storage_error": self.metrics.last_storage_error,
+            "trajectory_recording": trajectory_status,
             "active_skill": None if running is None else running.skill_id,
             "active_skill_parameters": ({} if running is None else self.executor.policy_parameters),
             "active_instruction": None if running is None else self.executor.instruction,

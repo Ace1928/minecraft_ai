@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+from collections import deque
+from concurrent.futures import Future
+from pathlib import Path
 import sqlite3
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from minecraft_ai.action_levels import ActionLevel
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
-from minecraft_ai.execution import ExecutionTick
+from minecraft_ai.execution import ExecutionTick, SkillExecutor
+from minecraft_ai.episodes import RuntimeEventKind
 from minecraft_ai.knowledge import Edition, GameVersion, KnowledgeGraph
 from minecraft_ai.memory import MemoryKind, MemoryRecord, MemoryStore
 from minecraft_ai.perception import (
@@ -18,7 +23,8 @@ from minecraft_ai.perception import (
     Track,
 )
 from minecraft_ai.planning import Goal, GoalScorer
-from minecraft_ai.motor import MotorIntent
+from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
+from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.roles import BUILTIN_ROLES, get_role
 from minecraft_ai.cognition import CognitionDecision
 from minecraft_ai.runtime import (
@@ -33,6 +39,7 @@ from minecraft_ai.runtime import (
     _selected_operator_message_id,
     _semantic_deadline_ms,
     _semantic_refresh_allowed,
+    _skill_stats_totals,
 )
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
@@ -44,6 +51,7 @@ from minecraft_ai.skills import (
     SkillStage,
     SkillStats,
 )
+from minecraft_ai.storage import StateDatabase
 from minecraft_ai.trajectory import ActionOrigin, motor_condition_id
 
 
@@ -450,6 +458,41 @@ def test_memory_retrieval_prioritizes_relevant_location_and_goal() -> None:
     assert result[0].memory_id == "iron"
 
 
+def test_associative_recall_ignores_legacy_keepalive_expiry_memory() -> None:
+    now = time.time_ns()
+    store = MemoryStore()
+    store.upsert(
+        MemoryRecord(
+            memory_id="legacy-expected-expiry",
+            kind=MemoryKind.FAILURE,
+            text="Observed timed_out for an ordinary keepalive chunk.",
+            created_ns=now,
+            updated_ns=now,
+            source="runtime:verified-skill-outcome",
+            metadata={
+                "context_key": "explore-keepalive",
+                "outcome": "timed_out",
+                "skill_id": "traverse_level_ground",
+            },
+        )
+    )
+    store.upsert(
+        MemoryRecord(
+            memory_id="real-failure",
+            kind=MemoryKind.FAILURE,
+            text="A verified non-keepalive failure.",
+            created_ns=now,
+            updated_ns=now,
+            source="runtime:verified-skill-outcome",
+            metadata={"context_key": "operator:test", "outcome": "failed"},
+        )
+    )
+
+    assert [memory.memory_id for memory in store.retrieve(now_ns=now)] == [
+        "real-failure"
+    ]
+
+
 def test_empty_dependency_graph_is_valid() -> None:
     graph = KnowledgeGraph(GameVersion(edition=Edition.BEDROCK, version_id="1.0"))
     assert graph.validate() == []
@@ -475,6 +518,63 @@ def test_zero_semantic_frequency_disables_only_periodic_refresh() -> None:
     runtime.perception = _Perception()  # type: ignore[assignment]
 
     runtime._request_semantics_if_due(frame_id=1)
+
+
+def test_trajectory_failure_degrades_recording_without_stopping_motor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:test",
+            width=1,
+            height=1,
+        )
+    )
+
+    class _BrokenTrajectory:
+        disabled_reason: str | None = None
+
+        def record_accepted(self, **_kwargs: object) -> bool:
+            raise OSError("simulated recorder fault")
+
+        def disable(self, reason: str) -> None:
+            self.disabled_reason = reason
+
+    trajectory = _BrokenTrajectory()
+    runtime = object.__new__(AgentRuntime)
+    runtime.blackboard = board
+    runtime.perception = SimpleNamespace(
+        last_capture=CapturedFrame(1, now, 1, 1, b"\x00\x00\x00\xff")
+    )
+    runtime.executor = SimpleNamespace(
+        policy=SimpleNamespace(policy_id="learned:test"),
+        run=None,
+    )
+    runtime.trajectory = trajectory
+    runtime.trajectory_disabled_reason = None
+    runtime.lease_id = "lease-test"
+    runtime._last_decision = None
+    runtime._last_keepalive_skill_id = None
+    runtime._sequence = 0
+    runtime.metrics = RuntimeMetrics()
+    monkeypatch.setattr(
+        "minecraft_ai.runtime.send_command",
+        lambda *_args, **_kwargs: {
+            "accepted_sequence": 0,
+            "accepted_monotonic_ns": now + 1,
+        },
+    )
+
+    runtime._send_motor(MotorAction(sequence=0))
+
+    assert runtime.metrics.motor_actions == 1
+    assert runtime._sequence == 1
+    assert trajectory.disabled_reason == "OSError: simulated recorder fault"
+    assert runtime.trajectory_disabled_reason == "OSError: simulated recorder fault"
 
 
 def test_optional_semantics_yield_to_cognition_and_operator_work() -> None:
@@ -521,6 +621,8 @@ def test_realtime_skill_stats_survive_transient_database_contention() -> None:
     runtime.state_db = database
     runtime.metrics = RuntimeMetrics()
     runtime._pending_skill_stats = {("navigate", "default"): SkillStats(successes=1)}
+    runtime._pending_runtime_events = {}
+    runtime._pending_memories = {}
     runtime._pending_operator_status_updates = {}
     runtime._last_storage_retry_ns = 0
 
@@ -559,6 +661,8 @@ def test_realtime_operator_ack_survives_transient_database_contention() -> None:
     runtime.state_db = database
     runtime.metrics = RuntimeMetrics()
     runtime._pending_skill_stats = {}
+    runtime._pending_runtime_events = {}
+    runtime._pending_memories = {}
     runtime._pending_operator_status_updates = {}
     runtime._last_operator_storage_retry_ns = 0
 
@@ -839,7 +943,14 @@ def test_player_chat_authorizes_world_chat_reply() -> None:
             instance_id="bedrock:world",
             width=1280,
             height=720,
-            chat=(ChatLine(speaker="Steve", text="how do I craft a chest?", observed_ns=now, confidence=0.95),),
+            chat=(
+                ChatLine(
+                    speaker="Steve",
+                    text="how do I craft a chest?",
+                    observed_ns=now,
+                    confidence=0.95,
+                ),
+            ),
         )
     )
     board.merge_semantics(
@@ -877,7 +988,10 @@ def test_player_chat_authorizes_world_chat_reply() -> None:
             ),
         ),
     )
-    assert _authorized_game_chat(decision, board, already_replied_ns=now + 1) == "Planks x8 gives a chest."
+    assert (
+        _authorized_game_chat(decision, board, already_replied_ns=now + 1)
+        == "Planks x8 gives a chest."
+    )
 
 
 def test_no_game_chat_without_authority() -> None:
@@ -962,7 +1076,7 @@ def _run(skill_id: str):
 
 def test_cognition_skips_while_plan_executing() -> None:
     from minecraft_ai.runtime import AgentRuntime
-    from minecraft_ai.skills import SkillRun, SkillOutcome
+    from minecraft_ai.skills import SkillRun
 
     runtime = object.__new__(AgentRuntime)
     runtime._cognition_requested = False
@@ -994,3 +1108,449 @@ def test_cognition_due_when_plan_exhausted() -> None:
     runtime._pending_decision = None
 
     assert runtime._cognition_due(operator_waiting=False) is True
+
+
+def _runtime_for_learning(database: StateDatabase) -> AgentRuntime:
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = SkillLibrary()
+    runtime.memories = MemoryStore()
+    runtime.state_db = database
+    runtime.trajectory = None
+    runtime.metrics = RuntimeMetrics()
+    runtime._recorded_run_ids = set()
+    runtime._recorded_run_order = deque(maxlen=4_096)
+    runtime._recent_skill_runs = deque(maxlen=8)
+    runtime._last_keepalive_skill_id = None
+    runtime._pending_skill_stats = {}
+    runtime._pending_runtime_events = {}
+    runtime._pending_memories = {}
+    runtime._pending_operator_status_updates = {}
+    runtime._last_storage_retry_ns = 0
+    runtime._last_decision = None
+    runtime._plan_steps = ()
+    runtime._plan_goal_id = None
+    runtime._plan_index = 0
+    runtime._plan_step_completed_ns = 0
+    return runtime
+
+
+def test_terminal_runs_persist_stats_events_and_factual_memories(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite3"
+    with StateDatabase(path) as database:
+        runtime = _runtime_for_learning(database)
+        runs = (
+            SkillRun(
+                run_id="timeout-1",
+                skill_id="traverse_level_ground",
+                context_key="test-terminal",
+                started_ns=10,
+                ended_ns=20,
+                outcome=SkillOutcome.TIMED_OUT,
+                failure_reason="skill-timeout",
+            ),
+            SkillRun(
+                run_id="timeout-2",
+                skill_id="traverse_level_ground",
+                context_key="test-terminal",
+                started_ns=20,
+                ended_ns=30,
+                outcome=SkillOutcome.TIMED_OUT,
+                failure_reason="skill-timeout",
+            ),
+            SkillRun(
+                run_id="failed-1",
+                skill_id="traverse_level_ground",
+                context_key="test-terminal",
+                started_ns=30,
+                ended_ns=40,
+                outcome=SkillOutcome.FAILED,
+                failure_reason="failure-condition:danger.immediate",
+            ),
+            SkillRun(
+                run_id="success-1",
+                skill_id="traverse_level_ground",
+                context_key="test-terminal",
+                started_ns=40,
+                ended_ns=50,
+                outcome=SkillOutcome.SUCCEEDED,
+            ),
+            SkillRun(
+                run_id="cancelled-1",
+                skill_id="traverse_level_ground",
+                context_key="test-terminal",
+                started_ns=50,
+                ended_ns=60,
+                outcome=SkillOutcome.CANCELLED,
+                failure_reason="cancelled",
+            ),
+        )
+        for run in runs:
+            runtime._record_terminal_run(run)
+        runtime._record_terminal_run(runs[2])
+
+        assert runtime.metrics.skill_successes == 1
+        assert runtime.metrics.skill_failed_outcomes == 1
+        assert runtime.metrics.skill_timeouts == 2
+        assert runtime.metrics.skill_cancellations == 1
+        assert runtime.metrics.skill_failures == 3
+        assert not runtime._pending_skill_stats
+        assert not runtime._pending_runtime_events
+        assert not runtime._pending_memories
+
+    with StateDatabase(path) as database:
+        stats = database.load_skills().stats[
+            ("traverse_level_ground", "test-terminal")
+        ]
+        events = database.load_runtime_events(limit=10)
+        memories = tuple(database.load_memories().records.values())
+
+    assert (stats.successes, stats.failures, stats.timeouts, stats.cancellations) == (1, 1, 2, 1)
+    assert {event.kind for event in events} == {
+        RuntimeEventKind.SKILL_SUCCEEDED,
+        RuntimeEventKind.SKILL_FAILED,
+        RuntimeEventKind.SKILL_TIMED_OUT,
+        RuntimeEventKind.SKILL_CANCELLED,
+    }
+    assert len(events) == 5
+    assert all(event.observed_ns > 1_000_000_000_000_000_000 for event in events)
+    failure_memories = [memory for memory in memories if memory.kind == MemoryKind.FAILURE]
+    procedural_memories = [memory for memory in memories if memory.kind == MemoryKind.PROCEDURAL]
+    assert len(failure_memories) == 2
+    assert len(procedural_memories) == 1
+    timeout_memory = next(
+        memory for memory in failure_memories if memory.metadata["outcome"] == "timed_out"
+    )
+    assert timeout_memory.metadata["occurrences"] == 2
+    assert timeout_memory.metadata["reported_reason"] == "skill-timeout"
+    assert "cause" not in timeout_memory.text.casefold()
+    assert procedural_memories[0].metadata["occurrences"] == 1
+    assert procedural_memories[0].text.startswith("Verified success")
+    assert all(memory.created_ns > 1_000_000_000_000_000_000 for memory in memories)
+
+
+def test_keepalive_timeout_is_an_event_not_a_permanent_failure_memory(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.sqlite3"
+    with StateDatabase(path) as database:
+        runtime = _runtime_for_learning(database)
+        run = SkillRun(
+            run_id="expected-expiry",
+            skill_id="traverse_level_ground",
+            context_key="explore-keepalive",
+            started_ns=10,
+            ended_ns=20,
+            outcome=SkillOutcome.TIMED_OUT,
+            failure_reason="skill-timeout",
+        )
+        runtime._record_terminal_run(run)
+
+    with StateDatabase(path) as database:
+        stats = database.load_skills().stats[
+            ("traverse_level_ground", "explore-keepalive")
+        ]
+        events = database.load_runtime_events(limit=10)
+        memories = tuple(database.load_memories().records.values())
+
+    assert stats.timeouts == 1
+    assert [event.kind for event in events] == [RuntimeEventKind.SKILL_TIMED_OUT]
+    assert not memories
+    assert not runtime._recent_skill_runs
+
+
+def test_real_scene_recovery_timeout_in_keepalive_context_remains_learning_evidence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.sqlite3"
+    with StateDatabase(path) as database:
+        runtime = _runtime_for_learning(database)
+        run = SkillRun(
+            run_id="submersion-timeout",
+            skill_id="escape_submersion",
+            context_key="explore-keepalive",
+            started_ns=10,
+            ended_ns=20,
+            outcome=SkillOutcome.TIMED_OUT,
+            failure_reason="skill-timeout",
+        )
+        runtime._record_terminal_run(run)
+
+    assert runtime._recent_skill_runs[0] == run
+    assert any(memory.kind == MemoryKind.FAILURE for memory in runtime.memories.records.values())
+
+
+def test_terminal_run_deduplication_window_is_bounded(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite3"
+    with StateDatabase(path) as database:
+        runtime = _runtime_for_learning(database)
+        for index in range(4_100):
+            runtime._record_terminal_run(
+                SkillRun(
+                    run_id=f"cancelled-{index}",
+                    skill_id="traverse_level_ground",
+                    context_key="bounded-dedup",
+                    started_ns=index * 2 + 1,
+                    ended_ns=index * 2 + 2,
+                    outcome=SkillOutcome.CANCELLED,
+                    failure_reason="cancelled",
+                )
+            )
+
+        assert len(runtime._recorded_run_ids) == 4_096
+        assert len(runtime._recorded_run_order) == 4_096
+        cancellations = runtime.metrics.skill_cancellations
+        latest = SkillRun(
+            run_id="cancelled-4099",
+            skill_id="traverse_level_ground",
+            context_key="bounded-dedup",
+            started_ns=8_199,
+            ended_ns=8_200,
+            outcome=SkillOutcome.CANCELLED,
+            failure_reason="cancelled",
+        )
+        runtime._record_terminal_run(latest)
+        assert runtime.metrics.skill_cancellations == cancellations
+
+
+def test_skill_totals_distinguish_exact_lifetime_outcomes() -> None:
+    assert _skill_stats_totals(
+        (
+            SkillStats(successes=2, failures=3, timeouts=4, cancellations=5),
+            SkillStats(successes=7, failures=11, timeouts=13, cancellations=17),
+        )
+    ) == {
+        "succeeded": 9,
+        "failed": 14,
+        "timed_out": 17,
+        "cancelled": 22,
+        "attempts": 62,
+    }
+
+
+def test_keepalive_rotates_away_from_persisted_consecutive_failures(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "state.sqlite3"
+    bootstrap = build_bootstrap_skill_library()
+    with StateDatabase(path) as database:
+        for skill_id in ("traverse_level_ground", "explore_forward"):
+            database.save_skill(bootstrap.get(skill_id))
+        database.save_skill_stats(
+            "traverse_level_ground",
+            "explore-keepalive",
+            SkillStats(timeouts=7, consecutive_failures=7),
+        )
+
+    with StateDatabase(path) as database:
+        persisted = database.load_skills()
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = persisted
+
+    selected = runtime._explore_keep_alive()
+
+    assert selected is not None
+    assert selected.skill_id == "explore_forward"
+
+
+def test_static_failed_keepalive_rotates_between_existing_vpt_recoveries(
+    tmp_path: Path,
+) -> None:
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    runtime = _runtime_for_learning(database)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.skills.stats[("traverse_level_ground", "explore-keepalive")] = SkillStats(
+        timeouts=466,
+        consecutive_failures=466,
+    )
+    runtime.skills.stats[("explore_forward", "explore-keepalive")] = SkillStats(
+        timeouts=54,
+        consecutive_failures=54,
+    )
+    runtime._keepalive_stagnant_failures = 1
+    runtime._record_terminal_run(
+        SkillRun(
+            run_id="semantic-timeout",
+            skill_id="explore_forward",
+            context_key="explore-keepalive",
+            started_ns=1,
+            ended_ns=2,
+            outcome=SkillOutcome.TIMED_OUT,
+        )
+    )
+
+    first = runtime._explore_keep_alive()
+    assert first is not None
+    assert first.skill_id == "traverse_visible_obstacle"
+
+    runtime._record_terminal_run(
+        SkillRun(
+            run_id="obstacle-timeout",
+            skill_id="traverse_visible_obstacle",
+            context_key="explore-keepalive",
+            started_ns=2,
+            ended_ns=3,
+            outcome=SkillOutcome.TIMED_OUT,
+        )
+    )
+    second = runtime._explore_keep_alive()
+    assert second is not None
+    assert second.skill_id == "traverse_level_ground"
+    database.close()
+
+
+def test_keepalive_stagnation_uses_visual_hash_displacement() -> None:
+    now = time.monotonic_ns()
+    runtime = object.__new__(AgentRuntime)
+    runtime.blackboard = PerceptionBlackboard()
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:stagnation",
+            width=1280,
+            height=720,
+            facts=(
+                PerceptionFact(
+                    key="frame.dhash",
+                    value="ae579e554aa525a6",
+                    confidence=1.0,
+                    observed_ns=now,
+                    source="bootstrap:bootstrap-rgb-v1:not-training-label",
+                ),
+            ),
+        )
+    )
+    runtime._keepalive_start_dhash = "ae579e554aa525a6"
+    runtime._keepalive_stagnant_failures = 0
+
+    runtime._update_keepalive_stagnation(
+        SkillRun(
+            run_id="static-timeout",
+            skill_id="explore_forward",
+            context_key="explore-keepalive",
+            started_ns=1,
+            ended_ns=2,
+            outcome=SkillOutcome.TIMED_OUT,
+        )
+    )
+
+    assert runtime._keepalive_stagnant_failures == 1
+
+    later = now + 1
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=2,
+            captured_ns=later,
+            instance_id="bedrock:stagnation",
+            width=1280,
+            height=720,
+            facts=(
+                PerceptionFact(
+                    key="frame.dhash",
+                    value="ffffffffffffffff",
+                    confidence=1.0,
+                    observed_ns=later,
+                    source="bootstrap:bootstrap-rgb-v1:not-training-label",
+                ),
+            ),
+        )
+    )
+    runtime._keepalive_start_dhash = "0000000000000000"
+    runtime._update_keepalive_stagnation(
+        SkillRun(
+            run_id="moving-timeout",
+            skill_id="traverse_visible_obstacle",
+            context_key="explore-keepalive",
+            started_ns=2,
+            ended_ns=3,
+            outcome=SkillOutcome.TIMED_OUT,
+        )
+    )
+
+    assert runtime._keepalive_stagnant_failures == 0
+
+
+def test_keepalive_timeout_does_not_stale_pending_operator_cognition() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime._execution_revision = 7
+    runtime._cognition_requested = False
+    runtime._pending_decision = object()  # type: ignore[assignment]
+    keepalive = SkillRun(
+        run_id="keepalive-timeout",
+        skill_id="explore_forward",
+        context_key="explore-keepalive",
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.TIMED_OUT,
+    )
+
+    runtime._note_terminal_for_cognition(keepalive, recovery_started=False)
+
+    assert runtime._execution_revision == 7
+    assert runtime._cognition_requested is False
+
+    runtime._note_terminal_for_cognition(keepalive, recovery_started=True)
+    assert runtime._execution_revision == 8
+    assert runtime._cognition_requested is True
+
+
+def test_real_skill_terminal_still_invalidates_pending_cognition() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime._execution_revision = 4
+    runtime._cognition_requested = False
+    runtime._pending_decision = object()  # type: ignore[assignment]
+
+    runtime._note_terminal_for_cognition(
+        SkillRun(
+            run_id="real-timeout",
+            skill_id="gather_nearby_wood",
+            context_key="operator:mine-tree",
+            started_ns=1,
+            ended_ns=2,
+            outcome=SkillOutcome.TIMED_OUT,
+        ),
+        recovery_started=False,
+    )
+
+    assert runtime._execution_revision == 5
+    assert runtime._cognition_requested is True
+
+
+def test_same_skill_cognition_takes_ownership_from_disposable_keepalive() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime.executor.start(
+        runtime.skills.get("explore_forward"),
+        run_id="keepalive-run",
+        context_key="explore-keepalive",
+    )
+    decision = CognitionDecision(
+        skill_id="explore_forward",
+        instruction="Explore toward open ground.",
+    )
+    future: Future[CognitionDecision] = Future()
+    future.set_result(decision)
+    runtime._pending_decision = future
+    runtime._pending_execution_revision = 3
+    runtime._execution_revision = 3
+    runtime._pending_operator_message_ids = ()
+    runtime.state_db = None
+    runtime.blackboard = PerceptionBlackboard()
+    runtime.metrics = RuntimeMetrics()
+    runtime._last_decision = None
+    runtime._last_cognition_ns = 0
+    runtime._queued_operator_message_waiting = lambda: False  # type: ignore[method-assign]
+    runtime._adopt_plan_if_revised = lambda _decision: None  # type: ignore[method-assign]
+    terminal: list[SkillRun] = []
+    runtime._record_terminal_run = terminal.append  # type: ignore[method-assign]
+    runtime._send_motor = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    runtime._consume_cognition()
+
+    assert terminal[0].run_id == "keepalive-run"
+    assert terminal[0].outcome == SkillOutcome.CANCELLED
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.run_id != "keepalive-run"
+    assert runtime.executor.run.context_key == "default"
+    assert runtime.executor.instruction == "Explore toward open ground."

@@ -40,6 +40,8 @@ class RuntimeEventKind(StrEnum):
     HUMAN_CORRECTION = "human_correction"
     SKILL_SUCCEEDED = "skill_succeeded"
     SKILL_FAILED = "skill_failed"
+    SKILL_TIMED_OUT = "skill_timed_out"
+    SKILL_CANCELLED = "skill_cancelled"
 
 
 class RuntimeEvent(BaseModel):

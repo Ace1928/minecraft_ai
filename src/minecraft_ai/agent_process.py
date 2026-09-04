@@ -167,6 +167,9 @@ def main(argv: list[str] | None = None) -> int:
                 restore_camera(estimated_pitch_units=estimated_pitch)
         executor = SkillExecutor(policy)
         trajectory: TrajectoryRecorder | None = None
+        trajectory_disabled_reason: str | None = (
+            None if config.trajectory.enabled else "disabled-by-configuration"
+        )
         if config.trajectory.enabled:
             trajectory_id = new_trajectory_id("bedrock-agent")
             manifest = TrajectoryManifest(
@@ -188,13 +191,23 @@ def main(argv: list[str] | None = None) -> int:
                 resolution=(capture_probe.width, capture_probe.height),
                 started_ns=time.time_ns(),
             )
-            trajectory = TrajectoryRecorder(
-                manifest=manifest,
-                artifact_root=paths.data_dir / "trajectories",
-                state_db_path=paths.state_db,
-                shard_steps=config.trajectory.shard_steps,
-                queue_size=config.trajectory.queue_size,
-            )
+            try:
+                trajectory = TrajectoryRecorder(
+                    manifest=manifest,
+                    artifact_root=paths.data_dir / "trajectories",
+                    state_db_path=paths.state_db,
+                    shard_steps=config.trajectory.shard_steps,
+                    queue_size=config.trajectory.queue_size,
+                    frame_max_width=config.trajectory.frame_max_width,
+                    frame_jpeg_quality=config.trajectory.frame_jpeg_quality,
+                    min_free_disk_bytes=int(config.trajectory.min_free_disk_gib * 1024**3),
+                )
+            except Exception as exc:
+                # Gameplay remains available when storage is tight. The shard
+                # writer applies the same reserve before every later sample;
+                # other recorder setup faults must also fail open for play.
+                print(f"trajectory recording disabled: {exc}", file=sys.stderr, flush=True)
+                trajectory_disabled_reason = f"{type(exc).__name__}: {exc}"
         # Startup and migrations may wait for the operator console, but the
         # realtime loop must never spend seconds blocked behind a UI write.
         database.set_busy_timeout_ms(100)
@@ -215,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
             lease_renew_ms=config.lease_renew_ms,
             stale_frame_consecutive_limit=config.stale_frame_consecutive_limit,
             trajectory=trajectory,
+            trajectory_disabled_reason=trajectory_disabled_reason,
         )
 
         def _stop(_signum: int, _frame: object) -> None:

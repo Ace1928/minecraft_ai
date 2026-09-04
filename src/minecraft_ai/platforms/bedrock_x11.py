@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from ..safety import MotorAction, MotorLease, MotorRejected
 
@@ -591,10 +591,10 @@ class IsolatedX11InputBackend:
         self.target_window_id = target_window_id
         self._input_window_id = target_window_id
         self._host_monitor_binding = host_monitor_binding
-        # Host-display play never steals the operator's focus. Keyboard goes to
-        # the Minecraft window directly (XSendEvent); clicks/motion are XTEST
-        # events under a pointer parked inside the game client, so they arrive
-        # regardless of operator focus. Isolated displays keep focus-based XTEST.
+        # Isolated displays use XTEST for the complete keyboard/mouse stream on
+        # their private input namespace. The retained host-display debug path
+        # sends keys directly to Minecraft with XSendEvent; autonomous CLI use
+        # rejects that mode because host XTEST mouse events are display-global.
         self._targeted = allow_host
         self._targeted_pointer: _TargetedPointer | None = None
         try:
@@ -616,6 +616,7 @@ class IsolatedX11InputBackend:
             if not self._targeted:
                 self._ensure_input_focus()
         else:
+            assert target_window_id is not None
             validate_host_monitor_window(
                 self._display,
                 host_monitor_binding,
@@ -712,6 +713,14 @@ class IsolatedX11InputBackend:
             )
         self._display.sync()
 
+    def _send_key(self, keycode: int, down: bool) -> None:
+        """Route keys through private-display XTEST or host-only XSendEvent."""
+        if self._targeted:
+            self._targeted_key(keycode, down)
+            return
+        event_type = self._x.KeyPress if down else self._x.KeyRelease
+        self._xtest.fake_input(self._display, event_type, keycode)
+
     def probe_target(self) -> bool:
         if self.target_window_id is None:
             return True
@@ -755,7 +764,12 @@ class IsolatedX11InputBackend:
         if not self.probe_target():
             self.release_all()
             raise IsolationError("Bedrock target window disappeared")
-        if not self._targeted and self._host_monitor_binding is not None and self.target_window_id is not None:
+        self._ensure_input_focus()
+        if (
+            not self._targeted
+            and self._host_monitor_binding is not None
+            and self.target_window_id is not None
+        ):
             try:
                 validate_host_monitor_window(
                     self._display,
@@ -767,15 +781,12 @@ class IsolatedX11InputBackend:
             except Exception:
                 self.release_all()
                 raise
-        # Focus-free play: keyboard events are delivered directly into the
-        # Minecraft window (window-directed XSendEvent), so they never leak
-        # into whatever the operator is typing in, and the game keeps them even
-        # while another window holds focus. Clicks+motion are real XTEST events
-        # whose target is the window under the pointer; the pointer is first
-        # parked inside the game client so those bursts land there too.
+        # On an isolated display every event below is XTEST-scoped to that X
+        # server. The host debug path retains window-directed keys, but is not
+        # accepted by the autonomous CLI because its mouse events are global.
         try:
             for key in action.keys_up:
-                self._targeted_key(self._keycode(key), down=False)
+                self._send_key(self._keycode(key), down=False)
                 self._held_keys.discard(key.lower())
             for button in action.buttons_up:
                 button_id = _BUTTONS.get(button.lower())
@@ -792,7 +803,7 @@ class IsolatedX11InputBackend:
                 self._park_pointer_in_game()
                 self._relative_mouse.move(relative_x, relative_y)
             for key in action.keys_down:
-                self._targeted_key(self._keycode(key), down=True)
+                self._send_key(self._keycode(key), down=True)
                 self._held_keys.add(key.lower())
             for button in action.buttons_down:
                 button_id = _BUTTONS.get(button.lower())
@@ -805,13 +816,22 @@ class IsolatedX11InputBackend:
         finally:
             pass
 
-    def type_chat(self, text: str) -> None:
+    def type_chat(
+        self,
+        text: str,
+        *,
+        input_permitted: Callable[[], bool] = lambda: True,
+    ) -> None:
         """Type one bounded ASCII chat message through the isolated input server."""
         self._require_live_lease()
         if not self.probe_target():
             self.release_all()
             raise IsolationError("Bedrock target window disappeared")
-        if not self._targeted and self._host_monitor_binding is not None and self.target_window_id is not None:
+        if (
+            not self._targeted
+            and self._host_monitor_binding is not None
+            and self.target_window_id is not None
+        ):
             try:
                 validate_host_monitor_window(
                     self._display,
@@ -831,37 +851,53 @@ class IsolatedX11InputBackend:
         previous_keys = set(self._held_keys)
         previous_buttons = set(self._held_buttons)
         self.release_all()
+
+        def require_permitted() -> None:
+            if not input_permitted():
+                raise IsolationError("chat input interlock is not clear")
+
         try:
+            require_permitted()
             self._tap_key("t")
             self._display.sync()
             time.sleep(0.04)
+            require_permitted()
             for char in text:
+                require_permitted()
                 self._type_ascii(char)
+            require_permitted()
             self._tap_key("enter")
             # Bedrock's full chat screen retains two nested UI layers after a
             # submitted message (compose, then history). Return explicitly to
             # the world so the learned policy never receives chat pixels as a
             # playable scene. This behavior was verified on the managed client.
             time.sleep(0.04)
+            require_permitted()
             self._tap_key("escape")
             time.sleep(0.04)
+            require_permitted()
             self._tap_key("escape")
         except Exception:
             # Never strand the player in a half-typed chat overlay.
-            try:
-                self._tap_key("escape")
-            except Exception:
-                pass
+            if input_permitted():
+                try:
+                    self._tap_key("escape")
+                except Exception:
+                    pass
             raise
         finally:
-            for key in sorted(previous_keys):
-                self._xtest.fake_input(self._display, self._x.KeyPress, self._keycode(key))
-            for button in sorted(previous_buttons):
-                button_id = _BUTTONS.get(button)
-                if button_id is not None:
-                    self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
-            self._held_keys = previous_keys
-            self._held_buttons = previous_buttons
+            if input_permitted():
+                for key in sorted(previous_keys):
+                    self._send_key(self._keycode(key), down=True)
+                for button in sorted(previous_buttons):
+                    button_id = _BUTTONS.get(button)
+                    if button_id is not None:
+                        self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
+                self._held_keys = previous_keys
+                self._held_buttons = previous_buttons
+            else:
+                self._held_keys.clear()
+                self._held_buttons.clear()
             self._display.sync()
 
     def _type_ascii(self, char: str) -> None:
@@ -872,23 +908,29 @@ class IsolatedX11InputBackend:
         base = _SHIFT_MAP.get(char, char.lower() if char.isalpha() else char)
         if shifted:
             shift = self._keycode("shift")
-            self._targeted_key(shift, down=True)
+            self._send_key(shift, down=True)
         try:
             self._tap_key(base)
         finally:
             if shifted:
-                self._targeted_key(shift, down=False)
+                self._send_key(shift, down=False)
 
     def _tap_key(self, key: str) -> None:
         keycode = self._keycode(key)
-        self._targeted_key(keycode, down=True)
-        self._targeted_key(keycode, down=False)
+        self._send_key(keycode, down=True)
+        self._send_key(keycode, down=False)
 
     def release_all(self) -> None:
         try:
+            try:
+                self._ensure_input_focus()
+            except Exception:
+                # The target may already be gone during failsafe cleanup; keep
+                # releasing every known token as a best-effort final sweep.
+                pass
             for key in sorted(set(_KEYSYM_NAMES) | self._held_keys):
                 try:
-                    self._targeted_key(self._keycode(key), down=False)
+                    self._send_key(self._keycode(key), down=False)
                 except Exception:
                     continue
             for button_id in sorted(set(_BUTTONS.values())):

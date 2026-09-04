@@ -18,14 +18,23 @@ from urllib.parse import urlparse
 
 from PIL import Image
 
-from .agent_lifecycle import AgentProcess, agent_alive, stop_agent_process
+from .agent_lifecycle import AGENT_FILE, AgentProcess, agent_alive, stop_agent_process
 from .config import app_paths
-from .emergency import emergency_reason, emergency_stop_latched
+from .emergency import (
+    emergency_reason,
+    emergency_stop_latched,
+    terminate_registered_supervisor,
+)
 from .perception import ScreenRegion, Track
-from .perception_service import bedrock_survival_hud_present, frame_dhash
+from .perception_service import (
+    bedrock_in_world_hud_present,
+    bedrock_survival_hud_present,
+    frame_dhash,
+)
 from .platforms import (
     HostMonitorBinding,
     IsolatedX11Capture,
+    IsolationError,
     MutterPipeWireCapture,
     create_bedrock_capture,
     discover_bedrock_linux_install,
@@ -34,14 +43,29 @@ from .platforms import (
 from .platforms.bedrock_session import BedrockSession, bedrock_session_alive
 from .platforms.bedrock_x11 import CapturedFrame
 from .social import OperatorMessage, OperatorMessageKind
+from .service_control import (
+    persistent_agent_service_load_state,
+    start_persistent_agent_service,
+    stop_persistent_agent_service,
+)
 from .storage import StateDatabase
-from .supervisor import STATUS_FILE, send_command, supervisor_alive
+from .supervisor import (
+    STATUS_FILE,
+    clear_operator_pause,
+    current_control_owner_state,
+    latch_operator_pause,
+    operator_intent_lock,
+    operator_pause_latched,
+    send_command,
+    supervisor_alive,
+)
 from .telemetry import read_telemetry
 
 
 MAX_BODY_BYTES = 16 * 1024
 FRAME_REFERENCE_TTL_NS = 120 * 1_000_000_000
 MAX_FRAME_REFERENCES = 8
+READINESS_TELEMETRY_MAX_AGE_NS = 5 * 1_000_000_000
 
 
 @dataclass(frozen=True)
@@ -141,6 +165,145 @@ def operator_status() -> dict[str, object]:
             "latched": emergency_stop_latched(),
             "reason": emergency_reason(),
         },
+        "operator_pause_latched": operator_pause_latched(),
+    }
+
+
+def operator_readiness(
+    *,
+    require_playable_capture: bool = True,
+) -> tuple[bool, dict[str, object]]:
+    """Report whether the loopback operator is backed by a playable live stack.
+
+    ``/healthz`` intentionally remains a cheap HTTP-process liveness probe so
+    the transactional launcher can start the dashboard before Bedrock. This
+    stronger probe prevents callers from mistaking a responsive dashboard for
+    an armed, isolated agent.
+    """
+    status = operator_status()
+    reasons: list[str] = []
+    degradations: list[str] = []
+    checks: dict[str, object] = {}
+
+    emergency = status.get("emergency_stop")
+    emergency_clear = isinstance(emergency, dict) and not bool(emergency.get("latched"))
+    checks["emergency_clear"] = emergency_clear
+    if not emergency_clear:
+        reasons.append("emergency stop is latched")
+
+    pause_clear = not bool(status.get("operator_pause_latched"))
+    checks["operator_pause_clear"] = pause_clear
+    if not pause_clear:
+        reasons.append("operator pause is latched")
+
+    try:
+        session = BedrockSession.load()
+    except (OSError, ValueError, TypeError, KeyError):
+        session = None
+    isolated_session = bool(
+        session is not None
+        and session.mode in {"weston", "xephyr"}
+        and session.display.split(".", 1)[0] != session.host_display.split(".", 1)[0]
+        and bedrock_session_alive(session)
+    )
+    checks["isolated_bedrock"] = isolated_session
+    if not isolated_session:
+        reasons.append("no live private Weston/Xephyr Bedrock session")
+
+    window_id = session.find_window() if isolated_session and session is not None else None
+    checks["bedrock_window"] = window_id is not None
+    if isolated_session and window_id is None:
+        reasons.append("Minecraft window is not available in the private display")
+
+    frame = _capture_live_bedrock_frame() if window_id is not None else None
+    live_capture = frame is not None
+    checks["live_capture"] = live_capture
+    if window_id is not None and not live_capture:
+        reasons.append("private Bedrock capture is unavailable")
+    playable_frame = frame is not None and bedrock_in_world_hud_present(frame)
+    checks["playable_capture"] = playable_frame
+    if require_playable_capture and window_id is not None and not playable_frame:
+        reasons.append("private capture does not show a complete in-world HUD")
+    elif live_capture and not playable_frame:
+        degradations.append("live capture is outside the complete in-world HUD")
+
+    supervisor = status.get("supervisor")
+    supervisor_ready = bool(
+        status.get("supervisor_reachable")
+        and isinstance(supervisor, dict)
+        and supervisor.get("state") == "RUNNING"
+        and supervisor.get("live_capable") is True
+        and supervisor.get("motor_lease_active") is True
+    )
+    checks["supervisor_running"] = supervisor_ready
+    if not supervisor_ready:
+        reasons.append("supervisor is not running with an active motor lease")
+
+    telemetry = status.get("telemetry")
+    telemetry_updated_ns = (
+        telemetry.get("updated_monotonic_ns") if isinstance(telemetry, dict) else None
+    )
+    telemetry_age_ns = (
+        time.monotonic_ns() - telemetry_updated_ns
+        if isinstance(telemetry_updated_ns, int)
+        and not isinstance(telemetry_updated_ns, bool)
+        else -1
+    )
+    telemetry_fresh = bool(
+        isinstance(telemetry, dict)
+        and telemetry.get("state") == "running"
+        and 0 <= telemetry_age_ns <= READINESS_TELEMETRY_MAX_AGE_NS
+    )
+    checks["telemetry_fresh"] = telemetry_fresh
+    if not telemetry_fresh:
+        reasons.append("agent motor telemetry is missing, stale, or not running")
+
+    trajectory = (
+        telemetry.get("trajectory_recording") if isinstance(telemetry, dict) else None
+    )
+    trajectory_recording = bool(
+        telemetry_fresh and isinstance(trajectory, dict) and trajectory.get("enabled") is True
+    )
+    checks["trajectory_recording"] = trajectory_recording
+    if telemetry_fresh and not trajectory_recording:
+        detail = (
+            trajectory.get("disabled_reason") if isinstance(trajectory, dict) else None
+        )
+        degradations.append(
+            "trajectory learning is disabled"
+            if not isinstance(detail, str) or not detail
+            else f"trajectory learning is disabled: {detail}"
+        )
+
+    lease_consistent = bool(
+        telemetry_fresh
+        and isinstance(supervisor, dict)
+        and isinstance(telemetry, dict)
+        and isinstance(supervisor.get("motor_lease_id"), str)
+        and supervisor.get("motor_lease_id") == telemetry.get("lease_id")
+    )
+    checks["lease_consistent"] = lease_consistent
+    if not lease_consistent:
+        reasons.append("agent telemetry does not match the active supervisor lease")
+
+    agent = status.get("agent")
+    agent_ready = bool(
+        isinstance(agent, dict)
+        and agent.get("alive") is True
+        and session is not None
+        and agent.get("display") == session.display
+        and agent.get("window_id") == window_id
+    )
+    checks["agent_attached"] = agent_ready
+    if not agent_ready:
+        reasons.append("live agent is not attached to the managed private window")
+
+    ready = not reasons
+    return ready, {
+        "status": "ready" if ready else "not_ready",
+        "checks": checks,
+        "reasons": reasons,
+        "degradations": degradations,
     }
 
 
@@ -156,32 +319,43 @@ def _capture_live_bedrock_frame() -> CapturedFrame | None:
         process = AgentProcess.load()
     except (OSError, ValueError, TypeError, KeyError):
         process = None
-    if process is not None:
+    if process is not None and agent_alive(process):
         binding = None
         if process.allow_host_capture and session is not None:
-            process_binding = session.host_monitor_binding()
+            try:
+                process_binding = session.host_monitor_binding()
+            except (OSError, ValueError, IsolationError):
+                process_binding = None
             if (
                 process_binding is not None
+                and session.mode == "host-monitor"
+                and bedrock_session_alive(session)
                 and process_binding.display == process.display
                 and process_binding.window_id == process.window_id
             ):
                 binding = process_binding
-        targets.append(
-            (
-                process.display,
-                process.window_id,
-                process.allow_host_capture,
-                binding,
+        if not process.allow_host_capture or binding is not None:
+            targets.append(
+                (
+                    process.display,
+                    process.window_id,
+                    process.allow_host_capture,
+                    binding,
+                )
             )
-        )
     if session is not None and bedrock_session_alive(session):
         window_id = session.find_window()
         if window_id is not None:
+            if session.mode == "direct":
+                return None
+            host_binding = session.host_monitor_binding()
+            if session.mode == "host-monitor" and host_binding is None:
+                return None
             session_target = (
                 session.display,
                 window_id,
-                session.mode in {"direct", "host-monitor"},
-                session.host_monitor_binding(),
+                session.mode == "host-monitor",
+                host_binding,
             )
             if session_target not in targets:
                 targets.append(session_target)
@@ -256,6 +430,11 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
     server_version = "MinecraftAIOperator/0.1"
 
     def do_GET(self) -> None:  # noqa: N802
+        try:
+            self._validate_request_host()
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
         path = urlparse(self.path).path
         if path == "/":
             self._send_bytes(HTTPStatus.OK, DASHBOARD_HTML.encode(), "text/html; charset=utf-8")
@@ -279,12 +458,19 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             )
         elif path == "/healthz":
             self._send_json(HTTPStatus.OK, {"status": "ok"})
+        elif path == "/readyz":
+            ready, payload = operator_readiness()
+            self._send_json(HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE, payload)
+        elif path == "/livez":
+            ready, payload = operator_readiness(require_playable_capture=False)
+            self._send_json(HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE, payload)
         else:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         try:
+            self._validate_mutation_request()
             payload = self._read_body()
             if path == "/api/messages":
                 self._post_message(payload)
@@ -305,6 +491,56 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
                 HTTPStatus.SERVICE_UNAVAILABLE,
                 {"error": f"{type(exc).__name__}: {exc}"},
             )
+
+    def _validate_mutation_request(self) -> None:
+        self._validate_request_host()
+        media_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().casefold()
+        if media_type != "application/json":
+            raise ValueError("Content-Type must be application/json")
+        origin = self.headers.get("Origin")
+        if origin is None:
+            return
+        parsed = urlparse(origin)
+        if parsed.scheme not in {"http", "https"} or parsed.netloc != self.headers.get("Host"):
+            raise ValueError("cross-origin operator mutations are not allowed")
+
+    def _validate_request_host(self) -> None:
+        """Reject DNS-rebound requests before exposing any operator route."""
+
+        raw_host = self.headers.get("Host", "").strip()
+        if not raw_host:
+            raise ValueError("Host must identify the bound loopback operator endpoint")
+        try:
+            parsed = urlparse(f"//{raw_host}")
+            requested_host = parsed.hostname
+            requested_port = parsed.port
+        except ValueError as exc:
+            raise ValueError("Host must identify the bound loopback operator endpoint") from exc
+        server_address = self.server.server_address
+        if (
+            requested_host is None
+            or requested_port is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or not isinstance(server_address, tuple)
+            or len(server_address) < 2
+        ):
+            raise ValueError("Host must identify the bound loopback operator endpoint")
+        try:
+            requested_address = ipaddress.ip_address(requested_host)
+            bound_address = ipaddress.ip_address(str(server_address[0]))
+            bound_port = int(server_address[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Host must identify the bound loopback operator endpoint") from exc
+        if (
+            not requested_address.is_loopback
+            or requested_address != bound_address
+            or requested_port != bound_port
+        ):
+            raise ValueError("Host must identify the bound loopback operator endpoint")
 
     def _read_body(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length", "")
@@ -423,20 +659,110 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, {"target": None})
 
     def _pause_agent(self) -> None:
-        stop_agent_process()
-        result: dict[str, object]
-        if supervisor_alive():
-            result = send_command("pause")
-        else:
-            result = {"state": "STOPPED"}
+        result: dict[str, object] = {"state": "UNKNOWN"}
+        revocation_error: str | None = None
+        persistence_error: str | None = None
+        command_error: Exception | None = None
+        use_supervisor = supervisor_alive()
+        if not use_supervisor:
+            with operator_intent_lock():
+                use_supervisor = supervisor_alive()
+                if not use_supervisor:
+                    try:
+                        latch_operator_pause()
+                    except OSError as exc:
+                        persistence_error = f"{type(exc).__name__}: {exc}"
+                    terminate_registered_supervisor()
+                    stop_agent_process()
+                    owner_state = current_control_owner_state()
+                    if owner_state in {"verified-live", "unverifiable", "unreadable"}:
+                        revocation_error = (
+                            f"supervisor ownership is {owner_state}; revocation is unconfirmed"
+                        )
+                    elif AGENT_FILE.exists():
+                        revocation_error = "realtime agent containment is unconfirmed"
+                    else:
+                        result = {"state": "STOPPED", "fallback": "local-transaction"}
+        if use_supervisor:
+            try:
+                result = send_command("pause", timeout_s=5.0)
+                if result.get("operator_pause_persisted") is False:
+                    persistence_error = "supervisor could not persist operator pause"
+                if result.get("agent_containment_confirmed") is not True:
+                    revocation_error = "supervisor could not confirm realtime agent containment"
+            except Exception as exc:
+                command_error = exc
+                with operator_intent_lock():
+                    try:
+                        latch_operator_pause()
+                    except OSError as latch_exc:
+                        persistence_error = f"{type(latch_exc).__name__}: {latch_exc}"
+                    terminate_registered_supervisor()
+                    stop_agent_process()
+                    owner_state = current_control_owner_state()
+                    if owner_state in {"verified-live", "unverifiable", "unreadable"}:
+                        revocation_error = (
+                            "supervisor pause failed and OS revocation is unconfirmed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    elif AGENT_FILE.exists():
+                        revocation_error = "realtime agent containment is unconfirmed"
+                    else:
+                        result = {"state": "STOPPED", "fallback": "local-transaction"}
+        if persistence_error is not None:
+            service_stopped = stop_persistent_agent_service()
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {
+                    "error": "agent stopped, but durable operator pause could not be recorded",
+                    "detail": persistence_error,
+                    "persistent_service_stopped": service_stopped,
+                    "supervisor": result,
+                },
+            )
+            return
+        if revocation_error is not None:
+            detail = None if command_error is None else f"{type(command_error).__name__}: {command_error}"
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": revocation_error, "detail": detail, "supervisor": result},
+            )
+            return
         self._send_json(HTTPStatus.OK, result)
 
     def _resume_supervisor(self) -> None:
         if emergency_stop_latched():
             raise ValueError("emergency stop is latched")
-        if not supervisor_alive():
-            raise ValueError("supervisor is not running; use the CLI to start it")
-        self._send_json(HTTPStatus.OK, send_command("resume"))
+        if supervisor_alive():
+            result = send_command("resume", timeout_s=5.0)
+        else:
+            late_supervisor = False
+            with operator_intent_lock():
+                if emergency_stop_latched():
+                    raise ValueError("emergency stop is latched")
+                late_supervisor = supervisor_alive()
+                if not late_supervisor:
+                    owner_state = current_control_owner_state()
+                    if owner_state in {"verified-live", "unverifiable", "unreadable"}:
+                        raise ValueError(
+                            "supervisor ownership is live or ambiguous; pause remains latched"
+                        )
+                    load_state = persistent_agent_service_load_state()
+                    if load_state == "loaded" and not start_persistent_agent_service():
+                        raise ValueError(
+                            "persistent recovery service did not start; operator pause remains latched"
+                        )
+                    if load_state == "unknown":
+                        raise ValueError(
+                            "persistent recovery service availability is unknown; pause remains latched"
+                        )
+                    if emergency_stop_latched():
+                        raise ValueError("emergency stop is latched; pause remains latched")
+                    clear_operator_pause()
+                    result = {"state": "STARTING", "recovery_pending": True}
+            if late_supervisor:
+                result = send_command("resume", timeout_s=5.0)
+        self._send_json(HTTPStatus.OK, result)
 
     def _send_json(self, status: HTTPStatus, payload: object) -> None:
         self._send_bytes(
@@ -464,7 +790,8 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+            "script-src 'self' 'unsafe-inline'; connect-src 'self'; "
+            "img-src 'self' blob:; frame-ancestors 'none'",
         )
         self.end_headers()
         self.wfile.write(body)
@@ -515,7 +842,7 @@ color:var(--text);border-radius:9px;padding:11px;font:inherit}textarea{min-heigh
 font:inherit;font-weight:700;cursor:pointer}button.secondary{background:#17251f;border-color:var(--line)}button.warn{background:#5e471d;border-color:#9f7c35}
 button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{border-top:1px solid var(--line);padding:12px 0}
 .msg:first-child{border:0}.meta{display:flex;gap:8px;color:var(--muted);font-size:11px}.kind{color:var(--cyan)}.text{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere}
-.reason{font-size:16px;margin-top:9px}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:13px}
+.reason{font-size:16px;margin-top:9px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:13px}
 .facts{margin:9px 0 0;max-height:220px;overflow:auto;white-space:pre-wrap;color:#b8d8ca;font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace}
 .metric{background:#09130f;border:1px solid #1d3028;border-radius:8px;padding:9px}.metric b{display:block;font-size:17px;margin-top:3px}
 .viewer{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:#030705;line-height:0;user-select:none;touch-action:none}
@@ -523,7 +850,7 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 .prediction{position:absolute;border:2px dashed var(--amber);background:#ffc76618;box-shadow:0 0 12px #ffc76688;display:none;pointer-events:none}
 .target-review{display:flex;align-items:center;gap:12px;margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:9px;background:#09130f}.target-review[hidden]{display:none}.target-review canvas{width:160px;height:90px;object-fit:contain;background:#020403;border:1px solid #31483e;border-radius:6px}.target-review b,.target-review span{display:block}.target-review span{color:var(--muted);font-size:12px;margin-top:4px}
 .ok{color:var(--green)}.bad{color:var(--red)}.amber{color:var(--amber)}#notice{min-height:20px;margin-top:9px;color:var(--muted)}
-@media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}.wide{grid-column:span 2}}
+@media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}.wide{grid-column:span 2}.metrics{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:540px){main{padding:16px}.grid{grid-template-columns:1fr}.wide,.full{grid-column:1}.row{flex-direction:column}.live{display:none}}
 </style></head>
 <body><main><div class="top"><div class="mark">⛏</div><div class="title"><h1>Minecraft AI Operator</h1>
@@ -545,7 +872,7 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 <div class="row"><select id="kind"><option value="instruction">Instruction</option><option value="question">Question</option><option value="feedback">Feedback</option><option value="correction">Correction</option></select>
 <select id="priority"><option value="0.8">High priority</option><option value="0.55">Normal priority</option><option value="1">Urgent</option></select><button id="send">Send to agent</button></div>
 <div id="notice"></div><div class="row"><button class="warn" id="pause">Pause & revoke control</button><button class="secondary" id="resume">Resume supervisor safely</button></div>
-<div class="metrics"><div class="metric"><span class="label">Frames</span><b id="frames">0</b></div><div class="metric"><span class="label">Actions</span><b id="actions">0</b></div><div class="metric"><span class="label">Capture</span><b id="capture">—</b></div></div></div>
+<div class="metrics"><div class="metric"><span class="label">Frames</span><b id="frames">0</b></div><div class="metric"><span class="label">Actions</span><b id="actions">0</b></div><div class="metric"><span class="label">Capture</span><b id="capture">—</b></div><div class="metric"><span class="label">Learning record</span><b id="recording">—</b><span class="label" id="recordingDetail"></span></div></div></div>
 <div class="card"><h2>Operator conversation</h2><div class="feed" id="feed"><div class="label">No messages yet</div></div></div></section></main>
 <script>
 const $=id=>document.getElementById(id);const esc=v=>v??'—';
@@ -573,6 +900,7 @@ $('instruction').textContent=esc(t.active_instruction||'Waiting for an executabl
 const wc=s.supervisor.world_camera||{};$('camera').textContent=esc(active.estimated_pitch_units??wc.estimated_pitch_units??'—')+' / '+esc(active.camera_pitch_limit??'—');$('cameraMode').textContent=(wc.origin_calibrated?'physical horizon calibrated':'physical horizon uncalibrated')+' · '+(active.camera_envelope_saturated?'envelope saturated':'normal learned control');$('camera').className='value '+(!wc.origin_calibrated?'bad':active.camera_envelope_saturated?'amber':'ok');drawPrediction(pred.target_bbox_xyxy,pred.target_exists_probability);
 const pf=((t.perception||{}).fresh_facts)||{};$('facts').textContent=Object.keys(pf).length?JSON.stringify(pf,null,2):'No fresh semantic facts yet.';
 $('frames').textContent=esc(t.frames||0);$('actions').textContent=esc(t.motor_actions||0);$('capture').textContent=t.last_capture_ms==null?'—':t.last_capture_ms+' ms';
+const tr=t.trajectory_recording||{},recording=tr.enabled===true;$('recording').textContent=recording?'ON':'PAUSED';$('recording').className=recording?'ok':'amber';$('recordingDetail').textContent=recording?(esc(tr.written_steps||0)+' saved · '+esc(tr.queued_samples||0)+' queued'):esc(tr.disabled_reason||'not configured');
 }catch(e){$('dot').style.background='var(--red)';$('connection').textContent='Disconnected'}}
 async function messages(){try{const d=await api('/api/messages');const feed=$('feed');feed.replaceChildren();if(!d.messages.length){const x=document.createElement('div');x.className='label';x.textContent='No messages yet';feed.append(x);return}
 d.messages.forEach(m=>{const box=document.createElement('div');box.className='msg';const meta=document.createElement('div');meta.className='meta';const k=document.createElement('span');k.className='kind';k.textContent=m.kind;const when=document.createElement('span');when.textContent=new Date(m.created_ns/1e6).toLocaleTimeString();const status=document.createElement('span');status.textContent=m.status;meta.append(k,when,status);const text=document.createElement('div');text.className='text';text.textContent=m.text;box.append(meta,text);if(m.response_text){const reply=document.createElement('div');reply.className='text ok';reply.textContent='Agent: '+m.response_text;box.append(reply)}feed.append(box)})}catch(e){}}

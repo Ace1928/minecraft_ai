@@ -17,17 +17,23 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urlsplit
 
 from platformdirs import user_data_dir, user_runtime_dir
 
 from .config import RuntimeConfig
 
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
 
 _SERVICE_ID = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _MANIFEST_SCHEMA = 1
 _IS_WINDOWS = os.name == "nt"
+_IS_LINUX = sys.platform.startswith("linux")
 
 
 class ServiceMode(StrEnum):
@@ -220,6 +226,10 @@ class ServiceRecord:
     pid: int | None
     started_wall_ns: int
     command_digest: str | None
+    # Linux field 22 from /proc/<pid>/stat.  This is stable for the lifetime of
+    # a process and prevents a persisted manifest from confusing a reused PID
+    # with the daemon it originally launched.
+    proc_start_ticks: int | None = None
 
 
 @dataclass(frozen=True)
@@ -251,6 +261,11 @@ class StackManifest:
                 started_wall_ns=int(item["started_wall_ns"]),
                 command_digest=(
                     None if item.get("command_digest") is None else str(item["command_digest"])
+                ),
+                proc_start_ticks=(
+                    None
+                    if item.get("proc_start_ticks") is None
+                    else int(item["proc_start_ticks"])
                 ),
             )
             for item in raw_services
@@ -372,16 +387,20 @@ class PortableStackLauncher:
             )
             manifest.persist(self.manifest_path)
             records: list[ServiceRecord] = []
+
+            def record_started(record: ServiceRecord) -> None:
+                nonlocal manifest
+                records.append(record)
+                manifest = replace(
+                    manifest,
+                    services=tuple(records),
+                    updated_wall_ns=time.time_ns(),
+                )
+                manifest.persist(self.manifest_path)
+
             try:
                 for service in self.plan.ordered_services():
-                    record = self._start_service(service)
-                    records.append(record)
-                    manifest = replace(
-                        manifest,
-                        services=tuple(records),
-                        updated_wall_ns=time.time_ns(),
-                    )
-                    manifest.persist(self.manifest_path)
+                    self._start_service(service, on_started=record_started)
             except Exception as exc:
                 manifest = replace(
                     manifest,
@@ -390,7 +409,14 @@ class PortableStackLauncher:
                     error=f"{type(exc).__name__}: {exc}",
                     updated_wall_ns=time.time_ns(),
                 )
-                manifest.persist(self.manifest_path)
+                persistence_errors: list[str] = []
+                try:
+                    manifest.persist(self.manifest_path)
+                except Exception as persist_exc:
+                    persistence_errors.append(
+                        "could not persist rolling-back state: "
+                        f"{type(persist_exc).__name__}: {persist_exc}"
+                    )
                 rollback_errors = self._rollback(tuple(records))
                 manifest = replace(
                     manifest,
@@ -400,10 +426,17 @@ class PortableStackLauncher:
                     ),
                     updated_wall_ns=time.time_ns(),
                 )
-                manifest.persist(self.manifest_path)
+                try:
+                    manifest.persist(self.manifest_path)
+                except Exception as persist_exc:
+                    persistence_errors.append(
+                        "could not persist failed state: "
+                        f"{type(persist_exc).__name__}: {persist_exc}"
+                    )
+                reported_errors = [*rollback_errors, *persistence_errors]
                 raise StackStartError(
                     f"stack start failed: {type(exc).__name__}: {exc}",
-                    rollback_errors=rollback_errors,
+                    rollback_errors=tuple(reported_errors),
                 ) from exc
 
             manifest = replace(
@@ -450,33 +483,49 @@ class PortableStackLauncher:
             return manifest, {"plan_matches": False}
         by_id = {service.service_id: service for service in self.plan.services}
         health = {
-            record.service_id: self._healthy(by_id[record.service_id], pid=record.pid)
+            record.service_id: self._record_healthy(by_id[record.service_id], record)
             for record in manifest.services
             if record.service_id in by_id
         }
         return manifest, health
 
-    def _start_service(self, service: ServiceSpec) -> ServiceRecord:
+    def _start_service(
+        self,
+        service: ServiceSpec,
+        *,
+        on_started: Callable[[ServiceRecord], None] | None = None,
+    ) -> ServiceRecord:
+        def announce(record: ServiceRecord) -> ServiceRecord:
+            if on_started is not None:
+                on_started(record)
+            return record
+
         if service.reuse_if_healthy and self._healthy(service, pid=None, reuse_check=True):
-            return ServiceRecord(
-                service_id=service.service_id,
-                mode=service.mode,
-                owned=False,
-                pid=None,
-                started_wall_ns=time.time_ns(),
-                command_digest=None,
+            return announce(
+                ServiceRecord(
+                    service_id=service.service_id,
+                    mode=service.mode,
+                    owned=False,
+                    pid=None,
+                    started_wall_ns=time.time_ns(),
+                    command_digest=None,
+                    proc_start_ticks=None,
+                )
             )
         if service.mode == ServiceMode.EXTERNAL:
             deadline = time.monotonic() + service.ready_timeout_s
             while time.monotonic() < deadline:
                 if self._healthy(service, pid=None):
-                    return ServiceRecord(
-                        service_id=service.service_id,
-                        mode=service.mode,
-                        owned=False,
-                        pid=None,
-                        started_wall_ns=time.time_ns(),
-                        command_digest=None,
+                    return announce(
+                        ServiceRecord(
+                            service_id=service.service_id,
+                            mode=service.mode,
+                            owned=False,
+                            pid=None,
+                            started_wall_ns=time.time_ns(),
+                            command_digest=None,
+                            proc_start_ticks=None,
+                        )
                     )
                 time.sleep(self.poll_interval_s)
             raise TimeoutError(
@@ -486,24 +535,56 @@ class PortableStackLauncher:
 
         pid: int | None = None
         command_digest = _command_digest(service.command)
+        proc_start_ticks: int | None = None
+        record_command_digest = command_digest
+        identity: tuple[int, tuple[str, ...]] | None = None
         if service.mode == ServiceMode.DAEMON:
             process = self._spawn(service, service.command)
             pid = process.pid
             self._children[pid] = process
+            if _IS_LINUX:
+                observed_start_ticks = _linux_process_start_ticks(pid)
+                identity_deadline = time.monotonic() + min(0.5, service.ready_timeout_s)
+                while True:
+                    identity = _linux_process_identity(pid)
+                    if identity is not None:
+                        observed_start_ticks = identity[0]
+                        record_command_digest = _command_digest(identity[1])
+                        if record_command_digest == command_digest:
+                            break
+                    else:
+                        observed_start_ticks = (
+                            _linux_process_start_ticks(pid) or observed_start_ticks
+                        )
+                    if process.poll() is not None or time.monotonic() >= identity_deadline:
+                        break
+                    time.sleep(max(0.001, min(self.poll_interval_s, 0.01)))
+                proc_start_ticks = observed_start_ticks
         else:
             self._run_oneshot(service, service.command)
+
+        record = announce(
+            ServiceRecord(
+                service_id=service.service_id,
+                mode=service.mode,
+                owned=True,
+                pid=pid,
+                started_wall_ns=time.time_ns(),
+                command_digest=record_command_digest,
+                proc_start_ticks=proc_start_ticks,
+            )
+        )
+        if _IS_LINUX and service.mode == ServiceMode.DAEMON and (
+            identity is None or record_command_digest != command_digest
+        ):
+            raise RuntimeError(
+                f"could not establish process identity for service {service.service_id!r}"
+            )
 
         deadline = time.monotonic() + service.ready_timeout_s
         while time.monotonic() < deadline:
             if self._healthy(service, pid=pid):
-                return ServiceRecord(
-                    service_id=service.service_id,
-                    mode=service.mode,
-                    owned=True,
-                    pid=pid,
-                    started_wall_ns=time.time_ns(),
-                    command_digest=command_digest,
-                )
+                return record
             if pid is not None:
                 child = self._children.get(pid)
                 if child is not None and child.poll() is not None:
@@ -511,8 +592,6 @@ class PortableStackLauncher:
                         f"service {service.service_id!r} exited with code {child.returncode}"
                     )
             time.sleep(self.poll_interval_s)
-        if pid is not None:
-            self._terminate_owned_pid(pid, service.stop_timeout_s, command_digest)
         raise TimeoutError(
             f"service {service.service_id!r} did not become healthy within "
             f"{service.ready_timeout_s:.1f}s; inspect {self._log_path(service)}"
@@ -523,9 +602,27 @@ class PortableStackLauncher:
         if set(records) != {service.service_id for service in self.plan.services}:
             return False
         return all(
-            self._healthy(service, pid=records[service.service_id].pid)
+            self._record_healthy(service, records[service.service_id])
             for service in self.plan.services
         )
+
+    def _record_healthy(self, service: ServiceSpec, record: ServiceRecord) -> bool:
+        """Evaluate probes without accepting a reconstructed, reused PID."""
+
+        if record.owned and record.pid is not None:
+            if record.command_digest != _command_digest(service.command):
+                return False
+            child = self._children.get(record.pid)
+            if child is not None:
+                if child.poll() is not None:
+                    return False
+            elif not _persisted_pid_matches(
+                record.pid,
+                command_digest=record.command_digest,
+                proc_start_ticks=record.proc_start_ticks,
+            ):
+                return False
+        return self._healthy(service, pid=record.pid)
 
     def _healthy(
         self,
@@ -565,6 +662,7 @@ class PortableStackLauncher:
                         record.pid,
                         service.stop_timeout_s,
                         record.command_digest,
+                        record.proc_start_ticks,
                     )
                 except Exception as exc:
                     errors.append(f"{record.service_id} process: {type(exc).__name__}: {exc}")
@@ -622,52 +720,136 @@ class PortableStackLauncher:
         pid: int,
         timeout_s: float,
         command_digest: str | None,
+        proc_start_ticks: int | None = None,
     ) -> None:
         child = self._children.get(pid)
-        if child is not None and child.poll() is not None:
-            self._children.pop(pid, None)
-            return
-        if not _pid_alive(pid):
-            self._children.pop(pid, None)
-            return
-        if child is None and command_digest is not None and not _pid_matches(pid, command_digest):
-            raise RuntimeError(f"refusing to signal PID {pid}: command identity changed")
-        if os.name == "nt":
+        if _IS_WINDOWS:
+            if child is not None and child.poll() is not None:
+                self._children.pop(pid, None)
+                return
+            if not _pid_alive(pid):
+                self._children.pop(pid, None)
+                return
+            if child is None:
+                raise RuntimeError(
+                    f"refusing to signal reconstructed Windows PID {pid}: "
+                    "process identity is unverifiable"
+                )
+            # taskkill /T is required even when the direct child has a retained
+            # Popen handle: Popen.terminate() only stops that process and can
+            # orphan the service tree.  Judge success from the retained handle
+            # (or a PID probe after manifest reconstruction), not taskkill's
+            # runner-dependent return code.
             completed = subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T"],
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
                 check=False,
                 capture_output=True,
                 timeout=timeout_s,
             )
-            if completed.returncode not in {0, 128}:
-                raise RuntimeError(f"taskkill failed with code {completed.returncode}")
-        else:
-            kill_group = getattr(os, "killpg", None)
-            if not callable(kill_group):
-                raise RuntimeError("process-group termination is unavailable on this platform")
-            try:
-                kill_group(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                return
-            deadline = time.monotonic() + timeout_s
-            while time.monotonic() < deadline:
-                if child is not None:
-                    if child.poll() is not None:
-                        self._children.pop(pid, None)
-                        return
-                elif not _pid_alive(pid):
-                    return
-                time.sleep(self.poll_interval_s)
-            try:
-                kill_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-            except ProcessLookupError:
-                return
             if child is not None:
                 try:
-                    child.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    pass
+                    child.wait(timeout=timeout_s)
+                except subprocess.TimeoutExpired as tree_timeout:
+                    # Best-effort direct-child cleanup does not prove that the
+                    # tree was stopped, so still surface the failed tree kill.
+                    child.kill()
+                    try:
+                        child.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired as exc:
+                        raise RuntimeError(f"process {pid} did not terminate") from exc
+                    detail = completed.stderr.decode(errors="replace").strip()
+                    suffix = "" if not detail else f": {detail}"
+                    raise RuntimeError(
+                        f"taskkill did not terminate process tree {pid} "
+                        f"(code {completed.returncode}){suffix}"
+                    ) from tree_timeout
+                finally:
+                    self._children.pop(pid, None)
+                return
+            if not _pid_alive(pid):
+                return
+            detail = completed.stderr.decode(errors="replace").strip()
+            suffix = "" if not detail else f": {detail}"
+            raise RuntimeError(f"taskkill failed with code {completed.returncode}{suffix}")
+
+        kill_group = getattr(os, "killpg", None)
+        if not callable(kill_group):
+            raise RuntimeError("process-group termination is unavailable on this platform")
+        group_alive = _process_group_alive(pid)
+        child_running = child is not None and child.poll() is None
+        if not group_alive:
+            if child is not None:
+                child.poll()
+            self._children.pop(pid, None)
+            return
+        if child is None:
+            if not _persisted_process_or_orphan_group_matches(
+                pid,
+                command_digest=command_digest,
+                proc_start_ticks=proc_start_ticks,
+            ):
+                raise RuntimeError(
+                    f"refusing to signal process group {pid}: persisted process identity "
+                    "changed or is unverifiable"
+                )
+        elif not child_running:
+            # The retained Popen proves this group was created by this launcher.
+            # Its descendants can outlive the reaped session leader, so group
+            # cleanup must continue rather than returning on child.poll().
+            self._children.pop(pid, None)
+
+        # Close the PID-reuse race between the initial check and killpg for a
+        # launcher reconstructed from disk.  A live child handle does not need
+        # procfs identity because it is direct ownership evidence.
+        if child is None and not _persisted_process_or_orphan_group_matches(
+            pid,
+            command_digest=command_digest,
+            proc_start_ticks=proc_start_ticks,
+        ):
+            raise RuntimeError(
+                f"refusing to signal process group {pid}: persisted process identity "
+                "changed or is unverifiable"
+            )
+        try:
+            kill_group(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            if child is not None:
+                child.poll()
+            self._children.pop(pid, None)
+            return
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if child is not None:
+                child.poll()
+            if not _process_group_alive(pid):
+                if child is not None:
+                    child.poll()
                 self._children.pop(pid, None)
+                return
+            time.sleep(self.poll_interval_s)
+
+        try:
+            kill_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        except ProcessLookupError:
+            if child is not None:
+                child.poll()
+            self._children.pop(pid, None)
+            return
+        kill_deadline = time.monotonic() + 1.0
+        while time.monotonic() < kill_deadline:
+            if child is not None:
+                child.poll()
+            if not _process_group_alive(pid):
+                if child is not None:
+                    child.poll()
+                self._children.pop(pid, None)
+                return
+            time.sleep(self.poll_interval_s)
+        if child is not None:
+            child.poll()
+        self._children.pop(pid, None)
+        raise RuntimeError(f"process group {pid} did not terminate")
 
     def _environment(self, service: ServiceSpec) -> dict[str, str]:
         environment = os.environ.copy()
@@ -698,38 +880,47 @@ class PortableStackLauncher:
     def _lock(self) -> Iterator[None]:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         token = uuid.uuid4().hex
-        for _attempt in range(2):
-            try:
-                descriptor = os.open(
-                    self.lock_path,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                    0o600,
-                )
-            except FileExistsError:
-                owner = _read_lock_owner(self.lock_path)
-                if owner is not None and _pid_alive(owner):
-                    raise RuntimeError(
-                        f"another stack lifecycle operation owns PID {owner}"
-                    ) from None
-                try:
-                    self.lock_path.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump({"pid": os.getpid(), "token": token}, handle)
-            break
-        else:
-            raise RuntimeError("could not acquire stack lifecycle lock")
+        handle = self.lock_path.open("a+b")
+        acquired = False
         try:
+            try:
+                if os.name == "nt":
+                    if self.lock_path.stat().st_size == 0:
+                        handle.write(b"\0")
+                        handle.flush()
+                    handle.seek(0)
+                    msvcrt.locking(  # type: ignore[attr-defined]
+                        handle.fileno(), msvcrt.LK_NBLCK, 1  # type: ignore[attr-defined]
+                    )
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except (BlockingIOError, OSError) as exc:
+                owner = _read_lock_owner(self.lock_path)
+                suffix = "" if owner is None else f" owned by PID {owner}"
+                raise RuntimeError(f"another stack lifecycle operation is active{suffix}") from exc
+            handle.seek(0)
+            handle.truncate()
+            handle.write(json.dumps({"pid": os.getpid(), "token": token}).encode())
+            handle.flush()
+            try:
+                os.fchmod(handle.fileno(), 0o600)
+            except OSError:
+                pass
             yield
         finally:
-            try:
-                raw = json.loads(self.lock_path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict) and raw.get("token") == token:
-                    self.lock_path.unlink()
-            except (FileNotFoundError, json.JSONDecodeError, OSError):
-                pass
+            if acquired:
+                try:
+                    if os.name == "nt":
+                        handle.seek(0)
+                        msvcrt.locking(  # type: ignore[attr-defined]
+                            handle.fileno(), msvcrt.LK_UNLCK, 1  # type: ignore[attr-defined]
+                        )
+                    else:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            handle.close()
 
 
 def build_bedrock_stack_plan(
@@ -812,6 +1003,7 @@ def build_bedrock_stack_plan(
                 "minecraft_ai.cli",
                 "bedrock",
                 "stop",
+                "--transient",
             ),
             probes=(CommandProbe((*health_module, "bedrock"), timeout_s=5.0),),
             dependencies=("dashboard",),
@@ -1014,7 +1206,7 @@ def _validate_command(command: tuple[str, ...], *, label: str) -> None:
 
 
 def _command_digest(command: tuple[str, ...]) -> str:
-    return hashlib.sha256("\x00".join(command).encode()).hexdigest()
+    return hashlib.sha256(b"\x00".join(os.fsencode(argument) for argument in command)).hexdigest()
 
 
 def _pid_alive(pid: int) -> bool:
@@ -1024,6 +1216,10 @@ def _pid_alive(pid: int) -> bool:
         return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
     except OSError:
         return False
     return True
@@ -1066,11 +1262,164 @@ def _pid_matches(pid: int, expected_digest: str) -> bool:
             if item
         )
     except OSError:
-        # Other supported operating systems do not expose Linux procfs. The
-        # manifest still limits the target to the exact PID and all managed
-        # daemons are placed in their own process group.
-        return True
+        return False
     return _command_digest(command) == expected_digest
+
+
+def _linux_process_start_ticks(pid: int) -> int | None:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    close_paren = stat.rfind(")")
+    if close_paren < 0:
+        return None
+    # Text after comm begins at proc(5) field 3 (state), making index 19
+    # field 22: starttime in clock ticks since system boot.
+    fields = stat[close_paren + 1 :].split()
+    if len(fields) <= 19:
+        return None
+    try:
+        start_ticks = int(fields[19])
+    except ValueError:
+        return None
+    return start_ticks if start_ticks > 0 else None
+
+
+def _linux_process_identity(pid: int) -> tuple[int, tuple[str, ...]] | None:
+    """Return Linux start ticks plus exact argv for PID-reuse-safe ownership."""
+
+    start_ticks = _linux_process_start_ticks(pid)
+    try:
+        command_raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    command = tuple(
+        os.fsdecode(argument)
+        for argument in command_raw.rstrip(b"\0").split(b"\0")
+        if argument
+    )
+    if start_ticks is None or not command:
+        return None
+    return start_ticks, command
+
+
+def _persisted_pid_matches(
+    pid: int,
+    *,
+    command_digest: str | None,
+    proc_start_ticks: int | None,
+) -> bool:
+    """Verify a process reconstructed from a persisted service record."""
+
+    if _IS_WINDOWS:
+        # Retained Popen handles are safe within one launcher process, but the
+        # v1 manifest does not contain a Windows creation-time token. Never
+        # reconstruct ownership from a numeric PID alone.
+        return False
+    if (
+        not _IS_LINUX
+        or command_digest is None
+        or proc_start_ticks is None
+        or proc_start_ticks <= 0
+        or not _pid_alive(pid)
+    ):
+        return False
+    identity = _linux_process_identity(pid)
+    if identity is None:
+        return False
+    start_ticks, command = identity
+    return start_ticks == proc_start_ticks and _command_digest(command) == command_digest
+
+
+def _persisted_process_or_orphan_group_matches(
+    pid: int,
+    *,
+    command_digest: str | None,
+    proc_start_ticks: int | None,
+) -> bool:
+    if _persisted_pid_matches(
+        pid,
+        command_digest=command_digest,
+        proc_start_ticks=proc_start_ticks,
+    ):
+        return True
+    if (
+        not _IS_LINUX
+        or command_digest is None
+        or len(command_digest) != 64
+        or any(character not in "0123456789abcdef" for character in command_digest)
+        or proc_start_ticks is None
+        or proc_start_ticks <= 0
+        or _pid_alive(pid)
+    ):
+        return False
+    members = _linux_process_group_members(pid)
+    if members is None or any(member_pid == pid for member_pid, _state in members):
+        return False
+    # Linux cannot reuse a numeric PGID while that group remains populated.
+    # A missing leader PID plus visible live members therefore identifies the
+    # orphaned group retained from this modern, identity-bearing record.  This
+    # deliberately does not extend to legacy records or opaque POSIX systems.
+    return any(state not in {"Z", "X"} for _member_pid, state in members)
+
+
+def _linux_process_group_members(
+    process_group_id: int,
+) -> tuple[tuple[int, str], ...] | None:
+    try:
+        process_entries = tuple(Path("/proc").iterdir())
+    except OSError:
+        return None
+    members: list[tuple[int, str]] = []
+    for entry in process_entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        close_paren = stat.rfind(")")
+        if close_paren < 0:
+            continue
+        fields = stat[close_paren + 1 :].split()
+        if len(fields) <= 2:
+            continue
+        try:
+            group_id = int(fields[2])
+        except ValueError:
+            continue
+        if group_id == process_group_id:
+            members.append((int(entry.name), fields[0]))
+    return tuple(members)
+
+
+def _process_group_alive(process_group_id: int) -> bool:
+    """Probe a POSIX process group, including descendants after leader exit."""
+
+    if process_group_id <= 0 or _IS_WINDOWS:
+        return False
+    try:
+        os.kill(-process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    if not _IS_LINUX:
+        return True
+
+    # kill(-pgid, 0) also succeeds for groups containing only zombies.  Such a
+    # group has no executable members left and cannot respond to another
+    # signal, so do not turn harmless reaping latency into a failed shutdown.
+    members = _linux_process_group_members(process_group_id)
+    if members is None:
+        return True
+    if not members:
+        # procfs may hide other users' processes; preserve kill(0)'s result.
+        return True
+    return any(state not in {"Z", "X"} for _pid, state in members)
 
 
 def _read_lock_owner(path: Path) -> int | None:
@@ -1085,4 +1434,13 @@ def _read_lock_owner(path: Path) -> int | None:
 def _release_records(records: tuple[ServiceRecord, ...]) -> tuple[ServiceRecord, ...]:
     """Mark resources as released so a later start cannot stop unrelated replacements."""
 
-    return tuple(replace(record, owned=False, pid=None) for record in records)
+    return tuple(
+        replace(
+            record,
+            owned=False,
+            pid=None,
+            command_digest=None,
+            proc_start_ticks=None,
+        )
+        for record in records
+    )

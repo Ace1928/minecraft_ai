@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 import time
 
+from minecraft_ai.episodes import RuntimeEvent, RuntimeEventKind
 from minecraft_ai.memory import MemoryKind, MemoryRecord
 from minecraft_ai.perception import ScreenRegion, Track
 from minecraft_ai.planning import Goal
@@ -105,6 +106,36 @@ def test_memory_kind_filter(tmp_path: Path) -> None:
             )
         loaded = db.load_memories({MemoryKind.SPATIAL})
         assert set(loaded.records) == {"0"}
+
+
+def test_runtime_event_roundtrip_is_append_only_and_filterable(tmp_path: Path) -> None:
+    path = tmp_path / "state.sqlite3"
+    failed = RuntimeEvent(
+        event_id="skill-run:failed:terminal",
+        kind=RuntimeEventKind.SKILL_FAILED,
+        observed_ns=10,
+        payload={"run_id": "failed", "reported_reason": "failure-condition:health.low"},
+    )
+    succeeded = RuntimeEvent(
+        event_id="skill-run:succeeded:terminal",
+        kind=RuntimeEventKind.SKILL_SUCCEEDED,
+        observed_ns=20,
+        payload={"run_id": "succeeded"},
+    )
+    with StateDatabase(path) as db:
+        db.save_runtime_event(failed)
+        db.save_runtime_event(succeeded)
+        # A retry with the same identity cannot rewrite an append-only fact.
+        db.save_runtime_event(
+            failed.model_copy(update={"observed_ns": 99, "payload": {"run_id": "changed"}})
+        )
+
+    with StateDatabase(path) as db:
+        events = db.load_runtime_events(limit=10)
+        failures = db.load_runtime_events(kinds={RuntimeEventKind.SKILL_FAILED}, limit=10)
+
+    assert events == (succeeded, failed)
+    assert failures == (failed,)
 
 
 def test_current_schema_open_does_not_reexecute_migration_ddl(

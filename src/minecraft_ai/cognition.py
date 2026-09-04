@@ -382,7 +382,13 @@ class HighLevelController:
                     "started_ago_ms": (
                         0
                         if context.plan_started_ns == 0
-                        else max(0, int((time.monotonic_ns() - context.plan_started_ns) // 1_000_000))
+                        else max(
+                            0,
+                            int(
+                                (time.monotonic_ns() - context.plan_started_ns)
+                                // 1_000_000
+                            ),
+                        )
                     ),
                 },
                 "frame": None
@@ -407,7 +413,10 @@ class HighLevelController:
                     {
                         "speaker": line.speaker,
                         "text": line.text,
-                        "age_ms": max(0, int((time.monotonic_ns() - line.observed_ns) // 1_000_000)),
+                        "age_ms": max(
+                            0,
+                            int((time.monotonic_ns() - line.observed_ns) // 1_000_000),
+                        ),
                     }
                     for line in (latest.chat if latest is not None else ())[-12:]
                 ],

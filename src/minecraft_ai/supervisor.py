@@ -18,10 +18,18 @@ if sys.platform == "win32":
 else:
     import fcntl
 
-from platformdirs import user_runtime_dir
+from platformdirs import user_data_dir, user_runtime_dir
 
+from .agent_lifecycle import (
+    AGENT_FILE,
+    _command_sha256,
+    _linux_process_identity,
+    _pid_alive,
+    stop_agent_process,
+)
 from .emergency import emergency_reason, emergency_stop_latched
 from .safety import (
+    MAX_MOTOR_LEASE_TTL_MS,
     FakeInputBackend,
     InputBackend,
     MotorAction,
@@ -36,6 +44,37 @@ RUNTIME_DIR = Path(user_runtime_dir(APP_NAME))
 CONTROL_FILE = RUNTIME_DIR / "control.json"
 STATUS_FILE = RUNTIME_DIR / "supervisor-state.json"
 LOCK_FILE = RUNTIME_DIR / "supervisor.lock"
+OPERATOR_PAUSE_FILE = Path(user_data_dir(APP_NAME)) / "OPERATOR_PAUSE"
+_IS_LINUX = sys.platform.startswith("linux")
+
+
+def operator_pause_latched() -> bool:
+    """Return whether an operator explicitly requested persistent suspension.
+
+    Supervisor state alone is intentionally insufficient: the realtime agent
+    disarms its lease during normal fault cleanup, which also leaves the
+    supervisor in ``PAUSED``.  A malformed marker fails closed so a damaged
+    control file cannot silently re-arm gameplay.
+    """
+    # Existence is the authority bit. The JSON body is audit metadata only, so
+    # corruption or an interrupted older writer can never turn a pause into a
+    # permission to re-arm.
+    return OPERATOR_PAUSE_FILE.exists()
+
+
+def latch_operator_pause() -> None:
+    _atomic_json_write(
+        OPERATOR_PAUSE_FILE,
+        {"paused": True, "requested_at_ns": time.time_ns()},
+        mode=0o600,
+    )
+
+
+def clear_operator_pause() -> None:
+    try:
+        OPERATOR_PAUSE_FILE.unlink()
+    except FileNotFoundError:
+        pass
 
 
 if sys.platform == "win32":
@@ -62,6 +101,39 @@ else:
 
     def _release_file_lock(handle: BinaryIO) -> None:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def operator_intent_lock(*, timeout_s: float = 5.0) -> Iterator[None]:
+    """Serialize durable pause/stop/resume transactions across processes."""
+
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    path = RUNTIME_DIR / "operator-intent.lock"
+    handle: BinaryIO = path.open("a+b")
+    deadline = time.monotonic() + timeout_s
+    acquired = False
+    try:
+        while True:
+            try:
+                _acquire_file_lock(handle)
+                acquired = True
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("operator intent transaction is busy") from exc
+                time.sleep(0.01)
+        try:
+            os.fchmod(handle.fileno(), 0o600)
+        except OSError:
+            pass
+        yield
+    finally:
+        if acquired:
+            try:
+                _release_file_lock(handle)
+            except OSError:
+                pass
+        handle.close()
 
 
 def _bounded_camera_calibration_deltas(
@@ -100,6 +172,8 @@ class ControlEndpoint:
     token: str
     pid: int
     session_id: str
+    proc_start_ticks: int | None = None
+    command_sha256: str | None = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> ControlEndpoint:
@@ -111,7 +185,65 @@ class ControlEndpoint:
             token=str(raw["token"]),
             pid=int(raw["pid"]),
             session_id=str(raw["session_id"]),
+            proc_start_ticks=(
+                None
+                if raw.get("proc_start_ticks") is None
+                else int(raw["proc_start_ticks"])
+            ),
+            command_sha256=(
+                None if raw.get("command_sha256") is None else str(raw["command_sha256"])
+            ),
         )
+
+
+def _supervisor_command(command: tuple[str, ...]) -> bool:
+    return len(command) >= 3 and command[1:3] == ("-m", "minecraft_ai.supervisor")
+
+
+def control_endpoint_process_state(endpoint: ControlEndpoint) -> str:
+    """Classify the descriptor without ever treating a PID alone as identity."""
+    if not _IS_LINUX:
+        return "unverifiable"
+    if not _pid_alive(endpoint.pid):
+        return "dead"
+    if endpoint.proc_start_ticks is None or not endpoint.command_sha256:
+        return "unverifiable"
+    identity = _linux_process_identity(endpoint.pid)
+    if identity is None:
+        return "unverifiable"
+    start_ticks, command = identity
+    if (
+        start_ticks == endpoint.proc_start_ticks
+        and _command_sha256(command) == endpoint.command_sha256
+        and _supervisor_command(command)
+    ):
+        return "verified-live"
+    return "mismatch"
+
+
+def current_control_owner_state() -> str:
+    if not CONTROL_FILE.exists():
+        return "absent"
+    try:
+        endpoint = ControlEndpoint.load(CONTROL_FILE)
+    except (OSError, ValueError, TypeError, KeyError):
+        return "unreadable"
+    return control_endpoint_process_state(endpoint)
+
+
+def remove_control_endpoint_if_owned(endpoint: ControlEndpoint) -> bool:
+    """Compare the complete descriptor before removing a stale endpoint."""
+    try:
+        current = ControlEndpoint.load(CONTROL_FILE)
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    if current != endpoint:
+        return False
+    try:
+        CONTROL_FILE.unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 class Supervisor:
@@ -149,8 +281,17 @@ class Supervisor:
             self.motor.revoke("emergency-stop-latched")
             self._persist_status()
             raise RuntimeError("emergency stop is latched; explicitly reset it before starting")
+        if operator_pause_latched():
+            self.last_fault = "operator-pause-latched"
+            self.motor.revoke("operator-pause")
+            self._persist_status()
+            raise RuntimeError("operator pause is latched; explicitly resume before starting")
         self.transition(SupervisorState.STARTING)
         self.transition(SupervisorState.SAFE_IDLE)
+
+    @staticmethod
+    def _actuation_permitted() -> bool:
+        return not emergency_stop_latched() and not operator_pause_latched()
 
     def pause(self) -> None:
         with self._lock:
@@ -170,6 +311,12 @@ class Supervisor:
             if emergency_stop_latched():
                 raise RuntimeError("emergency stop is latched")
             if self.state == SupervisorState.SAFE_IDLE:
+                return
+            if self.state == SupervisorState.FAILSAFE:
+                # A faulted generation cannot safely return to SAFE_IDLE. Retire
+                # it so the persistent owner can launch a clean generation once
+                # the resume command clears the durable operator-pause marker.
+                self.stop()
                 return
             if self.state != SupervisorState.PAUSED:
                 raise RuntimeError(f"cannot resume from {self.state}")
@@ -281,6 +428,8 @@ class Supervisor:
             try:
                 return_phase = False
                 for sequence, mouse_dy in enumerate(deltas):
+                    if not self._actuation_permitted():
+                        raise RuntimeError("actuation interlock was latched during calibration")
                     if mouse_dy > 0 and not return_phase:
                         # X11 and a grabbed Bedrock pointer may coalesce a burst
                         # of relative events. Let the game consume the complete
@@ -288,6 +437,10 @@ class Supervisor:
                         # measured 90-degree return; otherwise only the net
                         # delta is observed and no physical origin is created.
                         time.sleep(0.1)
+                        if not self._actuation_permitted():
+                            raise RuntimeError(
+                                "actuation interlock was latched during calibration"
+                            )
                         return_phase = True
                     self.motor.apply(
                         lease.lease_id,
@@ -301,14 +454,25 @@ class Supervisor:
                     if sequence % 25 == 24:
                         self.motor.renew(lease.lease_id, ttl_ms=5000)
                     time.sleep(0.02)
+                    if not self._actuation_permitted():
+                        raise RuntimeError("actuation interlock was latched during calibration")
                 # Do not hand the lease to a policy before the return phase has
                 # crossed at least one Bedrock render/input boundary.
                 time.sleep(0.1)
             except Exception as exc:
-                self.fail(f"camera-calibration:{type(exc).__name__}")
+                if emergency_stop_latched():
+                    self.fail("emergency-stop-latched")
+                elif operator_pause_latched():
+                    self.motor.revoke("operator-pause")
+                else:
+                    self.fail(f"camera-calibration:{type(exc).__name__}")
                 raise
             finally:
-                self.motor.revoke("camera-calibration-complete")
+                self.motor.revoke(
+                    "operator-pause"
+                    if operator_pause_latched()
+                    else "camera-calibration-complete"
+                )
             self.world_camera_pitch_units = 0
             self.world_camera_updates = 0
             self.world_camera_origin_calibrated = True
@@ -321,6 +485,9 @@ class Supervisor:
         with self._lock:
             if emergency_stop_latched():
                 raise RuntimeError("emergency stop is latched")
+            if operator_pause_latched():
+                self.motor.revoke("operator-pause")
+                raise RuntimeError("operator pause is latched")
             if self.state != SupervisorState.SAFE_IDLE:
                 raise RuntimeError(f"cannot arm from {self.state}")
             validate_transition(self.state, SupervisorState.ARMED)
@@ -341,6 +508,12 @@ class Supervisor:
 
     def renew(self, lease_id: str, *, ttl_ms: int = 750) -> dict[str, Any]:
         with self._lock:
+            if emergency_stop_latched():
+                self.fail("emergency-stop-latched")
+                raise RuntimeError("emergency stop is latched")
+            if operator_pause_latched():
+                self.disarm("operator-pause")
+                raise RuntimeError("operator pause is latched")
             if self.state not in {SupervisorState.ARMED, SupervisorState.RUNNING}:
                 raise RuntimeError(f"cannot renew motor lease from {self.state}")
             lease = self.motor.renew(lease_id, ttl_ms=ttl_ms)
@@ -353,7 +526,15 @@ class Supervisor:
         with self._lock:
             self._require_running_lease(lease_id)
             action = MotorAction.model_validate(raw_action)
-            self.motor.apply(lease_id, action)
+            # A valid, accepted action proves that the authenticated runtime is
+            # still alive. Refresh the same capability atomically with action
+            # acceptance so the 20 Hz motor stream cannot starve a separately
+            # queued heartbeat. Silence still expires at the fixed safety cap.
+            self.motor.apply(
+                lease_id,
+                action,
+                accepted_action_ttl_ms=MAX_MOTOR_LEASE_TTL_MS,
+            )
             if action.camera_semantics == "world" and (action.mouse_dx or action.mouse_dy):
                 self.world_camera_pitch_units += action.mouse_dy
                 self.world_camera_updates += 1
@@ -392,10 +573,17 @@ class Supervisor:
                 # Chat typing is synchronous and can outlive the normal heartbeat.
                 # Extend only this already-authenticated lease around the transaction.
                 self.motor.renew(lease_id, ttl_ms=5000)
-                actuator(text)
+                actuator(text, input_permitted=self._actuation_permitted)
+                if not self._actuation_permitted():
+                    raise RuntimeError("actuation interlock was latched during chat")
                 self.motor.renew(lease_id, ttl_ms=3000)
             except Exception as exc:
-                self.fail(f"chat-backend-fault:{type(exc).__name__}")
+                if emergency_stop_latched():
+                    self.fail("emergency-stop-latched")
+                elif operator_pause_latched():
+                    self.disarm("operator-pause")
+                else:
+                    self.fail(f"chat-backend-fault:{type(exc).__name__}")
                 raise
             return {"sent": True, "characters": len(text)}
 
@@ -403,6 +591,9 @@ class Supervisor:
         if emergency_stop_latched():
             self.fail("emergency-stop-latched")
             raise RuntimeError("emergency stop is latched")
+        if operator_pause_latched():
+            self.disarm("operator-pause")
+            raise RuntimeError("operator pause is latched")
         if self.state != SupervisorState.RUNNING:
             raise RuntimeError(f"motor interaction requires RUNNING, got {self.state}")
         lease = self.motor.lease
@@ -415,7 +606,10 @@ class Supervisor:
         with self._lock:
             if emergency_stop_latched():
                 self.fail("emergency-stop-latched")
-                return
+                raise RuntimeError("emergency stop is latched")
+            if operator_pause_latched():
+                self.disarm("operator-pause")
+                raise RuntimeError("operator pause is latched")
             if self.state != SupervisorState.ARMED:
                 raise RuntimeError(f"cannot activate from {self.state}")
             lease = self.motor.lease
@@ -429,7 +623,12 @@ class Supervisor:
 
     def disarm(self, reason: str = "operator-disarm") -> None:
         with self._lock:
-            self.motor.revoke(reason)
+            effective_reason = (
+                "operator-pause"
+                if self.state == SupervisorState.PAUSED and operator_pause_latched()
+                else reason
+            )
+            self.motor.revoke(effective_reason)
             if self.state in {SupervisorState.ARMED, SupervisorState.RUNNING}:
                 validate_transition(self.state, SupervisorState.PAUSED)
                 self.state = SupervisorState.PAUSED
@@ -482,6 +681,7 @@ class Supervisor:
                 "backend": self.backend.backend_id,
                 "live_capable": self.backend.live_capable,
                 "motor_lease_active": lease is not None and not lease.expired(),
+                "motor_lease_id": lease.lease_id if lease is not None else None,
                 "motor_target_instance": lease.target_instance if lease is not None else None,
                 "motor_revocation_reason": self.motor.revocation_reason,
                 "held_keys": held_keys,
@@ -497,6 +697,7 @@ class Supervisor:
                 },
                 "last_fault": self.last_fault,
                 "emergency_stop_latched": emergency_stop_latched(),
+                "operator_pause_latched": operator_pause_latched(),
                 "uptime_s": round(
                     (time.monotonic_ns() - self.started_monotonic_ns) / 1e9,
                     3,
@@ -517,12 +718,17 @@ class Supervisor:
         server.settimeout(self.watchdog_interval_s)
         self._server = server
         host, port = server.getsockname()
+        identity = _linux_process_identity(os.getpid()) if _IS_LINUX else None
+        if _IS_LINUX and (identity is None or not _supervisor_command(identity[1])):
+            raise RuntimeError("could not establish supervisor process identity")
         endpoint = ControlEndpoint(
             host=str(host),
             port=int(port),
             token=secrets.token_urlsafe(32),
             pid=os.getpid(),
             session_id=self.session_id,
+            proc_start_ticks=None if identity is None else identity[0],
+            command_sha256=None if identity is None else _command_sha256(identity[1]),
         )
         self._endpoint = endpoint
         _atomic_json_write(CONTROL_FILE, asdict(endpoint), mode=0o600)
@@ -534,6 +740,10 @@ class Supervisor:
                     self.fail(emergency_reason() or "emergency-stop-latched")
                     self.stop()
                     break
+                if operator_pause_latched() and (
+                    self.state != SupervisorState.PAUSED or self.motor.lease is not None
+                ):
+                    self.disarm("operator-pause")
                 if self.motor.check_expiry():
                     self.fail("motor-lease-watchdog-expired")
                 try:
@@ -577,14 +787,35 @@ class Supervisor:
             if command == "status":
                 result = self.status()
             elif command == "pause":
-                self.pause()
-                result = self.status()
+                with operator_intent_lock(), self._lock:
+                    pause_persisted = True
+                    try:
+                        latch_operator_pause()
+                    except OSError:
+                        pause_persisted = False
+                    self.pause()
+                    stop_agent_process(timeout_s=1.0)
+                    result = self.status()
+                    result["operator_pause_persisted"] = pause_persisted
+                    result["agent_containment_confirmed"] = not AGENT_FILE.exists()
             elif command == "resume":
-                self.resume()
-                result = self.status()
+                with operator_intent_lock(), self._lock:
+                    self.resume()
+                    clear_operator_pause()
+                    result = self.status()
             elif command == "stop":
-                self.stop()
-                result = self.status()
+                with operator_intent_lock(), self._lock:
+                    pause_persisted = True
+                    if bool(payload.get("persistent_intent", True)):
+                        try:
+                            latch_operator_pause()
+                        except OSError:
+                            pause_persisted = False
+                    self.stop()
+                    stop_agent_process(timeout_s=1.0)
+                    result = self.status()
+                    result["operator_pause_persisted"] = pause_persisted
+                    result["agent_containment_confirmed"] = not AGENT_FILE.exists()
             elif command == "attach-bedrock-x11":
                 display = str(payload.get("display", ""))
                 window_id = int(payload.get("window_id", 0))
@@ -661,14 +892,12 @@ class Supervisor:
             current = ControlEndpoint.load(CONTROL_FILE)
         except Exception:
             return False
-        return current.pid == endpoint.pid and current.session_id == endpoint.session_id
+        return current == endpoint
 
     def _remove_control_file_if_owned(self) -> None:
-        if self._owns_control_file():
-            try:
-                CONTROL_FILE.unlink()
-            except FileNotFoundError:
-                pass
+        endpoint = self._endpoint
+        if endpoint is not None:
+            remove_control_endpoint_if_owned(endpoint)
 
 
 @contextmanager
@@ -701,6 +930,8 @@ def send_command(
     if not 0.05 <= timeout_s <= 30.0:
         raise ValueError("supervisor command timeout must be in [0.05, 30] seconds")
     endpoint = ControlEndpoint.load()
+    if _IS_LINUX and control_endpoint_process_state(endpoint) != "verified-live":
+        raise RuntimeError("supervisor control endpoint does not match a live owned process")
     request = {"token": endpoint.token, "command": command, **payload}
     with socket.create_connection((endpoint.host, endpoint.port), timeout=timeout_s) as sock:
         _send_json_line(sock, request)

@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 
 import pytest
+import typer
 
+from minecraft_ai.cli import _require_autonomous_isolated_session
 from minecraft_ai.platforms.bedrock_linux import _read_install_record
 from minecraft_ai.platforms.bedrock_session import (
     DEFAULT_BEDROCK_HEIGHT,
@@ -166,6 +168,41 @@ def test_bedrock_menu_navigation_uses_x11_arrow_keysyms() -> None:
     assert _x11_keysym_name("down") == "Down"
     assert _x11_keysym_name("left") == "Left"
     assert _x11_keysym_name("right") == "Right"
+
+
+@pytest.mark.parametrize("mode", ("direct", "host-monitor"))
+def test_autonomous_live_cli_rejects_host_display_sessions(mode: str) -> None:
+    session = BedrockSession(
+        display=":0",
+        host_display=":0",
+        xserver_pid=0,
+        launcher_pid=200,
+        width=1920,
+        height=1080,
+        created_ns=1,
+        launcher_command=("bedrock-on-linux", "play"),
+        mode=mode,
+    )
+
+    with pytest.raises(typer.BadParameter, match="requires a nested Weston/Xephyr"):
+        _require_autonomous_isolated_session(session)
+
+
+@pytest.mark.parametrize("mode", ("weston", "xephyr"))
+def test_autonomous_live_cli_accepts_nested_sessions(mode: str) -> None:
+    session = BedrockSession(
+        display=":71",
+        host_display=":0",
+        xserver_pid=100,
+        launcher_pid=200,
+        width=1920,
+        height=1080,
+        created_ns=1,
+        launcher_command=("bedrock-on-linux", "play"),
+        mode=mode,
+    )
+
+    _require_autonomous_isolated_session(session)
 
 
 def test_nested_session_is_not_alive_when_launcher_exited(tmp_path: Path, monkeypatch) -> None:

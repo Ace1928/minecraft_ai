@@ -35,6 +35,9 @@ class TrajectoryConfig(BaseModel):
     enabled: bool = True
     shard_steps: int = Field(default=256, ge=16, le=4096)
     queue_size: int = Field(default=512, ge=32, le=8192)
+    frame_max_width: int = Field(default=256, ge=128, le=1280)
+    frame_jpeg_quality: int = Field(default=80, ge=40, le=95)
+    min_free_disk_gib: float = Field(default=5.0, ge=0.5, le=1024.0)
 
 
 class PolicyConfig(BaseModel):

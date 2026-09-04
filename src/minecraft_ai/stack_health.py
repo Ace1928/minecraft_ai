@@ -7,10 +7,13 @@ from typing import Callable
 
 def _start_permitted() -> tuple[bool, dict[str, object]]:
     from .emergency import emergency_reason, emergency_stop_latched
+    from .supervisor import operator_pause_latched
 
     latched = emergency_stop_latched()
-    return not latched, {
+    paused = operator_pause_latched()
+    return not latched and not paused, {
         "emergency_stop_latched": latched,
+        "operator_pause_latched": paused,
         "reason": emergency_reason(),
     }
 
@@ -107,7 +110,7 @@ def _live_agent_health() -> tuple[bool, dict[str, object]]:
 
 
 def _stop_agent() -> tuple[bool, dict[str, object]]:
-    from .agent_lifecycle import stop_agent_process
+    from .agent_lifecycle import AGENT_FILE, stop_agent_process
     from .supervisor import send_command, supervisor_alive
 
     stopped = stop_agent_process()
@@ -117,12 +120,15 @@ def _stop_agent() -> tuple[bool, dict[str, object]]:
             current = send_command("status")
             if current.get("state") in {"ARMED", "RUNNING"}:
                 current = send_command("disarm")
-            if current.get("state") == "PAUSED":
-                current = send_command("resume")
             state = current.get("state")
         except Exception as exc:
             return False, {"agent_stop_attempted": stopped, "error": f"{type(exc).__name__}: {exc}"}
-    return True, {"agent_stop_attempted": stopped, "supervisor_state": state}
+    contained = not AGENT_FILE.exists()
+    return contained, {
+        "agent_stop_attempted": stopped,
+        "agent_containment_confirmed": contained,
+        "supervisor_state": state,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:

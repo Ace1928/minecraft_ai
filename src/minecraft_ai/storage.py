@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .datasets.schema import TrajectoryManifest
+from .episodes import RuntimeEvent, RuntimeEventKind
 from .memory import MemoryKind, MemoryRecord, MemoryStore
 from .planning import Goal
 from .perception import Track
@@ -462,6 +463,50 @@ class StateDatabase:
         for (payload,) in rows:
             store.upsert(MemoryRecord.model_validate_json(payload))
         return store
+
+    def save_runtime_event(self, event: RuntimeEvent) -> None:
+        """Persist one idempotent append-only runtime observation."""
+
+        self.connection.execute(
+            """
+            INSERT INTO events(event_id, trajectory_id, step_index, observed_ns, kind, payload)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id) DO NOTHING
+            """,
+            (
+                event.event_id,
+                event.trajectory_id,
+                event.step_index,
+                event.observed_ns,
+                event.kind.value,
+                event.model_dump_json(),
+            ),
+        )
+        self.connection.commit()
+
+    def load_runtime_events(
+        self,
+        *,
+        kinds: set[RuntimeEventKind] | None = None,
+        limit: int = 100,
+    ) -> tuple[RuntimeEvent, ...]:
+        if limit < 1 or limit > 1000:
+            raise ValueError("runtime event limit must be between 1 and 1000")
+        parameters: list[object] = []
+        where = ""
+        if kinds:
+            selected_kinds = sorted(kinds, key=lambda kind: kind.value)
+            placeholders = ",".join("?" for _ in selected_kinds)
+            where = f" WHERE kind IN ({placeholders})"
+            parameters.extend(kind.value for kind in selected_kinds)
+        parameters.append(limit)
+        rows = self.connection.execute(
+            "SELECT payload FROM events"
+            + where
+            + " ORDER BY observed_ns DESC, event_id DESC LIMIT ?",
+            tuple(parameters),
+        ).fetchall()
+        return tuple(RuntimeEvent.model_validate_json(payload) for (payload,) in rows)
 
     def save_place(self, record: PlaceRecord) -> None:
         self.connection.execute(

@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
-import re
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from platformdirs import user_runtime_dir
 
+from ..agent_lifecycle import _command_sha256, _linux_process_identity
 from .bedrock_linux import discover_bedrock_linux_install
 from .bedrock_x11 import (
     HostMonitorBinding,
@@ -27,8 +30,47 @@ from .bedrock_x11 import (
 
 RUNTIME_DIR = Path(user_runtime_dir("minecraft-ai"))
 BEDROCK_SESSION_FILE = RUNTIME_DIR / "bedrock-session.json"
+BEDROCK_LIFECYCLE_LOCK = RUNTIME_DIR / "bedrock-session.lock"
 DEFAULT_BEDROCK_WIDTH = 1920
 DEFAULT_BEDROCK_HEIGHT = 1080
+_IS_LINUX = sys.platform.startswith("linux")
+
+
+@contextmanager
+def bedrock_lifecycle_lock(*, wait_timeout_s: float = 0.0) -> Iterator[None]:
+    """Serialize check/stop/launch/persist across CLI and recovery processes."""
+
+    if os.name != "posix":
+        raise IsolationError("managed Bedrock lifecycle locking is Linux-only")
+    if wait_timeout_s < 0:
+        raise ValueError("Bedrock lifecycle lock timeout cannot be negative")
+    import fcntl
+
+    BEDROCK_LIFECYCLE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    handle = BEDROCK_LIFECYCLE_LOCK.open("a+b")
+    try:
+        deadline = time.monotonic() + wait_timeout_s
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as exc:
+                if time.monotonic() >= deadline:
+                    raise IsolationError(
+                        "another Bedrock lifecycle operation is already active"
+                    ) from exc
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        try:
+            os.fchmod(handle.fileno(), 0o600)
+        except OSError:
+            pass
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
 
 
 @dataclass(frozen=True)
@@ -41,6 +83,10 @@ class BedrockSession:
     height: int
     created_ns: int
     launcher_command: tuple[str, ...]
+    xserver_proc_start_ticks: int | None = None
+    xserver_command_sha256: str | None = None
+    launcher_proc_start_ticks: int | None = None
+    launcher_command_sha256: str | None = None
     mode: str = "xephyr"
     compositor_fullscreen: bool = False
     wayland_socket: str | None = None
@@ -55,8 +101,9 @@ class BedrockSession:
     host_monitor_bound_ns: int | None = None
 
     @classmethod
-    def load(cls, path: Path = BEDROCK_SESSION_FILE) -> BedrockSession:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+    def load(cls, path: Path | None = None) -> BedrockSession:
+        selected = BEDROCK_SESSION_FILE if path is None else path
+        raw = json.loads(selected.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise TypeError("invalid Bedrock session descriptor")
         command = raw.get("launcher_command")
@@ -71,6 +118,26 @@ class BedrockSession:
             height=int(raw["height"]),
             created_ns=int(raw["created_ns"]),
             launcher_command=tuple(command),
+            xserver_proc_start_ticks=(
+                None
+                if raw.get("xserver_proc_start_ticks") is None
+                else int(raw["xserver_proc_start_ticks"])
+            ),
+            xserver_command_sha256=(
+                None
+                if raw.get("xserver_command_sha256") is None
+                else str(raw["xserver_command_sha256"])
+            ),
+            launcher_proc_start_ticks=(
+                None
+                if raw.get("launcher_proc_start_ticks") is None
+                else int(raw["launcher_proc_start_ticks"])
+            ),
+            launcher_command_sha256=(
+                None
+                if raw.get("launcher_command_sha256") is None
+                else str(raw["launcher_command_sha256"])
+            ),
             mode=str(raw.get("mode", "xephyr")),
             compositor_fullscreen=bool(raw.get("compositor_fullscreen", False)),
             wayland_socket=None
@@ -103,17 +170,18 @@ class BedrockSession:
             else int(raw["host_monitor_bound_ns"]),
         )
 
-    def persist(self, path: Path = BEDROCK_SESSION_FILE) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def persist(self, path: Path | None = None) -> None:
+        selected = BEDROCK_SESSION_FILE if path is None else path
+        selected.parent.mkdir(parents=True, exist_ok=True)
         payload: dict[str, Any] = asdict(self)
         payload["launcher_command"] = list(self.launcher_command)
-        staged = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        staged = selected.with_name(f".{selected.name}.{os.getpid()}.tmp")
         staged.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         try:
             os.chmod(staged, 0o600)
         except OSError:
             pass
-        staged.replace(path)
+        staged.replace(selected)
 
     def find_window(self) -> int | None:
         return find_minecraft_window(
@@ -166,6 +234,84 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _session_process_state(session: BedrockSession, *, launcher: bool) -> str:
+    pid = session.launcher_pid if launcher else session.xserver_pid
+    if pid <= 0:
+        return "absent"
+    if not _pid_alive(pid):
+        return "dead"
+    if not _IS_LINUX:
+        return "unverifiable"
+    start_ticks = (
+        session.launcher_proc_start_ticks if launcher else session.xserver_proc_start_ticks
+    )
+    expected_digest = (
+        session.launcher_command_sha256 if launcher else session.xserver_command_sha256
+    )
+    if start_ticks is None or not expected_digest:
+        return "unverifiable"
+    identity = _linux_process_identity(pid)
+    if identity is None:
+        return "unverifiable"
+    observed_ticks, command = identity
+    if launcher:
+        configured_name = Path(session.launcher_command[0]).name.casefold()
+        command_ok = "play" in command and any(
+            Path(argument).name.casefold() == configured_name for argument in command
+        )
+    else:
+        expected_name = "weston" if session.mode == "weston" else "xephyr"
+        command_ok = bool(command) and Path(command[0]).name.casefold() == expected_name
+    if (
+        observed_ticks == start_ticks
+        and _command_sha256(command) == expected_digest
+        and command_ok
+    ):
+        return "verified-live"
+    return "mismatch"
+
+
+def _session_identity_recorded(session: BedrockSession, *, launcher: bool) -> bool:
+    start_ticks = (
+        session.launcher_proc_start_ticks if launcher else session.xserver_proc_start_ticks
+    )
+    digest = session.launcher_command_sha256 if launcher else session.xserver_command_sha256
+    return (
+        start_ticks is not None
+        and start_ticks > 0
+        and digest is not None
+        and len(digest) == 64
+        and all(character in "0123456789abcdef" for character in digest.casefold())
+    )
+
+
+def _required_process_identity(
+    pid: int,
+    *,
+    label: str,
+    expected_program: str | None = None,
+    required_argument: str | None = None,
+) -> tuple[int, str]:
+    """Capture identity after a script launcher has completed its initial exec."""
+
+    deadline = time.monotonic() + 1.0
+    while True:
+        identity = _linux_process_identity(pid) if _IS_LINUX else None
+        if identity is not None:
+            command = identity[1]
+            program_ready = expected_program is None or any(
+                Path(argument).name.casefold() == expected_program.casefold()
+                for argument in command
+            )
+            argument_ready = required_argument is None or required_argument in command
+            if program_ready and argument_ready:
+                return identity[0], _command_sha256(command)
+        if not _pid_alive(pid) or time.monotonic() >= deadline:
+            break
+        time.sleep(0.01)
+    raise IsolationError(f"could not establish stable {label} process identity")
+
+
 def bedrock_session_alive(session: BedrockSession | None = None) -> bool:
     current = session
     if current is None:
@@ -174,10 +320,10 @@ def bedrock_session_alive(session: BedrockSession | None = None) -> bool:
         except (OSError, ValueError, TypeError, KeyError):
             return False
     if current.mode in {"direct", "host-monitor"}:
-        return _pid_alive(current.launcher_pid)
+        return _session_process_state(current, launcher=True) == "verified-live"
     return (
-        _pid_alive(current.xserver_pid)
-        and _pid_alive(current.launcher_pid)
+        _session_process_state(current, launcher=False) == "verified-live"
+        and _session_process_state(current, launcher=True) == "verified-live"
         and _x_socket(current.display).exists()
     )
 
@@ -252,6 +398,8 @@ def launch_xephyr_bedrock_session(
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    launcher: subprocess.Popen[bytes] | None = None
+    session: BedrockSession | None = None
     try:
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
@@ -279,6 +427,17 @@ def launch_xephyr_bedrock_session(
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+        xserver_start, xserver_digest = _required_process_identity(
+            xproc.pid,
+            label="Xephyr",
+            expected_program=Path(xephyr).name,
+        )
+        launcher_start, launcher_digest = _required_process_identity(
+            launcher.pid,
+            label="Bedrock launcher",
+            expected_program=Path(launcher_command[0]).name,
+            required_argument="play",
+        )
         session = BedrockSession(
             display=chosen,
             host_display=host_display,
@@ -288,11 +447,22 @@ def launch_xephyr_bedrock_session(
             height=height,
             created_ns=time.monotonic_ns(),
             launcher_command=launcher_command,
+            xserver_proc_start_ticks=xserver_start,
+            xserver_command_sha256=xserver_digest,
+            launcher_proc_start_ticks=launcher_start,
+            launcher_command_sha256=launcher_digest,
         )
         session.persist()
         return session
-    except Exception:
-        _terminate_process_group(xproc.pid)
+    except Exception as exc:
+        cleanup_ok = True
+        if launcher is not None:
+            cleanup_ok = _terminate_spawned_process_group(launcher) and cleanup_ok
+        cleanup_ok = _terminate_spawned_process_group(xproc) and cleanup_ok
+        if session is not None and cleanup_ok:
+            _remove_session_descriptor_if_owned(session)
+        if not cleanup_ok:
+            raise IsolationError("failed Xephyr launch left process cleanup unconfirmed") from exc
         raise
 
 
@@ -343,6 +513,8 @@ def launch_weston_bedrock_session(
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    launcher: subprocess.Popen[bytes] | None = None
+    session: BedrockSession | None = None
     try:
         display = _wait_for_weston_xwayland(compositor, compositor_log)
         require_isolated_display(display, host_display)
@@ -361,6 +533,17 @@ def launch_weston_bedrock_session(
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+        xserver_start, xserver_digest = _required_process_identity(
+            compositor.pid,
+            label="Weston",
+            expected_program=Path(weston).name,
+        )
+        launcher_start, launcher_digest = _required_process_identity(
+            launcher.pid,
+            label="Bedrock launcher",
+            expected_program=Path(launcher_command[0]).name,
+            required_argument="play",
+        )
         session = BedrockSession(
             display=display,
             host_display=host_display,
@@ -370,6 +553,10 @@ def launch_weston_bedrock_session(
             height=height,
             created_ns=time.monotonic_ns(),
             launcher_command=launcher_command,
+            xserver_proc_start_ticks=xserver_start,
+            xserver_command_sha256=xserver_digest,
+            launcher_proc_start_ticks=launcher_start,
+            launcher_command_sha256=launcher_digest,
             mode="weston",
             compositor_fullscreen=fullscreen,
             wayland_socket=wayland_socket,
@@ -378,8 +565,15 @@ def launch_weston_bedrock_session(
         )
         session.persist()
         return session
-    except Exception:
-        _terminate_process_group(compositor.pid)
+    except Exception as exc:
+        cleanup_ok = True
+        if launcher is not None:
+            cleanup_ok = _terminate_spawned_process_group(launcher) and cleanup_ok
+        cleanup_ok = _terminate_spawned_process_group(compositor) and cleanup_ok
+        if session is not None and cleanup_ok:
+            _remove_session_descriptor_if_owned(session)
+        if not cleanup_ok:
+            raise IsolationError("failed Weston launch left process cleanup unconfirmed") from exc
         raise
 
 
@@ -493,19 +687,36 @@ def launch_direct_bedrock_session(
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    session = BedrockSession(
-        display=host_display,
-        host_display=host_display,
-        xserver_pid=0,
-        launcher_pid=launcher.pid,
-        width=width,
-        height=height,
-        created_ns=time.monotonic_ns(),
-        launcher_command=launcher_command,
-        mode="direct",
-    )
-    session.persist()
-    return session
+    session: BedrockSession | None = None
+    try:
+        launcher_start, launcher_digest = _required_process_identity(
+            launcher.pid,
+            label="Bedrock launcher",
+            expected_program=Path(launcher_command[0]).name,
+            required_argument="play",
+        )
+        session = BedrockSession(
+            display=host_display,
+            host_display=host_display,
+            xserver_pid=0,
+            launcher_pid=launcher.pid,
+            width=width,
+            height=height,
+            created_ns=time.monotonic_ns(),
+            launcher_command=launcher_command,
+            launcher_proc_start_ticks=launcher_start,
+            launcher_command_sha256=launcher_digest,
+            mode="direct",
+        )
+        session.persist()
+        return session
+    except Exception as exc:
+        cleanup_ok = _terminate_spawned_process_group(launcher)
+        if session is not None and cleanup_ok:
+            _remove_session_descriptor_if_owned(session)
+        if not cleanup_ok:
+            raise IsolationError("failed direct launch left process cleanup unconfirmed") from exc
+        raise
 
 
 def bind_direct_session_to_monitor(
@@ -565,54 +776,453 @@ def stop_bedrock_session(session: BedrockSession | None = None) -> None:
     if current is None:
         try:
             current = BedrockSession.load()
-        except (OSError, ValueError, TypeError, KeyError):
+        except FileNotFoundError:
             return
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise IsolationError(
+                "managed Bedrock descriptor is unreadable; refusing to claim containment: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
     if current.mode not in {"xephyr", "weston", "direct", "host-monitor"}:
         raise IsolationError(f"unsupported Bedrock session mode: {current.mode!r}")
     if current.mode in {"xephyr", "weston"}:
         require_isolated_display(current.display, current.host_display)
-    window_id = current.find_window() if bedrock_session_alive(current) else None
-    if window_id is not None:
-        request_window_close(
-            current.display,
-            window_id,
-            host_display=current.host_display,
-            allow_host=(current.mode in {"direct", "host-monitor"}),
+    launcher_state = _session_process_state(current, launcher=True)
+    xserver_state = (
+        _session_process_state(current, launcher=False)
+        if current.mode in {"xephyr", "weston"}
+        else "absent"
+    )
+    blocked = [
+        label
+        for label, state in (("launcher", launcher_state), ("compositor", xserver_state))
+        if state in {"unverifiable", "mismatch"}
+    ]
+    if blocked:
+        labels = ", ".join(blocked)
+        raise IsolationError(
+            f"refusing to stop Bedrock: {labels} process identity is unverifiable or changed"
         )
-        deadline = time.monotonic() + 12.0
-        while time.monotonic() < deadline and _pid_alive(current.launcher_pid):
-            time.sleep(0.1)
-    if _pid_alive(current.launcher_pid):
-        _terminate_process_group(current.launcher_pid)
-    if current.mode in {"xephyr", "weston"}:
-        _terminate_process_group(current.xserver_pid)
+
+    errors: list[str] = []
+    launcher_stopped = launcher_state == "dead" and not _process_group_alive(
+        current.launcher_pid
+    )
+    if launcher_state == "verified-live":
+        try:
+            window_id = current.find_window()
+        except (OSError, IsolationError):
+            window_id = None
+        if window_id is not None:
+            try:
+                request_window_close(
+                    current.display,
+                    window_id,
+                    host_display=current.host_display,
+                    allow_host=(current.mode in {"direct", "host-monitor"}),
+                )
+            except (OSError, IsolationError):
+                pass
+            else:
+                deadline = time.monotonic() + 8.0
+                while time.monotonic() < deadline:
+                    leader_state = _session_process_state(current, launcher=True)
+                    if leader_state == "dead" and not _process_group_alive(
+                        current.launcher_pid
+                    ):
+                        launcher_stopped = True
+                        break
+                    if leader_state in {"mismatch", "unverifiable"}:
+                        errors.append("launcher identity changed during graceful shutdown")
+                        break
+                    time.sleep(0.1)
+        if not launcher_stopped and not errors:
+            leader_state = _session_process_state(current, launcher=True)
+            try:
+                if leader_state == "verified-live":
+                    _terminate_verified_session_group(current, launcher=True)
+                elif leader_state == "dead" and _process_group_alive(
+                    current.launcher_pid
+                ):
+                    if not _session_identity_recorded(current, launcher=True):
+                        raise IsolationError(
+                            "refusing orphaned launcher cleanup without modern identity metadata"
+                        )
+                    _terminate_orphaned_process_group(
+                        current.launcher_pid,
+                        label="launcher",
+                    )
+                else:
+                    raise IsolationError("launcher identity changed during shutdown")
+                launcher_stopped = True
+            except IsolationError as exc:
+                errors.append(str(exc))
+    elif launcher_state == "dead" and _process_group_alive(current.launcher_pid):
+        try:
+            if not _session_identity_recorded(current, launcher=True):
+                raise IsolationError(
+                    "refusing orphaned launcher cleanup without modern identity metadata"
+                )
+            _terminate_orphaned_process_group(current.launcher_pid, label="launcher")
+            launcher_stopped = True
+        except IsolationError as exc:
+            errors.append(str(exc))
+
+    verified_private_processes = (
+        _private_display_processes(current) if xserver_state == "verified-live" else {}
+    )
+    dead_weston_processes = (
+        _private_display_processes(current, require_wayland_nonce=True)
+        if xserver_state == "dead"
+        and current.mode == "weston"
+        and current.wayland_socket is not None
+        else {}
+    )
+    compositor_stopped = xserver_state == "dead" and not _process_group_alive(
+        current.xserver_pid
+    )
+    if xserver_state == "verified-live":
+        try:
+            _terminate_verified_session_group(current, launcher=False)
+            compositor_stopped = True
+        except IsolationError as exc:
+            errors.append(str(exc))
+    elif xserver_state == "dead" and _process_group_alive(current.xserver_pid):
+        try:
+            if not _session_identity_recorded(current, launcher=False):
+                raise IsolationError(
+                    "refusing orphaned compositor cleanup without modern identity metadata"
+                )
+            _terminate_orphaned_process_group(current.xserver_pid, label="compositor")
+            compositor_stopped = True
+        except IsolationError as exc:
+            errors.append(str(exc))
+
+    if (
+        current.mode in {"xephyr", "weston"}
+        and xserver_state == "verified-live"
+        and compositor_stopped
+    ):
+        try:
+            _terminate_private_display_processes(
+                current,
+                expected=verified_private_processes,
+            )
+            launcher_stopped = True
+        except IsolationError as exc:
+            errors.append(str(exc))
+    elif current.mode == "weston" and xserver_state == "dead" and dead_weston_processes:
+        try:
+            _terminate_private_display_processes(
+                current,
+                expected=dead_weston_processes,
+                require_wayland_nonce=True,
+            )
+            launcher_stopped = not _process_group_alive(current.launcher_pid)
+        except IsolationError as exc:
+            errors.append(str(exc))
+    elif (
+        current.mode in {"xephyr", "weston"}
+        and xserver_state == "dead"
+        and _private_display_processes(current)
+    ):
+        errors.append("private Bedrock clients remain after their compositor leader died")
+
+    if not launcher_stopped:
+        errors.append("Bedrock launcher containment could not be confirmed stopped")
+
+    if errors:
+        raise IsolationError("; ".join(errors))
+    _remove_session_descriptor_if_owned(current)
+
+
+def _remove_session_descriptor_if_owned(session: BedrockSession) -> None:
     try:
         persisted = BedrockSession.load()
     except (OSError, ValueError, TypeError, KeyError):
-        persisted = None
-    if persisted is not None and persisted.created_ns == current.created_ns:
-        try:
-            BEDROCK_SESSION_FILE.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def _terminate_process_group(pid: int) -> None:
-    if pid <= 0:
         return
-    kill_group = getattr(os, "killpg", None)
-    if not callable(kill_group):
+    if persisted != session:
         return
     try:
-        kill_group(pid, signal.SIGTERM)
-    except (OSError, ProcessLookupError):
-        return
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline:
-        if not _pid_alive(pid):
-            return
-        time.sleep(0.05)
-    try:
-        kill_group(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-    except (OSError, ProcessLookupError):
+        BEDROCK_SESSION_FILE.unlink()
+    except FileNotFoundError:
         pass
+
+
+def _process_group_alive(group_id: int) -> bool:
+    if group_id <= 0 or os.name != "posix":
+        return False
+    try:
+        os.killpg(group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    if not _IS_LINUX:
+        return True
+    found_member = False
+    try:
+        entries = tuple(Path("/proc").iterdir())
+    except OSError:
+        return True
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = entry.joinpath("stat").read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        close_paren = stat.rfind(")")
+        if close_paren < 0:
+            continue
+        fields = stat[close_paren + 1 :].split()
+        if len(fields) <= 2:
+            continue
+        try:
+            process_group = int(fields[2])
+        except ValueError:
+            continue
+        if process_group != group_id:
+            continue
+        found_member = True
+        if fields[0] not in {"Z", "X"}:
+            return True
+    return not found_member
+
+
+def _wait_for_process_group_exit(group_id: int, *, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not _process_group_alive(group_id):
+            return True
+        time.sleep(0.05)
+    return not _process_group_alive(group_id)
+
+
+def _terminate_spawned_process_group(process: subprocess.Popen[bytes]) -> bool:
+    """Best-effort cleanup for a process created by this invocation."""
+
+    group_id = process.pid
+    if group_id <= 0 or os.name != "posix":
+        return False
+    try:
+        os.killpg(group_id, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    if not _wait_for_process_group_exit(group_id, timeout_s=2.0):
+        try:
+            os.killpg(group_id, getattr(signal, "SIGKILL", signal.SIGTERM))
+        except (OSError, ProcessLookupError):
+            pass
+        _wait_for_process_group_exit(group_id, timeout_s=1.0)
+    try:
+        process.wait(timeout=0.2)
+    except (subprocess.TimeoutExpired, ChildProcessError, OSError):
+        pass
+    return not _process_group_alive(group_id)
+
+
+def _terminate_verified_session_group(
+    session: BedrockSession,
+    *,
+    launcher: bool,
+) -> None:
+    label = "launcher" if launcher else "compositor"
+    pid = session.launcher_pid if launcher else session.xserver_pid
+    if _session_process_state(session, launcher=launcher) != "verified-live":
+        if not _pid_alive(pid) and not _process_group_alive(pid):
+            return
+        raise IsolationError(f"refusing to signal {label}: process identity changed")
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError as exc:
+        raise IsolationError(f"could not stop Bedrock {label}: {exc}") from exc
+    if _wait_for_process_group_exit(pid, timeout_s=3.0):
+        return
+    # A non-empty process group retains its identity after the leader exits, so
+    # this escalation cannot cross into a newly reused numeric PID group.
+    try:
+        os.killpg(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+    except ProcessLookupError:
+        return
+    except OSError as exc:
+        raise IsolationError(f"could not kill Bedrock {label} group: {exc}") from exc
+    if not _wait_for_process_group_exit(pid, timeout_s=2.0):
+        raise IsolationError(f"Bedrock {label} process group did not stop")
+
+
+def _terminate_orphaned_process_group(group_id: int, *, label: str) -> None:
+    """Stop descendants while their non-empty Linux PGID remains reserved."""
+
+    if _pid_alive(group_id) or not _process_group_alive(group_id):
+        raise IsolationError(f"refusing to signal {label}: orphaned group state changed")
+    try:
+        os.killpg(group_id, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError as exc:
+        raise IsolationError(f"could not stop orphaned Bedrock {label}: {exc}") from exc
+    if _wait_for_process_group_exit(group_id, timeout_s=3.0):
+        return
+    try:
+        os.killpg(group_id, getattr(signal, "SIGKILL", signal.SIGTERM))
+    except ProcessLookupError:
+        return
+    except OSError as exc:
+        raise IsolationError(f"could not kill orphaned Bedrock {label}: {exc}") from exc
+    if not _wait_for_process_group_exit(group_id, timeout_s=2.0):
+        raise IsolationError(f"orphaned Bedrock {label} process group did not stop")
+
+
+def _private_display_processes(
+    session: BedrockSession,
+    *,
+    require_wayland_nonce: bool = False,
+) -> dict[int, int]:
+    """Return exact identities for clients of this unique nested display."""
+
+    if not _IS_LINUX or session.mode not in {"xephyr", "weston"}:
+        return {}
+    expected_display = os.fsencode(f"DISPLAY={session.display}")
+    expected_wayland = (
+        None
+        if not session.wayland_socket
+        else os.fsencode(f"WAYLAND_DISPLAY={session.wayland_socket}")
+    )
+    matches: dict[int, int] = {}
+    for proc_dir in Path("/proc").glob("[0-9]*"):
+        try:
+            pid = int(proc_dir.name)
+        except ValueError:
+            continue
+        if pid in {os.getpid(), session.launcher_pid, session.xserver_pid}:
+            continue
+        try:
+            values = proc_dir.joinpath("environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if require_wayland_nonce:
+            matched = expected_wayland is not None and expected_wayland in values
+        else:
+            matched = expected_display in values or (
+                expected_wayland is not None and expected_wayland in values
+            )
+        if not matched:
+            continue
+        identity = _linux_process_identity(pid)
+        if identity is not None:
+            matches[pid] = identity[0]
+    return matches
+
+
+def _private_process_identity_matches(
+    session: BedrockSession,
+    pid: int,
+    start_ticks: int,
+    *,
+    require_wayland_nonce: bool = False,
+) -> bool:
+    return (
+        _private_display_processes(
+            session,
+            require_wayland_nonce=require_wayland_nonce,
+        ).get(pid)
+        == start_ticks
+    )
+
+
+def _terminate_private_display_processes(
+    session: BedrockSession,
+    *,
+    expected: dict[int, int] | None = None,
+    require_wayland_nonce: bool = False,
+) -> None:
+    """Stop residual clients only after proving the nested display owner."""
+
+    def reject_unexpected(current: dict[int, int]) -> None:
+        if expected is None:
+            return
+        unexpected = sorted(
+            pid for pid, start_ticks in current.items() if expected.get(pid) != start_ticks
+        )
+        if unexpected:
+            detail = ", ".join(str(pid) for pid in unexpected[:8])
+            raise IsolationError(
+                f"unexpected private Bedrock display processes appeared: {detail}"
+            )
+
+    for sig, timeout_s in (
+        (signal.SIGTERM, 2.0),
+        (getattr(signal, "SIGKILL", signal.SIGTERM), 1.0),
+    ):
+        current = _private_display_processes(
+            session,
+            require_wayland_nonce=require_wayland_nonce,
+        )
+        reject_unexpected(current)
+        snapshot = (
+            current
+            if expected is None
+            else {pid: ticks for pid, ticks in expected.items() if current.get(pid) == ticks}
+        )
+        if not snapshot:
+            return
+        for pid, start_ticks in snapshot.items():
+            try:
+                pidfd = os.pidfd_open(pid, 0)
+            except ProcessLookupError:
+                continue
+            except AttributeError as exc:
+                raise IsolationError(
+                    "pidfd process signaling is unavailable; refusing residual-client cleanup"
+                ) from exc
+            except OSError as exc:
+                raise IsolationError(
+                    f"could not acquire private Bedrock process handle {pid}: {exc}"
+                ) from exc
+            try:
+                # The pidfd pins this exact process object across PID reuse;
+                # still revalidate the display identity after acquiring it.
+                if not _private_process_identity_matches(
+                    session,
+                    pid,
+                    start_ticks,
+                    require_wayland_nonce=require_wayland_nonce,
+                ):
+                    continue
+                try:
+                    signal.pidfd_send_signal(pidfd, sig)
+                except ProcessLookupError:
+                    continue
+                except (AttributeError, OSError) as exc:
+                    raise IsolationError(
+                        f"could not stop private Bedrock display process {pid}: {exc}"
+                    ) from exc
+            finally:
+                os.close(pidfd)
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            current = _private_display_processes(
+                session,
+                require_wayland_nonce=require_wayland_nonce,
+            )
+            reject_unexpected(current)
+            if not any(current.get(pid) == ticks for pid, ticks in snapshot.items()):
+                return
+            time.sleep(0.05)
+    current = _private_display_processes(
+        session,
+        require_wayland_nonce=require_wayland_nonce,
+    )
+    reject_unexpected(current)
+    candidates = current if expected is None else expected
+    survivors = sorted(pid for pid, ticks in candidates.items() if current.get(pid) == ticks)
+    if survivors:
+        detail = ", ".join(str(pid) for pid in survivors[:8])
+        raise IsolationError(f"private Bedrock display still has processes: {detail}")

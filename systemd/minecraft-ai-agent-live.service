@@ -1,0 +1,22 @@
+[Unit]
+Description=Minecraft AI persistent isolated Bedrock agent
+Wants=graphical-session.target minecraft-ai-dashboard-live.service minecraft-ai-vlm-gemma4-vulkan-all.service
+After=graphical-session.target minecraft-ai-dashboard-live.service minecraft-ai-vlm-gemma4-vulkan-all.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/minecraft_ai
+ExecStart=%h/minecraft_ai/start.sh creative_builder
+ExecStop=-%h/minecraft_ai/.venv/bin/minecraft-ai stop --transient
+Restart=on-failure
+RestartPreventExitStatus=64
+RestartSec=15
+TimeoutStopSec=45
+KillMode=mixed
+Environment=DISPLAY=:0
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=%t
+
+[Install]
+WantedBy=graphical-session.target

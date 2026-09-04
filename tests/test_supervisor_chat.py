@@ -36,7 +36,9 @@ class ChatBackend:
         self.held_buttons.clear()
         self.release_count += 1
 
-    def type_chat(self, text: str) -> None:
+    def type_chat(self, text: str, *, input_permitted=lambda: True) -> None:
+        if not input_permitted():
+            raise RuntimeError("chat interlock blocked")
         if self.fail_chat:
             raise RuntimeError("backend failure")
         self.messages.append(text)

@@ -60,9 +60,27 @@ class MemoryStore:
     ) -> list[MemoryRecord]:
         if limit < 1:
             return []
-        now = time.monotonic_ns() if now_ns is None else now_ns
+        # Durable memory timestamps use Unix time so recency remains meaningful
+        # after a process restart or host reboot. Runtime deadlines use a
+        # monotonic clock elsewhere and must never be stored in these fields.
+        now = time.time_ns() if now_ns is None else now_ns
         scored: list[tuple[float, MemoryRecord]] = []
         for record in self.records.values():
+            if (
+                record.source == "runtime:verified-skill-outcome"
+                and record.metadata.get("context_key") == "explore-keepalive"
+                and record.metadata.get("outcome") == "timed_out"
+                and record.metadata.get("skill_id")
+                in {
+                    "explore_forward",
+                    "traverse_level_ground",
+                    "traverse_visible_obstacle",
+                }
+            ):
+                # Older runtimes persisted normal bounded-chunk expiry as a
+                # failure. Retain the audit record but never suggest it as a
+                # learned failure to current planning.
+                continue
             if kinds is not None and record.kind not in kinds:
                 continue
             goal_overlap = len(set(record.goal_tags) & (goal_tags or set()))
