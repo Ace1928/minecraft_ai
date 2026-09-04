@@ -4,25 +4,34 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/.venv/bin/minecraft-ai"
 PYTHON="$SCRIPT_DIR/.venv/bin/python"
-ROLE="${1:-generalist}"
 CAPTURE_SOURCE="${MINECRAFT_AI_CAPTURE_SOURCE:-x11}"
 CHECK_INTERVAL_S="${MINECRAFT_AI_CHECK_INTERVAL_S:-10}"
 FAILURES_BEFORE_RECOVERY="${MINECRAFT_AI_FAILURES_BEFORE_RECOVERY:-3}"
 NONPLAYABLE_FAILURES_BEFORE_RECOVERY="${MINECRAFT_AI_NONPLAYABLE_FAILURES_BEFORE_RECOVERY:-12}"
+AGENT_TRANSITION_GRACE_S="${MINECRAFT_AI_AGENT_TRANSITION_GRACE_S:-60}"
 START_FAILURES_BEFORE_BEDROCK_RELAUNCH="${MINECRAFT_AI_START_FAILURES_BEFORE_BEDROCK_RELAUNCH:-20}"
 START_FAILURE_GRACE_S="${MINECRAFT_AI_START_FAILURE_GRACE_S:-420}"
 bedrock_start_failures=0
 bedrock_failure_started_s=0
 
-if [ "$#" -gt 0 ]; then
-    shift
-fi
-RUN_ARGS=("$@")
-
 if [ ! -x "$CLI" ] || [ ! -x "$PYTHON" ]; then
     echo "Missing repo environment. Run: python3 -m venv .venv && .venv/bin/pip install -e '.[full,dev]'" >&2
     exit 2
 fi
+
+# Older installed units supplied the role as argv[1]. Consume only a valid
+# role token so option-first manual invocations remain intact, while persisted
+# config stays authoritative for every launch/recovery generation.
+if [ "$#" -gt 0 ] && [[ "$1" != -* ]] \
+    && "$PYTHON" -c '
+import sys
+from minecraft_ai.roles import get_role
+get_role(sys.argv[1])
+' "$1" >/dev/null 2>&1
+then
+    shift
+fi
+RUN_ARGS=("$@")
 
 stop_runtime() {
     "$CLI" stop --transient >/dev/null 2>&1 || true
@@ -46,6 +55,44 @@ operator_paused() {
 
 emergency_latched() {
     "$CLI" status 2>/dev/null | grep -q '"emergency_stop_latched": true'
+}
+
+configured_runtime_role() {
+    "$PYTHON" -c '
+from minecraft_ai.config import load_config
+from minecraft_ai.roles import get_role
+
+role = load_config().role
+get_role(role)
+print(role)
+'
+}
+
+runtime_role() {
+    configured_runtime_role
+}
+
+healthy_agent_generation() {
+    local payload
+    payload="$("$CLI" status 2>/dev/null)" || return 1
+    printf '%s' "$payload" | "$PYTHON" -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+agent = payload.get("agent") if isinstance(payload, dict) else None
+healthy = (
+    isinstance(agent, dict)
+    and agent.get("alive") is True
+    and payload.get("state") == "RUNNING"
+    and payload.get("live_capable") is True
+    and payload.get("motor_lease_active") is True
+)
+pid = agent.get("pid") if isinstance(agent, dict) else None
+if not healthy or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+    raise SystemExit(1)
+print(pid)
+'
 }
 
 reset_start_failures() {
@@ -166,7 +213,7 @@ wait_for_model() {
 }
 
 start_live_runtime() {
-    local result
+    local result selected_role
     if emergency_latched; then
         echo "Emergency stop is latched; persistent startup is suspended." >&2
         return 64
@@ -174,6 +221,16 @@ start_live_runtime() {
     if operator_paused; then
         echo "Explicit operator pause is active; persistent startup remains suspended." >&2
         return 65
+    fi
+
+    selected_role="$(runtime_role)"
+    result=$?
+    if [ "$result" -ne 0 ]; then
+        echo "Configured agent role is unreadable or invalid; containing runtime." >&2
+        if ! stop_runtime_required; then
+            return 66
+        fi
+        return 68
     fi
     # A live launcher intentionally owns the GPU marker, so Doctor reports it
     # as busy. Run the host preflight only when a fresh GPU launch is needed.
@@ -227,7 +284,7 @@ start_live_runtime() {
         return 65
     fi
     "$CLI" run \
-        --role "$ROLE" \
+        --role "$selected_role" \
         --live \
         --capture-source "$CAPTURE_SOURCE" \
         "${RUN_ARGS[@]}"
@@ -241,7 +298,8 @@ start_live_runtime() {
     for attempt in $(seq 1 45); do
         if readiness_ok; then
             reset_start_failures
-            echo "Minecraft AI is ready: isolated Bedrock, supervisor, and agent are healthy."
+            echo "Minecraft AI is ready: isolated Bedrock, supervisor, and agent are healthy" \
+                "(role=$selected_role)."
             return 0
         fi
         if emergency_latched; then
@@ -260,7 +318,7 @@ start_live_runtime() {
 
 echo "=================================================="
 echo " Minecraft AI persistent Bedrock runtime"
-echo " Role: $ROLE | capture: $CAPTURE_SOURCE"
+echo " Role: configured | capture: $CAPTURE_SOURCE"
 echo "=================================================="
 
 if ! "$CLI" install; then
@@ -293,10 +351,19 @@ done
 
 failures=0
 nonplayable_failures=0
+healthy_generation="$(healthy_agent_generation 2>/dev/null || true)"
+transition_generation=""
+transition_started_s=0
 while true; do
     sleep "$CHECK_INTERVAL_S"
     if runtime_health_ok; then
         failures=0
+        observed_generation="$(healthy_agent_generation 2>/dev/null || true)"
+        if [ -n "$observed_generation" ]; then
+            healthy_generation="$observed_generation"
+        fi
+        transition_generation=""
+        transition_started_s=0
         if readiness_ok; then
             nonplayable_failures=0
             continue
@@ -325,6 +392,26 @@ while true; do
     fi
     if [ "$nonplayable_failures" -eq 0 ]; then
         failures=$((failures + 1))
+        observed_generation="$(healthy_agent_generation 2>/dev/null || true)"
+        if [ -n "$observed_generation" ] \
+            && [ "$observed_generation" != "$healthy_generation" ]
+        then
+            now_s="$(date +%s)"
+            if [ "$transition_started_s" -eq 0 ]; then
+                transition_started_s="$now_s"
+            fi
+            transition_generation="$observed_generation"
+            transition_elapsed_s=$((now_s - transition_started_s))
+            if [ "$transition_elapsed_s" -lt "$AGENT_TRANSITION_GRACE_S" ]; then
+                echo "New agent generation $transition_generation is warming" \
+                    "($transition_elapsed_s/$AGENT_TRANSITION_GRACE_S seconds); preserving it." >&2
+                continue
+            fi
+            echo "Agent generation $transition_generation exceeded its warm-up grace." >&2
+        else
+            transition_generation=""
+            transition_started_s=0
+        fi
         echo "Runtime health check failed ($failures/$FAILURES_BEFORE_RECOVERY)." >&2
         if [ "$failures" -lt "$FAILURES_BEFORE_RECOVERY" ]; then
             continue
@@ -338,6 +425,9 @@ while true; do
         start_live_runtime
         result=$?
         if [ "$result" -eq 0 ]; then
+            healthy_generation="$(healthy_agent_generation 2>/dev/null || true)"
+            transition_generation=""
+            transition_started_s=0
             break
         fi
         if [ "$result" -eq 64 ]; then
