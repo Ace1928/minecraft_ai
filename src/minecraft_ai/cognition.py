@@ -9,6 +9,7 @@ from typing import Any, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .execution import initiation_satisfied
+from .grounded_perception import resolve_grounded_output_keys
 from .memory import MemoryRecord
 from .models import LanguageModel, ModelMessage, ModelResponse
 from .perception import PerceptionBlackboard
@@ -169,7 +170,8 @@ class _DecisionRepairBounds:
         if self.authority_goal_id is not None:
             payload["authority_goal_id"] = self.authority_goal_id
         if self.requested_skill_ids:
-            payload["skill_required"] = True
+            payload["skill_required"] = False
+            payload["abstention_requires_perception_or_replan"] = True
             payload["requested_skill_ids"] = self.requested_skill_ids
         return payload
 
@@ -194,9 +196,10 @@ def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
         if skill_id in allowed_skill_ids
     )
     skill_ids = requested_skill_ids if bounds.requested_skill_ids else allowed_skill_ids
-    skill_alternatives = tuple(literal(skill_id) for skill_id in skill_ids)
-    if not requested_skill_ids:
-        skill_alternatives = (*skill_alternatives, '"null"')
+    # Operator authority constrains which action can run, not whether an
+    # inadequately grounded action must run. Null keeps observation/replanning
+    # possible even when the only requested option has repeatedly failed.
+    skill_alternatives = (*tuple(literal(skill_id) for skill_id in skill_ids), '"null"')
     skill_rule = " | ".join(skill_alternatives)
     parameter_names = tuple(
         dict.fromkeys(
@@ -1395,6 +1398,23 @@ class HighLevelController:
         repaired = self._complete(repair_messages, repair_bounds=repair_bounds)
         repaired = self._apply_decision_authority(repaired, blackboard, context)
         if repaired.skill_id is None and repaired.request_replan:
+            if not repaired.ask_perception:
+                # A failed repair needs new evidence, not another identical
+                # model call. Reuse the failed option's concrete prerequisite
+                # keys; locomotion options without prerequisites need terrain.
+                prerequisite_keys = tuple(
+                    condition.key for condition in self.skills.get(failed_skill).preconditions
+                )
+                # Internal run witnesses (such as collection authorization)
+                # are not visual claims and must never be requested of a VLM.
+                keys = tuple(
+                    key
+                    for prerequisite in prerequisite_keys
+                    for key in resolve_grounded_output_keys((), prerequisite)
+                ) or ("obstacle.ahead",)
+                repaired = repaired.model_copy(
+                    update={"ask_perception": tuple(dict.fromkeys(keys))[:2]}
+                )
             self.metrics.last_error = None
             return _enforce_repair_bounds(repaired, repair_bounds)
         if repaired.skill_id in feasible:
@@ -1614,8 +1634,10 @@ def _enforce_repair_bounds(
         bounds.required_action_constraints
     )
     goal_id = bounds.authority_goal_id or decision.chosen_goal_id
-    violates_requested_skill = bool(bounds.requested_skill_ids) and (
-        decision.skill_id not in requested_skills
+    violates_requested_skill = (
+        decision.skill_id is not None
+        and bool(bounds.requested_skill_ids)
+        and decision.skill_id not in requested_skills
     )
     if (
         decision.skill_id is not None and decision.skill_id not in allowed_parameters
@@ -1629,6 +1651,10 @@ def _enforce_repair_bounds(
         )
     if decision.skill_id is None:
         parameters = required_constraints
+        if bounds.requested_skill_ids:
+            # An abstention is not acknowledgement that the requested action
+            # was accepted. Keep the directive pending while seeking evidence.
+            decision = decision.model_copy(update={"request_replan": True})
     else:
         permitted = set(allowed_parameters[decision.skill_id]) | set(required_constraints)
         parameters = {

@@ -157,7 +157,7 @@ class _GrammarCapturingModel:
     def __init__(
         self,
         *,
-        skill_id: str = "explore_forward",
+        skill_id: str | None = "explore_forward",
         chosen_goal_id: str = "operator:move-now",
     ) -> None:
         self.grammar = ""
@@ -919,7 +919,7 @@ def test_literal_snake_case_skill_id_uses_immediate_operator_fast_path() -> None
     assert decision.say == "Starting that now."
 
 
-def test_direct_operator_action_uses_sampler_grammar_that_requires_a_skill() -> None:
+def test_direct_operator_action_grammar_allows_abstention_but_not_substitution() -> None:
     message = OperatorMessage(
         message_id="move-now",
         created_ns=2,
@@ -937,7 +937,7 @@ def test_direct_operator_action_uses_sampler_grammar_that_requires_a_skill() -> 
     authority_rule = next(
         line for line in model.grammar.splitlines() if line.startswith("authority-goal ::=")
     )
-    assert '"null"' not in skill_rule
+    assert '"null"' in skill_rule
     assert "explore_forward" in skill_rule
     assert "traverse_level_ground" in skill_rule
     assert "gather_nearby_wood" not in skill_rule
@@ -1218,6 +1218,94 @@ def test_repeated_timed_out_option_is_repaired_to_different_learned_option() -> 
 
     assert decision.skill_id == "reacquire_target"
     assert model.calls == 2
+    assert controller.metrics.retry_repairs == 1
+
+
+def test_operator_can_abstain_for_perception_without_violating_requested_skill() -> None:
+    context = _context()
+    context.operator_messages = (
+        OperatorMessage(
+            message_id="inspect-before-mining",
+            created_ns=2,
+            text="break the blocks in front of you",
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),
+    )
+    controller = HighLevelController(_IdleCapturingModel(), build_bootstrap_skill_library())
+
+    decision = controller.decide(_board(), context)
+
+    assert decision.skill_id is None
+    assert decision.request_replan is True
+    assert decision.reasoning_summary == "No option selected yet"
+    assert decision.chosen_goal_id == "operator:inspect-before-mining"
+    assert decision.ask_perception == ("terrain.safe_direction",)
+
+
+def test_operator_null_action_cannot_acknowledge_instruction_as_executed() -> None:
+    context = _context()
+    context.operator_messages = (
+        OperatorMessage(
+            message_id="move-now", created_ns=2,
+            text="Move forward through safe open terrain.",
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),
+    )
+    controller = HighLevelController(
+        _GrammarCapturingModel(skill_id=None), build_bootstrap_skill_library(),
+    )
+
+    decision = controller.decide(_board(), context)
+
+    assert decision.skill_id is None
+    assert decision.request_replan is True
+    assert decision.chosen_goal_id == "operator:move-now"
+
+
+@pytest.mark.parametrize(
+    ("failed_skill", "provided_keys", "expected_keys"),
+    (
+        ("mine_visible_block", (), ("target.visible", "target.mineable")),
+        ("explore_forward", (), ("obstacle.ahead",)),
+        ("collect_recent_drop", (), ("obstacle.ahead",)),
+        ("mine_visible_block", ("target.visible",), ("target.visible",)),
+    ),
+)
+def test_empty_failed_repair_requests_new_evidence_instead_of_identical_replan(
+    monkeypatch: pytest.MonkeyPatch,
+    failed_skill: str,
+    provided_keys: tuple[str, ...],
+    expected_keys: tuple[str, ...],
+) -> None:
+    library = build_bootstrap_skill_library()
+    recent = SkillRun(
+        run_id="blocked-2",
+        skill_id=failed_skill,
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.FAILED,
+        failure_reason="target-not-found",
+    )
+    library.record(recent.model_copy(update={"run_id": "blocked-1"}))
+    library.record(recent)
+    context = _context()
+    context.recent_skill_runs = (recent,)
+    controller = HighLevelController(_IdleCapturingModel(), library)
+    monkeypatch.setattr(
+        controller,
+        "_complete",
+        lambda *_args, **_kwargs: CognitionDecision(
+            request_replan=True, ask_perception=provided_keys,
+        ),
+    )
+
+    decision = controller._repair_repeated_failure(
+        CognitionDecision(skill_id=failed_skill), _board(), context, recent,
+    )
+
+    assert decision.skill_id is None
+    assert decision.request_replan is True
+    assert decision.ask_perception == expected_keys
     assert controller.metrics.retry_repairs == 1
 
 

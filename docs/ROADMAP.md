@@ -7,6 +7,7 @@ The roadmap is ordered by dependency and release gates. Later phases must not by
 This is the immediate gameplay critical path, not a claim that whole phases below are complete.
 
 - [x] Guarded private-LAN operator viewing and commands; game input remains isolated.
+- [x] Repair local hostname advertisement collisions without restarting the game; verify the dashboard, live frame, message history, and readiness over the physical LAN interface. Access from a second physical device remains unverified.
 - [x] Deterministic inventory open/close: live transitions verified without restarting Minecraft.
 - [x] Agent-only reload: live game, GPU server, input calibration and supervisor preserved.
 - [x] Exact traversal-stall recovery transaction implemented and tested. Live reorientation/query ran, but the initial VLM answer abstained; escape is not yet demonstrated.
@@ -19,6 +20,13 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [ ] Demonstrate a verified log-to-planks inventory transformation, then use that run to select the next progression upgrade.
 
 Retain failed trajectories as failures. Do not promote a successful block break into resource possession, or test coverage into a completed live gameplay milestone.
+
+Latest live observation (`4ca2b96`): the agent-only reload preserved Minecraft,
+the supervisor, isolated input, and GPU server. The first three-minute sample
+recorded 387 motor actions, but none pressed attack; mining acquisition and
+reacquisition failed and traversal stalled. The decision-owned perception
+transaction was not selected in that sample. The next execution gate remains
+a real perception-to-action cycle followed by escape, not another activity count.
 
 ## Phase 0 — Public extraction and safety foundation
 
