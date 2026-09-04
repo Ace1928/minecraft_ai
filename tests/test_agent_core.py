@@ -478,12 +478,16 @@ def test_death_recovery_preserves_incomplete_gather_plan_neutrality(
     monkeypatch: pytest.MonkeyPatch,
     lineage: str,
 ) -> None:
-    now = time.monotonic_ns()
     with StateDatabase(tmp_path / "state.sqlite3") as database:
         runtime = _runtime_for_learning(database)
         runtime.skills = build_bootstrap_skill_library()
         runtime.executor = SkillExecutor(BootstrapMotorPolicy())
         runtime.blackboard = PerceptionBlackboard()
+        # Timestamp the observed scene after runtime/database setup.  On a
+        # fresh CI runner that setup can legitimately exceed the fact's
+        # one-second freshness lease; backdating the synthetic death frame
+        # made this recovery assertion depend on machine speed.
+        now = time.monotonic_ns()
         runtime.blackboard.publish(
             FrameState(
                 frame_id=1,
