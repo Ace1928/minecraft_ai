@@ -23,6 +23,9 @@ from minecraft_ai.safety import MotorAction
 
 _SECOND = 1_000_000_000
 _HASH_B = "ffffffffffffffff"
+_LUMA_A = "20" * 64
+_LUMA_B = "80" * 16 + "20" * 48
+_LUMA_C = "e0" * 16 + "20" * 48
 
 
 def _fact(
@@ -1051,9 +1054,10 @@ def test_static_attack_reports_mining_stall() -> None:
     assert verdict.signal == OutcomeSignal.MINING_STALLED
 
 
-def test_repeated_quiet_camera_motion_changes_report_traversal_progress() -> None:
+def test_repeated_quiet_camera_luma_changes_report_traversal_progress() -> None:
     now = time.monotonic_ns()
     board = _board(now)
+    _publish_hashes(board, now, frame_hash="0000000000000000", luma_grid=_LUMA_A)
     verifier = TemporalOutcomeVerifier()
     verifier.begin("walk-1", OutcomeKind.TRAVERSAL, board, now_ns=now)
     verifier.observe(
@@ -1067,6 +1071,7 @@ def test_repeated_quiet_camera_motion_changes_report_traversal_progress() -> Non
         first_ns,
         frame_hash="00ff00ff00ff00ff",
         crosshair_hash="00000000ffffffff",
+        luma_grid=_LUMA_B,
     )
     verifier.observe(board, now_ns=first_ns)
     second_ns = now + 600_000_000
@@ -1075,6 +1080,7 @@ def test_repeated_quiet_camera_motion_changes_report_traversal_progress() -> Non
         second_ns,
         frame_hash="ff00ff00ff00ff00",
         crosshair_hash="ffffffff00000000",
+        luma_grid=_LUMA_C,
     )
 
     verdict = verifier.observe(board, now_ns=second_ns)
@@ -1087,6 +1093,7 @@ def test_repeated_quiet_camera_motion_changes_report_traversal_progress() -> Non
 def test_static_world_while_movement_is_held_reports_traversal_stall() -> None:
     now = time.monotonic_ns()
     board = _board(now)
+    _publish_hashes(board, now, frame_hash="0000000000000000", luma_grid=_LUMA_A)
     verifier = TemporalOutcomeVerifier()
     verifier.begin("walk-2", OutcomeKind.TRAVERSAL, board, now_ns=now)
     verifier.observe(
@@ -1097,7 +1104,12 @@ def test_static_world_while_movement_is_held_reports_traversal_stall() -> None:
     verdict = None
     for index in range(1, 5):
         sample_ns = now + index * 550_000_000
-        _publish_hashes(board, sample_ns, frame_hash="0000000000000000")
+        _publish_hashes(
+            board,
+            sample_ns,
+            frame_hash=("ffffffffffffffff" if index % 2 else "0000000000000000"),
+            luma_grid=_LUMA_A,
+        )
         verdict = verifier.observe(board, now_ns=sample_ns)
 
     assert verdict is not None
@@ -1108,6 +1120,7 @@ def test_static_world_while_movement_is_held_reports_traversal_stall() -> None:
 def test_camera_motion_cannot_be_claimed_as_traversal_progress_or_stall() -> None:
     now = time.monotonic_ns()
     board = _board(now)
+    _publish_hashes(board, now, frame_hash="0000000000000000", luma_grid=_LUMA_A)
     verifier = TemporalOutcomeVerifier(
         OutcomeVerifierConfig(camera_quiet_ms=500, traversal_stall_ms=600)
     )
@@ -1124,6 +1137,7 @@ def test_camera_motion_cannot_be_claimed_as_traversal_progress_or_stall() -> Non
             board,
             sample_ns,
             frame_hash=("ffffffffffffffff" if index % 2 else "0000000000000000"),
+            luma_grid=(_LUMA_B if index % 2 else _LUMA_C),
         )
         verdict = verifier.observe(
             board,
@@ -1134,6 +1148,126 @@ def test_camera_motion_cannot_be_claimed_as_traversal_progress_or_stall() -> Non
     assert verdict is not None
     assert verdict.status == OutcomeStatus.PENDING
     assert verdict.signal == OutcomeSignal.NONE
+
+
+def test_intermittent_locomotion_accumulates_until_static_luma_stalls() -> None:
+    now = time.monotonic_ns()
+    board = _board(now)
+    _publish_hashes(board, now, frame_hash="0000000000000000", luma_grid=_LUMA_A)
+    verifier = TemporalOutcomeVerifier(
+        OutcomeVerifierConfig(
+            traversal_stall_ms=1_000,
+            traversal_controller_starvation_ms=5_000,
+        )
+    )
+    verifier.begin("walk-pulsed", OutcomeKind.TRAVERSAL, board, now_ns=now)
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=1, keys_down=("w",)),
+        now_ns=now,
+    )
+
+    verdict = None
+    sequence = 2
+    for offset_ms, action in (
+        (300, MotorAction(sequence=sequence, keys_up=("w",))),
+        (500, MotorAction(sequence=sequence + 1, keys_down=("w",))),
+        (800, MotorAction(sequence=sequence + 2, keys_up=("w",))),
+        (1_000, MotorAction(sequence=sequence + 3, keys_down=("w",))),
+        (1_300, MotorAction(sequence=sequence + 4, keys_up=("w",))),
+        (1_500, MotorAction(sequence=sequence + 5, keys_down=("w",))),
+        (1_800, MotorAction(sequence=sequence + 6, keys_up=("w",))),
+    ):
+        sample_ns = now + offset_ms * 1_000_000
+        _publish_hashes(
+            board,
+            sample_ns,
+            frame_hash="ffffffffffffffff",
+            luma_grid=_LUMA_A,
+        )
+        verdict = verifier.observe(board, action=action, now_ns=sample_ns)
+
+    assert verdict is not None
+    assert verdict.status == OutcomeStatus.STALLED
+    assert verdict.signal == OutcomeSignal.LOCOMOTION_STALLED
+
+
+def test_camera_rebaseline_does_not_erase_accumulated_no_progress() -> None:
+    now = time.monotonic_ns()
+    board = _board(now)
+    _publish_hashes(board, now, frame_hash="0000000000000000", luma_grid=_LUMA_A)
+    verifier = TemporalOutcomeVerifier(
+        OutcomeVerifierConfig(
+            camera_quiet_ms=200,
+            traversal_stall_ms=600,
+            traversal_controller_starvation_ms=5_000,
+        )
+    )
+    verifier.begin("walk-camera", OutcomeKind.TRAVERSAL, board, now_ns=now)
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=1, keys_down=("w",)),
+        now_ns=now,
+    )
+    for sequence, offset_ms, luma in (
+        (2, 300, _LUMA_B),
+        (3, 600, _LUMA_C),
+    ):
+        sample_ns = now + offset_ms * 1_000_000
+        _publish_hashes(
+            board,
+            sample_ns,
+            frame_hash="ffffffffffffffff",
+            luma_grid=luma,
+        )
+        verdict = verifier.observe(
+            board,
+            action=MotorAction(sequence=sequence, mouse_dx=20),
+            now_ns=sample_ns,
+        )
+        assert verdict.status == OutcomeStatus.PENDING
+
+    verdict = None
+    for offset_ms in (850, 900):
+        sample_ns = now + offset_ms * 1_000_000
+        _publish_hashes(
+            board,
+            sample_ns,
+            frame_hash="0000000000000000",
+            luma_grid=_LUMA_C,
+        )
+        verdict = verifier.observe(board, now_ns=sample_ns)
+
+    assert verdict is not None
+    assert verdict.status == OutcomeStatus.STALLED
+    assert verdict.signal == OutcomeSignal.LOCOMOTION_STALLED
+
+
+def test_controller_without_locomotion_stalls_before_skill_timeout() -> None:
+    now = time.monotonic_ns()
+    board = _board(now)
+    _publish_hashes(board, now, frame_hash="0000000000000000", luma_grid=_LUMA_A)
+    verifier = TemporalOutcomeVerifier(
+        OutcomeVerifierConfig(traversal_controller_starvation_ms=600)
+    )
+    verifier.begin("walk-starved", OutcomeKind.TRAVERSAL, board, now_ns=now)
+
+    sample_ns = now + 650_000_000
+    _publish_hashes(
+        board,
+        sample_ns,
+        frame_hash="ffffffffffffffff",
+        luma_grid=_LUMA_B,
+    )
+    verdict = verifier.observe(
+        board,
+        action=MotorAction(sequence=1, mouse_dx=20),
+        now_ns=sample_ns,
+    )
+
+    assert verdict.status == OutcomeStatus.STALLED
+    assert verdict.signal == OutcomeSignal.LOCOMOTION_STALLED
+    assert "controller emitted no sustained locomotion" in verdict.reason
 
 
 def test_inventory_open_requires_input_stable_pixels_and_fresh_scene_fact() -> None:

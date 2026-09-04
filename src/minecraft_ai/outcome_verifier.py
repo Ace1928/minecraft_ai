@@ -79,8 +79,13 @@ class OutcomeVerifierConfig:
     mining_stall_ms: int = 1_500
     traversal_change_distance: int = 6
     traversal_crosshair_change_distance: int = 4
+    traversal_luma_change_mae: float = 6.0
+    traversal_luma_pixel_delta: int = 12
+    traversal_luma_changed_fraction: float = 0.12
     traversal_progress_samples: int = 2
     traversal_stall_ms: int = 2_000
+    traversal_controller_starvation_ms: int = 3_000
+    traversal_min_commanded_ms: int = 250
     camera_quiet_ms: int = 200
     inventory_change_distance: int = 6
     inventory_stable_samples: int = 2
@@ -106,8 +111,12 @@ class OutcomeVerifierConfig:
             self.mining_stall_ms,
             self.traversal_change_distance,
             self.traversal_crosshair_change_distance,
+            self.traversal_luma_change_mae,
+            self.traversal_luma_pixel_delta,
             self.traversal_progress_samples,
             self.traversal_stall_ms,
+            self.traversal_controller_starvation_ms,
+            self.traversal_min_commanded_ms,
             self.camera_quiet_ms,
             self.inventory_change_distance,
             self.inventory_stable_samples,
@@ -117,6 +126,8 @@ class OutcomeVerifierConfig:
             raise ValueError("outcome verifier thresholds must be positive")
         if not 0.0 < self.mining_luma_changed_fraction <= 1.0:
             raise ValueError("mining_luma_changed_fraction must be in 0..1")
+        if not 0.0 < self.traversal_luma_changed_fraction <= 1.0:
+            raise ValueError("traversal_luma_changed_fraction must be in 0..1")
 
 
 @dataclass
@@ -149,13 +160,13 @@ class _MiningState:
 
 @dataclass
 class _TraversalState:
-    frame_hash: str | None
-    crosshair_hash: str | None
-    last_sample_ns: int = -1
-    last_change_ns: int = 0
-    samples: int = 0
+    luma_grid: bytes | None
+    last_luma_ns: int
+    last_observe_ns: int
+    commanded_movement_ns: int = 0
+    commanded_since_luma_ns: int = 0
     progress_samples: int = 0
-    movement_started_ns: int | None = None
+    static_samples: int = 0
     last_camera_ns: int = -1
 
 
@@ -170,6 +181,7 @@ class _InventoryState:
 
 @dataclass(frozen=True)
 class _InputDelta:
+    movement_was_active: bool
     movement_active: bool
     movement_started: bool
     attack_active: bool
@@ -250,10 +262,11 @@ class TemporalOutcomeVerifier:
                 last_change_ns=now,
             )
         elif kind == OutcomeKind.TRAVERSAL:
+            luma = _luma_observation(blackboard, "frame.crosshair_luma_grid", now)
             self._state = _TraversalState(
-                frame_hash=_hash_value(blackboard, "frame.dhash", now),
-                crosshair_hash=_hash_value(blackboard, "frame.crosshair_dhash", now),
-                last_change_ns=now,
+                luma_grid=None if luma is None else luma[0],
+                last_luma_ns=-1 if luma is None else luma[1],
+                last_observe_ns=now,
             )
         else:
             self._state = _InventoryState(baseline=_scene_signature(blackboard, now))
@@ -296,6 +309,7 @@ class TemporalOutcomeVerifier:
         was_attacking = "left" in previous_buttons
         attacking = "left" in self._held_buttons
         return _InputDelta(
+            movement_was_active=was_moving,
             movement_active=moving,
             movement_started=moving and not was_moving,
             attack_active=attacking,
@@ -501,73 +515,97 @@ class TemporalOutcomeVerifier:
         delta: _InputDelta,
         now_ns: int,
     ) -> OutcomeVerification:
+        elapsed_ns = max(0, now_ns - state.last_observe_ns)
+        state.last_observe_ns = now_ns
+        if delta.movement_was_active:
+            state.commanded_movement_ns += elapsed_ns
+            state.commanded_since_luma_ns += elapsed_ns
+
         if delta.camera_changed:
             state.last_camera_ns = now_ns
-        if delta.movement_started or (
-            delta.movement_active and state.movement_started_ns is None
-        ):
-            state.movement_started_ns = now_ns
-            state.last_change_ns = now_ns
-            _refresh_traversal_hashes(state, blackboard, now_ns)
-        if not delta.movement_active:
-            state.movement_started_ns = None
-            return self._pending(now_ns, "waiting for locomotion input")
 
-        frame = _hash_observation(blackboard, "frame.dhash", now_ns)
-        crosshair = _hash_observation(blackboard, "frame.crosshair_dhash", now_ns)
-        sample_ns = max(
-            -1 if frame is None else frame[1],
-            -1 if crosshair is None else crosshair[1],
-        )
-        if sample_ns <= state.last_sample_ns:
-            return self._pending(now_ns, "waiting for a fresh traversal frame")
-        state.last_sample_ns = sample_ns
-        state.samples += 1
+        if (
+            now_ns - self._started_ns
+            >= self.config.traversal_controller_starvation_ms * 1_000_000
+            and state.commanded_movement_ns
+            < self.config.traversal_min_commanded_ms * 1_000_000
+            and not delta.movement_active
+        ):
+            return self._result(
+                OutcomeStatus.STALLED,
+                OutcomeSignal.LOCOMOTION_STALLED,
+                now_ns,
+                0.96,
+                "controller emitted no sustained locomotion within the bounded startup window",
+                ("frame.crosshair_luma_grid",),
+            )
+
+        luma = _luma_observation(blackboard, "frame.crosshair_luma_grid", now_ns)
+        fresh_luma = bool(luma is not None and luma[1] > state.last_luma_ns)
         camera_quiet = bool(
             state.last_camera_ns < 0
             or now_ns - state.last_camera_ns >= self.config.camera_quiet_ms * 1_000_000
         )
         if not camera_quiet:
-            _refresh_traversal_hashes(state, blackboard, now_ns)
-            state.last_change_ns = now_ns
+            if fresh_luma:
+                assert luma is not None
+                _rebaseline_traversal_luma(state, luma)
             return self._pending(now_ns, "camera motion currently confounds translation")
 
-        frame_changed = bool(
-            frame is not None
-            and state.frame_hash is not None
-            and _hash_distance(state.frame_hash, frame[0])
-            >= self.config.traversal_change_distance
+        if not fresh_luma:
+            return self._pending(now_ns, "waiting for a fresh traversal luma grid")
+        assert luma is not None
+        current_luma, observed_ns = luma
+        state.last_luma_ns = observed_ns
+        if state.luma_grid is None:
+            state.luma_grid = current_luma
+            return self._pending(now_ns, "establishing traversal luma baseline")
+        if state.commanded_since_luma_ns <= 0:
+            state.luma_grid = current_luma
+            state.static_samples = 0
+            return self._pending(now_ns, "waiting for locomotion input")
+
+        deltas = tuple(
+            abs(left - right)
+            for left, right in zip(state.luma_grid, current_luma, strict=True)
         )
-        crosshair_changed = bool(
-            crosshair is not None
-            and state.crosshair_hash is not None
-            and _hash_distance(state.crosshair_hash, crosshair[0])
-            >= self.config.traversal_crosshair_change_distance
+        mean_change = sum(deltas) / len(deltas)
+        changed_fraction = sum(
+            value >= self.config.traversal_luma_pixel_delta for value in deltas
+        ) / len(deltas)
+        displaced = bool(
+            mean_change >= self.config.traversal_luma_change_mae
+            and changed_fraction >= self.config.traversal_luma_changed_fraction
         )
-        if frame_changed and crosshair_changed:
+        if displaced:
             state.progress_samples += 1
-            state.last_change_ns = now_ns
-            _refresh_traversal_hashes(state, blackboard, now_ns)
+            state.static_samples = 0
+            state.luma_grid = current_luma
+            state.commanded_since_luma_ns = 0
             if state.progress_samples >= self.config.traversal_progress_samples:
+                state.commanded_movement_ns = 0
+                state.progress_samples = 0
                 return self._result(
                     OutcomeStatus.PROGRESS,
                     OutcomeSignal.LOCOMOTION_PROGRESS,
                     now_ns,
-                    0.78,
-                    "repeated world changes followed commanded quiet-camera locomotion",
-                    ("frame.dhash", "frame.crosshair_dhash"),
+                    0.84,
+                    "repeated absolute-luma displacement followed commanded "
+                    "quiet-camera locomotion",
+                    ("frame.crosshair_luma_grid",),
                 )
-        if (
-            state.samples >= self.config.traversal_progress_samples
-            and now_ns - state.last_change_ns >= self.config.traversal_stall_ms * 1_000_000
+        else:
+            state.static_samples += 1
+        if state.commanded_movement_ns >= self.config.traversal_stall_ms * 1_000_000 and (
+            state.static_samples >= self.config.traversal_progress_samples
         ):
             return self._result(
                 OutcomeStatus.STALLED,
                 OutcomeSignal.LOCOMOTION_STALLED,
                 now_ns,
                 0.92,
-                "locomotion remained commanded while world pixels stayed static",
-                ("frame.dhash", "frame.crosshair_dhash"),
+                "accumulated locomotion commands produced no crosshair-luma displacement",
+                ("frame.crosshair_luma_grid",),
             )
         return self._pending(now_ns, "collecting quiet-camera locomotion evidence")
 
@@ -938,13 +976,14 @@ def _bound_target_still_present_after_release(
     return probability
 
 
-def _refresh_traversal_hashes(
+def _rebaseline_traversal_luma(
     state: _TraversalState,
-    blackboard: PerceptionBlackboard,
-    now_ns: int,
+    observation: tuple[bytes, int],
 ) -> None:
-    state.frame_hash = _hash_value(blackboard, "frame.dhash", now_ns)
-    state.crosshair_hash = _hash_value(blackboard, "frame.crosshair_dhash", now_ns)
+    state.luma_grid, state.last_luma_ns = observation
+    state.commanded_since_luma_ns = 0
+    state.progress_samples = 0
+    state.static_samples = 0
 
 
 def _hash_observation(

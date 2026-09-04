@@ -189,7 +189,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="explore_forward",
-            version=8,
+            version=9,
             name="Explore forward",
             description=(
                 "Traverse visible open terrain to discover a genuinely new area, keep the view "
@@ -199,7 +199,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             parameters=("allow_attack", "allow_use", "allow_jump"),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("new_area_observed",),
-            recovery_skills=("escape_submersion", "retreat_from_danger"),
+            recovery_skills=(
+                "escape_submersion",
+                "retreat_from_danger",
+                "traverse_visible_obstacle",
+            ),
             max_duration_ms=12_000,
             policy_ref="explore",
             # This published-style command produced locomotion, camera control,
@@ -217,7 +221,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="traverse_level_ground",
-            version=2,
+            version=3,
             name="Traverse level ground",
             description=(
                 "Use the fast learned motion expert to cross a short visible lane while "
@@ -226,7 +230,11 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             stage=SkillStage.EXPERIMENTAL,
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("locomotion_progress", "destination_reached"),
-            recovery_skills=("escape_submersion", "retreat_from_danger"),
+            recovery_skills=(
+                "escape_submersion",
+                "retreat_from_danger",
+                "traverse_visible_obstacle",
+            ),
             max_duration_ms=30_000,
             action_level=ActionLevel.MOTION,
             policy_ref="traverse_level_ground",
@@ -242,7 +250,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="traverse_visible_obstacle",
-            version=4,
+            version=5,
             name="Traverse visible obstacle",
             description=(
                 "Use learned short-horizon movement and camera control to jump over or climb "
@@ -254,17 +262,13 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             expected_effects=("obstacle_crossed", "locomotion_progress"),
             recovery_skills=("escape_submersion", "retreat_from_danger"),
             max_duration_ms=8_000,
-            # Bind this short, atomic locomotion episode to the fast VPT body.
-            # The checkpoint chooses the native keys/camera; this metadata is
-            # only an explicit abstraction contract, never a jump macro.
-            action_level=ActionLevel.MOTION,
+            # This escape needs the goal-conditioned STEVE body. The fast VPT
+            # route cannot consume "jump forward" and may emit no locomotion at
+            # all for this atomic option; the checkpoint still chooses every
+            # native key and camera action without a scripted jump macro.
+            action_level=ActionLevel.LATENT,
             policy_ref="traverse_obstacle",
-            # VPT is goal-unconditioned, so this text is not represented as a
-            # claim that it follows instructions. It remains useful only for a
-            # configured semantic fallback and for provenance/evaluation.
             policy_instruction="jump forward",
-            # The scale is likewise consumed by STEVE only when the optional
-            # RAW/MOTION body is unavailable; it does not alter VPT logits.
             policy_condition_scale=6.0,
             action_permissions=SkillActionPermissions(
                 allow_attack=False,

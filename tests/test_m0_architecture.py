@@ -199,14 +199,20 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert exploration.action_permissions.allow_attack is False
     assert exploration.action_permissions.allow_jump is True
     assert exploration.policy_instruction == "Run around and explore the Minecraft world."
+    assert exploration.version == 9
+    assert exploration.recovery_skills[-1] == "traverse_visible_obstacle"
     assert level_ground.policy_ref == "traverse_level_ground"
+    assert level_ground.version == 3
     assert level_ground.action_level == ActionLevel.MOTION
     assert level_ground.action_permissions.allow_jump is False
     assert level_ground.action_permissions.allow_attack is False
+    assert level_ground.recovery_skills[-1] == "traverse_visible_obstacle"
     assert obstacle.policy_ref == "traverse_obstacle"
-    assert obstacle.action_level == ActionLevel.MOTION
+    assert obstacle.version == 5
+    assert obstacle.action_level == ActionLevel.LATENT
     assert obstacle.policy_instruction == "jump forward"
     assert obstacle.policy_condition_scale == 6.0
+    assert "traverse_visible_obstacle" not in obstacle.recovery_skills
     assert obstacle.action_permissions.allow_jump is True
     assert obstacle.action_permissions.allow_attack is False
     assert obstacle.action_permissions.allow_use is False

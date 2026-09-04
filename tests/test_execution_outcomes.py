@@ -5,6 +5,7 @@ from typing import Any, cast
 
 import pytest
 
+from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.execution import SkillExecutor
 from minecraft_ai.mining_control import MiningGuardDecision
 from minecraft_ai.motor import MotorIntent
@@ -22,6 +23,9 @@ from minecraft_ai.trajectory import ActionOrigin
 
 _HASH_A = "0000000000000000"
 _HASH_B = "ffffffffffffffff"
+_LUMA_A = "20" * 64
+_LUMA_B = "80" * 16 + "20" * 48
+_LUMA_C = "e0" * 16 + "20" * 48
 
 
 class _MiningPolicy:
@@ -63,6 +67,38 @@ class _MiningPolicy:
     ) -> bool:
         self.perception_poll_calls += 1
         return False
+
+
+class _TraversalPolicy:
+    policy_id = "traversal-outcome-test-policy"
+
+    def __init__(self, *actions: MotorAction) -> None:
+        self.actions = list(actions)
+        self.last_sequence = -1
+        self.held_keys: set[str] = set()
+
+    def act(
+        self,
+        _blackboard: PerceptionBlackboard,
+        _intent: MotorIntent,
+        *,
+        sequence: int,
+    ) -> MotorAction:
+        self.last_sequence = sequence
+        template = self.actions.pop(0) if self.actions else MotorAction(sequence=0)
+        action = template.model_copy(update={"sequence": sequence})
+        self.held_keys.update(action.keys_down)
+        self.held_keys.difference_update(action.keys_up)
+        return action
+
+    def reset(self) -> MotorAction:
+        self.last_sequence += 1
+        action = MotorAction(
+            sequence=max(0, self.last_sequence),
+            keys_up=tuple(sorted(self.held_keys)),
+        )
+        self.held_keys.clear()
+        return action
 
 
 class _ScriptedMiningGuard:
@@ -169,6 +205,45 @@ def _board(
                     first_seen_ns=now_ns,
                     last_seen_ns=now_ns,
                     attributes={"tracking_source": "learned:test-target"},
+                ),
+            ),
+        )
+    )
+    return board
+
+
+def _traversal_board(
+    now_ns: int,
+    *,
+    luma_grid: str,
+    frame_hash: str = _HASH_A,
+) -> PerceptionBlackboard:
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now_ns,
+            instance_id="bedrock:test",
+            width=1280,
+            height=720,
+            facts=(
+                _fact(
+                    "frame.dhash",
+                    frame_hash,
+                    now_ns=now_ns,
+                    source="bootstrap:test-hash",
+                ),
+                _fact(
+                    "frame.crosshair_dhash",
+                    frame_hash,
+                    now_ns=now_ns,
+                    source="bootstrap:test-hash",
+                ),
+                _fact(
+                    "frame.crosshair_luma_grid",
+                    luma_grid,
+                    now_ns=now_ns,
+                    source="bootstrap:test-luma",
                 ),
             ),
         )
@@ -553,3 +628,124 @@ def test_verified_break_precedence_respects_safety_boundary(
     else:
         assert terminal.run.failure_code == guard_failure
         assert terminal.outcome_verification is None
+
+
+@pytest.mark.parametrize(
+    "skill_id",
+    ("explore_forward", "traverse_level_ground", "traverse_visible_obstacle"),
+)
+def test_traversal_stall_fails_early_with_typed_evidence_and_full_release(
+    skill_id: str,
+) -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy(
+        MotorAction(sequence=0, keys_down=("w",)),
+        MotorAction(sequence=0),
+        MotorAction(sequence=0),
+    )
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get(skill_id)
+    executor.start(spec, run_id=f"traversal-{skill_id}", now_ns=now)
+
+    executor.tick(
+        _traversal_board(now, luma_grid=_LUMA_A),
+        sequence=1,
+        now_ns=now,
+    )
+    executor.tick(
+        _traversal_board(
+            now + 1_100_000_000,
+            luma_grid=_LUMA_A,
+            frame_hash=_HASH_B,
+        ),
+        sequence=2,
+        now_ns=now + 1_100_000_000,
+    )
+    stopped = executor.tick(
+        _traversal_board(now + 2_200_000_000, luma_grid=_LUMA_A),
+        sequence=3,
+        now_ns=now + 2_200_000_000,
+    )
+
+    assert stopped.run.outcome == SkillOutcome.FAILED
+    assert stopped.run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
+    assert stopped.run.failure_reason == SkillFailureCode.LOCOMOTION_STALLED.value
+    assert stopped.action is not None
+    assert set(stopped.action.keys_up) == {"w", "a", "s", "d", "space"}
+    assert stopped.outcome_verification is not None
+    assert stopped.outcome_verification.signal.value == "locomotion_stalled"
+    assert stopped.recovery_skills == spec.recovery_skills
+
+
+def test_traversal_progress_is_evidence_without_finishing_the_skill() -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy(
+        MotorAction(sequence=0, keys_down=("w",)),
+        MotorAction(sequence=0),
+        MotorAction(sequence=0),
+    )
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("explore_forward"),
+        run_id="traversal-progress",
+        now_ns=now,
+    )
+
+    executor.tick(
+        _traversal_board(now, luma_grid=_LUMA_A),
+        sequence=1,
+        now_ns=now,
+    )
+    executor.tick(
+        _traversal_board(now + 300_000_000, luma_grid=_LUMA_B),
+        sequence=2,
+        now_ns=now + 300_000_000,
+    )
+    progressed = executor.tick(
+        _traversal_board(now + 600_000_000, luma_grid=_LUMA_C),
+        sequence=3,
+        now_ns=now + 600_000_000,
+    )
+
+    assert progressed.run.outcome == SkillOutcome.RUNNING
+    assert progressed.outcome_verification is not None
+    assert progressed.outcome_verification.signal.value == "locomotion_progress"
+
+
+def test_starting_next_skill_resets_terminal_traversal_verifier() -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy(
+        MotorAction(sequence=0, keys_down=("w",)),
+        MotorAction(sequence=0),
+        MotorAction(sequence=0),
+    )
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("traverse_level_ground")
+    executor.start(spec, run_id="first-traversal", now_ns=now)
+    executor.tick(
+        _traversal_board(now, luma_grid=_LUMA_A),
+        sequence=1,
+        now_ns=now,
+    )
+    executor.tick(
+        _traversal_board(now + 1_100_000_000, luma_grid=_LUMA_A),
+        sequence=2,
+        now_ns=now + 1_100_000_000,
+    )
+    stopped = executor.tick(
+        _traversal_board(now + 2_200_000_000, luma_grid=_LUMA_A),
+        sequence=3,
+        now_ns=now + 2_200_000_000,
+    )
+    assert stopped.run.outcome == SkillOutcome.FAILED
+
+    restarted_ns = now + 2_300_000_000
+    executor.start(spec, run_id="second-traversal", now_ns=restarted_ns)
+    restarted = executor.tick(
+        _traversal_board(restarted_ns, luma_grid=_LUMA_A),
+        sequence=4,
+        now_ns=restarted_ns,
+    )
+
+    assert restarted.run.outcome == SkillOutcome.RUNNING
+    assert executor._outcome_verifier.active_run_id == "second-traversal"

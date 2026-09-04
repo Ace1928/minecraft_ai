@@ -33,7 +33,14 @@ from .perception_service import RealtimePerceptionService, perceptual_hash_dista
 from .planning import Goal
 from .roles import RoleProfile
 from .safety import MotorAction
-from .skills import SkillLibrary, SkillOutcome, SkillRun, SkillSpec, SkillStats
+from .skills import (
+    SkillFailureCode,
+    SkillLibrary,
+    SkillOutcome,
+    SkillRun,
+    SkillSpec,
+    SkillStats,
+)
 from .social import (
     OperatorMessage,
     OperatorMessageKind,
@@ -50,8 +57,6 @@ _EXPLORE_KEEPALIVE_CONTEXT = "explore-keepalive"
 _BOUNDED_KEEPALIVE_SKILL_IDS = frozenset(
     {"explore_forward", "traverse_level_ground", "traverse_visible_obstacle"}
 )
-_KEEPALIVE_FAILURE_THRESHOLD = 2
-_KEEPALIVE_STATIC_DHASH_DISTANCE = 6
 _RECORDED_RUN_ID_LIMIT = 4_096
 _COGNITION_RETRY_BASE_NS = 2_000_000_000
 _COGNITION_RETRY_MAX_NS = 30_000_000_000
@@ -833,9 +838,7 @@ class AgentRuntime:
     )
     _last_storage_retry_ns: int = field(default=0, init=False)
     _last_operator_storage_retry_ns: int = field(default=0, init=False)
-    _keepalive_start_dhash: str | None = field(default=None, init=False)
-    _keepalive_stagnant_failures: int = field(default=0, init=False)
-    _last_keepalive_skill_id: str | None = field(default=None, init=False)
+    _traversal_escalation_pending: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz < 0:
@@ -995,7 +998,6 @@ class AgentRuntime:
                     run_id=uuid.uuid4().hex,
                     context_key=_EXPLORE_KEEPALIVE_CONTEXT,
                 )
-                self._mark_keepalive_start()
                 active = self.executor.run
             if active is None or active.outcome != SkillOutcome.RUNNING:
                 self._flush_pending_skill_stats()
@@ -1047,6 +1049,8 @@ class AgentRuntime:
         idle freeze that the latent STEVE body produces while cognition is in
         flight.
         """
+        if getattr(self, "_traversal_escalation_pending", False):
+            return None
         candidates: list[tuple[int, SkillSpec, SkillStats | None]] = []
         for order, skill_id in enumerate(("traverse_level_ground", "explore_forward")):
             skill = self.skills.specs.get(skill_id)
@@ -1056,28 +1060,6 @@ class AgentRuntime:
             candidates.append((order, skill, stats))
         if not candidates:
             return None
-        repeatedly_failed = all(
-            stats is not None
-            and stats.consecutive_failures >= _KEEPALIVE_FAILURE_THRESHOLD
-            for _order, _skill, stats in candidates
-        )
-        if repeatedly_failed and getattr(self, "_keepalive_stagnant_failures", 0) >= 1:
-            # Both ordinary keepalive routes have repeatedly terminated and the
-            # latest option produced negligible visual displacement. Rotate
-            # between the existing fast learned VPT movement envelopes instead
-            # of selecting the option with the smaller lifetime timeout count
-            # for hundreds more attempts. Obstacle traversal differs only by
-            # allowing the learned policy's jump output; no action is scripted.
-            recovery_ids = ("traverse_visible_obstacle", "traverse_level_ground")
-            available = [skill_id for skill_id in recovery_ids if skill_id in self.skills.specs]
-            if available:
-                last_recovery_id = getattr(self, "_last_keepalive_skill_id", None)
-                if last_recovery_id is None:
-                    return self.skills.get(available[0])
-                if last_recovery_id not in available:
-                    return self.skills.get(available[0])
-                next_index = (available.index(last_recovery_id) + 1) % len(available)
-                return self.skills.get(available[next_index])
         healthy = [
             candidate
             for candidate in candidates
@@ -1093,39 +1075,6 @@ class AgentRuntime:
             ),
         )[1]
 
-    def _mark_keepalive_start(self) -> None:
-        current = self.blackboard.fact("frame.dhash", min_confidence=1.0)
-        self._keepalive_start_dhash = (
-            current.value if current is not None and isinstance(current.value, str) else None
-        )
-
-    def _update_keepalive_stagnation(self, run: SkillRun) -> None:
-        if run.context_key != _EXPLORE_KEEPALIVE_CONTEXT:
-            return
-        reference = getattr(self, "_keepalive_start_dhash", None)
-        self._keepalive_start_dhash = None
-        if run.outcome == SkillOutcome.CANCELLED:
-            return
-        if run.outcome == SkillOutcome.SUCCEEDED:
-            self._keepalive_stagnant_failures = 0
-            return
-        blackboard = getattr(self, "blackboard", None)
-        if reference is None or blackboard is None:
-            return
-        current = blackboard.fact("frame.dhash", min_confidence=1.0)
-        if current is None or not isinstance(current.value, str):
-            return
-        try:
-            static = (
-                perceptual_hash_distance(reference, current.value)
-                <= _KEEPALIVE_STATIC_DHASH_DISTANCE
-            )
-        except ValueError:
-            return
-        self._keepalive_stagnant_failures = (
-            getattr(self, "_keepalive_stagnant_failures", 0) + 1 if static else 0
-        )
-
     def _note_terminal_for_cognition(
         self,
         run: SkillRun,
@@ -1139,7 +1088,17 @@ class AgentRuntime:
         strategic/operator decision. A failure that routes into a recovery, or
         any non-keepalive terminal result, still invalidates the old snapshot.
         """
-        invalidates = run.context_key != _EXPLORE_KEEPALIVE_CONTEXT or recovery_started
+        obstacle_stalled = bool(
+            run.skill_id == "traverse_visible_obstacle"
+            and run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
+        )
+        if obstacle_stalled:
+            self._traversal_escalation_pending = True
+        invalidates = (
+            run.context_key != _EXPLORE_KEEPALIVE_CONTEXT
+            or recovery_started
+            or obstacle_stalled
+        )
         if invalidates:
             self._execution_revision += 1
             self._cognition_requested = True
@@ -1793,6 +1752,8 @@ class AgentRuntime:
                     parameters=decision.skill_parameters,
                     instruction=decision.instruction,
                 )
+            if not decision.request_replan:
+                self._traversal_escalation_pending = False
         operator_waiting = self._queued_operator_message_waiting()
         if decision.request_replan:
             self._schedule_cognition_retry(now_ns=now)
@@ -2010,14 +1971,8 @@ class AgentRuntime:
             self._recorded_run_ids.discard(self._recorded_run_order.popleft())
         self._recorded_run_order.append(run.run_id)
         self._recorded_run_ids.add(run.run_id)
-        if (
-            run.context_key == _EXPLORE_KEEPALIVE_CONTEXT
-            and run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}
-        ):
-            self._last_keepalive_skill_id = run.skill_id
         if not _expected_keepalive_expiry(run):
             self._recent_skill_runs.appendleft(run)
-        self._update_keepalive_stagnation(run)
 
         if run.outcome == SkillOutcome.SUCCEEDED:
             self.metrics.skill_successes += 1

@@ -51,6 +51,7 @@ from minecraft_ai.social import (
     SocialState,
 )
 from minecraft_ai.skills import (
+    SkillFailureCode,
     SkillLibrary,
     SkillOutcome,
     SkillRun,
@@ -657,7 +658,6 @@ def test_trajectory_failure_degrades_recording_without_stopping_motor(
     runtime.trajectory_disabled_reason = None
     runtime.lease_id = "lease-test"
     runtime._last_decision = None
-    runtime._last_keepalive_skill_id = None
     runtime._sequence = 0
     runtime.metrics = RuntimeMetrics()
     monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
@@ -1466,7 +1466,6 @@ def _runtime_for_learning(database: StateDatabase) -> AgentRuntime:
     runtime._recorded_run_ids = set()
     runtime._recorded_run_order = deque(maxlen=4_096)
     runtime._recent_skill_runs = deque(maxlen=8)
-    runtime._last_keepalive_skill_id = None
     runtime._pending_skill_stats = {}
     runtime._pending_runtime_events = {}
     runtime._pending_memories = {}
@@ -1698,7 +1697,7 @@ def test_keepalive_rotates_away_from_persisted_consecutive_failures(
     assert selected.skill_id == "explore_forward"
 
 
-def test_static_failed_keepalive_rotates_between_existing_vpt_recoveries(
+def test_failed_keepalive_does_not_blindly_start_obstacle_recovery(
     tmp_path: Path,
 ) -> None:
     database = StateDatabase(tmp_path / "state.sqlite3")
@@ -1712,7 +1711,6 @@ def test_static_failed_keepalive_rotates_between_existing_vpt_recoveries(
         timeouts=54,
         consecutive_failures=54,
     )
-    runtime._keepalive_stagnant_failures = 1
     runtime._record_terminal_run(
         SkillRun(
             run_id="semantic-timeout",
@@ -1724,96 +1722,11 @@ def test_static_failed_keepalive_rotates_between_existing_vpt_recoveries(
         )
     )
 
-    first = runtime._explore_keep_alive()
-    assert first is not None
-    assert first.skill_id == "traverse_visible_obstacle"
+    selected = runtime._explore_keep_alive()
 
-    runtime._record_terminal_run(
-        SkillRun(
-            run_id="obstacle-timeout",
-            skill_id="traverse_visible_obstacle",
-            context_key="explore-keepalive",
-            started_ns=2,
-            ended_ns=3,
-            outcome=SkillOutcome.TIMED_OUT,
-        )
-    )
-    second = runtime._explore_keep_alive()
-    assert second is not None
-    assert second.skill_id == "traverse_level_ground"
+    assert selected is not None
+    assert selected.skill_id == "explore_forward"
     database.close()
-
-
-def test_keepalive_stagnation_uses_visual_hash_displacement() -> None:
-    now = time.monotonic_ns()
-    runtime = object.__new__(AgentRuntime)
-    runtime.blackboard = PerceptionBlackboard()
-    runtime.blackboard.publish(
-        FrameState(
-            frame_id=1,
-            captured_ns=now,
-            instance_id="bedrock:stagnation",
-            width=1280,
-            height=720,
-            facts=(
-                PerceptionFact(
-                    key="frame.dhash",
-                    value="ae579e554aa525a6",
-                    confidence=1.0,
-                    observed_ns=now,
-                    source="bootstrap:bootstrap-rgb-v1:not-training-label",
-                ),
-            ),
-        )
-    )
-    runtime._keepalive_start_dhash = "ae579e554aa525a6"
-    runtime._keepalive_stagnant_failures = 0
-
-    runtime._update_keepalive_stagnation(
-        SkillRun(
-            run_id="static-timeout",
-            skill_id="explore_forward",
-            context_key="explore-keepalive",
-            started_ns=1,
-            ended_ns=2,
-            outcome=SkillOutcome.TIMED_OUT,
-        )
-    )
-
-    assert runtime._keepalive_stagnant_failures == 1
-
-    later = now + 1
-    runtime.blackboard.publish(
-        FrameState(
-            frame_id=2,
-            captured_ns=later,
-            instance_id="bedrock:stagnation",
-            width=1280,
-            height=720,
-            facts=(
-                PerceptionFact(
-                    key="frame.dhash",
-                    value="ffffffffffffffff",
-                    confidence=1.0,
-                    observed_ns=later,
-                    source="bootstrap:bootstrap-rgb-v1:not-training-label",
-                ),
-            ),
-        )
-    )
-    runtime._keepalive_start_dhash = "0000000000000000"
-    runtime._update_keepalive_stagnation(
-        SkillRun(
-            run_id="moving-timeout",
-            skill_id="traverse_visible_obstacle",
-            context_key="explore-keepalive",
-            started_ns=2,
-            ended_ns=3,
-            outcome=SkillOutcome.TIMED_OUT,
-        )
-    )
-
-    assert runtime._keepalive_stagnant_failures == 0
 
 
 def test_keepalive_timeout_does_not_stale_pending_operator_cognition() -> None:
@@ -1838,6 +1751,44 @@ def test_keepalive_timeout_does_not_stale_pending_operator_cognition() -> None:
     runtime._note_terminal_for_cognition(keepalive, recovery_started=True)
     assert runtime._execution_revision == 8
     assert runtime._cognition_requested is True
+
+
+def test_ordinary_traversal_stall_routes_one_obstacle_recovery() -> None:
+    skills = build_bootstrap_skill_library()
+    selected = _first_feasible_recovery(
+        skills,
+        skills.get("explore_forward").recovery_skills,
+        PerceptionBlackboard(),
+    )
+
+    assert selected is not None
+    assert selected.skill_id == "traverse_visible_obstacle"
+
+
+def test_obstacle_stall_blocks_keepalive_and_invalidates_pending_cognition() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime._execution_revision = 7
+    runtime._cognition_requested = False
+    runtime._pending_decision = object()  # type: ignore[assignment]
+    runtime._traversal_escalation_pending = False
+    stalled = SkillRun(
+        run_id="obstacle-stalled",
+        skill_id="traverse_visible_obstacle",
+        context_key="explore-keepalive",
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.FAILED,
+        failure_reason=SkillFailureCode.LOCOMOTION_STALLED.value,
+        failure_code=SkillFailureCode.LOCOMOTION_STALLED,
+    )
+
+    runtime._note_terminal_for_cognition(stalled, recovery_started=False)
+
+    assert runtime._execution_revision == 8
+    assert runtime._cognition_requested is True
+    assert runtime._traversal_escalation_pending is True
+    assert runtime._explore_keep_alive() is None
 
 
 def test_real_skill_terminal_still_invalidates_pending_cognition() -> None:
@@ -1964,6 +1915,25 @@ def _runtime_with_completed_decision(
     return runtime
 
 
+def test_fresh_executable_cognition_unblocks_traversal_after_obstacle_stall() -> None:
+    runtime = _runtime_with_completed_decision(
+        CognitionDecision(
+            skill_id="explore_forward",
+            instruction="Find another visible route.",
+        )
+    )
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime._traversal_escalation_pending = True
+
+    runtime._consume_cognition()
+
+    assert runtime._traversal_escalation_pending is False
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.skill_id == "explore_forward"
+    assert runtime.executor.instruction == "Find another visible route."
+
+
 def test_request_replan_rearms_cognition_with_bounded_backoff() -> None:
     runtime = _runtime_with_completed_decision(
         CognitionDecision(
@@ -1971,10 +1941,12 @@ def test_request_replan_rearms_cognition_with_bounded_backoff() -> None:
             request_replan=True,
         )
     )
+    runtime._traversal_escalation_pending = True
 
     runtime._consume_cognition()
 
     assert runtime._cognition_requested is True
+    assert runtime._traversal_escalation_pending is True
     assert runtime._cognition_retry_count == 1
     assert runtime._cognition_retry_not_before_ns > runtime._last_cognition_ns
     retry_deadline = runtime._cognition_retry_not_before_ns

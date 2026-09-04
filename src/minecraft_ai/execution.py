@@ -55,6 +55,10 @@ _MINING_SUCCESS_OVERRIDABLE_FAILURES = frozenset(
         SkillFailureCode.MINING_LEASE_EXPIRED,
     }
 )
+_TRAVERSAL_SKILL_IDS = frozenset(
+    {"explore_forward", "traverse_level_ground", "traverse_visible_obstacle"}
+)
+_LOCOMOTION_RELEASE_KEYS = ("a", "d", "s", "space", "w")
 
 
 class SkillExecutor:
@@ -245,6 +249,11 @@ class SkillExecutor:
             action=mining.action,
             now_ns=now,
         )
+        traversal_verification = self._observe_traversal_outcome(
+            blackboard,
+            action=mining.action,
+            now_ns=now,
+        )
         if mining.failure_code is not None:
             if (
                 verification is not None
@@ -300,12 +309,31 @@ class SkillExecutor:
                 force_release_left=True,
                 outcome_verification=verification,
             )
+        if (
+            traversal_verification is not None
+            and traversal_verification.status == OutcomeStatus.STALLED
+        ):
+            return self._finish(
+                SkillOutcome.FAILED,
+                now,
+                SkillFailureCode.LOCOMOTION_STALLED.value,
+                recover=True,
+                failure_code=SkillFailureCode.LOCOMOTION_STALLED,
+                force_release_keys=_LOCOMOTION_RELEASE_KEYS,
+                outcome_verification=traversal_verification,
+            )
         return ExecutionTick(
             run=self._run,
             action=mining.action,
             motor_intent=intent,
             policy_status=_policy_status_snapshot(self.policy),
             action_origin=(ActionOrigin.SYNTHETIC if mining.synthetic else ActionOrigin.POLICY),
+            outcome_verification=(
+                traversal_verification
+                if traversal_verification is not None
+                and traversal_verification.status == OutcomeStatus.PROGRESS
+                else None
+            ),
         )
 
     def _tick_plank_crafting(
@@ -422,6 +450,30 @@ class SkillExecutor:
                     and trusted_transition_source
                     else None
                 ),
+            )
+        return self._outcome_verifier.observe(
+            blackboard,
+            action=action,
+            now_ns=now_ns,
+        )
+
+    def _observe_traversal_outcome(
+        self,
+        blackboard: PerceptionBlackboard,
+        *,
+        action: MotorAction | None,
+        now_ns: int,
+    ) -> OutcomeVerification | None:
+        if self._spec is None or self._run is None:
+            return None
+        if self._spec.skill_id not in _TRAVERSAL_SKILL_IDS:
+            return None
+        if self._outcome_verifier.active_run_id != self._run.run_id:
+            self._outcome_verifier.begin(
+                self._run.run_id,
+                OutcomeKind.TRAVERSAL,
+                blackboard,
+                now_ns=now_ns,
             )
         return self._outcome_verifier.observe(
             blackboard,
