@@ -181,7 +181,7 @@ def test_supervisor_tracks_only_accepted_world_camera_motion() -> None:
     lease_id = str(lease_info["lease_id"])
     supervisor.activate()
 
-    supervisor.apply_motor_action(
+    first = supervisor.apply_motor_action(
         lease_id,
         MotorAction(sequence=0, mouse_dy=-30).model_dump(mode="json"),
     )
@@ -193,10 +193,25 @@ def test_supervisor_tracks_only_accepted_world_camera_motion() -> None:
             camera_semantics="cursor",
         ).model_dump(mode="json"),
     )
-    supervisor.apply_motor_action(
+    last = supervisor.apply_motor_action(
         lease_id,
         MotorAction(sequence=2, mouse_dy=7).model_dump(mode="json"),
     )
+
+    assert first["world_camera"] == {
+        "estimated_pitch_units": -30,
+        "accepted_updates": 1,
+        "origin_calibrated": False,
+        "pitch_counts_per_degree": None,
+        "calibration_id": None,
+    }
+    assert last["world_camera"] == {
+        "estimated_pitch_units": -23,
+        "accepted_updates": 2,
+        "origin_calibrated": False,
+        "pitch_counts_per_degree": None,
+        "calibration_id": None,
+    }
 
     assert supervisor.status()["world_camera"] == {
         "estimated_pitch_units": -23,

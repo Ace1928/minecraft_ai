@@ -557,6 +557,16 @@ class Supervisor:
                 # physical supervisor boundary rather than policy intent.
                 "accepted_monotonic_ns": time.monotonic_ns(),
                 "lease_active": self.motor.lease is not None,
+                # Return the camera state from this same locked acceptance
+                # transaction. The agent can rebind a policy action that was
+                # filtered or replaced without racing a second status call.
+                "world_camera": {
+                    "estimated_pitch_units": self.world_camera_pitch_units,
+                    "accepted_updates": self.world_camera_updates,
+                    "origin_calibrated": self.world_camera_origin_calibrated,
+                    "pitch_counts_per_degree": self.world_camera_pitch_counts_per_degree,
+                    "calibration_id": self.world_camera_calibration_id,
+                },
             }
 
     def release_inputs(self, lease_id: str) -> dict[str, Any]:

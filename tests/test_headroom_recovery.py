@@ -609,6 +609,11 @@ def test_headroom_already_near_target_pitch_settles_without_camera_overshoot(
     _install_strict_monotonic_clock(monkeypatch)
     runtime, perception, sent = _runtime_for_probe()
     runtime._authoritative_world_camera_pitch_units = lambda: 96  # type: ignore[method-assign]
+    restored: list[int] = []
+    monkeypatch.setattr(
+        "minecraft_ai.runtime._restore_policy_world_camera",
+        lambda _policy, *, pitch_units: restored.append(pitch_units),
+    )
     assert runtime._route_headroom_terminal(_stall_result()) is True
     recovery = runtime._headroom_recovery
     assert recovery is not None
@@ -616,6 +621,7 @@ def test_headroom_already_near_target_pitch_settles_without_camera_overshoot(
     runtime._advance_headroom_recovery()
     assert recovery.phase == "settle"
     assert sent == []
+    assert restored == [96]
 
     for frame_id in (42, 43, 44):
         settled = replace(
@@ -629,6 +635,24 @@ def test_headroom_already_near_target_pitch_settles_without_camera_overshoot(
 
     assert recovery.phase == "grounding"
     assert len(perception.requests) == 1
+
+
+def test_headroom_retries_transient_missing_physical_pitch() -> None:
+    runtime, _, sent = _runtime_for_probe()
+    assert runtime._route_headroom_terminal(_stall_result()) is True
+    recovery = runtime._headroom_recovery
+    assert recovery is not None
+    runtime._authoritative_world_camera_pitch_units = lambda: None  # type: ignore[method-assign]
+
+    runtime._advance_headroom_recovery()
+
+    assert runtime._headroom_recovery is recovery
+    assert recovery.phase == "reorient"
+    assert sent == []
+
+    runtime._authoritative_world_camera_pitch_units = lambda: 96  # type: ignore[method-assign]
+    runtime._advance_headroom_recovery()
+    assert recovery.phase == "settle"
 
 
 def test_current_crosshair_probe_can_initiate_mining_without_learned_attack() -> None:
@@ -689,7 +713,7 @@ def test_changed_crosshair_probe_never_initiates_quiet_policy_attack() -> None:
     )
     changed = CapturedFrame(
         frame_id=frame.frame_id + 1,
-        captured_ns=time.monotonic_ns(),
+        captured_ns=frame.captured_ns + 1,
         width=frame.width,
         height=frame.height,
         bgra=bytes((12, 34, 56, 255)) * frame.width * frame.height,

@@ -1744,7 +1744,10 @@ class AgentRuntime:
                 recovery.pre_reorient_dhash = frame_dhash(captured)
             current_pitch = self._authoritative_world_camera_pitch_units()
             if current_pitch is None:
-                self._clear_headroom_recovery(recovery)
+                # A transient status timeout must not discard a verified stall
+                # and immediately hand a stale camera estimate back to the
+                # learned route. Keep this bounded transaction armed and retry
+                # until its existing deadline or a safety preemption.
                 return
             reorient_mouse_dy = _headroom_reorient_mouse_dy(current_pitch)
             if reorient_mouse_dy:
@@ -1764,6 +1767,10 @@ class AgentRuntime:
                     pitch_units=current_pitch + reorient_mouse_dy,
                 )
                 return
+            _restore_policy_world_camera(
+                self.executor.policy,
+                pitch_units=current_pitch,
+            )
             recovery.phase = "settle"
             recovery.reoriented_frame_id = latest.frame_id
             recovery.settle_deadline_ns = (
@@ -2242,6 +2249,38 @@ class AgentRuntime:
                 self._stop.set()
                 return
             raise
+        if (
+            execution is not None
+            and execution.action_origin in {ActionOrigin.SYNTHETIC, ActionOrigin.RESET}
+            and action.camera_semantics == "world"
+        ):
+            # Learned policy clients integrate their requested camera delta
+            # before the mining/GUI guards can suppress or replace it. Rebind
+            # every guarded or reset world-camera result to the physical
+            # supervisor after acceptance so later routes never inherit an
+            # unsent pitch.
+            accepted_camera = accepted.get("world_camera")
+            physical_pitch = (
+                accepted_camera.get("estimated_pitch_units")
+                if (
+                    isinstance(accepted_camera, dict)
+                    and accepted_camera.get("origin_calibrated") is True
+                    and isinstance(
+                        accepted_camera.get("estimated_pitch_units"),
+                        int,
+                    )
+                    and not isinstance(
+                        accepted_camera.get("estimated_pitch_units"),
+                        bool,
+                    )
+                )
+                else self._authoritative_world_camera_pitch_units()
+            )
+            if physical_pitch is not None:
+                _restore_policy_world_camera(
+                    self.executor.policy,
+                    pitch_units=physical_pitch,
+                )
         if self.trajectory is not None:
             frame = self.perception.last_capture
             blackboard = self.blackboard.latest()

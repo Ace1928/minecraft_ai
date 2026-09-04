@@ -866,6 +866,77 @@ def test_runtime_preserves_policy_sequence_ahead_of_wire_counter(
     assert trajectory.accepted_calls == 1
 
 
+@pytest.mark.parametrize("origin", (ActionOrigin.SYNTHETIC, ActionOrigin.RESET))
+def test_non_policy_world_action_rebinds_policy_to_physical_camera(
+    monkeypatch: pytest.MonkeyPatch,
+    origin: ActionOrigin,
+) -> None:
+    runtime, trajectory = _motor_shutdown_runtime()
+    restored: list[int] = []
+    runtime.executor.policy = SimpleNamespace(
+        policy_id="learned:test",
+        restore_world_camera_state=lambda *, estimated_pitch_units: restored.append(
+            estimated_pitch_units
+        ),
+    )
+    runtime._authoritative_world_camera_pitch_units = lambda: -117  # type: ignore[method-assign]
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+    monkeypatch.setattr(
+        "minecraft_ai.runtime.send_command",
+        lambda _command, **payload: {
+            "accepted_sequence": payload["action"]["sequence"],
+        },
+    )
+    action = MotorAction(sequence=7)
+    execution = ExecutionTick(
+        run=SkillRun(run_id="camera-rebind", skill_id="mine_visible_block", started_ns=1),
+        action=action,
+        action_origin=origin,
+    )
+
+    runtime._send_motor(action, execution=execution)
+
+    assert restored == [-117]
+    assert trajectory.accepted_calls == 1
+
+
+def test_non_policy_world_action_uses_atomic_accepted_camera_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _ = _motor_shutdown_runtime()
+    restored: list[int] = []
+    runtime.executor.policy = SimpleNamespace(
+        policy_id="learned:test",
+        restore_world_camera_state=lambda *, estimated_pitch_units: restored.append(
+            estimated_pitch_units
+        ),
+    )
+    runtime._authoritative_world_camera_pitch_units = (  # type: ignore[method-assign]
+        lambda: pytest.fail("atomic response should avoid a second status request")
+    )
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+    monkeypatch.setattr(
+        "minecraft_ai.runtime.send_command",
+        lambda _command, **payload: {
+            "accepted_sequence": payload["action"]["sequence"],
+            "world_camera": {
+                "estimated_pitch_units": 73,
+                "origin_calibrated": True,
+            },
+        },
+    )
+    action = MotorAction(sequence=7)
+    execution = ExecutionTick(
+        run=SkillRun(run_id="atomic-camera", skill_id="mine_visible_block", started_ns=1),
+        action=action,
+        action_origin=ActionOrigin.RESET,
+    )
+
+    runtime._send_motor(action, execution=execution)
+
+    assert restored == [73]
+
+
 def test_motor_send_treats_transient_stop_during_ipc_as_expected_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
