@@ -47,6 +47,7 @@ from minecraft_ai.cognition import (
 from minecraft_ai.runtime import (
     AgentRuntime,
     RuntimeMetrics,
+    _CognitionPerceptionProbe,
     _GatherAcquisitionContinuation,
     _HeadroomRecovery,
     _accepted_action_provenance,
@@ -2714,6 +2715,32 @@ def test_pending_cognition_cannot_replace_atomic_collection() -> None:
     assert runtime.executor.run.run_id == "atomic-collection"
 
 
+def test_pending_perception_replan_cannot_cancel_atomic_respawn() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime.executor.start(
+        runtime.skills.get("respawn_after_death"),
+        run_id="atomic-respawn",
+        context_key="scene-recovery",
+    )
+    future: Future[CognitionDecision] = Future()
+    future.set_result(
+        CognitionDecision(
+            request_replan=True,
+            ask_perception=("scene.playable",),
+        )
+    )
+    runtime._pending_decision = future
+
+    runtime._consume_cognition()
+
+    assert runtime._pending_decision is future
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.run_id == "atomic-respawn"
+    assert runtime.executor.run.outcome == SkillOutcome.RUNNING
+
+
 def test_pending_cognition_cannot_replace_owned_gather_continuation() -> None:
     runtime = object.__new__(AgentRuntime)
     runtime.skills = build_bootstrap_skill_library()
@@ -3170,6 +3197,443 @@ def test_request_replan_rearms_cognition_with_bounded_backoff() -> None:
 
     assert runtime._pending_decision is None
     assert runtime._cognition_retry_not_before_ns == retry_deadline
+
+
+def test_perception_only_replan_combines_questions_and_waits_for_one_fresh_result() -> None:
+    class _Worker:
+        completed = 3
+        failures = 0
+
+        def status(self) -> dict[str, object]:
+            return {
+                "completed": self.completed,
+                "failures": self.failures,
+            }
+
+    class _Perception:
+        def __init__(self) -> None:
+            self.active_vlm = _Worker()
+            self.available = True
+            self.queries: list[object] = []
+            self.last_capture: CapturedFrame | None = None
+
+        def semantic_available(self) -> bool:
+            return self.available
+
+        def request_semantics(
+            self,
+            query: object,
+            frame: CapturedFrame | None = None,
+        ) -> bool:
+            assert frame is self.last_capture
+            self.queries.append(query)
+            self.available = False
+            return True
+
+    runtime = _runtime_with_completed_decision(
+        CognitionDecision(
+            reasoning_summary="Need current visual evidence.",
+            request_replan=True,
+            ask_perception=("target.visible", "obstacle.ahead"),
+        )
+    )
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime.perception = _Perception()  # type: ignore[assignment]
+    runtime.semantic_hz = 2.0
+    runtime._last_semantic_ns = 0
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=7,
+            captured_ns=time.monotonic_ns(),
+            instance_id="bedrock:test",
+            width=1280,
+            height=720,
+        )
+    )
+
+    runtime._consume_cognition()
+    # Mirror tick ordering: periodic work runs after the decision arms its
+    # settling transaction and must not take the one available VLM slot.
+    runtime._request_semantics_if_due(frame_id=7)
+
+    assert runtime.perception.queries == []
+    assert runtime.metrics.semantic_requests == 0
+    assert runtime._cognition_perception_probe is not None
+    assert runtime._cognition_perception_probe.requested_keys == (
+        "target.visible",
+        "obstacle.ahead",
+    )
+    assert runtime._cognition_perception_probe.frame_id == 7
+    assert runtime._cognition_perception_probe.execution_revision == 0
+    assert runtime._cognition_perception_probe.query_id is None
+    assert runtime._cognition_requested is False
+    runtime._queued_operator_message_waiting = lambda: False  # type: ignore[method-assign]
+    runtime._pending_decision = None
+    runtime._start_cognition_if_due()
+    assert runtime._pending_decision is None
+
+    for frame_id, frame_hash in (
+        (8, "0123456789abcdef"),
+        (9, "fedcba9876543210"),
+        (10, "fedcba9876543210"),
+    ):
+        captured_ns = time.monotonic_ns()
+        runtime.perception.last_capture = CapturedFrame(
+            1,
+            captured_ns,
+            1280,
+            720,
+            b"",
+        )
+        runtime.blackboard.publish(
+            FrameState(
+                frame_id=frame_id,
+                captured_ns=captured_ns,
+                instance_id="bedrock:test",
+                width=1280,
+                height=720,
+                facts=(
+                    PerceptionFact(
+                        key="frame.dhash",
+                        value=frame_hash,
+                        confidence=1.0,
+                        observed_ns=captured_ns,
+                        source="bootstrap:test",
+                        expires_after_ms=500,
+                    ),
+                ),
+            )
+        )
+        runtime._reconcile_cognition_perception_probe()
+        runtime._request_semantics_if_due(frame_id=frame_id)
+        if frame_id < 10:
+            assert runtime.perception.queries == []
+
+    assert len(runtime.perception.queries) == 1
+    query = runtime.perception.queries[0]
+    assert query.output_keys == ("target.visible", "obstacle.ahead")  # type: ignore[attr-defined]
+    assert runtime.metrics.semantic_requests == 1
+    assert runtime._cognition_perception_probe is not None
+    assert runtime._cognition_perception_probe.query_id == query.query_id  # type: ignore[attr-defined]
+    assert runtime._cognition_perception_probe.frame_id == 10
+    assert runtime._cognition_perception_probe.grounding_deadline_ns is not None
+    assert runtime._cognition_perception_probe.grounding_deadline_ns > time.monotonic_ns()
+
+    runtime.perception.active_vlm.completed += 1
+    runtime.perception.available = True
+    runtime._reconcile_cognition_perception_probe()
+
+    assert runtime._cognition_perception_probe is None
+    assert runtime._cognition_requested is True
+
+
+def _runtime_with_waiting_cognition_perception(
+    *,
+    now_ns: int,
+    query_id: str | None = "pending-grounding",
+    facts: tuple[PerceptionFact, ...] = (),
+    grounding_deadline_ns: int | None = None,
+    worker_alive: bool = True,
+) -> AgentRuntime:
+    runtime = _runtime_with_completed_decision(CognitionDecision())
+    runtime._pending_decision = None
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime._stop = threading.Event()
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now_ns,
+            instance_id="bedrock:test",
+            width=1280,
+            height=720,
+            facts=facts,
+        )
+    )
+    runtime.perception = SimpleNamespace(  # type: ignore[assignment]
+        active_vlm=SimpleNamespace(
+            status=lambda: {"completed": 0, "failures": 0, "thread_alive": worker_alive},
+        ),
+        semantic_available=lambda: False,
+        last_capture=None,
+    )
+    runtime._cognition_perception_probe = _CognitionPerceptionProbe(
+        query_id=query_id,
+        requested_keys=("obstacle.ahead",),
+        frame_id=1,
+        execution_revision=0,
+        terminal_count_before=0,
+        settle_dhash=None,
+        settle_deadline_ns=now_ns + 2_000_000_000,
+        grounding_deadline_ns=(
+            now_ns + 180_000_000_000
+            if grounding_deadline_ns is None
+            else grounding_deadline_ns
+        ),
+    )
+    return runtime
+
+
+@pytest.mark.parametrize("query_id", (None, "pending-grounding"))
+@pytest.mark.parametrize("underwater", (False, True))
+def test_perception_probe_yields_to_fresh_hazard_without_waiting_for_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    query_id: str | None,
+    underwater: bool,
+) -> None:
+    now_ns = time.monotonic_ns()
+    facts = tuple(
+        PerceptionFact(
+            key=key,
+            value=value,
+            confidence=0.995,
+            observed_ns=now_ns,
+            source="safety:bedrock-hud-v1:test",
+        )
+        for key, value in (
+            ("danger.immediate", True),
+            ("environment.underwater", underwater),
+        )
+    )
+    runtime = _runtime_with_waiting_cognition_perception(
+        now_ns=now_ns, query_id=query_id, facts=facts,
+    )
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+
+    runtime._reconcile_cognition_perception_probe()
+
+    assert runtime._cognition_perception_probe is None
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.skill_id == (
+        "escape_submersion" if underwater else "retreat_from_danger"
+    )
+    assert runtime.executor.run.run_id in runtime._plan_neutral_recovery_runs
+    assert runtime._execution_revision == 1
+    assert runtime._cognition_requested is True
+    action = runtime.executor.tick(runtime.blackboard, sequence=0)
+    assert action.action is not None
+    assert action.run.outcome == SkillOutcome.RUNNING
+
+
+@pytest.mark.parametrize("expired", (False, True))
+def test_perception_probe_does_not_promote_weak_or_expired_hazard(
+    expired: bool,
+) -> None:
+    now_ns = time.monotonic_ns()
+    runtime = _runtime_with_waiting_cognition_perception(
+        now_ns=now_ns,
+        facts=(PerceptionFact(
+            key="danger.immediate",
+            value=True,
+            confidence=0.995 if expired else 0.1,
+            observed_ns=now_ns - 2_000_000_000 if expired else now_ns,
+            source="safety:bedrock-hud-v1:test",
+            expires_after_ms=250,
+        ),),
+    )
+
+    runtime._reconcile_cognition_perception_probe()
+
+    assert runtime._cognition_perception_probe is not None
+    assert runtime.executor.run is None
+
+
+@pytest.mark.parametrize("paused", (False, True))
+def test_perception_hazard_cannot_start_recovery_after_pause_or_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    paused: bool,
+) -> None:
+    now_ns = time.monotonic_ns()
+    runtime = _runtime_with_waiting_cognition_perception(
+        now_ns=now_ns,
+        facts=(PerceptionFact(
+            key="danger.immediate",
+            value=True,
+            confidence=0.995,
+            observed_ns=now_ns,
+            source="safety:bedrock-hud-v1:test",
+        ),),
+    )
+    if not paused:
+        runtime._stop.set()
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: paused)
+
+    runtime._reconcile_cognition_perception_probe()
+
+    assert runtime._cognition_perception_probe is None
+    assert runtime.executor.run is None
+    assert runtime._stop.is_set()
+
+
+def test_perception_hazard_defers_to_observed_death_recovery() -> None:
+    now_ns = time.monotonic_ns()
+    runtime = _runtime_with_waiting_cognition_perception(
+        now_ns=now_ns,
+        facts=tuple(
+            PerceptionFact(
+                key=key,
+                value=True,
+                confidence=0.995,
+                observed_ns=now_ns,
+                source="safety:bedrock-hud-v1:test",
+            )
+            for key in ("scene.death", "danger.immediate", "environment.underwater")
+        ),
+    )
+
+    runtime._reconcile_cognition_perception_probe()
+
+    assert runtime._cognition_perception_probe is None
+    assert runtime.executor.run is None
+    runtime._route_observed_scene_recovery()
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.skill_id == "respawn_after_death"
+
+
+@pytest.mark.parametrize("expired", (False, True))
+def test_perception_grounding_timeout_or_dead_worker_releases_play(
+    expired: bool,
+) -> None:
+    now_ns = time.monotonic_ns()
+    runtime = _runtime_with_waiting_cognition_perception(
+        now_ns=now_ns,
+        grounding_deadline_ns=now_ns if expired else now_ns + 180_000_000_000,
+        worker_alive=expired,
+    )
+
+    runtime._reconcile_cognition_perception_probe()
+
+    assert runtime._cognition_perception_probe is None
+    assert runtime._cognition_requested is True
+    assert runtime._cognition_retry_count == 1
+    assert runtime._cognition_retry_not_before_ns > now_ns
+    assert runtime._explore_keep_alive() is not None
+
+
+def test_requested_perception_suppresses_skill_until_fresh_replan() -> None:
+    class _Worker:
+        def status(self) -> dict[str, object]:
+            return {"completed": 0, "failures": 0}
+
+    class _Perception:
+        active_vlm = _Worker()
+        query: object | None = None
+
+        def semantic_available(self) -> bool:
+            return True
+
+        def request_semantics(self, query: object) -> bool:
+            self.query = query
+            return True
+
+    runtime = _runtime_with_completed_decision(
+        CognitionDecision(
+            skill_id="explore_forward",
+            request_replan=False,
+            ask_perception=("obstacle.ahead",),
+        )
+    )
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime.perception = _Perception()  # type: ignore[assignment]
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=11,
+            captured_ns=time.monotonic_ns(),
+            instance_id="bedrock:test",
+            width=1280,
+            height=720,
+        )
+    )
+
+    runtime._consume_cognition()
+
+    assert runtime.executor.run is None
+    assert runtime.perception.query is None
+    assert runtime._last_decision is not None
+    assert runtime._last_decision.skill_id is None
+    assert runtime._last_decision.request_replan is True
+    assert runtime._cognition_perception_probe is not None
+
+
+def test_pending_cognition_perception_probe_suppresses_exploration_keepalive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.metrics = RuntimeMetrics()
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime._cognition_perception_probe = SimpleNamespace(query_id="q-stable")
+    captured_ns = time.monotonic_ns()
+    frame = FrameState(
+        frame_id=4,
+        captured_ns=captured_ns,
+        instance_id="bedrock:test",
+        width=1280,
+        height=720,
+    )
+    runtime.perception = SimpleNamespace(  # type: ignore[assignment]
+        capture_once=lambda: frame,
+        stale=lambda: False,
+    )
+    runtime.telemetry = SimpleNamespace(publish=lambda _payload: None)  # type: ignore[assignment]
+    for method in (
+        "_merge_operator_target",
+        "_merge_policy_perception",
+        "_flush_pending_skill_stats",
+        "_flush_pending_learning_records",
+        "_flush_pending_operator_status_updates",
+        "_publish_player_chat_facts",
+        "_planks_retry_requires_wood",
+        "_consume_cognition",
+        "_reconcile_cognition_perception_probe",
+        "_start_cognition_if_due",
+        "_request_semantics_if_due",
+        "_route_observed_scene_recovery",
+        "_advance_headroom_recovery",
+    ):
+        monkeypatch.setattr(runtime, method, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_telemetry_payload", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        runtime,
+        "_explore_keep_alive",
+        lambda: pytest.fail("stable-scene probe must not start a keepalive"),
+    )
+
+    runtime.tick()
+
+    assert runtime.executor.run is None
+    assert runtime.metrics.motor_actions == 0
+
+
+def test_invalid_perception_question_stays_fail_closed_and_does_not_open_query() -> None:
+    class _Perception:
+        active_vlm = SimpleNamespace(status=lambda: {"completed": 0, "failures": 0})
+        queries: list[object] = []
+
+        def semantic_available(self) -> bool:
+            return True
+
+        def request_semantics(self, query: object) -> bool:
+            self.queries.append(query)
+            return True
+
+    runtime = _runtime_with_completed_decision(
+        CognitionDecision(
+            request_replan=True,
+            ask_perception=("describe everything and invent a route",),
+        )
+    )
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime.perception = _Perception()  # type: ignore[assignment]
+
+    runtime._consume_cognition()
+
+    assert runtime.perception.queries == []
+    assert runtime._cognition_perception_probe is None
+    assert runtime._cognition_requested is True
 
 
 def test_cognition_retry_backoff_is_exponential_and_capped() -> None:

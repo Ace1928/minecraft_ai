@@ -88,12 +88,19 @@ _BOUNDED_KEEPALIVE_SKILL_IDS = frozenset(
     {"explore_forward", "traverse_level_ground", "traverse_visible_obstacle"}
 )
 _ATOMIC_SKILL_IDS = frozenset(
-    {"open_inventory", "close_open_inventory", "collect_recent_drop"}
+    {
+        "open_inventory",
+        "close_open_inventory",
+        "collect_recent_drop",
+        "respawn_after_death",
+    }
 )
 _WOOD_INVENTORY_AUDIT_SKILLS = frozenset({"craft_wood_planks", "open_inventory"})
 _RECORDED_RUN_ID_LIMIT = 4_096
 _COGNITION_RETRY_BASE_NS = 2_000_000_000
 _COGNITION_RETRY_MAX_NS = 30_000_000_000
+_COGNITION_PERCEPTION_SETTLE_TIMEOUT_NS = 2_000_000_000
+_COGNITION_PERCEPTION_GROUNDING_TIMEOUT_NS = 180_000_000_000
 _OPERATOR_FOLLOWUP_DELAY_NS = 250_000_000
 _CRAFT_SEMANTIC_LATENCY_MARGIN = 1.25
 _CRAFT_SEMANTIC_MAX_REQUIRED_BUDGET_MS = 60_000
@@ -119,6 +126,20 @@ class _CraftSemanticProbe:
     run_id: str
     phase: PlankCraftPhase
     terminal_count_before: int
+
+
+@dataclass(frozen=True)
+class _CognitionPerceptionProbe:
+    """One stable-scene observation requested by a perception-only decision."""
+
+    query_id: str | None
+    requested_keys: tuple[str, ...]
+    frame_id: int
+    execution_revision: int
+    terminal_count_before: int | None
+    settle_dhash: str | None
+    settle_deadline_ns: int
+    grounding_deadline_ns: int | None = None
 
 
 @dataclass
@@ -1310,6 +1331,10 @@ class AgentRuntime:
     _policy_warmup_error: str | None = field(default=None, init=False)
     _gui_fast_path_deferred: bool = field(default=False, init=False)
     _craft_semantic_probe: _CraftSemanticProbe | None = field(default=None, init=False)
+    _cognition_perception_probe: _CognitionPerceptionProbe | None = field(
+        default=None,
+        init=False,
+    )
     _cognition_requested: bool = field(default=True, init=False)
     _cognition_retry_count: int = field(default=0, init=False)
     _cognition_retry_not_before_ns: int = field(default=0, init=False)
@@ -1483,6 +1508,7 @@ class AgentRuntime:
         self._publish_player_chat_facts()
         self._planks_retry_requires_wood()
         self._consume_cognition()
+        self._reconcile_cognition_perception_probe()
         self._start_cognition_if_due()
         self._request_semantics_if_due(frame.frame_id)
         self._route_observed_scene_recovery()
@@ -1494,6 +1520,12 @@ class AgentRuntime:
             # Keep the motor idle while this transaction owns the scene; its
             # mining/retry children appear as normal active runs below.
             if getattr(self, "_headroom_recovery", None) is not None:
+                self._flush_pending_skill_stats()
+                return
+            if getattr(self, "_cognition_perception_probe", None) is not None:
+                # A perception-only decision deliberately bought one stable
+                # visual snapshot. Do not make that evidence stale by starting
+                # the disposable exploration keepalive underneath it.
                 self._flush_pending_skill_stats()
                 return
             # Never idle the player while cognition is in flight: keep a
@@ -2592,6 +2624,12 @@ class AgentRuntime:
         # cognition and bounded GUI transactions are still permitted events.
         if self.perception.active_vlm is None:
             return
+        if getattr(self, "_cognition_perception_probe", None) is not None:
+            # A decision-owned query must have the next available semantic
+            # slot. Periodic work here would occupy the shared model lane,
+            # outlive the short settle window, and recreate the starvation
+            # this transaction exists to prevent.
+            return
         if getattr(self, "_headroom_recovery", None) is not None:
             # The recovery owns exactly one narrowly scoped query. A periodic
             # request must neither race it nor replace its target facts.
@@ -2711,6 +2749,162 @@ class AgentRuntime:
             return None
         return completed + failures
 
+    def _reconcile_cognition_perception_probe(self) -> None:
+        """Bind a perception-only replan to settled pixels, then await publication."""
+
+        probe = getattr(self, "_cognition_perception_probe", None)
+        if probe is None:
+            return
+        now_ns = time.monotonic_ns()
+        running = self.executor.run
+        if (
+            self._execution_revision != probe.execution_revision
+            or (running is not None and running.outcome == SkillOutcome.RUNNING)
+        ):
+            # Safety/operator work may take ownership while this optional wait
+            # is settling. Its visual publication remains independently
+            # scene-matched, but it no longer owns runtime scheduling.
+            self._cognition_perception_probe = None
+            self._cognition_requested = True
+            return
+        if _observed_scene_recovery(self.skills, self.blackboard) is not None:
+            # The normal scene router below owns death and modal UI recovery.
+            # Release this optional wait before considering any world motion.
+            self._cognition_perception_probe = None
+            self._cognition_requested = True
+            return
+        safety = _first_feasible_recovery(
+            self.skills,
+            tuple(
+                skill_id
+                for key, skill_id in (
+                    ("environment.underwater", "escape_submersion"),
+                    ("danger.immediate", "retreat_from_danger"),
+                )
+                if (hazard := self.blackboard.fact(
+                    key, min_confidence=0.7, now_ns=now_ns,
+                )) is not None
+                and hazard.value is True
+            ),
+            self.blackboard,
+        )
+        if safety is not None:
+            # New hazard evidence must reach the existing learned escape route
+            # immediately, even while the slow observation worker is occupied.
+            self._cognition_perception_probe = None
+            self._cognition_requested = True
+            stop_event = getattr(self, "_stop", None)
+            if (stop_event is not None and stop_event.is_set()) or operator_pause_latched():
+                if stop_event is not None:
+                    stop_event.set()
+                return
+            safety_run = self.executor.start(
+                safety,
+                run_id=uuid.uuid4().hex,
+                context_key="perception-safety-recovery",
+            )
+            self._plan_neutral_recovery_runs = {
+                *getattr(self, "_plan_neutral_recovery_runs", ()),
+                safety_run.run_id,
+            }
+            self._execution_revision += 1
+            return
+        if probe.query_id is None:
+            if now_ns >= probe.settle_deadline_ns:
+                self._cognition_perception_probe = None
+                self._schedule_cognition_retry(now_ns=now_ns)
+                return
+            latest = self.blackboard.raw_latest()
+            captured = self.perception.last_capture
+            current_hash_fact = self.blackboard.fact(
+                "frame.dhash",
+                min_confidence=1.0,
+                now_ns=now_ns,
+            )
+            current_hash = (
+                current_hash_fact.value
+                if current_hash_fact is not None
+                and isinstance(current_hash_fact.value, str)
+                else None
+            )
+            if (
+                latest is None
+                or captured is None
+                or latest.frame_id <= probe.frame_id
+                or captured.captured_ns != latest.captured_ns
+                or current_hash is None
+            ):
+                return
+            if probe.settle_dhash is None:
+                self._cognition_perception_probe = replace(
+                    probe,
+                    frame_id=latest.frame_id,
+                    settle_dhash=current_hash,
+                )
+                return
+            try:
+                settled = perceptual_hash_distance(probe.settle_dhash, current_hash) <= 2
+            except ValueError:
+                settled = False
+            if not settled:
+                self._cognition_perception_probe = replace(
+                    probe,
+                    frame_id=latest.frame_id,
+                    settle_dhash=current_hash,
+                )
+                return
+            if (
+                not self.perception.semantic_available()
+                or not local_model_inference_available()
+            ):
+                return
+            terminal_count = self._active_vlm_terminal_count()
+            if terminal_count is None:
+                return
+            query_id = uuid.uuid4().hex
+            query = ActivePerceptionQuery(
+                query_id=query_id,
+                question="Inspect only the requested canonical facts.",
+                skill_id=None,
+                frame_id=latest.frame_id,
+                output_keys=probe.requested_keys,
+            )
+            if not self.perception.request_semantics(query, frame=captured):
+                return
+            self.metrics.semantic_requests += 1
+            self._cognition_perception_probe = replace(
+                probe,
+                query_id=query_id,
+                frame_id=latest.frame_id,
+                terminal_count_before=terminal_count,
+                grounding_deadline_ns=(
+                    now_ns + _COGNITION_PERCEPTION_GROUNDING_TIMEOUT_NS
+                ),
+            )
+            return
+        if (
+            probe.grounding_deadline_ns is not None
+            and now_ns >= probe.grounding_deadline_ns
+        ) or self._active_vlm_status().get("thread_alive") is False:
+            # Bound ownership of the scene even if a worker stalls or stops.
+            # The in-flight job is left alone; its eventual publication still
+            # passes the independent visual freshness checks.
+            self._cognition_perception_probe = None
+            self._schedule_cognition_retry(now_ns=now_ns)
+            return
+        if not self.perception.semantic_available():
+            return
+        terminal_count = self._active_vlm_terminal_count()
+        if (
+            terminal_count is None
+            or probe.terminal_count_before is None
+            or terminal_count <= probe.terminal_count_before
+        ):
+            return
+        self._cognition_perception_probe = None
+        self._clear_cognition_retry()
+        self._cognition_requested = True
+
     def _reconcile_craft_semantic_probe(self, active: SkillRun) -> None:
         probe = getattr(self, "_craft_semantic_probe", None)
         if probe is None:
@@ -2823,6 +3017,17 @@ class AgentRuntime:
         )
 
     def _start_cognition_if_due(self) -> None:
+        perception_probe = getattr(self, "_cognition_perception_probe", None)
+        if perception_probe is not None:
+            if not self._new_queued_operator_message_waiting():
+                # The VLM worker and planner share one serialized local-model
+                # lane. Repeated replans must not starve the observation they
+                # explicitly requested.
+                return
+            # Fresh operator authority may take over immediately. The old VLM
+            # result remains scene-matched at publication and therefore cannot
+            # contaminate a view changed by the operator's action.
+            self._cognition_perception_probe = None
         headroom = getattr(self, "_headroom_recovery", None)
         if headroom is not None:
             if not self._queued_operator_message_waiting():
@@ -3122,6 +3327,24 @@ class AgentRuntime:
             # The accepted skill still executes under its operator context, but
             # model-generated plan text cannot keep replaying it afterward.
             decision = decision.model_copy(update={"plan_steps": ()})
+        perception_output_keys = tuple(
+            dict.fromkeys(
+                key
+                for question in decision.ask_perception
+                for key in resolve_grounded_output_keys((), question)
+            )
+        )
+        if decision.ask_perception:
+            # A question is an explicit admission that the sampled decision is
+            # missing current visual evidence. Never execute a simultaneously
+            # proposed skill against that older snapshot; observe once, then
+            # let fresh cognition select the action.
+            decision = decision.model_copy(
+                update={
+                    "skill_id": None,
+                    "request_replan": True,
+                }
+            )
         self._last_decision = decision
         self._adopt_plan_if_revised(decision)
         operator_acknowledged = False
@@ -3136,18 +3359,43 @@ class AgentRuntime:
                 )
             self._pending_operator_message_ids = ()
             self._pending_operator_message_kinds = {}
-        for question in decision.ask_perception:
+        perception_probe_started = False
+        if decision.ask_perception:
+            # ``q`` means the planner cannot justify an action from its current
+            # facts. Resolve every literal key into one request: the VLM queue
+            # admits exactly one job, so submitting one job per key silently
+            # discarded the second question. Invalid/free-form questions stay
+            # fail-closed instead of expanding into an expensive open query.
             latest = self.blackboard.raw_latest()
-            if latest is None:
-                break
-            query = ActivePerceptionQuery(
-                query_id=uuid.uuid4().hex,
-                question=question,
-                skill_id=decision.skill_id,
-                frame_id=latest.frame_id,
-                output_keys=resolve_grounded_output_keys((), question),
-            )
-            self.perception.request_semantics(query)
+            terminal_count_before = self._active_vlm_terminal_count()
+            running = self.executor.run
+            if (
+                perception_output_keys
+                and latest is not None
+                and terminal_count_before is not None
+                and self.perception.semantic_available()
+                and local_model_inference_available()
+            ):
+                if running is not None and running.outcome == SkillOutcome.RUNNING:
+                    cancelled = self.executor.cancel()
+                    try:
+                        if cancelled.action is not None:
+                            self._send_motor(cancelled.action, execution=cancelled)
+                    finally:
+                        self._record_terminal_run(cancelled.run, advance_plan=False)
+                    self._execution_revision += 1
+                self._cognition_perception_probe = _CognitionPerceptionProbe(
+                    query_id=None,
+                    requested_keys=perception_output_keys,
+                    frame_id=latest.frame_id,
+                    execution_revision=self._execution_revision,
+                    terminal_count_before=None,
+                    settle_dhash=None,
+                    settle_deadline_ns=(
+                        time.monotonic_ns() + _COGNITION_PERCEPTION_SETTLE_TIMEOUT_NS
+                    ),
+                )
+                perception_probe_started = True
         game_chat = _authorized_game_chat(
             decision,
             self.blackboard,
@@ -3197,7 +3445,10 @@ class AgentRuntime:
             if not decision.request_replan:
                 self._traversal_escalation_pending = False
         operator_waiting = self._queued_operator_message_waiting()
-        if decision.request_replan:
+        if perception_probe_started:
+            self._clear_cognition_retry()
+            self._cognition_requested = False
+        elif decision.request_replan:
             self._schedule_cognition_retry(now_ns=now)
         elif operator_waiting and operator_acknowledged:
             self._schedule_operator_followup(now_ns=now)
@@ -3824,6 +4075,20 @@ class AgentRuntime:
         }
         if self.perception.active_vlm is not None:
             perception_status["active_vlm"] = self.perception.active_vlm.status()
+        cognition_probe = getattr(self, "_cognition_perception_probe", None)
+        perception_status["cognition_probe"] = (
+            None
+            if cognition_probe is None
+            else {
+                "phase": (
+                    "settling" if cognition_probe.query_id is None else "grounding"
+                ),
+                "query_id": cognition_probe.query_id,
+                "requested_keys": list(cognition_probe.requested_keys),
+                "frame_id": cognition_probe.frame_id,
+                "execution_revision": cognition_probe.execution_revision,
+            }
+        )
         cognition_status: dict[str, object] | None = None
         if self.high_level is not None:
             cognition_status = self.high_level.status()
