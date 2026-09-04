@@ -655,16 +655,41 @@ def test_headroom_retries_transient_missing_physical_pitch() -> None:
     assert recovery.phase == "settle"
 
 
-def test_current_crosshair_probe_can_initiate_mining_without_learned_attack() -> None:
+def test_equivalent_crosshair_probe_can_initiate_mining_without_learned_attack() -> None:
     frame = _capture()
     runtime, _, _ = _runtime_for_probe(frame)
     recovery = _recovery_for_frame(frame, query_id="quiet-policy-query")
     runtime._headroom_recovery = recovery
     _publish_headroom_answer(runtime.blackboard, recovery, frame)
+    assert recovery.query_crosshair_dhash is not None
+    assert recovery.query_rgb_grid is not None
+    current_ns = max(time.monotonic_ns(), frame.captured_ns) + 1
+    equivalent_hash = f"{int(recovery.query_crosshair_dhash, 16) ^ 0b111:016x}"
+    runtime.blackboard.merge_semantics(
+        instance_id="bedrock:headroom",
+        facts=(
+            PerceptionFact(
+                key="frame.crosshair_block_dhash",
+                value=equivalent_hash,
+                confidence=1.0,
+                observed_ns=current_ns,
+                source=CROSSHAIR_BLOCK_FAST_SOURCE,
+                expires_after_ms=60_000,
+            ),
+            PerceptionFact(
+                key="frame.crosshair_block_rgb_grid",
+                value=recovery.query_rgb_grid,
+                confidence=1.0,
+                observed_ns=current_ns,
+                source=CROSSHAIR_BLOCK_FAST_SOURCE,
+                expires_after_ms=60_000,
+            ),
+        ),
+    )
     target = _headroom_clear_target(
         runtime.blackboard,
         recovery,
-        now_ns=time.monotonic_ns(),
+        now_ns=current_ns,
         current_frame=frame,
     )
     assert target is not None
@@ -681,7 +706,7 @@ def test_current_crosshair_probe_can_initiate_mining_without_learned_attack() ->
     started = runtime.executor.tick(
         runtime.blackboard,
         sequence=1,
-        now_ns=time.monotonic_ns(),
+        now_ns=current_ns,
     )
 
     assert started.run.outcome == SkillOutcome.RUNNING

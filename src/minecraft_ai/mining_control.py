@@ -5,7 +5,10 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from .motor import MotorIntent
-from .grounded_perception import CROSSHAIR_BLOCK_FAST_SOURCE, crosshair_block_rgb_grid_distance
+from .grounded_perception import (
+    CROSSHAIR_BLOCK_FAST_SOURCE,
+    crosshair_block_visually_equivalent,
+)
 from .perception import PerceptionBlackboard, PerceptionFact, Track
 from .safety import MotorAction
 from .skills import SkillFailureCode
@@ -1522,13 +1525,12 @@ def _fresh_crosshair_probe_target(
         or not latest.captured_ns <= current_grid.observed_ns <= now_ns
     ):
         return False
-    try:
-        return bool(
-            _hash_distance(observed.value, current.value) <= 2
-            and crosshair_block_rgb_grid_distance(expected_grid, current_grid.value) <= 1.0
-        )
-    except ValueError:
-        return False
+    return crosshair_block_visually_equivalent(
+        observed.value,
+        current.value,
+        expected_grid,
+        current_grid.value,
+    )
 
 
 def is_rocket_source(source: str) -> bool:

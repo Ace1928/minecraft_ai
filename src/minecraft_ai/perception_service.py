@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 import queue
 import threading
 import time
@@ -17,6 +18,8 @@ from .grounded_perception import (
     GroundedPerceptionReport,
     crosshair_block_region,
     crosshair_block_rgb_grid,
+    crosshair_block_rgb_grid_distance,
+    crosshair_block_visually_equivalent,
 )
 from .models import VisionLanguageModel
 from .perception import (
@@ -239,6 +242,7 @@ class SemanticJob:
     frame_dhash: str
     ui_dhash: str = ""
     crosshair_block_dhash: str = ""
+    crosshair_block_rgb_grid: str = ""
 
 
 @dataclass
@@ -253,6 +257,7 @@ class ActiveVLMMetrics:
     last_frame_age: int = 0
     last_hash_distance: int | None = None
     last_crosshair_hash_distance: int | None = None
+    last_crosshair_rgb_distance: float | None = None
     last_error: str | None = None
     last_fact_keys: tuple[str, ...] = ()
     claim_rejections: int = 0
@@ -416,9 +421,33 @@ class ActiveVLMWorker:
             if job.crosshair_block_dhash and current_crosshair_hash is not None
             else None
         )
+        current_crosshair_rgb_fact = self.blackboard.fact(
+            "frame.crosshair_block_rgb_grid", min_confidence=1.0
+        )
+        current_crosshair_rgb_grid = (
+            current_crosshair_rgb_fact.value
+            if current_crosshair_rgb_fact is not None
+            and isinstance(current_crosshair_rgb_fact.value, str)
+            else None
+        )
+        measured_crosshair_rgb_distance = (
+            crosshair_block_rgb_grid_distance(
+                job.crosshair_block_rgb_grid,
+                current_crosshair_rgb_grid,
+            )
+            if job.crosshair_block_rgb_grid and current_crosshair_rgb_grid is not None
+            else None
+        )
+        crosshair_rgb_distance = (
+            measured_crosshair_rgb_distance
+            if measured_crosshair_rgb_distance is not None
+            and math.isfinite(measured_crosshair_rgb_distance)
+            else None
+        )
         self.metrics.last_frame_age = frame_age
         self.metrics.last_hash_distance = hash_distance
         self.metrics.last_crosshair_hash_distance = crosshair_hash_distance
+        self.metrics.last_crosshair_rgb_distance = crosshair_rgb_distance
         # Slow semantics remain valid for an unchanged static GUI or view. A
         # numerically old result from a changed scene must not control tactics.
         inventory_scoped = bool(
@@ -438,7 +467,16 @@ class ActiveVLMWorker:
         stale = bool(
             (
                 crosshair_block_scoped
-                and (crosshair_hash_distance is None or crosshair_hash_distance > 2)
+                and not (
+                    current_crosshair_hash is not None
+                    and current_crosshair_rgb_grid is not None
+                    and crosshair_block_visually_equivalent(
+                        job.crosshair_block_dhash,
+                        current_crosshair_hash,
+                        job.crosshair_block_rgb_grid,
+                        current_crosshair_rgb_grid,
+                    )
+                )
             )
             or (
                 not crosshair_block_scoped
@@ -559,6 +597,7 @@ class ActiveVLMWorker:
             "last_frame_age": self.metrics.last_frame_age,
             "last_hash_distance": self.metrics.last_hash_distance,
             "last_crosshair_hash_distance": self.metrics.last_crosshair_hash_distance,
+            "last_crosshair_rgb_distance": self.metrics.last_crosshair_rgb_distance,
             "last_error": self.metrics.last_error,
             "last_fact_keys": list(self.metrics.last_fact_keys),
             "claim_rejections": self.metrics.claim_rejections,
@@ -821,6 +860,7 @@ class RealtimePerceptionService:
                 frame_dhash=frame_dhash(selected),
                 ui_dhash=frame_region_dhash(selected, y_start=0.0, y_end=0.18),
                 crosshair_block_dhash=crosshair_block_dhash(selected),
+                crosshair_block_rgb_grid=crosshair_block_rgb_grid(selected),
             )
         )
 

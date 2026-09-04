@@ -31,6 +31,7 @@ from .grounded_perception import (
     crosshair_block_region,
     crosshair_block_rgb_grid,
     crosshair_block_rgb_grid_distance,
+    crosshair_block_visually_equivalent,
     resolve_grounded_output_keys,
 )
 from .memory import MemoryKind, MemoryRecord, MemoryStore
@@ -445,15 +446,12 @@ def _headroom_clear_target(
         or current_frame.height != recovery.query_frame_height
     ):
         return None
-    try:
-        if perceptual_hash_distance(requested_crop_hash, current_hash.value) > 2:
-            return None
-    except ValueError:
-        return None
-    if crosshair_block_rgb_grid_distance(
+    if not crosshair_block_visually_equivalent(
+        requested_crop_hash,
+        current_hash.value,
         recovery.query_rgb_grid,
         current_grid.value,
-    ) > 1.0:
+    ):
         return None
     return _HeadroomTarget(
         kind=normalized_kind,

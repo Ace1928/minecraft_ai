@@ -8,7 +8,10 @@ import pytest
 from PIL import Image, ImageDraw
 
 import minecraft_ai.perception_service as perception_service
-from minecraft_ai.grounded_perception import GroundedPerceptionRepairError
+from minecraft_ai.grounded_perception import (
+    GroundedPerceptionRepairError,
+    crosshair_block_rgb_grid,
+)
 from minecraft_ai.models import ModelResponse
 from minecraft_ai.perception import (
     ActivePerceptionQuery,
@@ -925,6 +928,7 @@ def test_active_vlm_typed_crosshair_route_publishes_only_recovery_local_facts() 
 
     frame = _frame(b"\0" * (800 * 600 * 4), width=800, height=600)
     crop_hash = crosshair_block_dhash(frame)
+    crop_grid = crosshair_block_rgb_grid(frame)
     board = PerceptionBlackboard()
     board.publish(
         FrameState(frame_id=1, captured_ns=frame.captured_ns, instance_id="bedrock:test",
@@ -935,6 +939,10 @@ def test_active_vlm_typed_crosshair_route_publishes_only_recovery_local_facts() 
         facts=(
             PerceptionFact(
                 key="frame.crosshair_block_dhash", value=crop_hash, confidence=1,
+                observed_ns=time.monotonic_ns(), source="bootstrap:test", expires_after_ms=500,
+            ),
+            PerceptionFact(
+                key="frame.crosshair_block_rgb_grid", value=crop_grid, confidence=1,
                 observed_ns=time.monotonic_ns(), source="bootstrap:test", expires_after_ms=500,
             ),
         ),
@@ -949,6 +957,7 @@ def test_active_vlm_typed_crosshair_route_publishes_only_recovery_local_facts() 
         frame=frame,
         frame_dhash=frame_dhash(frame),
         crosshair_block_dhash=crop_hash,
+        crosshair_block_rgb_grid=crop_grid,
     )
     observation, _ = worker._inspect(job)
     worker._publish(job, observation)
@@ -969,7 +978,7 @@ def test_active_vlm_typed_crosshair_route_publishes_only_recovery_local_facts() 
     assert board.latest() is not None and board.latest().tracks == ()
 
 
-def test_crosshair_result_rejects_changed_or_missing_exact_crop_hash() -> None:
+def test_crosshair_result_rejects_incomplete_or_changed_crop_evidence() -> None:
     board = PerceptionBlackboard()
     board.publish(
         FrameState(frame_id=2, captured_ns=2, instance_id="bedrock:test", width=9, height=8)
@@ -1005,6 +1014,8 @@ def test_crosshair_result_rejects_changed_or_missing_exact_crop_hash() -> None:
 
 
 def test_crosshair_publish_reports_local_drift_separately_from_full_frame_drift() -> None:
+    frame = _frame(b"\0" * (9 * 8 * 4))
+    crop_grid = crosshair_block_rgb_grid(frame)
     board = PerceptionBlackboard()
     board.publish(
         FrameState(
@@ -1015,7 +1026,8 @@ def test_crosshair_publish_reports_local_drift_separately_from_full_frame_drift(
             height=8,
             facts=(
                 _hash_fact("f" * 16),
-                _hash_fact("0" * 15 + "1", key="frame.crosshair_block_dhash"),
+                _hash_fact("0" * 15 + "7", key="frame.crosshair_block_dhash"),
+                _hash_fact(crop_grid, key="frame.crosshair_block_rgb_grid"),
             ),
         )
     )
@@ -1027,9 +1039,10 @@ def test_crosshair_publish_reports_local_drift_separately_from_full_frame_drift(
             question="center",
             frame_id=1,
         ),
-        frame=_frame(b"\0" * (9 * 8 * 4)),
+        frame=frame,
         frame_dhash="0" * 16,
         crosshair_block_dhash="0" * 16,
+        crosshair_block_rgb_grid=crop_grid,
     )
 
     worker._publish(
@@ -1042,9 +1055,98 @@ def test_crosshair_publish_reports_local_drift_separately_from_full_frame_drift(
 
     assert board.fact("recovery.crosshair.block") is not None
     assert worker.metrics.last_hash_distance == 64
-    assert worker.metrics.last_crosshair_hash_distance == 1
+    assert worker.metrics.last_crosshair_hash_distance == 3
+    assert worker.metrics.last_crosshair_rgb_distance == 0.0
     assert worker.status()["last_hash_distance"] == 64
-    assert worker.status()["last_crosshair_hash_distance"] == 1
+    assert worker.status()["last_crosshair_hash_distance"] == 3
+    assert worker.status()["last_crosshair_rgb_distance"] == 0.0
+
+
+def test_crosshair_publish_rejects_tiny_hash_drift_with_material_rgb_change() -> None:
+    frame = _frame(b"\0" * (9 * 8 * 4))
+    reference_grid = (bytes((0,)) * (16 * 16 * 3)).hex()
+    changed_grid = (bytes((2,)) * (16 * 16 * 3)).hex()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=2,
+            captured_ns=2,
+            instance_id="bedrock:test",
+            width=9,
+            height=8,
+            facts=(
+                _hash_fact("0" * 15 + "7", key="frame.crosshair_block_dhash"),
+                _hash_fact(changed_grid, key="frame.crosshair_block_rgb_grid"),
+            ),
+        )
+    )
+    worker = ActiveVLMWorker(_UnusedVisionModel(), board, "bedrock:test")
+    job = SemanticJob(
+        query=ActivePerceptionQuery(
+            query_id="q-rgb-drift",
+            mode=PerceptionQueryMode.CROSSHAIR_BLOCK,
+            question="center",
+            frame_id=1,
+        ),
+        frame=frame,
+        frame_dhash="0" * 16,
+        crosshair_block_dhash="0" * 16,
+        crosshair_block_rgb_grid=reference_grid,
+    )
+
+    worker._publish(
+        job,
+        SemanticObservation(
+            facts={"recovery.crosshair.block": "dirt"},
+            confidences={"recovery.crosshair.block": 0.9},
+        ),
+    )
+
+    assert board.fact("recovery.crosshair.block") is None
+    assert worker.metrics.last_crosshair_hash_distance == 3
+    assert worker.metrics.last_crosshair_rgb_distance == 2.0
+    assert worker.metrics.stale_rejections == 1
+
+
+def test_crosshair_publish_does_not_expose_non_finite_rgb_distance() -> None:
+    valid_grid = (bytes((0,)) * (16 * 16 * 3)).hex()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=2,
+            captured_ns=2,
+            instance_id="bedrock:test",
+            width=9,
+            height=8,
+            facts=(
+                _hash_fact("0" * 16, key="frame.crosshair_block_dhash"),
+                _hash_fact(valid_grid + " ", key="frame.crosshair_block_rgb_grid"),
+            ),
+        )
+    )
+    worker = ActiveVLMWorker(_UnusedVisionModel(), board, "bedrock:test")
+    worker._publish(
+        SemanticJob(
+            query=ActivePerceptionQuery(
+                query_id="q-invalid-rgb",
+                mode=PerceptionQueryMode.CROSSHAIR_BLOCK,
+                question="center",
+                frame_id=1,
+            ),
+            frame=_frame(b"\0" * (9 * 8 * 4)),
+            frame_dhash="0" * 16,
+            crosshair_block_dhash="0" * 16,
+            crosshair_block_rgb_grid=valid_grid,
+        ),
+        SemanticObservation(
+            facts={"recovery.crosshair.block": "dirt"},
+            confidences={"recovery.crosshair.block": 0.9},
+        ),
+    )
+
+    assert worker.metrics.last_crosshair_rgb_distance is None
+    assert worker.status()["last_crosshair_rgb_distance"] is None
+    assert worker.metrics.stale_rejections == 1
 
 
 def test_perception_fact_future_timestamp_is_not_fresh() -> None:

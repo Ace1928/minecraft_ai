@@ -20,6 +20,10 @@ from .platforms.bedrock_x11 import CapturedFrame
 
 JsonScalar = bool | int | float | str
 CROSSHAIR_BLOCK_FAST_SOURCE = "bootstrap:bootstrap-rgb-v1:not-training-label"
+CROSSHAIR_BLOCK_EQUIVALENT_DHASH_MAX = 4
+CROSSHAIR_BLOCK_EQUIVALENT_RGB_MAE_MAX = 1.0
+_CROSSHAIR_DHASH_HEX = re.compile(r"[0-9a-fA-F]{16}")
+_CROSSHAIR_RGB_GRID_HEX = re.compile(r"[0-9a-fA-F]{1536}")
 
 
 class ClaimStatus(StrEnum):
@@ -520,6 +524,11 @@ def crosshair_block_rgb_grid(frame: CapturedFrame) -> str:
 def crosshair_block_rgb_grid_distance(first: str, second: str) -> float:
     """Return mean absolute RGB error outside the fixed crosshair mask."""
 
+    if (
+        _CROSSHAIR_RGB_GRID_HEX.fullmatch(first) is None
+        or _CROSSHAIR_RGB_GRID_HEX.fullmatch(second) is None
+    ):
+        return float("inf")
     try:
         left = bytes.fromhex(first)
         right = bytes.fromhex(second)
@@ -529,6 +538,35 @@ def crosshair_block_rgb_grid_distance(first: str, second: str) -> float:
         return float("inf")
     difference = sum(abs(a - b) for a, b in zip(left, right, strict=True))
     return difference / len(left)
+
+
+def crosshair_block_visually_equivalent(
+    reference_dhash: str,
+    current_dhash: str,
+    reference_rgb_grid: str,
+    current_rgb_grid: str,
+) -> bool:
+    """Accept only tiny structural drift with near-identical absolute color."""
+
+    if (
+        _CROSSHAIR_DHASH_HEX.fullmatch(reference_dhash) is None
+        or _CROSSHAIR_DHASH_HEX.fullmatch(current_dhash) is None
+    ):
+        return False
+    try:
+        dhash_distance = (
+            int(reference_dhash, 16) ^ int(current_dhash, 16)
+        ).bit_count()
+    except ValueError:
+        return False
+    return bool(
+        dhash_distance <= CROSSHAIR_BLOCK_EQUIVALENT_DHASH_MAX
+        and crosshair_block_rgb_grid_distance(
+            reference_rgb_grid,
+            current_rgb_grid,
+        )
+        <= CROSSHAIR_BLOCK_EQUIVALENT_RGB_MAE_MAX
+    )
 
 
 def _build_crosshair_evidence(frame: CapturedFrame, *, frame_id: int) -> SegmentedFrameEvidence:

@@ -35,6 +35,7 @@ from minecraft_ai.grounded_perception import (
     crosshair_block_region,
     crosshair_block_rgb_grid,
     crosshair_block_rgb_grid_distance,
+    crosshair_block_visually_equivalent,
 )
 from minecraft_ai.mining_control import is_hand_safe_soft_block
 from minecraft_ai.models import ModelResponse
@@ -272,6 +273,51 @@ def test_crosshair_rgb_signature_detects_equal_luma_center_color_swap() -> None:
     ) > 1
     grammar = _crosshair_block_grammar()
     assert 'probability ::= "0"' in grammar
+
+
+@pytest.mark.parametrize(
+    ("current_hash", "current_grid", "equivalent"),
+    (
+        ("0000000000000007", (bytes((1, 0)) * 384).hex(), True),
+        ("000000000000000f", (bytes((1,)) * 768).hex(), True),
+        ("0000000000000007", (bytes((2,)) * 768).hex(), False),
+        ("000000000000001f", (bytes((0,)) * 768).hex(), False),
+    ),
+)
+def test_crosshair_visual_equivalence_requires_small_hash_and_rgb_drift(
+    current_hash: str,
+    current_grid: str,
+    equivalent: bool,
+) -> None:
+    assert (
+        crosshair_block_visually_equivalent(
+            "0" * 16,
+            current_hash,
+            (bytes((0,)) * 768).hex(),
+            current_grid,
+        )
+        is equivalent
+    )
+
+
+@pytest.mark.parametrize(
+    ("reference_hash", "reference_grid"),
+    (
+        ("-000000000000001", (bytes((0,)) * 768).hex()),
+        ("0000000000000_00", (bytes((0,)) * 768).hex()),
+        ("0" * 16, (bytes((0,)) * 768).hex() + " "),
+    ),
+)
+def test_crosshair_visual_equivalence_rejects_noncanonical_hex(
+    reference_hash: str,
+    reference_grid: str,
+) -> None:
+    assert not crosshair_block_visually_equivalent(
+        reference_hash,
+        "0" * 16,
+        reference_grid,
+        (bytes((0,)) * 768).hex(),
+    )
 
 
 @pytest.mark.parametrize(("width", "height"), ((1280, 720), (65, 64), (64, 65)))
