@@ -50,6 +50,23 @@ class FastPerception(Protocol):
     def infer(self, frame: CapturedFrame) -> tuple[PerceptionFact, ...]: ...
 
 
+BEDROCK_INVENTORY_ZERO_SOURCE = (
+    "deterministic:bedrock-1.26.45.1-classic-inventory-v1:not-training-label"
+)
+
+
+@dataclass(frozen=True)
+class BedrockInventorySlotObservation:
+    """Fail-closed result from the calibrated classic survival inventory grid."""
+
+    occupied_slots: tuple[str, ...]
+    known_non_wood_slots: tuple[str, ...]
+
+    @property
+    def wood_absence_certified(self) -> bool:
+        return self.occupied_slots == self.known_non_wood_slots
+
+
 class SemanticTrack(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -505,8 +522,8 @@ class BootstrapFastPerception:
         if not frame.bgra or frame.width <= 0 or frame.height <= 0:
             return ()
         now = time.monotonic_ns()
-        ui_overlay = bedrock_ui_chrome_present(frame)
-        inventory_overlay = ui_overlay and bedrock_inventory_overlay_present(frame)
+        inventory_overlay = bedrock_inventory_overlay_present(frame)
+        ui_overlay = inventory_overlay or _bedrock_top_ui_chrome_present(frame)
         bootstrap_source = f"bootstrap:{self.model_id}:not-training-label"
         values: tuple[tuple[str, str | bool, float, int], ...] = (
             ("perception.bootstrap_active", True, 1.0, 500),
@@ -614,6 +631,20 @@ class BootstrapFastPerception:
             )
             for key, value in safety_values
         )
+        if inventory_overlay:
+            inventory_slots = _bedrock_inventory_slot_observation(frame)
+            if inventory_slots is not None and inventory_slots.wood_absence_certified:
+                facts.extend(
+                    PerceptionFact(
+                        key=key,
+                        value=0,
+                        confidence=0.995,
+                        observed_ns=now,
+                        source=BEDROCK_INVENTORY_ZERO_SOURCE,
+                        expires_after_ms=250,
+                    )
+                    for key in ("inventory.logs", "inventory.planks")
+                )
         return tuple(facts)
 
 
@@ -771,6 +802,10 @@ def bedrock_ui_chrome_present(frame: CapturedFrame) -> bool:
     This intentionally has no positive world classification and is never an
     eligible training label. It only blocks input during an obvious overlay.
     """
+    return _bedrock_top_ui_chrome_present(frame) or bedrock_inventory_overlay_present(frame)
+
+
+def _bedrock_top_ui_chrome_present(frame: CapturedFrame) -> bool:
     if not frame.bgra or frame.width < 32 or frame.height < 32:
         return False
     source = memoryview(frame.bgra)
@@ -785,9 +820,233 @@ def bedrock_ui_chrome_present(frame: CapturedFrame) -> bool:
             luma = 29 * int(blue) + 150 * int(green) + 77 * int(red)
             bright += int(luma > 180 * 256)
             sampled += 1
-    if sampled > 0 and bright / sampled >= 0.90:
+    return bool(sampled > 0 and bright / sampled >= 0.90)
+
+
+_CLASSIC_INVENTORY_CANONICAL_WIDTH = 1920
+_CLASSIC_INVENTORY_CANONICAL_HEIGHT = 1054
+_CLASSIC_INVENTORY_SLOT_SIZE = 68
+_CLASSIC_INVENTORY_PLAYER_X = tuple(936 + 72 * column for column in range(9))
+_CLASSIC_INVENTORY_PLAYER_Y = (540, 612, 684, 768)
+# These are the non-player-grid slots that can contain the wood inputs/outputs
+# in Bedrock survival. Armor and Bedrock's restricted offhand cannot hold them.
+_CLASSIC_INVENTORY_AUXILIARY_SLOTS = (
+    ("craft.input.0", 1292, 268),
+    ("craft.input.1", 1364, 268),
+    ("craft.input.2", 1292, 340),
+    ("craft.input.3", 1364, 340),
+    ("craft.output", 1516, 300),
+)
+# Manually verified vanilla dirt held in hotbar slot zero. The 36x34 source
+# crop excludes the stack-count glyph; this 8x8 RGB mean grid was stable across
+# independent count-5 and count-6 captures. Their full-frame SHA-256 values are
+# 6c7602169f34ddb13ecba1567d18b7cd4f7bb20c5e0f65bad6208b89f7d937f8 and
+# 85e3c9e97f01b0646c2c19ad91c1f61327b72c44d0f76b13d178031805b0b338.
+# This is deliberately a one-item whitelist, not an open-ended item classifier.
+# Unknown occupants abstain.
+_CLASSIC_INVENTORY_DIRT_RGB_8X8 = bytes.fromhex(
+    "898b8e8a8c8d8c8b8a86766a7f634d7d5b408e694b8268548c8b8a90847a8a"
+    "726089654894684578573d856145815c3e8d746179573a8b664a7e5d4278553a"
+    "835e41845d3f8c6647735034815a428963438e6c50886448805a3c916d4f856042"
+    "58412e664a37724f327d583b815a3b9066468a634478583f60432c5c442d634935"
+    "61452e70523a7a593e6d50394b33225f432e654b365c4029583f2b543a265b3e27"
+    "422e1e453021634832684c36624732563c295d4430614732483629412e21"
+)
+
+
+def bedrock_inventory_slot_observation(
+    frame: CapturedFrame,
+) -> BedrockInventorySlotObservation | None:
+    """Inspect the version-pinned classic survival inventory slot grid.
+
+    The detector proves absence only. It recognizes uniform empty slot fill and
+    one tightly calibrated non-wood dirt signature. Any other occupied slot,
+    partial render, different GUI geometry, or unavailable NumPy path remains
+    explicitly unresolved for the slower semantic fallback.
+    """
+    if not bedrock_inventory_overlay_present(frame):
+        return None
+    return _bedrock_inventory_slot_observation(frame)
+
+
+def _bedrock_inventory_slot_observation(
+    frame: CapturedFrame,
+) -> BedrockInventorySlotObservation | None:
+    if frame.width < 1280 or frame.height < 700:
+        return None
+    scale_x = frame.width / _CLASSIC_INVENTORY_CANONICAL_WIDTH
+    scale_y = frame.height / _CLASSIC_INVENTORY_CANONICAL_HEIGHT
+    if not 0.94 <= scale_x / scale_y <= 1.06:
+        return None
+    pixels = _numpy_bgra(frame)
+    if pixels is None:
+        return None
+
+    slots = tuple(
+        (
+            f"inventory.{row * 9 + column}",
+            _scaled_inventory_slot(frame, x=x, y=y),
+        )
+        for row, y in enumerate(_CLASSIC_INVENTORY_PLAYER_Y)
+        for column, x in enumerate(_CLASSIC_INVENTORY_PLAYER_X)
+    ) + tuple(
+        (name, _scaled_inventory_slot(frame, x=x, y=y))
+        for name, x, y in _CLASSIC_INVENTORY_AUXILIARY_SLOTS
+    )
+    if any(not _classic_inventory_slot_geometry(pixels, bounds) for _, bounds in slots):
+        return None
+
+    player_patches = tuple(
+        _classic_inventory_slot_inner(pixels, bounds) for _, bounds in slots[:36]
+    )
+    background_candidates = tuple(
+        median
+        for patch in player_patches
+        if (median := _uniform_empty_slot_median(patch)) is not None
+    )
+    # This is an absence fast path, not a general full-inventory reader. A
+    # mostly occupied inventory remains the VLM's responsibility.
+    if len(background_candidates) < 24:
+        return None
+    numpy = importlib.import_module("numpy")
+    candidate_array = numpy.asarray(background_candidates, dtype=numpy.int16)
+    background = numpy.rint(numpy.median(candidate_array, axis=0)).astype(numpy.int16)
+    if int(numpy.max(numpy.abs(candidate_array - background))) > 6:
+        return None
+
+    occupied: list[str] = []
+    known_non_wood: list[str] = []
+    for name, bounds in slots:
+        patch = _classic_inventory_slot_inner(pixels, bounds)
+        classification = _classic_inventory_slot_occupancy(patch, background)
+        if classification is None:
+            return None
+        if not classification:
+            continue
+        occupied.append(name)
+        if _classic_inventory_dirt_matches(pixels, bounds):
+            known_non_wood.append(name)
+    return BedrockInventorySlotObservation(
+        occupied_slots=tuple(occupied),
+        known_non_wood_slots=tuple(known_non_wood),
+    )
+
+
+def _scaled_inventory_slot(
+    frame: CapturedFrame,
+    *,
+    x: int,
+    y: int,
+) -> tuple[int, int, int, int]:
+    scale_x = frame.width / _CLASSIC_INVENTORY_CANONICAL_WIDTH
+    scale_y = frame.height / _CLASSIC_INVENTORY_CANONICAL_HEIGHT
+    return (
+        round(x * scale_x),
+        round(y * scale_y),
+        round((x + _CLASSIC_INVENTORY_SLOT_SIZE) * scale_x),
+        round((y + _CLASSIC_INVENTORY_SLOT_SIZE) * scale_y),
+    )
+
+
+def _classic_inventory_slot_geometry(
+    pixels: Any,
+    bounds: tuple[int, int, int, int],
+) -> bool:
+    numpy = importlib.import_module("numpy")
+    x0, y0, x1, y1 = bounds
+    width, height = x1 - x0, y1 - y0
+    border_x = max(1, round(width * 4 / _CLASSIC_INVENTORY_SLOT_SIZE))
+    border_y = max(1, round(height * 4 / _CLASSIC_INVENTORY_SLOT_SIZE))
+    top = pixels[y0 : y0 + border_y, x0:x1, :3].reshape(-1, 3).astype(numpy.int16)
+    left = pixels[y0 + border_y : y1, x0 : x0 + border_x, :3].reshape(-1, 3).astype(
+        numpy.int16
+    )
+    if not top.size or not left.size:
+        return False
+    border = numpy.concatenate((top, left), axis=0)
+    chroma = border.max(axis=1) - border.min(axis=1)
+    blue, green, red = border[:, 0], border[:, 1], border[:, 2]
+    luma = (29 * blue + 150 * green + 77 * red) // 256
+    signature = (chroma <= 8) & (luma >= 45) & (luma <= 70)
+    return float(signature.mean()) >= 0.93
+
+
+def _classic_inventory_slot_inner(
+    pixels: Any,
+    bounds: tuple[int, int, int, int],
+) -> Any:
+    x0, y0, x1, y1 = bounds
+    width, height = x1 - x0, y1 - y0
+    inset_x0 = round(width * 8 / _CLASSIC_INVENTORY_SLOT_SIZE)
+    inset_x1 = round(width * 60 / _CLASSIC_INVENTORY_SLOT_SIZE)
+    inset_y0 = round(height * 8 / _CLASSIC_INVENTORY_SLOT_SIZE)
+    inset_y1 = round(height * 60 / _CLASSIC_INVENTORY_SLOT_SIZE)
+    return pixels[
+        y0 + inset_y0 : y0 + inset_y1,
+        x0 + inset_x0 : x0 + inset_x1,
+        :3,
+    ].astype("int16")
+
+
+def _uniform_empty_slot_median(patch: Any) -> Any | None:
+    numpy = importlib.import_module("numpy")
+    flat = patch.reshape(-1, 3)
+    if not flat.size:
+        return None
+    median = numpy.rint(numpy.median(flat, axis=0)).astype(numpy.int16)
+    luma = (29 * int(median[0]) + 150 * int(median[1]) + 77 * int(median[2])) // 256
+    residual = numpy.max(numpy.abs(flat - median), axis=1)
+    chroma = flat.max(axis=1) - flat.min(axis=1)
+    uniform = (residual <= 4) & (chroma <= 8)
+    if not 125 <= luma <= 150 or float(uniform.mean()) < 0.97:
+        return None
+    return median
+
+
+def _classic_inventory_slot_occupancy(patch: Any, background: Any) -> bool | None:
+    numpy = importlib.import_module("numpy")
+    foreground = (numpy.max(numpy.abs(patch - background), axis=2) > 12) | (
+        patch.max(axis=2) - patch.min(axis=2) > 12
+    )
+    fraction = float(foreground.mean())
+    if fraction <= 0.03:
+        return False
+    if fraction >= 0.12:
         return True
-    return bedrock_inventory_overlay_present(frame)
+    return None
+
+
+def _classic_inventory_dirt_matches(
+    pixels: Any,
+    bounds: tuple[int, int, int, int],
+) -> bool:
+    numpy = importlib.import_module("numpy")
+    x0, y0, x1, y1 = bounds
+    width, height = x1 - x0, y1 - y0
+    left = x0 + round(width * 10 / _CLASSIC_INVENTORY_SLOT_SIZE)
+    right = x0 + round(width * 46 / _CLASSIC_INVENTORY_SLOT_SIZE)
+    top = y0 + round(height * 8 / _CLASSIC_INVENTORY_SLOT_SIZE)
+    bottom = y0 + round(height * 42 / _CLASSIC_INVENTORY_SLOT_SIZE)
+    # Captured pixels are BGRA; the calibrated template is RGB.
+    patch = pixels[top:bottom, left:right, :3][:, :, ::-1].astype(numpy.int32)
+    if patch.shape[0] < 8 or patch.shape[1] < 8:
+        return False
+    y_edges = numpy.rint(numpy.linspace(0, patch.shape[0], 9)).astype(int)
+    x_edges = numpy.rint(numpy.linspace(0, patch.shape[1], 9)).astype(int)
+    grid = numpy.empty((8, 8, 3), dtype=numpy.int32)
+    for row in range(8):
+        for column in range(8):
+            cell = patch[
+                y_edges[row] : y_edges[row + 1],
+                x_edges[column] : x_edges[column + 1],
+            ]
+            grid[row, column] = numpy.rint(cell.mean(axis=(0, 1))).astype(numpy.int32)
+    template = numpy.frombuffer(_CLASSIC_INVENTORY_DIRT_RGB_8X8, dtype=numpy.uint8).reshape(
+        8, 8, 3
+    )
+    difference = numpy.abs(grid - template.astype(numpy.int32))
+    per_pixel = difference.max(axis=2)
+    return bool(float(difference.mean()) <= 3.0 and float(numpy.percentile(per_pixel, 95)) <= 8)
 
 
 def bedrock_inventory_overlay_present(frame: CapturedFrame) -> bool:

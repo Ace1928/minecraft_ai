@@ -10,6 +10,7 @@ from .outcome_verifier import (
     OutcomeVerification,
 )
 from .perception import EvidenceRegion, PerceptionBlackboard, PerceptionFact, Track
+from .perception_service import BEDROCK_INVENTORY_ZERO_SOURCE
 from .safety import MotorAction
 
 
@@ -94,6 +95,13 @@ class BoundedPlankCraftController:
             return True
         if self._phase == PlankCraftPhase.LOCATE_RECIPE:
             if not self._inventory_overlay_settled(blackboard, now_ns=now_ns):
+                return False
+            if _deterministic_wood_absence_observation(
+                blackboard,
+                now_ns=now_ns,
+                observed_after_ns=self._inventory_toggle_ns,
+                min_confidence=self.minimum_confidence,
+            ) is not None:
                 return False
             observed = _inventory_gui_observation(
                 blackboard,
@@ -244,6 +252,15 @@ class BoundedPlankCraftController:
         sequence: int,
         now_ns: int,
     ) -> PlankCraftStep:
+        if self._inventory_overlay_settled(blackboard, now_ns=now_ns):
+            empty_wood = _deterministic_wood_absence_observation(
+                blackboard,
+                now_ns=now_ns,
+                observed_after_ns=self._inventory_toggle_ns,
+                min_confidence=self.minimum_confidence,
+            )
+            if empty_wood is not None:
+                return self._fail("crafting-no-logs-observed-in-inventory")
         observed = _inventory_gui_observation(
             blackboard,
             now_ns=now_ns,
@@ -562,6 +579,42 @@ def _inventory_count(
         if not supported.intersection(fact.evidence_refs):
             return None
     return fact
+
+
+def _deterministic_wood_absence_observation(
+    blackboard: PerceptionBlackboard,
+    *,
+    now_ns: int,
+    observed_after_ns: int,
+    min_confidence: float,
+) -> tuple[PerceptionFact, PerceptionFact] | None:
+    """Accept only one coherent current-frame zero certificate from the slot gate."""
+    logs = blackboard.fact("inventory.logs", min_confidence=min_confidence, now_ns=now_ns)
+    planks = blackboard.fact("inventory.planks", min_confidence=min_confidence, now_ns=now_ns)
+    overlay = blackboard.fact(
+        "scene.inventory_overlay",
+        min_confidence=min_confidence,
+        now_ns=now_ns,
+    )
+    playable = blackboard.fact("scene.playable", min_confidence=min_confidence, now_ns=now_ns)
+    if logs is None or planks is None or overlay is None or playable is None:
+        return None
+    if logs.source != BEDROCK_INVENTORY_ZERO_SOURCE or planks.source != logs.source:
+        return None
+    if logs.value != 0 or planks.value != 0:
+        return None
+    if not (
+        logs.observed_ns == planks.observed_ns == overlay.observed_ns == playable.observed_ns
+        and logs.observed_ns > observed_after_ns
+    ):
+        return None
+    if overlay.value is not True or playable.value is not False:
+        return None
+    if not overlay.source.startswith(("bootstrap:", "safety:")):
+        return None
+    if not playable.source.startswith(("bootstrap:", "safety:")):
+        return None
+    return logs, planks
 
 
 def _inventory_gui_observation(

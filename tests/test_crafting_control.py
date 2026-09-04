@@ -18,6 +18,7 @@ from minecraft_ai.perception import (
     ScreenRegion,
     Track,
 )
+from minecraft_ai.perception_service import BEDROCK_INVENTORY_ZERO_SOURCE
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.skills import SkillOutcome
 from minecraft_ai.runtime import AgentRuntime, RuntimeMetrics
@@ -165,6 +166,31 @@ def _merge_fast_overlay(board: PerceptionBlackboard, *, observed_ns: int) -> Non
                 True,
                 observed_ns=observed_ns,
                 source="bootstrap:bootstrap-rgb-v1:not-training-label",
+            ),
+        ),
+    )
+
+
+def _merge_deterministic_empty_wood(
+    board: PerceptionBlackboard,
+    *,
+    observed_ns: int,
+) -> None:
+    _merge_fast_overlay(board, observed_ns=observed_ns)
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(
+            _fact(
+                "inventory.logs",
+                0,
+                observed_ns=observed_ns,
+                source=BEDROCK_INVENTORY_ZERO_SOURCE,
+            ),
+            _fact(
+                "inventory.planks",
+                0,
+                observed_ns=observed_ns,
+                source=BEDROCK_INVENTORY_ZERO_SOURCE,
             ),
         ),
     )
@@ -374,6 +400,72 @@ def test_runtime_waits_for_locate_phase_and_settled_inventory_before_semantics(
 
     assert len(perception.requests) == 1
     assert perception.requests[0].frame_id == 7
+
+
+def test_deterministic_empty_wood_certificate_skips_vlm_and_fails_no_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.monotonic_ns()
+    clock = [now]
+    monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock[0])
+    board = _board(now)
+    executor = SkillExecutor(_UnusedPolicy())
+    executor.start(
+        build_bootstrap_skill_library().get("craft_wood_planks"),
+        run_id="craft:deterministic-empty",
+        now_ns=now - 1,
+    )
+    perception = _TrackedPerception()
+    runtime = _craft_semantic_runtime(board, executor, perception)
+
+    opened = executor.tick(board, sequence=1, now_ns=now)
+    assert opened.action is not None and opened.action.keys_down == ("e",)
+    clock[0] = now + 100_000_000
+    _merge_deterministic_empty_wood(board, observed_ns=clock[0])
+    executor.tick(board, sequence=2, now_ns=clock[0])
+    runtime._request_semantics_if_due(frame_id=2)
+
+    for frame_id, offset_ms in ((3, 300), (4, 500), (5, 600)):
+        clock[0] = now + offset_ms * 1_000_000
+        _merge_deterministic_empty_wood(board, observed_ns=clock[0])
+        runtime._request_semantics_if_due(frame_id=frame_id)
+
+    failed = executor.tick(board, sequence=3, now_ns=clock[0])
+
+    assert perception.requests == []
+    assert failed.run.outcome == SkillOutcome.FAILED
+    assert failed.run.failure_reason == "crafting-no-logs-observed-in-inventory"
+
+
+def test_deterministic_empty_wood_certificate_must_match_overlay_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.monotonic_ns()
+    clock = [now]
+    monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock[0])
+    board = _board(now)
+    executor = SkillExecutor(_UnusedPolicy())
+    executor.start(
+        build_bootstrap_skill_library().get("craft_wood_planks"),
+        run_id="craft:stale-deterministic-empty",
+        now_ns=now - 1,
+    )
+    perception = _TrackedPerception()
+    runtime = _craft_semantic_runtime(board, executor, perception)
+
+    executor.tick(board, sequence=1, now_ns=now)
+    clock[0] = now + 100_000_000
+    _merge_deterministic_empty_wood(board, observed_ns=clock[0])
+    executor.tick(board, sequence=2, now_ns=clock[0])
+    runtime._request_semantics_if_due(frame_id=2)
+
+    for frame_id, offset_ms in ((3, 300), (4, 500), (5, 600)):
+        clock[0] = now + offset_ms * 1_000_000
+        _merge_fast_overlay(board, observed_ns=clock[0])
+        runtime._request_semantics_if_due(frame_id=frame_id)
+
+    assert len(perception.requests) == 1
+    assert perception.requests[0].frame_id == 5
 
 
 def test_runtime_reserves_first_post_click_semantic_request_for_outcome(

@@ -4,7 +4,7 @@ import io
 import time
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from minecraft_ai.grounded_perception import GroundedPerceptionRepairError
 from minecraft_ai.models import ModelResponse
@@ -18,6 +18,7 @@ from minecraft_ai.perception import (
     Track,
 )
 from minecraft_ai.perception_service import (
+    BEDROCK_INVENTORY_ZERO_SOURCE,
     ActiveVLMWorker,
     BootstrapFastPerception,
     SemanticJob,
@@ -25,6 +26,7 @@ from minecraft_ai.perception_service import (
     bedrock_air_bubbles,
     bedrock_death_screen_present,
     bedrock_inventory_overlay_present,
+    bedrock_inventory_slot_observation,
     bedrock_survival_hud_present,
     bedrock_ui_chrome_present,
     frame_dhash,
@@ -240,6 +242,84 @@ def _frame(pixels: bytes, *, width: int = 9, height: int = 8) -> CapturedFrame:
     )
 
 
+_VERIFIED_DIRT_RGB_8X8 = bytes.fromhex(
+    "898b8e8a8c8d8c8b8a86766a7f634d7d5b408e694b8268548c8b8a90847a8a"
+    "726089654894684578573d856145815c3e8d746179573a8b664a7e5d4278553a"
+    "835e41845d3f8c6647735034815a428963438e6c50886448805a3c916d4f856042"
+    "58412e664a37724f327d583b815a3b9066468a634478583f60432c5c442d634935"
+    "61452e70523a7a593e6d50394b33225f432e654b365c4029583f2b543a265b3e27"
+    "422e1e453021634832684c36624732563c295d4430614732483629412e21"
+)
+
+
+def _classic_inventory_frame(
+    *,
+    width: int = 1920,
+    height: int = 1054,
+    occupant: str | None = None,
+    occupant_slot: tuple[int, int] = (936, 768),
+    damage_geometry: bool = False,
+) -> CapturedFrame:
+    image = Image.new("RGB", (width, height), (35, 55, 30))
+    draw = ImageDraw.Draw(image)
+    scale_x, scale_y = width / 1920, height / 1054
+
+    def rectangle(box: tuple[int, int, int, int], fill: tuple[int, int, int]) -> None:
+        x0, y0, x1, y1 = box
+        draw.rectangle(
+            (
+                round(x0 * scale_x),
+                round(y0 * scale_y),
+                round(x1 * scale_x) - 1,
+                round(y1 * scale_y) - 1,
+            ),
+            fill=fill,
+        )
+
+    rectangle((288, 190, 883, 791), (93, 93, 93))
+    rectangle((902, 190, 1613, 791), (198, 198, 198))
+    slots = tuple(
+        (936 + 72 * column, y)
+        for y in (540, 612, 684, 768)
+        for column in range(9)
+    ) + ((1292, 268), (1364, 268), (1292, 340), (1364, 340), (1516, 300))
+    for x, y in slots:
+        rectangle((x, y, x + 68, y + 68), (55, 55, 55))
+        rectangle((x + 4, y + 4, x + 68, y + 68), (139, 139, 139))
+
+    if occupant is not None:
+        x, y = occupant_slot
+        if occupant == "unknown":
+            rectangle((x + 10, y + 8, x + 46, y + 42), (210, 20, 200))
+        elif occupant == "dirt":
+            template = Image.frombytes("RGB", (8, 8), _VERIFIED_DIRT_RGB_8X8)
+            source = template.load()
+            x_edges = [round(index * 36 / 8) for index in range(9)]
+            y_edges = [round(index * 34 / 8) for index in range(9)]
+            for row in range(8):
+                for column in range(8):
+                    rectangle(
+                        (
+                            x + 10 + x_edges[column],
+                            y + 8 + y_edges[row],
+                            x + 10 + x_edges[column + 1],
+                            y + 8 + y_edges[row + 1],
+                        ),
+                        source[column, row],
+                    )
+        else:
+            raise AssertionError(f"unsupported synthetic occupant {occupant!r}")
+    if damage_geometry:
+        rectangle((936, 540, 1004, 544), (198, 198, 198))
+    return CapturedFrame(
+        frame_id=1,
+        captured_ns=1,
+        width=width,
+        height=height,
+        bgra=image.convert("RGBA").tobytes("raw", "BGRA"),
+    )
+
+
 def _hash_fact(value: str, *, key: str = "frame.dhash") -> PerceptionFact:
     return PerceptionFact(
         key=key,
@@ -344,6 +424,72 @@ def test_bedrock_wide_survival_inventory_uses_asymmetric_panel_palettes() -> Non
     facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
     assert facts["scene.playable"].value is False
     assert facts["scene.inventory_overlay"].value is True
+
+
+def test_classic_inventory_empty_grid_publishes_deterministic_wood_zeros() -> None:
+    frame = _classic_inventory_frame()
+
+    observation = bedrock_inventory_slot_observation(frame)
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+
+    assert observation is not None
+    assert observation.occupied_slots == ()
+    assert observation.wood_absence_certified
+    assert facts["inventory.logs"].value == 0
+    assert facts["inventory.planks"].value == 0
+    assert facts["inventory.logs"].observed_ns == facts["scene.inventory_overlay"].observed_ns
+    assert facts["inventory.planks"].observed_ns == facts["scene.inventory_overlay"].observed_ns
+    assert facts["inventory.logs"].source == BEDROCK_INVENTORY_ZERO_SOURCE
+    assert facts["inventory.planks"].source == BEDROCK_INVENTORY_ZERO_SOURCE
+
+
+def test_classic_inventory_verified_dirt_is_the_only_non_wood_whitelist() -> None:
+    frame = _classic_inventory_frame(occupant="dirt")
+
+    observation = bedrock_inventory_slot_observation(frame)
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+
+    assert observation is not None
+    assert observation.occupied_slots == ("inventory.27",)
+    assert observation.known_non_wood_slots == ("inventory.27",)
+    assert observation.wood_absence_certified
+    assert facts["inventory.logs"].value == facts["inventory.planks"].value == 0
+
+
+@pytest.mark.parametrize("occupant_slot", [(936, 768), (1516, 300)])
+def test_classic_inventory_unknown_occupant_abstains(
+    occupant_slot: tuple[int, int],
+) -> None:
+    frame = _classic_inventory_frame(occupant="unknown", occupant_slot=occupant_slot)
+
+    observation = bedrock_inventory_slot_observation(frame)
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+
+    assert observation is not None
+    assert observation.occupied_slots
+    assert observation.known_non_wood_slots == ()
+    assert not observation.wood_absence_certified
+    assert "inventory.logs" not in facts
+    assert "inventory.planks" not in facts
+
+
+def test_classic_inventory_geometry_mismatch_abstains() -> None:
+    frame = _classic_inventory_frame(damage_geometry=True)
+
+    assert bedrock_inventory_slot_observation(frame) is None
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert "inventory.logs" not in facts
+    assert "inventory.planks" not in facts
+
+
+def test_classic_inventory_empty_grid_scales_with_the_captured_drawable() -> None:
+    frame = _classic_inventory_frame(width=1440, height=790)
+
+    observation = bedrock_inventory_slot_observation(frame)
+
+    assert observation is not None
+    assert observation.occupied_slots == ()
+    assert observation.wood_absence_certified
 
 
 def test_uniform_gray_world_does_not_match_split_inventory_palettes() -> None:
