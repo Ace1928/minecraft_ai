@@ -2233,10 +2233,11 @@ class AgentRuntime:
         # single query abstained; never ask again or improvise another target.
         if self.perception.semantic_available():
             self._clear_headroom_recovery(recovery)
-            # The completed semantic transaction found no authorized block to
-            # clear. Release only the traversal keepalive latch so safe,
-            # non-attacking exploration can continue while cognition replans.
-            self._traversal_escalation_pending = False
+            # The completed recovery found no authorized block to clear. Let
+            # cognition consume this failure before another disposable walk:
+            # a new obstacle stall otherwise invalidates every slow decision
+            # before it can return. Safety and operator work still preempt.
+            self._traversal_escalation_pending = True
             self._cognition_requested = True
 
     def _headroom_scene_is_safe(self) -> bool:

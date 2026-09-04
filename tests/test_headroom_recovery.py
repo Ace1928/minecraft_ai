@@ -1021,7 +1021,7 @@ def test_crosshair_color_swap_after_acquisition_motion_never_starts_attack(
 
 
 @pytest.mark.parametrize("kind", ("stone", "unknown"))
-def test_hard_or_unknown_answer_abstains_after_exactly_one_query(kind: str) -> None:
+def test_hard_or_unknown_answer_gives_cognition_a_turn_after_one_query(kind: str) -> None:
     runtime, perception, sent = _runtime_for_probe()
     runtime._traversal_escalation_pending = True
     runtime._headroom_recovery = _HeadroomRecovery(
@@ -1050,12 +1050,15 @@ def test_hard_or_unknown_answer_abstains_after_exactly_one_query(kind: str) -> N
     assert len(perception.requests) == 1
     assert runtime.executor.run is None
     assert sent == []
-    assert runtime._traversal_escalation_pending is False
+    assert runtime._traversal_escalation_pending is True
     assert runtime._cognition_requested is True
-    keepalive = runtime._explore_keep_alive()
-    assert keepalive is not None
-    assert keepalive.skill_id in {"traverse_level_ground", "explore_forward"}
-    assert keepalive.action_permissions.allow_attack is False
+    # Do not start another disposable walk that can fail and invalidate the
+    # slow decision before it returns. Explicit/safety work is routed elsewhere.
+    revision = runtime._execution_revision
+    for _ in range(3):
+        assert runtime._explore_keep_alive() is None
+        runtime._advance_headroom_recovery()
+    assert runtime._execution_revision == revision
 
 
 @pytest.mark.parametrize(
