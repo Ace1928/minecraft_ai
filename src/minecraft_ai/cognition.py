@@ -265,6 +265,7 @@ _SEMANTIC_REPAIR_SYSTEM = (
 
 _MAX_REJECTED_OUTPUT_CHARS = 2_048
 _MAX_REPAIR_REASON_CHARS = 640
+_MAX_OPERATOR_FAST_PATH_INSTRUCTION_CHARS = 280
 
 
 def _operator_prompt_payload(message: OperatorMessage) -> dict[str, object]:
@@ -497,6 +498,10 @@ class HighLevelController:
         context: CognitionContext,
     ) -> CognitionDecision:
         try:
+            operator_fast_path = self._operator_fast_path_decision(blackboard, context)
+            if operator_fast_path is not None:
+                self.metrics.last_error = None
+                return operator_fast_path
             latest = blackboard.latest()
             active_operator = (
                 None
@@ -749,6 +754,53 @@ class HighLevelController:
                 ),
                 request_replan=True,
             )
+
+    def _operator_fast_path_decision(
+        self,
+        blackboard: PerceptionBlackboard,
+        context: CognitionContext,
+    ) -> CognitionDecision | None:
+        """Execute one literal, unambiguous operator option without model latency."""
+        if _urgent_safety_required(blackboard):
+            return None
+        active = next(
+            (
+                message
+                for message in context.operator_messages
+                if message.kind
+                in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+            ),
+            None,
+        )
+        if active is None or active.status not in {
+            OperatorMessageStatus.QUEUED,
+            OperatorMessageStatus.DELIVERED,
+        }:
+            return None
+        if len(active.text) > _MAX_OPERATOR_FAST_PATH_INSTRUCTION_CHARS:
+            return None
+
+        feasible_skill_ids = tuple(
+            skill_id
+            for skill_id in _operator_requested_skill_ids(active.text)
+            if skill_id in self.skills.specs
+            and initiation_satisfied(self.skills.get(skill_id), blackboard)
+        )
+        if len(feasible_skill_ids) != 1:
+            return None
+
+        parameters: dict[str, str | int | float | bool] = dict(
+            _explicit_action_constraints(active.text)
+        )
+        decision = CognitionDecision(
+            reasoning_summary="Following an explicit operator instruction.",
+            chosen_goal_id=f"operator:{active.message_id}",
+            skill_id=feasible_skill_ids[0],
+            skill_parameters=parameters,
+            say="Starting that now.",
+            instruction=active.text,
+        )
+        return self._scope_operator_decision(decision, blackboard, context)
 
     def _apply_decision_authority(
         self,

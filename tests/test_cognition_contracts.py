@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
+
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.cognition import CognitionContext, CognitionDecision, HighLevelController
 from minecraft_ai.models import ModelMessage, ModelResponse
@@ -607,6 +609,61 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
     assert decision.say == "I am climbing the hill now."
 
 
+@pytest.mark.parametrize(
+    "status",
+    (OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED),
+)
+def test_marked_dirt_instruction_uses_immediate_operator_fast_path(
+    status: OperatorMessageStatus,
+) -> None:
+    now = time.monotonic_ns()
+    reference = PerceptionFact(
+        key="target.reference_available",
+        value=True,
+        confidence=1.0,
+        observed_ns=now,
+        source="operator",
+        expires_after_ms=10_000,
+    )
+    board = _board(reference)
+    latest = board.latest()
+    assert latest is not None
+    board.upsert_semantic_track(
+        instance_id=latest.instance_id,
+        track=Track(
+            track_id="operator:target",
+            label="dirt",
+            confidence=1.0,
+            region=ScreenRegion(x=0.3, y=0.2, width=0.4, height=0.6),
+            first_seen_ns=now,
+            last_seen_ns=now,
+            attributes={"source": "operator"},
+        ),
+    )
+    message = OperatorMessage(
+        message_id="mine-marked-dirt",
+        created_ns=now,
+        text="Mine the marked dirt block.",
+        kind=OperatorMessageKind.CORRECTION,
+        status=status,
+    )
+    context = _context()
+    context.operator_messages = (message,)
+    model = _GrammarCapturingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    decision = controller.decide(board, context)
+
+    assert model.messages == ()
+    assert controller.metrics.calls == 0
+    assert decision.chosen_goal_id == "operator:mine-marked-dirt"
+    assert decision.skill_id == "mine_visible_block"
+    assert decision.skill_parameters == {"target": "dirt"}
+    assert decision.instruction == message.text
+    assert decision.say == "Starting that now."
+    assert decision.request_replan is False
+
+
 def test_direct_operator_action_uses_sampler_grammar_that_requires_a_skill() -> None:
     message = OperatorMessage(
         message_id="move-now",
@@ -657,6 +714,7 @@ def test_negated_question_and_unsupported_actions_keep_null_available() -> None:
 
         controller.decide(_board(), context)
 
+        assert model.messages, text
         skill_rule = next(
             line for line in model.grammar.splitlines() if line.startswith("skill ::=")
         )
@@ -677,6 +735,7 @@ def test_unavailable_requested_skill_allows_only_null() -> None:
 
     decision = controller.decide(_board(), context)
 
+    assert model.messages
     skill_rule = next(line for line in model.grammar.splitlines() if line.startswith("skill ::="))
     assert skill_rule == 'skill ::= "null"'
     assert decision.skill_id is None
@@ -696,7 +755,7 @@ def test_danger_defers_operator_authority_without_acknowledging_completion() -> 
     message = OperatorMessage(
         message_id="danger-command",
         created_ns=2,
-        text="Move forward through safe open terrain.",
+        text="Mine the marked dirt block.",
         status=OperatorMessageStatus.DELIVERED,
     )
     context = _context()
@@ -707,8 +766,18 @@ def test_danger_defers_operator_authority_without_acknowledging_completion() -> 
     )
     controller = HighLevelController(model, build_bootstrap_skill_library())
 
-    decision = controller.decide(_board(danger), context)
+    reference = PerceptionFact(
+        key="target.reference_available",
+        value=True,
+        confidence=1.0,
+        observed_ns=now,
+        source="operator",
+        expires_after_ms=10_000,
+    )
 
+    decision = controller.decide(_board(danger, reference), context)
+
+    assert model.messages
     payload = json.loads(model.messages[1].content)
     assert payload["active_operator_message"] is None
     assert len(model.messages) == 2
