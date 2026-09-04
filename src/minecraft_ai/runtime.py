@@ -786,6 +786,11 @@ class AgentRuntime:
             # paid serially while the avatar stands idle.
             if self.perception.last_capture is None:
                 self.perception.capture_once()
+            # Operator grounding is deterministic and may make a pending
+            # directive executable before the first strategic snapshot. Merge
+            # it before launching slow cognition, including after a process
+            # restart where the message was already marked delivered.
+            self._merge_operator_target()
             self._start_cognition_if_due()
             self._warmup_policy()
             while not self._stop.is_set():
@@ -1260,6 +1265,12 @@ class AgentRuntime:
 
     def _start_cognition_if_due(self) -> None:
         if self._pending_decision is not None:
+            if self._preempt_pending_cognition_for_operator():
+                # The replacement is a completed deterministic decision. Apply
+                # it on this motor-loop turn so operator authority can take
+                # ownership from a disposable keepalive without waiting for
+                # the stale model request to finish.
+                self._consume_cognition()
             return
         now = time.monotonic_ns()
         new_operator_message = self._new_queued_operator_message_waiting()
@@ -1314,6 +1325,63 @@ class AgentRuntime:
         self._cognition_requested = False
         self._pending_execution_revision = self._execution_revision
         self.metrics.cognition_calls += 1
+
+    def _preempt_pending_cognition_for_operator(self) -> bool:
+        """Replace a stale model future with one safe deterministic operator decision."""
+        stale_future = self._pending_decision
+        if stale_future is None or self.high_level is None or self.state_db is None:
+            return False
+        if not self._queued_operator_message_waiting():
+            return False
+
+        context = self._cognition_context()
+        decision = self.high_level._operator_fast_path_decision(self.blackboard, context)
+        if decision is None:
+            return False
+        pending_ids = tuple(
+            message.message_id
+            for message in context.operator_messages
+            if message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+        )
+        selected_id = _selected_operator_message_id(decision, pending_ids)
+        if selected_id is None:
+            return False
+
+        running = self.executor.run
+        if (
+            running is not None
+            and running.outcome == SkillOutcome.RUNNING
+            and running.context_key == _EXPLORE_KEEPALIVE_CONTEXT
+        ):
+            cancelled = self.executor.cancel()
+            try:
+                if cancelled.action is not None:
+                    self._send_motor(cancelled.action, execution=cancelled)
+            finally:
+                self._record_terminal_run(cancelled.run)
+            self._execution_revision += 1
+
+        for message in context.operator_messages:
+            if message.status == OperatorMessageStatus.QUEUED:
+                self._persist_operator_message_status(
+                    message.message_id,
+                    OperatorMessageStatus.DELIVERED,
+                    timestamp_ns=time.time_ns(),
+                )
+
+        # A running thread-pool future cannot be interrupted safely. Cancel it
+        # when it has not started, otherwise detach it; either way its stale
+        # result can no longer alter runtime state.
+        stale_future.cancel()
+        replacement: concurrent.futures.Future[CognitionDecision] = (
+            concurrent.futures.Future()
+        )
+        replacement.set_result(decision)
+        self._pending_decision = replacement
+        self._pending_operator_message_ids = pending_ids
+        self._pending_execution_revision = self._execution_revision
+        self._cognition_requested = False
+        return True
 
     def _consume_cognition(self) -> None:
         future = self._pending_decision

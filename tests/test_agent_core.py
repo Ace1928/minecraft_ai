@@ -15,6 +15,7 @@ from minecraft_ai.execution import ExecutionTick, SkillExecutor
 from minecraft_ai.episodes import RuntimeEventKind
 from minecraft_ai.knowledge import Edition, GameVersion, KnowledgeGraph
 from minecraft_ai.memory import MemoryKind, MemoryRecord, MemoryStore
+from minecraft_ai.models import ModelMessage, ModelResponse
 from minecraft_ai.perception import (
     FrameState,
     PerceptionBlackboard,
@@ -26,7 +27,7 @@ from minecraft_ai.planning import Goal, GoalScorer
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.roles import BUILTIN_ROLES, get_role
-from minecraft_ai.cognition import CognitionDecision
+from minecraft_ai.cognition import CognitionDecision, HighLevelController
 from minecraft_ai.runtime import (
     AgentRuntime,
     RuntimeMetrics,
@@ -1693,6 +1694,248 @@ def test_new_queued_operator_message_bypasses_old_backoff_once(tmp_path: Path) -
         assert pool.calls == 1
     finally:
         database.close()
+
+
+class _OperatorFastPathOnlyModel:
+    model_id = "operator-fast-path-only"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse:
+        del messages
+        self.calls += 1
+        raise AssertionError("operator preemption must not invoke the slow model")
+
+
+def _runtime_with_inflight_operator_cognition(
+    database: StateDatabase,
+    *,
+    message_text: str,
+    status: OperatorMessageStatus = OperatorMessageStatus.QUEUED,
+    target_reference: bool = True,
+    danger: bool = False,
+    sampled_message: bool = False,
+) -> tuple[
+    AgentRuntime,
+    Future[CognitionDecision],
+    _OperatorFastPathOnlyModel,
+    list[SkillRun],
+    list[MotorAction],
+]:
+    now = time.monotonic_ns()
+    facts: list[PerceptionFact] = []
+    if target_reference:
+        facts.append(
+            PerceptionFact(
+                key="target.reference_available",
+                value=True,
+                confidence=1.0,
+                observed_ns=now,
+                source="operator",
+                expires_after_ms=10_000,
+            )
+        )
+    blackboard = PerceptionBlackboard()
+    blackboard.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:operator-preemption",
+            width=1280,
+            height=720,
+            facts=tuple(facts),
+            tracks=(
+                Track(
+                    track_id="operator:marked-dirt",
+                    label="dirt",
+                    confidence=1.0,
+                    region=ScreenRegion(x=0.3, y=0.2, width=0.4, height=0.6),
+                    first_seen_ns=now,
+                    last_seen_ns=now,
+                    attributes={"source": "operator"},
+                ),
+            ),
+        )
+    )
+    message = OperatorMessage(
+        message_id="new-operator-correction",
+        created_ns=now,
+        text=message_text,
+        kind=OperatorMessageKind.CORRECTION,
+        status=status,
+    )
+    database.save_operator_message(message)
+    skills = build_bootstrap_skill_library()
+    executor = SkillExecutor(BootstrapMotorPolicy())
+    executor.start(
+        skills.get("explore_forward"),
+        run_id="disposable-keepalive",
+        context_key="explore-keepalive",
+    )
+    keepalive_tick = executor.tick(blackboard, sequence=0, now_ns=now + 1)
+    assert keepalive_tick.action is not None
+    assert "w" in keepalive_tick.action.keys_down
+    if danger:
+        blackboard.merge_semantics(
+            instance_id="bedrock:operator-preemption",
+            facts=(
+                PerceptionFact(
+                    key="danger.immediate",
+                    value=True,
+                    confidence=1.0,
+                    observed_ns=now + 2,
+                    source="test",
+                    expires_after_ms=10_000,
+                ),
+            ),
+        )
+    model = _OperatorFastPathOnlyModel()
+    stale_future: Future[CognitionDecision] = Future()
+    assert stale_future.set_running_or_notify_cancel()
+    terminal: list[SkillRun] = []
+    sent_actions: list[MotorAction] = []
+
+    runtime = object.__new__(AgentRuntime)
+    runtime.blackboard = blackboard
+    runtime.executor = executor
+    runtime.skills = skills
+    runtime.role = get_role("generalist")
+    runtime.memories = MemoryStore()
+    runtime.social = SocialState()
+    runtime.custom_goals = []
+    runtime.state_db = database
+    runtime.high_level = HighLevelController(model, skills)
+    runtime._pending_decision = stale_future
+    runtime._pending_execution_revision = 0
+    runtime._execution_revision = 0
+    runtime._pending_operator_message_ids = (
+        (message.message_id,) if sampled_message else ()
+    )
+    runtime._pending_operator_status_updates = {}
+    runtime._pending_skill_stats = {}
+    runtime._pending_runtime_events = {}
+    runtime._pending_memories = {}
+    runtime._recent_skill_runs = deque(maxlen=8)
+    runtime._cognition_requested = False
+    runtime._cognition_retry_count = 0
+    runtime._cognition_retry_not_before_ns = 0
+    runtime._last_cognition_ns = 0
+    runtime._last_player_chat_replied_ns = None
+    runtime._last_decision = None
+    runtime._plan_steps = ()
+    runtime._plan_goal_id = None
+    runtime._plan_index = 0
+    runtime._plan_started_ns = 0
+    runtime.metrics = RuntimeMetrics()
+    runtime._record_terminal_run = terminal.append  # type: ignore[method-assign]
+    runtime._send_motor = (  # type: ignore[method-assign]
+        lambda action, **_kwargs: sent_actions.append(action)
+    )
+    return runtime, stale_future, model, terminal, sent_actions
+
+
+@pytest.mark.parametrize(
+    ("status", "sampled_message"),
+    (
+        (OperatorMessageStatus.QUEUED, False),
+        (OperatorMessageStatus.DELIVERED, False),
+        # A target can become available after this same delivered message was
+        # already captured in a slow, pre-grounding cognition snapshot.
+        (OperatorMessageStatus.DELIVERED, True),
+    ),
+)
+def test_actionable_operator_command_preempts_inflight_cognition_and_keepalive(
+    tmp_path: Path,
+    status: OperatorMessageStatus,
+    sampled_message: bool,
+) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime, stale_future, model, terminal, sent_actions = (
+            _runtime_with_inflight_operator_cognition(
+                database,
+                message_text="Mine the marked dirt block.",
+                status=status,
+                sampled_message=sampled_message,
+            )
+        )
+
+        runtime._start_cognition_if_due()
+
+        # Python cannot interrupt a running worker thread, but its stale result
+        # is detached and can no longer delay or mutate live runtime state.
+        assert stale_future.running()
+        assert runtime._pending_decision is None
+        assert model.calls == 0
+        assert terminal[0].run_id == "disposable-keepalive"
+        assert terminal[0].outcome == SkillOutcome.CANCELLED
+        assert "w" in sent_actions[0].keys_up
+        assert runtime.executor.run is not None
+        assert runtime.executor.run.skill_id == "mine_visible_block"
+        assert runtime.executor.parameters == {"target": "dirt"}
+        assert runtime.executor.instruction == "Mine the marked dirt block."
+        assert runtime._last_decision is not None
+        assert runtime._last_decision.chosen_goal_id == "operator:new-operator-correction"
+        persisted = database.load_operator_messages(limit=1)[0]
+        assert persisted.status == OperatorMessageStatus.ACKNOWLEDGED
+        assert persisted.response_text == "Starting that now."
+
+
+@pytest.mark.parametrize(
+    ("message_text", "target_reference"),
+    (
+        ("Move forward through safe open terrain.", True),
+        ("Mine the marked dirt block.", False),
+    ),
+)
+def test_ambiguous_or_infeasible_operator_command_keeps_inflight_cognition(
+    tmp_path: Path,
+    message_text: str,
+    target_reference: bool,
+) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime, stale_future, model, terminal, sent_actions = (
+            _runtime_with_inflight_operator_cognition(
+                database,
+                message_text=message_text,
+                target_reference=target_reference,
+            )
+        )
+
+        runtime._start_cognition_if_due()
+
+        assert runtime._pending_decision is stale_future
+        assert stale_future.running()
+        assert model.calls == 0
+        assert terminal == []
+        assert sent_actions == []
+        assert runtime.executor.run is not None
+        assert runtime.executor.run.run_id == "disposable-keepalive"
+
+
+def test_urgent_safety_blocks_operator_fast_path_preemption(
+    tmp_path: Path,
+) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime, stale_future, model, terminal, sent_actions = (
+            _runtime_with_inflight_operator_cognition(
+                database,
+                message_text="Mine the marked dirt block.",
+                danger=True,
+            )
+        )
+
+        runtime._start_cognition_if_due()
+
+        assert runtime._pending_decision is stale_future
+        assert model.calls == 0
+        assert runtime.executor.run is not None
+        assert runtime.executor.run.run_id == "disposable-keepalive"
+        assert terminal == []
+        assert sent_actions == []
+        assert database.load_operator_messages(limit=1)[0].status == (
+            OperatorMessageStatus.QUEUED
+        )
 
 
 def test_delivered_operator_message_remains_waiting_until_acknowledged(tmp_path: Path) -> None:
