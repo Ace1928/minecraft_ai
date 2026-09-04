@@ -7,7 +7,7 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 WorkingDirectory=%h/minecraft_ai
-ExecStart=%h/minecraft_ai/start.sh creative_builder
+ExecStart=%h/minecraft_ai/start.sh generalist
 ExecStop=-%h/minecraft_ai/.venv/bin/minecraft-ai stop --transient
 ExecStop=-%h/minecraft_ai/.venv/bin/minecraft-ai bedrock stop --transient
 Restart=on-failure

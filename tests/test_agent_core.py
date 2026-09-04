@@ -1272,6 +1272,27 @@ def test_newer_acknowledged_instruction_supersedes_old_high_priority_correction(
     assert tuple(message.message_id for message in active) == ("new-instruction",)
 
 
+def test_acknowledged_correction_tombstones_older_instruction() -> None:
+    messages = (
+        OperatorMessage(
+            message_id="old-instruction",
+            created_ns=1,
+            text="Keep crafting planks",
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),
+        OperatorMessage(
+            message_id="new-correction",
+            created_ns=2,
+            text="Stop crafting and mine the marked dirt once",
+            kind=OperatorMessageKind.CORRECTION,
+            priority=1.0,
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),
+    )
+
+    assert _active_operator_messages(messages) == ()
+
+
 def test_only_selected_operator_goal_is_acknowledgeable() -> None:
     pending = ("new-correction", "old-instruction")
 
@@ -1422,6 +1443,54 @@ def test_persistent_plan_adoption_and_advancement() -> None:
     runtime._last_decision = CognitionDecision(chosen_goal_id="operator:abc")
     runtime._advance_plan_on_step_complete(_run("navigate"))
     assert runtime._plan_index == 0
+
+
+def test_new_concrete_operator_command_retires_stale_operator_plan() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime._plan_steps = ("open inventory", "craft planks")
+    runtime._plan_goal_id = "operator:old-craft"
+    runtime._plan_index = 1
+    runtime._plan_started_ns = 1
+
+    runtime._adopt_plan_if_revised(
+        CognitionDecision(
+            chosen_goal_id="operator:new-mine",
+            skill_id="mine_visible_block",
+            instruction="Mine the marked dirt once, then reassess.",
+        )
+    )
+
+    assert runtime._plan_steps == ()
+    assert runtime._plan_goal_id == "operator:new-mine"
+    assert runtime._plan_index == 0
+    assert runtime._plan_started_ns > 1
+
+
+def test_operator_question_and_same_goal_continuation_preserve_plan() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime._plan_steps = ("collect logs", "craft planks")
+    runtime._plan_goal_id = "operator:wood"
+    runtime._plan_index = 1
+    runtime._plan_started_ns = 1
+
+    runtime._adopt_plan_if_revised(
+        CognitionDecision(
+            chosen_goal_id="operator:status-question",
+            skill_id="explore_forward",
+            say="I am collecting wood.",
+        )
+    )
+    runtime._adopt_plan_if_revised(
+        CognitionDecision(
+            chosen_goal_id="operator:wood",
+            skill_id="gather_nearby_wood",
+            instruction="Continue collecting logs.",
+        )
+    )
+
+    assert runtime._plan_steps == ("collect logs", "craft planks")
+    assert runtime._plan_goal_id == "operator:wood"
+    assert runtime._plan_index == 1
 
 
 def _run(skill_id: str):
@@ -1892,6 +1961,23 @@ def test_same_skill_cognition_takes_ownership_from_disposable_keepalive() -> Non
     assert runtime.executor.run.run_id != "keepalive-run"
     assert runtime.executor.run.context_key == "default"
     assert runtime.executor.instruction == "Explore toward open ground."
+
+
+def test_operator_decision_attributes_skill_run_to_operator_goal() -> None:
+    runtime = _runtime_with_completed_decision(
+        CognitionDecision(
+            chosen_goal_id="operator:mine-marked-dirt",
+            skill_id="mine_visible_block",
+            instruction="Mine the marked dirt until it breaks.",
+        )
+    )
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+
+    runtime._consume_cognition()
+
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.context_key == "operator:mine-marked-dirt"
 
 
 def test_world_decision_closes_owned_crafting_gui_before_execution() -> None:
@@ -2488,6 +2574,49 @@ def test_pending_operator_message_is_not_hidden_by_newer_acknowledged_history(
         assert tuple(message.message_id for message in context.operator_messages) == (
             "old-pending",
         )
+    finally:
+        database.close()
+
+
+def test_cognition_context_does_not_replay_acknowledged_correction(
+    tmp_path: Path,
+) -> None:
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    try:
+        database.save_operator_message(
+            OperatorMessage(
+                message_id="one-shot-correction",
+                created_ns=2,
+                text="Stop and mine the marked dirt once.",
+                kind=OperatorMessageKind.CORRECTION,
+                status=OperatorMessageStatus.ACKNOWLEDGED,
+                delivered_ns=3,
+                acknowledged_ns=4,
+            )
+        )
+        database.save_operator_message(
+            OperatorMessage(
+                message_id="older-instruction",
+                created_ns=1,
+                text="Keep crafting planks.",
+                status=OperatorMessageStatus.ACKNOWLEDGED,
+                delivered_ns=2,
+                acknowledged_ns=3,
+            )
+        )
+        runtime = object.__new__(AgentRuntime)
+        runtime.state_db = database
+        runtime.role = get_role("generalist")
+        runtime.custom_goals = []
+        runtime.memories = MemoryStore()
+        runtime.social = SocialState()
+        runtime._recent_skill_runs = deque(maxlen=8)
+        runtime._plan_steps = ()
+        runtime._plan_index = 0
+        runtime._plan_goal_id = None
+        runtime._plan_started_ns = 0
+
+        assert runtime._cognition_context().operator_messages == ()
     finally:
         database.close()
 

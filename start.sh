@@ -4,7 +4,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/.venv/bin/minecraft-ai"
 PYTHON="$SCRIPT_DIR/.venv/bin/python"
-ROLE="${1:-creative_builder}"
+ROLE="${1:-generalist}"
 CAPTURE_SOURCE="${MINECRAFT_AI_CAPTURE_SOURCE:-x11}"
 CHECK_INTERVAL_S="${MINECRAFT_AI_CHECK_INTERVAL_S:-10}"
 FAILURES_BEFORE_RECOVERY="${MINECRAFT_AI_FAILURES_BEFORE_RECOVERY:-3}"

@@ -672,10 +672,12 @@ def _active_operator_messages(
 
     Fresh queued/delivered directives are the complete active command set for
     the next decision. Once those are handled, the newest acknowledged
-    instruction or correction remains the current directive. Older messages
-    stay visible in conversation history but cannot silently regain control.
-    Persistent multi-project commitments belong in the goal portfolio rather
-    than an ever-growing motor prompt.
+    instruction remains the current directive. A correction authorizes one
+    accepted bounded attempt, so an acknowledged correction acts as a
+    tombstone: it is no longer active and an older instruction must not
+    silently regain control underneath it. Persistent multi-project
+    commitments belong in the goal portfolio rather than an ever-growing
+    motor prompt.
     """
     pending = tuple(
         message
@@ -704,13 +706,10 @@ def _active_operator_messages(
         if message.status == OperatorMessageStatus.ACKNOWLEDGED
         and message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
     )
-    return tuple(
-        sorted(
-            acknowledged,
-            key=lambda message: message.created_ns,
-            reverse=True,
-        )[:1]
-    )
+    if not acknowledged:
+        return ()
+    newest = max(acknowledged, key=lambda message: message.created_ns)
+    return (newest,) if newest.kind == OperatorMessageKind.INSTRUCTION else ()
 
 
 def _selected_operator_message_id(
@@ -1754,6 +1753,7 @@ class AgentRuntime:
                     self.executor.start(
                         spec,
                         run_id=uuid.uuid4().hex,
+                        context_key=decision.chosen_goal_id or "default",
                         parameters=decision.skill_parameters,
                         instruction=decision.instruction,
                     )
@@ -1762,6 +1762,7 @@ class AgentRuntime:
                 self.executor.start(
                     spec,
                     run_id=uuid.uuid4().hex,
+                    context_key=decision.chosen_goal_id or "default",
                     parameters=decision.skill_parameters,
                     instruction=decision.instruction,
                 )
@@ -1894,6 +1895,22 @@ class AgentRuntime:
         """
         steps = decision.plan_steps
         if not steps:
+            # A concrete operator command must not inherit a different
+            # operator command's unfinished plan. Questions and status replies
+            # have no execution instruction and deliberately preserve it.
+            if (
+                decision.skill_id is not None
+                and decision.instruction
+                and decision.chosen_goal_id is not None
+                and decision.chosen_goal_id.startswith("operator:")
+                and self._plan_goal_id is not None
+                and self._plan_goal_id.startswith("operator:")
+                and decision.chosen_goal_id != self._plan_goal_id
+            ):
+                self._plan_steps = ()
+                self._plan_goal_id = decision.chosen_goal_id
+                self._plan_index = 0
+                self._plan_started_ns = time.monotonic_ns()
             return
         goal_changed = (
             decision.chosen_goal_id is not None
