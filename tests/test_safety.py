@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from minecraft_ai.safety import (
@@ -114,9 +112,9 @@ def test_expired_lease_fails_closed() -> None:
     gate = MotorGate(backend)
     lease = gate.issue(session_id="test", target_instance="minecraft", ttl_ms=50)
     gate.apply(lease.lease_id, MotorAction(sequence=0, buttons_down=("left",)))
-    time.sleep(0.06)
 
-    assert gate.check_expiry()
+    assert not gate.check_expiry(lease.expires_monotonic_ns - 1)
+    assert gate.check_expiry(lease.expires_monotonic_ns)
     assert gate.lease is None
     assert backend.held_buttons == set()
     assert gate.revocation_reason == "watchdog-expired"
