@@ -2236,7 +2236,7 @@ class AgentRuntime:
             wiki=(),
             operator_messages=operator_messages,
             recent_skill_runs=tuple(self._recent_skill_runs),
-            current_plan=self._plan_steps[self._plan_index:],
+            current_plan=self._plan_steps,
             plan_goal_id=self._plan_goal_id,
             plan_index=self._plan_index,
             plan_started_ns=self._plan_started_ns,

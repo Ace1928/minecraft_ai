@@ -12,7 +12,7 @@ from .execution import initiation_satisfied
 from .memory import MemoryRecord
 from .models import LanguageModel, ModelMessage, ModelResponse
 from .perception import PerceptionBlackboard
-from .planning import Goal
+from .planning import Goal, GoalSource
 from .roles import RoleProfile
 from .skills import SkillLibrary, SkillOutcome, SkillRun
 from .social import (
@@ -268,11 +268,27 @@ _MAX_REPAIR_REASON_CHARS = 640
 _MAX_OPERATOR_FAST_PATH_INSTRUCTION_CHARS = 280
 _MAX_HIGH_LEVEL_FACTS = 16
 _MAX_HIGH_LEVEL_FACT_TEXT = 120
+_MAX_HIGH_LEVEL_GOALS = 4
+_MAX_HIGH_LEVEL_PAYLOAD_CHARS = 7_200
+_MAX_OPERATOR_PROMPT_TEXT_CHARS = 640
 _MOTOR_ONLY_FACT_PREFIXES = ("frame.", "perception.")
 _MOTOR_ONLY_FACT_KEYS = frozenset({"scene.observation_dhash"})
+_URGENT_FACT_KEYS = frozenset(
+    {
+        "danger.immediate",
+        "environment.underwater",
+        "player.critical_health",
+        "scene.death",
+        "scene.playable",
+    }
+)
 
 
-def _high_level_fact_payload(blackboard: PerceptionBlackboard) -> dict[str, list[object]]:
+def _high_level_fact_payload(
+    blackboard: PerceptionBlackboard,
+    *,
+    required_keys: set[str] | None = None,
+) -> dict[str, list[object]]:
     """Return a bounded strategic view without motor-loop fingerprints.
 
     Per-frame hashes, luma grids, and verbose provenance are useful to the
@@ -294,8 +310,21 @@ def _high_level_fact_payload(blackboard: PerceptionBlackboard) -> dict[str, list
         "interaction.",
     )
 
-    def rank(key: str) -> tuple[int, str]:
+    evidence_keys = required_keys or set()
+
+    def rank(key: str) -> tuple[int, int, str]:
+        if key in _URGENT_FACT_KEYS:
+            reserve_rank = 0
+        elif key == "social.player_message":
+            reserve_rank = 1
+        elif key in evidence_keys:
+            reserve_rank = 2
+        elif key.startswith("target."):
+            reserve_rank = 3
+        else:
+            reserve_rank = 4
         return (
+            reserve_rank,
             next(
                 (index for index, prefix in enumerate(priority_prefixes) if key.startswith(prefix)),
                 len(priority_prefixes),
@@ -321,13 +350,123 @@ def _high_level_fact_payload(blackboard: PerceptionBlackboard) -> dict[str, list
     return payload
 
 
+def _selected_goals(
+    goals: tuple[Goal, ...],
+    *,
+    active_goal_id: str | None,
+) -> tuple[Goal, ...]:
+    """Keep the active/player/custom objectives ahead of standing-role filler."""
+
+    source_rank = {
+        GoalSource.PLAYER: 0,
+        GoalSource.CUSTOM: 1,
+        GoalSource.OPPORTUNITY: 2,
+        GoalSource.PROGRESSION: 3,
+        GoalSource.SURVIVAL: 4,
+        GoalSource.ROLE: 5,
+    }
+    ranked = sorted(
+        enumerate(goals),
+        key=lambda item: (
+            0 if item[1].goal_id == active_goal_id else 1,
+            source_rank.get(item[1].source, len(source_rank)),
+            -item[1].priority,
+            item[1].deadline_ns is None,
+            item[1].deadline_ns or 0,
+            item[0],
+        ),
+    )
+    return tuple(goal for _index, goal in ranked[:_MAX_HIGH_LEVEL_GOALS])
+
+
+def _wiki_prompt_payload(item: WikiEvidence) -> dict[str, object]:
+    return {
+        "title": item.title[:120],
+        "extract": item.extract[:600],
+        "url": None if item.url is None else item.url[:240],
+        "query": item.query[:120],
+        "version": item.version_key[:80],
+        "confidence": round(item.confidence, 3),
+    }
+
+
+def _compact_prompt_scalar(
+    value: str | int | float | bool,
+    *,
+    text_limit: int = 100,
+) -> str | int | float | bool:
+    return value[:text_limit] if isinstance(value, str) else value
+
+
+def _serialize_high_level_payload(payload: dict[str, Any]) -> str:
+    """Fit optional context under a conservative local-model character budget."""
+
+    while True:
+        encoded = json.dumps(payload, separators=(",", ":"))
+        if len(encoded) <= _MAX_HIGH_LEVEL_PAYLOAD_CHARS:
+            return encoded
+
+        reduced = False
+        for key, minimum in (
+            ("wiki_evidence", 0),
+            ("operator_messages", 0),
+            ("memories", 0),
+            ("promises", 0),
+            ("chat_lines", 0),
+            ("recent_skill_runs", 1),
+            ("goals", 1),
+        ):
+            values = payload.get(key)
+            if isinstance(values, list) and len(values) > minimum:
+                values.pop()
+                reduced = True
+                break
+        if reduced:
+            continue
+
+        frame = payload.get("frame")
+        if isinstance(frame, dict):
+            tracks = frame.get("tracks")
+            if isinstance(tracks, list) and tracks:
+                tracks.pop()
+                continue
+
+        current_plan = payload.get("current_plan")
+        if isinstance(current_plan, dict):
+            steps = current_plan.get("steps")
+            if isinstance(steps, list) and len(steps) > 1:
+                steps.pop()
+                continue
+
+        facts = payload.get("fresh_facts")
+        if isinstance(facts, dict) and len(facts) > 4:
+            facts.popitem()
+            continue
+
+        skills = payload.get("skills")
+        if isinstance(skills, list) and len(skills) > 4:
+            skills.pop()
+            continue
+
+        raise ValueError("high-level prompt cannot fit the bounded local-model context")
+
+
 def _operator_prompt_payload(message: OperatorMessage) -> dict[str, object]:
     """Expose operator-authored content without feeding model replies back as commands."""
     return {
-        "message_id": message.message_id,
+        "message_id": message.message_id[:128],
         "created_ns": message.created_ns,
-        "author": message.author,
-        "text": message.text,
+        "author": message.author[:64],
+        "text": message.text[:_MAX_OPERATOR_PROMPT_TEXT_CHARS],
+        "kind": message.kind.value,
+        "priority": message.priority,
+        "status": message.status.value,
+    }
+
+
+def _operator_prompt_metadata(message: OperatorMessage) -> dict[str, object]:
+    return {
+        "message_id": message.message_id[:128],
         "kind": message.kind.value,
         "priority": message.priority,
         "status": message.status.value,
@@ -585,73 +724,101 @@ class HighLevelController:
                 blackboard,
                 query_text=planning_query,
             )
+            required_fact_keys: set[str] = set()
+            for skill_payload in feasible_skill_payloads:
+                evidence_items = skill_payload.get("success_evidence")
+                if not isinstance(evidence_items, list):
+                    continue
+                for evidence in evidence_items:
+                    if isinstance(evidence, dict) and isinstance(evidence.get("fact"), str):
+                        required_fact_keys.add(str(evidence["fact"]))
             repair_bounds = self._decision_repair_bounds(
                 blackboard,
                 context,
                 allowed_skill_ids={str(payload["skill_id"]) for payload in feasible_skill_payloads},
             )
-            facts = _high_level_fact_payload(blackboard)
+            facts = _high_level_fact_payload(
+                blackboard,
+                required_keys=required_fact_keys,
+            )
+            selected_goals = _selected_goals(
+                context.goals,
+                active_goal_id=context.plan_goal_id,
+            )
             payload: dict[str, Any] = {
                 "role": {
-                    "id": context.role.role_id,
-                    "goals": context.role.standing_goals,
-                    "weights": context.role.utility_weights,
+                    "id": context.role.role_id[:128],
+                    "goals": [goal[:80] for goal in context.role.standing_goals[:8]],
+                    "weights": {
+                        key[:64]: value
+                        for key, value in sorted(context.role.utility_weights.items())[:12]
+                    },
                     "risk": context.role.risk_tolerance,
                 },
                 "goals": [
                     {
-                        "id": goal.goal_id,
-                        "description": goal.description,
-                        "target": goal.target_node,
+                        "id": goal.goal_id[:80],
+                        "description": goal.description[:120],
+                        "target": None if goal.target_node is None else goal.target_node[:64],
                         "source": goal.source.value,
                         "priority": goal.priority,
-                        "domain": goal.domain,
+                        "domain": goal.domain[:32],
                     }
-                    for goal in context.goals[:4]
+                    for goal in selected_goals
                 ],
                 "memories": [
                     {
-                        "id": memory.memory_id,
+                        "id": memory.memory_id[:64],
                         "kind": memory.kind.value,
-                        "text": memory.text[:160],
+                        "text": memory.text[:120],
                         "confidence": memory.confidence,
                         "importance": memory.importance,
-                        "goals": memory.goal_tags[:4],
-                        "entities": memory.entity_tags[:4],
-                        "place": memory.location_key,
+                        "goals": [tag[:40] for tag in memory.goal_tags[:2]],
+                        "entities": [tag[:40] for tag in memory.entity_tags[:2]],
+                        "place": (
+                            None if memory.location_key is None else memory.location_key[:64]
+                        ),
                     }
                     for memory in context.memories[:4]
                 ],
                 "promises": [
                     {
-                        "id": promise.promise_id,
-                        "player": promise.player,
-                        "summary": promise.summary,
+                        "id": promise.promise_id[:64],
+                        "player": promise.player[:40],
+                        "summary": promise.summary[:120],
                         "status": promise.status.value,
-                        "goal": promise.goal_id,
-                        "project": promise.project_id,
+                        "goal": None if promise.goal_id is None else promise.goal_id[:64],
+                        "project": (
+                            None if promise.project_id is None else promise.project_id[:64]
+                        ),
                     }
                     for promise in context.promises[:4]
                 ],
                 "operator_messages": [
-                    _operator_prompt_payload(message) for message in context.operator_messages[:2]
+                    _operator_prompt_payload(message)
+                    for message in context.operator_messages[:2]
+                    if active_operator is None or message.message_id != active_operator.message_id
                 ],
                 "active_operator_message": None
                 if active_operator is None
-                else _operator_prompt_payload(active_operator),
-                "wiki_evidence": [item.model_dump(mode="json") for item in context.wiki[:2]],
+                else _operator_prompt_metadata(active_operator),
+                "wiki_evidence": [_wiki_prompt_payload(item) for item in context.wiki[:2]],
                 "recent_skill_runs": [
                     {
-                        "skill": run.skill_id,
+                        "skill": run.skill_id[:64],
                         "outcome": run.outcome.value,
-                        "context": run.context_key,
-                        "failure": run.failure_reason,
+                        "context": run.context_key[:80],
+                        "failure": (
+                            None if run.failure_reason is None else run.failure_reason[:120]
+                        ),
                     }
                     for run in context.recent_skill_runs[:4]
                 ],
                 "current_plan": {
-                    "goal": context.plan_goal_id,
-                    "steps": list(context.current_plan),
+                    "goal": (
+                        None if context.plan_goal_id is None else context.plan_goal_id[:128]
+                    ),
+                    "steps": [step[:120] for step in context.current_plan[:5]],
                     "next": context.plan_index,
                     "started_ago_ms": (
                         0
@@ -666,16 +833,16 @@ class HighLevelController:
                 if latest is None
                 else {
                     "id": latest.frame_id,
-                    "instance": latest.instance_id,
+                    "instance": latest.instance_id[:128],
                     "size": (latest.width, latest.height),
                     "tracks": [
                         {
-                            "id": track.track_id,
-                            "label": track.label,
+                            "id": track.track_id[:64],
+                            "label": track.label[:48],
                             "confidence": round(track.confidence, 3),
                             "region": track.region.model_dump(mode="json"),
                             "attributes": {
-                                key: track.attributes[key]
+                                key: _compact_prompt_scalar(track.attributes[key])
                                 for key in ("source", "grounding")
                                 if key in track.attributes
                             },
@@ -686,8 +853,8 @@ class HighLevelController:
                 "fresh_facts": facts,
                 "chat_lines": [
                     {
-                        "speaker": line.speaker,
-                        "text": line.text,
+                        "speaker": None if line.speaker is None else line.speaker[:64],
+                        "text": line.text[:120],
                         "age_ms": max(
                             0,
                             int((time.monotonic_ns() - line.observed_ns) // 1_000_000),
@@ -740,7 +907,7 @@ class HighLevelController:
                         "A fresh operator correction permits one evidence-producing retry."
                     ),
                 ),
-                ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
+                ModelMessage(role="user", content=_serialize_high_level_payload(payload)),
                 *(
                     ()
                     if active_operator is None
@@ -1035,7 +1202,7 @@ class HighLevelController:
         safety = [item[4] for item in ranked if item[0] == 0]
         if safety and _urgent_safety_required(blackboard):
             return safety[:8]
-        return [item[4] for item in ranked[:8]]
+        return [item[4] for item in ranked[:6]]
 
     def _decision_repair_bounds(
         self,

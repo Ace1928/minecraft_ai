@@ -2492,6 +2492,26 @@ def test_pending_operator_message_is_not_hidden_by_newer_acknowledged_history(
         database.close()
 
 
+def test_cognition_context_keeps_full_persistent_plan_with_absolute_index() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.state_db = None
+    runtime.role = get_role("generalist")
+    runtime.custom_goals = []
+    runtime.memories = MemoryStore()
+    runtime.social = SocialState()
+    runtime._recent_skill_runs = deque(maxlen=8)
+    runtime._plan_steps = ("gather logs", "craft planks", "close inventory")
+    runtime._plan_index = 1
+    runtime._plan_goal_id = "progression:wood"
+    runtime._plan_started_ns = 10
+
+    context = runtime._cognition_context()
+
+    assert context.current_plan == runtime._plan_steps
+    assert context.plan_index == 1
+    assert context.current_plan[context.plan_index] == "craft planks"
+
+
 def test_replan_does_not_acknowledge_delivered_operator_message(tmp_path: Path) -> None:
     database = StateDatabase(tmp_path / "state.sqlite3")
     try:

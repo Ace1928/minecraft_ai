@@ -8,6 +8,7 @@ import pytest
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.cognition import CognitionContext, CognitionDecision, HighLevelController
 from minecraft_ai.models import ModelMessage, ModelResponse
+from minecraft_ai.planning import Goal, GoalSource
 from minecraft_ai.perception import (
     FrameState,
     PerceptionBlackboard,
@@ -18,6 +19,7 @@ from minecraft_ai.perception import (
 from minecraft_ai.roles import get_role
 from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
 from minecraft_ai.skills import SkillLibrary, SkillOutcome, SkillRun
+from minecraft_ai.wiki import WikiEvidence
 
 
 class _ShelterSelectingModel:
@@ -678,6 +680,150 @@ def test_high_level_prompt_bounds_strategic_facts_and_omits_motor_fingerprints()
     assert len(combined) < 9_000
 
 
+def test_high_level_prompt_reserves_interaction_and_skill_evidence_facts() -> None:
+    now = time.monotonic_ns()
+    facts = [
+        *(
+            PerceptionFact(
+                key=f"danger.distractor_{index:02d}",
+                value=False,
+                confidence=0.9,
+                observed_ns=now,
+                source="test",
+                expires_after_ms=10_000,
+            )
+            for index in range(20)
+        ),
+        PerceptionFact(
+            key="target.visible",
+            value=True,
+            confidence=0.9,
+            observed_ns=now,
+            source="test",
+            expires_after_ms=10_000,
+        ),
+        PerceptionFact(
+            key="inventory.logs",
+            value=0,
+            confidence=1.0,
+            observed_ns=now,
+            source="test",
+            expires_after_ms=10_000,
+        ),
+        PerceptionFact(
+            key="social.player_message",
+            value="Lloyd: bring back wood",
+            confidence=0.95,
+            observed_ns=now,
+            source="test",
+            expires_after_ms=10_000,
+        ),
+    ]
+    context = _context()
+    context.goals = (
+        Goal(
+            goal_id="custom:gather",
+            description="gather wood",
+            source=GoalSource.CUSTOM,
+            priority=1.0,
+        ),
+    )
+    model = _CapturingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    controller.decide(_board(*facts), context)
+
+    strategic = json.loads(model.initial_messages[1].content)["fresh_facts"]
+    assert len(strategic) == 16
+    assert "social.player_message" in strategic
+    assert "target.visible" in strategic
+    assert "inventory.logs" in strategic
+
+
+def test_high_level_goal_shortlist_keeps_custom_goal_after_role_standing_goals() -> None:
+    role = get_role("creative_builder")
+    role_goals = tuple(
+        Goal(
+            goal_id=f"role:{index}",
+            description=description,
+            source=GoalSource.ROLE,
+            priority=0.55,
+        )
+        for index, description in enumerate(role.standing_goals)
+    )
+    custom = Goal(
+        goal_id="custom:survival-progression",
+        description="establish survival progression",
+        source=GoalSource.CUSTOM,
+        priority=1.0,
+    )
+    context = CognitionContext(
+        role=role,
+        goals=(*role_goals, custom),
+        memories=(),
+        promises=(),
+        wiki=(),
+    )
+    model = _CapturingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    controller.decide(_board(), context)
+
+    goals = json.loads(model.initial_messages[1].content)["goals"]
+    assert len(goals) == 4
+    assert goals[0]["id"] == custom.goal_id
+
+
+def test_high_level_deduplicates_long_operator_text_and_bounds_wiki_context() -> None:
+    operator_text = "".join(f"{index:04x}" for index in range(500))
+    message = OperatorMessage(
+        message_id="long-directive",
+        created_ns=2,
+        text=operator_text,
+        status=OperatorMessageStatus.DELIVERED,
+    )
+    wiki = WikiEvidence(
+        title="Crafting" * 40,
+        extract="recipe-detail-" * 400,
+        url="https://minecraft.wiki/" + ("path/" * 100),
+        retrieved_ns=1,
+        query="wood planks" * 30,
+        version_key="bedrock:1.26" * 20,
+    )
+    context = _context()
+    context.operator_messages = (message,)
+    context.wiki = (wiki, wiki)
+    model = _GrammarCapturingModel(chosen_goal_id="operator:long-directive")
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    controller.decide(_board(), context)
+
+    payload = json.loads(model.messages[1].content)
+    assert len(model.messages[1].content) <= 7_200
+    assert "text" not in payload["active_operator_message"]
+    assert payload["operator_messages"] == []
+    assert len(payload["wiki_evidence"][0]["extract"]) == 600
+    combined = "".join(item.content for item in model.messages)
+    assert operator_text not in combined
+    assert combined.count(operator_text[:640]) == 1
+    assert len(combined) < 10_000
+
+
+def test_high_level_plan_payload_keeps_full_plan_and_current_index() -> None:
+    context = _context()
+    context.current_plan = ("gather logs", "craft planks", "close inventory")
+    context.plan_goal_id = "progression:wood"
+    context.plan_index = 1
+    model = _CapturingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    controller.decide(_board(), context)
+
+    current_plan = json.loads(model.initial_messages[1].content)["current_plan"]
+    assert current_plan["steps"] == ["gather logs", "craft planks", "close inventory"]
+    assert current_plan["next"] == 1
+
+
 @pytest.mark.parametrize(
     "status",
     (OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED),
@@ -993,8 +1139,9 @@ def test_prior_agent_response_is_not_replayed_as_operator_instruction() -> None:
     controller.decide(_board(), context)
 
     payload = json.loads(model.initial_messages[1].content)
-    assert payload["active_operator_message"]["text"] == message.text
+    assert "text" not in payload["active_operator_message"]
     assert "response_text" not in payload["active_operator_message"]
+    assert message.text in model.initial_messages[-1].content
     assert "Restart the old" not in model.initial_messages[-1].content
 
 
