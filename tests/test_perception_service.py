@@ -684,9 +684,15 @@ def test_classic_hotbar_zero_does_not_erase_full_inventory_possession() -> None:
     assert hotbar_count is not None and hotbar_count.value == 0
 
 
-def test_realtime_hotbar_fact_is_bound_to_capture_not_inference_clock() -> None:
+def test_realtime_hotbar_fact_is_bound_to_capture_not_inference_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     template = _classic_hotbar_frame(occupant="log", count=1)
-    captured_ns = time.monotonic_ns()
+    captured_ns = 1_000_000_000
+    inference_ns = captured_ns + 50_000_000
+    # Windows may return the same monotonic tick for both real calls. Model
+    # the two instants explicitly; this tests provenance, not clock resolution.
+    monkeypatch.setattr(perception_service.time, "monotonic_ns", lambda: inference_ns)
     frame = CapturedFrame(
         frame_id=1, captured_ns=captured_ns, width=template.width, height=template.height,
         bgra=template.bgra,
@@ -708,7 +714,7 @@ def test_realtime_hotbar_fact_is_bound_to_capture_not_inference_clock() -> None:
     diagnostic = board.fact("frame.dhash", now_ns=time.monotonic_ns())
     assert fact is not None and diagnostic is not None
     assert fact.observed_ns == state.captured_ns == captured_ns
-    assert diagnostic.observed_ns > captured_ns
+    assert diagnostic.observed_ns == inference_ns
 
 
 def test_classic_hotbar_geometry_cache_revalidates_current_pixels(
