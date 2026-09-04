@@ -8,7 +8,7 @@ from .crafting_control import (
     INVENTORY_TOGGLE_DURATION_MS,
     PlankCraftPhase,
 )
-from .mining_control import MiningLeaseGuard
+from .mining_control import MiningLeaseGuard, is_rocket_source, track_contains_crosshair
 from .motor import MotorIntent, MotorPolicy
 from .outcome_verifier import (
     OutcomeKind,
@@ -59,6 +59,7 @@ _TRAVERSAL_SKILL_IDS = frozenset(
     {"explore_forward", "traverse_level_ground", "traverse_visible_obstacle"}
 )
 _LOCOMOTION_RELEASE_KEYS = ("a", "d", "s", "space", "w")
+_REACQUIRE_MIN_CONFIDENCE = 0.65
 
 
 class SkillExecutor:
@@ -190,7 +191,15 @@ class SkillExecutor:
                 f"failure-condition:{failed.key}",
                 recover=True,
             )
-        if (
+        if self._spec.skill_id == "reacquire_target":
+            if _reacquisition_satisfied(
+                blackboard,
+                run_started_ns=self._run.started_ns,
+                target_label=_target_label(self._parameters),
+                now_ns=now,
+            ):
+                return self._finish(SkillOutcome.SUCCEEDED, now, None)
+        elif (
             self._spec.skill_id not in {"mine_visible_block", "craft_wood_planks"}
             and self._spec.success_conditions
             and conditions_satisfied(
@@ -769,6 +778,82 @@ def _target_label(parameters: dict[str, str | int | float | bool]) -> str | None
     if not isinstance(target, str) or not target.strip():
         return None
     return target.strip()
+
+
+def _reacquisition_satisfied(
+    blackboard: PerceptionBlackboard,
+    *,
+    run_started_ns: int,
+    target_label: str | None,
+    now_ns: int,
+) -> bool:
+    """Require one coherent post-start ROCKET box under the crosshair."""
+
+    visible = blackboard.fact(
+        "target.visible",
+        min_confidence=_REACQUIRE_MIN_CONFIDENCE,
+        now_ns=now_ns,
+    )
+    tracking = blackboard.fact(
+        "target.tracking_confidence",
+        min_confidence=_REACQUIRE_MIN_CONFIDENCE,
+        now_ns=now_ns,
+    )
+    probability = blackboard.fact(
+        "target.exists_probability",
+        min_confidence=_REACQUIRE_MIN_CONFIDENCE,
+        now_ns=now_ns,
+    )
+    kind = blackboard.fact(
+        "target.kind",
+        min_confidence=_REACQUIRE_MIN_CONFIDENCE,
+        now_ns=now_ns,
+    )
+    facts = (visible, tracking, probability, kind)
+    if any(fact is None for fact in facts):
+        return False
+    assert visible is not None and tracking is not None
+    assert probability is not None and kind is not None
+    coherent_facts = (visible, tracking, probability, kind)
+    observed_ns = visible.observed_ns
+    source = visible.source
+    if (
+        visible.value is not True
+        or observed_ns <= run_started_ns
+        or not is_rocket_source(source)
+        or any(
+            fact.source != source or fact.observed_ns != observed_ns
+            for fact in coherent_facts
+        )
+        or not _number_at_least(tracking.value, _REACQUIRE_MIN_CONFIDENCE)
+        or not _number_at_least(probability.value, _REACQUIRE_MIN_CONFIDENCE)
+        or not isinstance(kind.value, str)
+    ):
+        return False
+    latest = blackboard.latest()
+    if latest is None:
+        return False
+    for track in latest.tracks:
+        track_probability = track.attributes.get("target_exists_probability")
+        if (
+            track.last_seen_ns == observed_ns
+            and track.confidence >= _REACQUIRE_MIN_CONFIDENCE
+            and track.attributes.get("tracking_source") == source
+            and _number_at_least(track_probability, _REACQUIRE_MIN_CONFIDENCE)
+            and track.label.casefold() == kind.value.casefold()
+            and (target_label is None or track.label.casefold() == target_label.casefold())
+            and track_contains_crosshair(track)
+        ):
+            return True
+    return False
+
+
+def _number_at_least(value: object, minimum: float) -> bool:
+    return bool(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and float(value) >= minimum
+    )
 
 
 def _policy_parameters(

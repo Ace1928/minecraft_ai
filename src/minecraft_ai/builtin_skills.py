@@ -55,7 +55,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="reacquire_target",
-            version=8,
+            version=9,
             name="Reacquire target",
             description=(
                 "Look around deliberately to find the requested target again, stabilize it near "
@@ -64,13 +64,15 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             stage=SkillStage.EXPERIMENTAL,
             parameters=("target",),
             success_conditions=(
+                # The executor additionally requires a coherent post-start
+                # ROCKET bounding box that actually contains the crosshair.
                 SkillCondition(
                     key="target.tracking_confidence",
                     operator="gte",
                     value=0.65,
                 ),
             ),
-            expected_effects=("target_visible",),
+            expected_effects=("target_visible", "target_centered"),
             max_duration_ms=8_000,
             action_level=ActionLevel.GROUNDED,
             policy_ref="navigate",

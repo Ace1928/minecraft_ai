@@ -35,6 +35,7 @@ from minecraft_ai.runtime import (
     _accepted_action_provenance,
     _authorized_game_chat,
     _active_operator_messages,
+    _compatible_recovery_parameters,
     _first_feasible_recovery,
     _observed_scene_recovery,
     _operator_target_facts,
@@ -1156,6 +1157,21 @@ def test_recovery_selection_requires_observed_option_preconditions() -> None:
     assert selected.skill_id == "escape_submersion"
 
 
+def test_recovery_preserves_only_matching_failed_run_parameters() -> None:
+    failed_run = SkillRun(
+        run_id="mining-acquisition-timeout",
+        skill_id="mine_visible_block",
+        context_key="operator:mine",
+        parameters={"target": "dirt", "unused": True},
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.FAILED,
+    )
+    recovery = build_bootstrap_skill_library().get("reacquire_target")
+
+    assert _compatible_recovery_parameters(failed_run, recovery) == {"target": "dirt"}
+
+
 def test_newest_acknowledged_operator_directive_remains_active() -> None:
     messages = (
         OperatorMessage(
@@ -1786,6 +1802,31 @@ def test_obstacle_stall_blocks_keepalive_and_invalidates_pending_cognition() -> 
     runtime._note_terminal_for_cognition(stalled, recovery_started=False)
 
     assert runtime._execution_revision == 8
+    assert runtime._cognition_requested is True
+    assert runtime._traversal_escalation_pending is True
+    assert runtime._explore_keep_alive() is None
+
+
+def test_obstacle_recovery_timeout_blocks_keepalive_and_requests_cognition() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime._execution_revision = 11
+    runtime._cognition_requested = False
+    runtime._pending_decision = object()  # type: ignore[assignment]
+    runtime._traversal_escalation_pending = False
+    timed_out = SkillRun(
+        run_id="obstacle-timeout",
+        skill_id="traverse_visible_obstacle",
+        context_key="explore-keepalive",
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.TIMED_OUT,
+        failure_reason="skill-timeout",
+    )
+
+    runtime._note_terminal_for_cognition(timed_out, recovery_started=False)
+
+    assert runtime._execution_revision == 12
     assert runtime._cognition_requested is True
     assert runtime._traversal_escalation_pending is True
     assert runtime._explore_keep_alive() is None

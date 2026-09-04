@@ -475,7 +475,7 @@ class MiningLeaseGuard:
             min_confidence=self.min_confidence,
             max_track_age_ms=self.max_track_age_ms,
         )
-        if aim_track is not None and not _contains_crosshair(aim_track):
+        if aim_track is not None and not track_contains_crosshair(aim_track):
             aimed = _aim_at_operator_track(
                 action,
                 aim_track,
@@ -807,7 +807,7 @@ def _prelease_semantic_failure(
         or visible.value is not True
         or not isinstance(kind.value, str)
         or kind.source != visible.source
-        or not _rocket_source(kind.source)
+        or not is_rocket_source(kind.source)
     ):
         return None
     rule = _block_rule(_normalize_name(kind.value))
@@ -936,7 +936,7 @@ def _operator_aim_track(
     probability = track.attributes.get("target_exists_probability")
     if (
         not isinstance(tracking_source, str)
-        or not _rocket_source(tracking_source)
+        or not is_rocket_source(tracking_source)
         or not isinstance(probability, (int, float))
         or isinstance(probability, bool)
         or float(probability) < min_confidence
@@ -1152,7 +1152,7 @@ def _continuation_target_failure(
             or operator_current
             or operator_grace
         )
-        or not _contains_crosshair(track)
+        or not track_contains_crosshair(track)
     ):
         return SkillFailureCode.MINING_TARGET_CHANGED
     track_kind = _normalize_name(track.label)
@@ -1272,7 +1272,7 @@ def _crosshair_track(
         )
         if (
             same_target
-            and _contains_crosshair(track)
+            and track_contains_crosshair(track)
             and track.confidence >= min_confidence
             and (
                 _track_fresh(
@@ -1307,7 +1307,7 @@ def _fresh_rocket_log_track(
         track
         for track in latest.tracks
         if track.confidence >= min_confidence
-        and _contains_crosshair(track)
+        and track_contains_crosshair(track)
         and _track_fresh(
             track,
             now_ns=now_ns,
@@ -1343,7 +1343,7 @@ def _fresh_rocket_target(
         visible.value is True
         and isinstance(tracking_source, str)
         and visible.source == tracking_source
-        and _rocket_source(visible.source)
+        and is_rocket_source(visible.source)
         and 0 <= now_ns - visible.observed_ns <= max_track_age_ms * 1_000_000
         and _track_fresh(
             track,
@@ -1375,12 +1375,16 @@ def _fresh_operator_target(
     )
 
 
-def _rocket_source(source: str) -> bool:
+def is_rocket_source(source: str) -> bool:
+    """Return whether a fact came from the learned ROCKET localization head."""
+
     normalized = source.casefold()
     return normalized.startswith("learned:") and "rocket" in normalized
 
 
-def _contains_crosshair(track: Track) -> bool:
+def track_contains_crosshair(track: Track) -> bool:
+    """Return whether a normalized target box contains the world crosshair."""
+
     region = track.region
     return (
         region.x <= 0.5 <= region.x + region.width

@@ -234,10 +234,12 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
 
     reacquire = skills.get("reacquire_target")
     assert reacquire.policy_ref == "navigate"
+    assert reacquire.version == 9
     assert reacquire.action_level == ActionLevel.GROUNDED
     assert reacquire.success_conditions[0].key == "target.tracking_confidence"
     assert reacquire.success_conditions[0].operator == "gte"
     assert reacquire.success_conditions[0].value == 0.65
+    assert reacquire.expected_effects == ("target_visible", "target_centered")
 
     respawn = skills.get("respawn_after_death")
     assert respawn.preconditions[0].key == "scene.death"

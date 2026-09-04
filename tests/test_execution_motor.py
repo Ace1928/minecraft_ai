@@ -6,10 +6,19 @@ from minecraft_ai.action_levels import ActionLevel
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.execution import SkillExecutor, conditions_satisfied
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
-from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
+from minecraft_ai.perception import (
+    FrameState,
+    PerceptionBlackboard,
+    PerceptionFact,
+    ScreenRegion,
+    Track,
+)
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.skills import SkillActionPermissions, SkillCondition, SkillOutcome, SkillSpec
 from minecraft_ai.trajectory import ActionOrigin
+
+
+_ROCKET_SOURCE = "learned:minestudio-rocket2:test:aux-localization:not-training-label"
 
 
 class _IntentCapturePolicy:
@@ -56,6 +65,78 @@ def _fact(key: str, value: str | int | float | bool) -> PerceptionFact:
         source="test",
         expires_after_ms=1_000_000,
     )
+
+
+def _reacquisition_board(
+    *,
+    observed_ns: int,
+    centered: bool,
+    reference_observed_ns: int | None = None,
+) -> PerceptionBlackboard:
+    region = (
+        ScreenRegion(x=0.42, y=0.38, width=0.16, height=0.24)
+        if centered
+        else ScreenRegion(
+            x=0.318410882477959,
+            y=0.09819203615188599,
+            width=0.15090409368276597,
+            height=0.2760867178440094,
+        )
+    )
+    facts = [
+        PerceptionFact(
+            key=key,
+            value=value,
+            confidence=confidence,
+            observed_ns=observed_ns,
+            source=_ROCKET_SOURCE,
+            expires_after_ms=5_000,
+        )
+        for key, value, confidence in (
+            ("target.visible", True, 0.93),
+            ("target.tracking_confidence", 0.93, 1.0),
+            ("target.exists_probability", 0.83, 1.0),
+            ("target.kind", "dirt", 0.93),
+        )
+    ]
+    if reference_observed_ns is not None:
+        facts.append(
+            PerceptionFact(
+                key="target.reference_available",
+                value=True,
+                confidence=1.0,
+                observed_ns=reference_observed_ns,
+                source="operator:cross-view-reference:operator:dirt",
+                expires_after_ms=250,
+            )
+        )
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=max(observed_ns, reference_observed_ns or observed_ns),
+            instance_id="bedrock:reacquisition",
+            width=1280,
+            height=720,
+            facts=tuple(facts),
+            tracks=(
+                Track(
+                    track_id="operator:dirt",
+                    label="dirt",
+                    confidence=0.93,
+                    region=region,
+                    first_seen_ns=observed_ns,
+                    last_seen_ns=observed_ns,
+                    attributes={
+                        "source": "operator",
+                        "tracking_source": _ROCKET_SOURCE,
+                        "target_exists_probability": 0.83,
+                    },
+                ),
+            ),
+        )
+    )
+    return board
 
 
 def test_running_skill_emits_bounded_motor_action() -> None:
@@ -207,6 +288,80 @@ def test_skill_can_initiate_from_verified_alternative_evidence() -> None:
     assert tick.run.outcome == SkillOutcome.RUNNING
     assert policy.intent is not None
     assert policy.intent.mode == "approach"
+
+
+def test_reacquire_rejects_stale_off_center_tracking_despite_fresh_reference() -> None:
+    started_ns = 1_000_000_000
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("reacquire_target"),
+        run_id="reacquire:stale",
+        parameters={"target": "dirt"},
+        now_ns=started_ns,
+    )
+
+    tick = executor.tick(
+        _reacquisition_board(
+            observed_ns=started_ns - 100_000_000,
+            centered=False,
+            reference_observed_ns=started_ns + 50_000_000,
+        ),
+        sequence=1,
+        now_ns=started_ns + 100_000_000,
+    )
+
+    assert tick.run.outcome == SkillOutcome.RUNNING
+    assert policy.intent is not None
+    assert policy.intent.mode == "navigate"
+
+
+def test_reacquire_rejects_fresh_rocket_track_away_from_crosshair() -> None:
+    started_ns = 1_000_000_000
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("reacquire_target"),
+        run_id="reacquire:off-center",
+        parameters={"target": "dirt"},
+        now_ns=started_ns,
+    )
+
+    tick = executor.tick(
+        _reacquisition_board(
+            observed_ns=started_ns + 50_000_000,
+            centered=False,
+        ),
+        sequence=1,
+        now_ns=started_ns + 100_000_000,
+    )
+
+    assert tick.run.outcome == SkillOutcome.RUNNING
+    assert policy.intent is not None
+
+
+def test_reacquire_accepts_only_fresh_centered_same_target_rocket_track() -> None:
+    started_ns = 1_000_000_000
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("reacquire_target"),
+        run_id="reacquire:centered",
+        parameters={"target": "dirt"},
+        now_ns=started_ns,
+    )
+
+    tick = executor.tick(
+        _reacquisition_board(
+            observed_ns=started_ns + 50_000_000,
+            centered=True,
+        ),
+        sequence=1,
+        now_ns=started_ns + 100_000_000,
+    )
+
+    assert tick.run.outcome == SkillOutcome.SUCCEEDED
+    assert policy.intent is None
 
 
 def test_skill_action_permissions_bound_learned_policy_without_replacing_it() -> None:

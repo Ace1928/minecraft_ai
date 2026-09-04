@@ -34,7 +34,6 @@ from .planning import Goal
 from .roles import RoleProfile
 from .safety import MotorAction
 from .skills import (
-    SkillFailureCode,
     SkillLibrary,
     SkillOutcome,
     SkillRun,
@@ -543,6 +542,19 @@ def _first_feasible_recovery(
     return None
 
 
+def _compatible_recovery_parameters(
+    failed_run: SkillRun,
+    recovery: SkillSpec,
+) -> dict[str, str | int | float | bool]:
+    """Carry only parameters declared by both the failed and recovery skills."""
+
+    return {
+        name: failed_run.parameters[name]
+        for name in recovery.parameters
+        if name in failed_run.parameters
+    }
+
+
 def _observed_scene_recovery(
     skills: SkillLibrary,
     blackboard: PerceptionBlackboard,
@@ -1037,6 +1049,7 @@ class AgentRuntime:
                     recovery,
                     run_id=uuid.uuid4().hex,
                     context_key=result.run.context_key,
+                    parameters=_compatible_recovery_parameters(result.run, recovery),
                 )
 
     def _explore_keep_alive(self) -> SkillSpec | None:
@@ -1088,16 +1101,16 @@ class AgentRuntime:
         strategic/operator decision. A failure that routes into a recovery, or
         any non-keepalive terminal result, still invalidates the old snapshot.
         """
-        obstacle_stalled = bool(
+        obstacle_recovery_exhausted = bool(
             run.skill_id == "traverse_visible_obstacle"
-            and run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
+            and run.outcome not in {SkillOutcome.SUCCEEDED, SkillOutcome.CANCELLED}
         )
-        if obstacle_stalled:
+        if obstacle_recovery_exhausted:
             self._traversal_escalation_pending = True
         invalidates = (
             run.context_key != _EXPLORE_KEEPALIVE_CONTEXT
             or recovery_started
-            or obstacle_stalled
+            or obstacle_recovery_exhausted
         )
         if invalidates:
             self._execution_revision += 1
