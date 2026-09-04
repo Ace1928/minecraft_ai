@@ -57,6 +57,7 @@ class LearnedPolicyOutput(BaseModel):
 class PolicyServiceMetrics:
     requests: int = 0
     responses: int = 0
+    invalidated_requests: int = 0
     deadline_misses: int = 0
     failures: int = 0
     scene_blocks: int = 0
@@ -272,7 +273,15 @@ class TemporalPolicyClient:
     def reset(self) -> MotorAction:
         sequence = self._last_sequence + 1
         if self._pending_request_id is not None:
+            # The worker is single-threaded, so an in-flight inference cannot
+            # be cancelled until it returns.  Keep only its transport id long
+            # enough to drain the matching stdout record; retire the option
+            # context immediately so status and every future action cease to
+            # belong to the terminated skill run.
+            if not self._discard_pending_response:
+                self.metrics.invalidated_requests += 1
             self._discard_pending_response = True
+        self._pending_request_context = None
         process = self._process
         if process is not None and process.poll() is None and process.stdin is not None:
             try:
@@ -391,6 +400,7 @@ class TemporalPolicyClient:
             "process_alive": bool(process is not None and process.poll() is None),
             "requests": self.metrics.requests,
             "responses": self.metrics.responses,
+            "invalidated_requests": self.metrics.invalidated_requests,
             "deadline_misses": self.metrics.deadline_misses,
             "failures": self.metrics.failures,
             "scene_blocks": self.metrics.scene_blocks,

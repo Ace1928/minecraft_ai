@@ -88,6 +88,26 @@ class _TargetFeedbackPolicy(_RoutingPolicy):
         return self.observation
 
 
+class _RecordingStdin:
+    def __init__(self) -> None:
+        self.writes: list[str] = []
+
+    def write(self, value: str) -> int:
+        self.writes.append(value)
+        return len(value)
+
+    def flush(self) -> None:
+        return None
+
+
+class _RunningPolicyProcess:
+    def __init__(self) -> None:
+        self.stdin = _RecordingStdin()
+
+    def poll(self) -> None:
+        return None
+
+
 def _tracked_board(*, age_ms: int = 0) -> PerceptionBlackboard:
     now = time.monotonic_ns()
     board = PerceptionBlackboard()
@@ -1600,6 +1620,100 @@ def test_async_action_provenance_stays_bound_to_consumed_request(
     assert released["action_kind"] == "release"
     assert released["request_id"] is None
     assert released["condition"] is None
+
+
+def test_reset_immediately_retires_pending_option_context_without_restarting_worker(
+    tmp_path: Path,
+) -> None:
+    client = TemporalPolicyClient(config=_policy_config(tmp_path), frame_provider=lambda: None)
+    intent = MotorIntent(
+        skill_id="explore_forward",
+        mode="explore",
+        episode_id="run-finished",
+    )
+    condition = client._conditioned_intent(intent)
+    client._pending_request_id = "request-finished"
+    client._pending_request_context = _PolicyRequestContext(
+        request_id="request-finished",
+        condition=condition,
+        target_track_id=None,
+        interaction_id=-1,
+    )
+    process = client._process = _RunningPolicyProcess()
+
+    client.reset()
+
+    assert client._process is process
+    assert process.stdin.writes == ['{"type":"reset"}\n']
+    assert client._pending_request_id == "request-finished"
+    assert client._discard_pending_response is True
+    assert client.metrics.invalidated_requests == 1
+    assert client.status()["pending_request"] is None
+
+    client.reset()
+    assert client.metrics.invalidated_requests == 1
+
+
+def test_retired_request_response_cannot_act_in_next_option(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = CapturedFrame(frame_id=2, captured_ns=2, width=1, height=1, bgra=b"\0" * 4)
+    client = TemporalPolicyClient(config=_policy_config(tmp_path), frame_provider=lambda: frame)
+    old_intent = MotorIntent(
+        skill_id="explore_forward",
+        mode="explore",
+        episode_id="run-old",
+    )
+    client._pending_request_id = "request-old"
+    client._pending_request_context = _PolicyRequestContext(
+        request_id="request-old",
+        condition=client._conditioned_intent(old_intent),
+        target_track_id=None,
+        interaction_id=-1,
+    )
+    client._pending_frame_captured_ns = 1
+    monkeypatch.setattr(client, "_ensure_started", lambda _size: None)
+    monkeypatch.setattr(
+        client,
+        "_read_response",
+        lambda _timeout: {
+            "type": "prediction",
+            "request_id": "request-old",
+            "output": {
+                "keys": ["w"],
+                "buttons": ["left"],
+                "inference_ns": 1,
+                "model_version": "official-v1",
+            },
+        },
+    )
+    submitted: list[MotorIntent] = []
+    monkeypatch.setattr(
+        client,
+        "_submit",
+        lambda _frame, intent, _board: submitted.append(intent),
+    )
+
+    client.reset()
+    action = client.act(
+        PerceptionBlackboard(),
+        MotorIntent(
+            skill_id="navigate_home",
+            mode="navigate",
+            episode_id="run-new",
+        ),
+        sequence=client._last_sequence + 1,
+    )
+
+    assert action.keys_down == ()
+    assert action.buttons_down == ()
+    assert client.metrics.responses == 0
+    assert [intent.episode_id for intent in submitted] == ["run-new"]
+    provenance = client.status()["last_action_provenance"]
+    assert isinstance(provenance, dict)
+    assert provenance["request_id"] is None
+    assert provenance["episode_id"] is None
 
 
 def test_router_reidentifies_exact_prediction_condition_for_bound_route() -> None:
