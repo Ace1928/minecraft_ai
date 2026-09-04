@@ -1601,6 +1601,8 @@ class AgentRuntime:
                         context_key=recovery.context_key,
                         parameters=recovery.traversal_parameters,
                         complete_on_locomotion_progress=True,
+                        locomotion_progress_events_required=3,
+                        locomotion_progress_min_ms=750,
                     )
                 else:
                     self._clear_headroom_recovery(recovery)

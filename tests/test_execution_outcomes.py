@@ -884,6 +884,90 @@ def test_internal_obstacle_retry_can_finish_on_verified_locomotion_progress() ->
     assert "w" in progressed.action.keys_up
 
 
+def test_internal_obstacle_retry_requires_sustained_locomotion_progress() -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy(MotorAction(sequence=0, keys_down=("w",)))
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("traverse_visible_obstacle"),
+        run_id="sustained-headroom-retry",
+        now_ns=now,
+        complete_on_locomotion_progress=True,
+        locomotion_progress_events_required=3,
+        locomotion_progress_min_ms=750,
+    )
+
+    samples = (
+        (0, _LUMA_A),
+        (100, _LUMA_B),
+        (200, _LUMA_C),  # progress 1
+        (300, _LUMA_A),
+        (400, _LUMA_B),  # progress 2
+        (500, _LUMA_C),
+        (600, _LUMA_A),  # progress 3, but too soon
+        (800, _LUMA_B),
+        (1_000, _LUMA_C),  # progress 4, 800 ms after the first
+    )
+    ticks = [
+        executor.tick(
+            _traversal_board(now + offset_ms * 1_000_000, luma_grid=luma),
+            sequence=sequence,
+            now_ns=now + offset_ms * 1_000_000,
+        )
+        for sequence, (offset_ms, luma) in enumerate(samples, start=1)
+    ]
+
+    assert all(tick.run.outcome == SkillOutcome.RUNNING for tick in ticks[:-1])
+    assert ticks[-1].run.outcome == SkillOutcome.SUCCEEDED
+    assert ticks[-1].outcome_verification is not None
+    assert ticks[-1].outcome_verification.signal == OutcomeSignal.LOCOMOTION_PROGRESS
+    assert ticks[-1].action is not None
+    assert "w" in ticks[-1].action.keys_up
+
+
+def test_sustained_locomotion_progress_then_stall_fails_truthfully() -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy(MotorAction(sequence=0, keys_down=("w",)))
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("traverse_visible_obstacle"),
+        run_id="headroom-retry-stalls",
+        now_ns=now,
+        complete_on_locomotion_progress=True,
+        locomotion_progress_events_required=3,
+        locomotion_progress_min_ms=750,
+    )
+
+    for sequence, (offset_ms, luma) in enumerate(
+        ((0, _LUMA_A), (100, _LUMA_B), (200, _LUMA_C)),
+        start=1,
+    ):
+        progress = executor.tick(
+            _traversal_board(now + offset_ms * 1_000_000, luma_grid=luma),
+            sequence=sequence,
+            now_ns=now + offset_ms * 1_000_000,
+        )
+    assert progress.run.outcome == SkillOutcome.RUNNING
+    assert progress.outcome_verification is not None
+    assert progress.outcome_verification.signal == OutcomeSignal.LOCOMOTION_PROGRESS
+
+    executor.tick(
+        _traversal_board(now + 1_300_000_000, luma_grid=_LUMA_C),
+        sequence=4,
+        now_ns=now + 1_300_000_000,
+    )
+    stalled = executor.tick(
+        _traversal_board(now + 2_400_000_000, luma_grid=_LUMA_C),
+        sequence=5,
+        now_ns=now + 2_400_000_000,
+    )
+
+    assert stalled.run.outcome == SkillOutcome.FAILED
+    assert stalled.run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
+    assert stalled.outcome_verification is not None
+    assert stalled.outcome_verification.signal == OutcomeSignal.LOCOMOTION_STALLED
+
+
 def test_starting_next_skill_resets_terminal_traversal_verifier() -> None:
     now = time.monotonic_ns()
     policy = _TraversalPolicy(

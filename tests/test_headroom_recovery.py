@@ -1341,6 +1341,8 @@ def test_verified_clear_retries_obstacle_once_and_retry_stall_does_not_loop() ->
     assert runtime.executor.run is not None
     assert runtime.executor.run.skill_id == "traverse_visible_obstacle"
     assert runtime.executor.parameters == {"allow_jump": True}
+    assert runtime.executor._locomotion_progress_events_required == 3
+    assert runtime.executor._locomotion_progress_min_ms == 750
     assert runtime._traversal_escalation_pending is True
 
     retry_stall = _stall_result(recovery.retry_run_id)

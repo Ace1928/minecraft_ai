@@ -124,6 +124,10 @@ class SkillExecutor:
         self._mining_hotbar_log_baseline: PerceptionFact | None = None
         self._mining_attack_started = False
         self._complete_on_locomotion_progress = False
+        self._locomotion_progress_events = 0
+        self._locomotion_progress_first_ns: int | None = None
+        self._locomotion_progress_events_required = 1
+        self._locomotion_progress_min_ms = 0
 
     @property
     def run(self) -> SkillRun | None:
@@ -190,10 +194,28 @@ class SkillExecutor:
         now_ns: int | None = None,
         instruction: str | None = None,
         complete_on_locomotion_progress: bool = False,
+        locomotion_progress_events_required: int = 1,
+        locomotion_progress_min_ms: int = 0,
         collection_hotbar_log_baseline: PerceptionFact | None = None,
     ) -> SkillRun:
         if self._run is not None and self._run.outcome == SkillOutcome.RUNNING:
             raise RuntimeError("a skill is already running")
+        if (
+            not isinstance(locomotion_progress_events_required, int)
+            or isinstance(locomotion_progress_events_required, bool)
+            or locomotion_progress_events_required < 1
+        ):
+            raise ValueError(
+                "locomotion_progress_events_required must be an integer of at least 1"
+            )
+        if (
+            not isinstance(locomotion_progress_min_ms, int)
+            or isinstance(locomotion_progress_min_ms, bool)
+            or locomotion_progress_min_ms < 0
+        ):
+            raise ValueError(
+                "locomotion_progress_min_ms must be a non-negative integer"
+            )
         started = time.monotonic_ns() if now_ns is None else now_ns
         self._spec = spec
         self._parameters = dict(parameters or {})
@@ -224,6 +246,10 @@ class SkillExecutor:
         self._mining_hotbar_log_baseline = None
         self._mining_attack_started = False
         self._complete_on_locomotion_progress = complete_on_locomotion_progress
+        self._locomotion_progress_events = 0
+        self._locomotion_progress_first_ns = None
+        self._locomotion_progress_events_required = locomotion_progress_events_required
+        self._locomotion_progress_min_ms = locomotion_progress_min_ms
         self._run = SkillRun(
             run_id=run_id,
             skill_id=spec.skill_id,
@@ -457,13 +483,22 @@ class SkillExecutor:
             and traversal_verification.signal == OutcomeSignal.LOCOMOTION_PROGRESS
             and self._complete_on_locomotion_progress
         ):
-            return self._finish(
-                SkillOutcome.SUCCEEDED,
-                now,
-                None,
-                force_release_keys=_LOCOMOTION_RELEASE_KEYS,
-                outcome_verification=traversal_verification,
-            )
+            self._locomotion_progress_events += 1
+            if self._locomotion_progress_first_ns is None:
+                self._locomotion_progress_first_ns = now
+            progress_elapsed_ns = now - self._locomotion_progress_first_ns
+            if (
+                self._locomotion_progress_events
+                >= self._locomotion_progress_events_required
+                and progress_elapsed_ns >= self._locomotion_progress_min_ms * 1_000_000
+            ):
+                return self._finish(
+                    SkillOutcome.SUCCEEDED,
+                    now,
+                    None,
+                    force_release_keys=_LOCOMOTION_RELEASE_KEYS,
+                    outcome_verification=traversal_verification,
+                )
         if (
             traversal_verification is not None
             and traversal_verification.status == OutcomeStatus.STALLED
