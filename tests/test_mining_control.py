@@ -1057,11 +1057,6 @@ def test_early_policy_release_is_suppressed_only_inside_verified_lease() -> None
     ("second_action", "board_change", "failure"),
     [
         (
-            MotorAction(sequence=0, mouse_dx=2),
-            {},
-            SkillFailureCode.MINING_CAMERA_CHANGED,
-        ),
-        (
             MotorAction(sequence=0),
             {"extra_facts": ()},
             SkillFailureCode.MINING_TARGET_CHANGED,
@@ -1073,7 +1068,7 @@ def test_early_policy_release_is_suppressed_only_inside_verified_lease() -> None
         ),
     ],
 )
-def test_active_lease_releases_on_camera_target_or_tool_change(
+def test_active_lease_releases_on_target_or_tool_change(
     second_action: MotorAction,
     board_change: dict[str, object],
     failure: SkillFailureCode,
@@ -1387,25 +1382,97 @@ def test_attack_waits_for_a_new_frame_after_stopping_then_synthesizes_press() ->
     assert started.action_origin == ActionOrigin.SYNTHETIC
 
 
-def test_active_lease_releases_when_policy_starts_moving() -> None:
+def test_active_lease_quiesces_policy_locomotion_and_camera_drift() -> None:
     now = time.monotonic_ns()
     policy = _ScriptedPolicy(
         MotorAction(sequence=0, buttons_down=("left",)),
-        MotorAction(sequence=0, keys_down=("a",), buttons_up=("left",)),
+        MotorAction(
+            sequence=0,
+            keys_down=("a", "space"),
+            buttons_up=("left",),
+            mouse_dx=23,
+            mouse_dy=-17,
+        ),
+        MotorAction(sequence=0, keys_down=("w",), mouse_dx=-31),
+    )
+    executor = _executor(policy, now_ns=now)
+    executor.tick(_mining_board(now_ns=now), sequence=1, now_ns=now)
+
+    continued = executor.tick(
+        _mining_board(
+            now_ns=now + 100_000_000,
+            crosshair_hash="0000000000000003",
+        ),
+        sequence=2,
+        now_ns=now + 100_000_000,
+    )
+    repeated = executor.tick(
+        _mining_board(
+            now_ns=now + 200_000_000,
+            crosshair_hash="0000000000000007",
+        ),
+        sequence=3,
+        now_ns=now + 200_000_000,
+    )
+
+    assert continued.run.outcome == SkillOutcome.RUNNING
+    assert continued.action is not None
+    assert continued.action.keys_down == ()
+    assert continued.action.keys_up == ("a", "space")
+    assert continued.action.mouse_dx == continued.action.mouse_dy == 0
+    assert "left" not in continued.action.buttons_up
+    assert continued.action_origin == ActionOrigin.SYNTHETIC
+    assert repeated.run.outcome == SkillOutcome.RUNNING
+    assert repeated.action is not None
+    assert repeated.action.keys_down == ()
+    assert repeated.action.keys_up == ("w",)
+    assert repeated.action.mouse_dx == repeated.action.mouse_dy == 0
+    assert executor._mining_guard.held_keys == ()
+
+
+@pytest.mark.parametrize(
+    ("second_action", "board_change", "failure"),
+    [
+        (
+            MotorAction(sequence=0, keys_down=("w", "2"), mouse_dx=30),
+            {},
+            SkillFailureCode.MINING_TOOL_CHANGED,
+        ),
+        (
+            MotorAction(sequence=0, keys_down=("w", "e"), mouse_dx=30),
+            {},
+            SkillFailureCode.MINING_CONFLICTING_INPUT,
+        ),
+        (
+            MotorAction(sequence=0, keys_down=("w",), mouse_dx=30),
+            {"track_id": "target:two"},
+            SkillFailureCode.MINING_TARGET_CHANGED,
+        ),
+    ],
+)
+def test_active_lease_drift_suppression_does_not_mask_hard_interlocks(
+    second_action: MotorAction,
+    board_change: dict[str, object],
+    failure: SkillFailureCode,
+) -> None:
+    now = time.monotonic_ns()
+    policy = _ScriptedPolicy(
+        MotorAction(sequence=0, buttons_down=("left",)),
+        second_action,
     )
     executor = _executor(policy, now_ns=now)
     executor.tick(_mining_board(now_ns=now), sequence=1, now_ns=now)
 
     stopped = executor.tick(
-        _mining_board(now_ns=now + 100_000_000),
+        _mining_board(now_ns=now + 100_000_000, **board_change),  # type: ignore[arg-type]
         sequence=2,
         now_ns=now + 100_000_000,
     )
 
-    assert stopped.run.failure_code == SkillFailureCode.MINING_MOVEMENT_CHANGED
+    assert stopped.run.failure_code == failure
     assert stopped.action is not None
     assert "left" in stopped.action.buttons_up
-    assert "a" in stopped.action.keys_up
+    assert set(second_action.keys_down).issubset(stopped.action.keys_up)
 
 
 def test_active_lease_releases_before_a_hotbar_tool_change() -> None:
@@ -1431,7 +1498,18 @@ def test_active_lease_releases_before_a_hotbar_tool_change() -> None:
     "conflicting_action",
     [
         MotorAction(sequence=0, buttons_down=("right",), buttons_up=("left",)),
+        MotorAction(
+            sequence=0,
+            buttons_down=("right",),
+            buttons_up=("right", "left"),
+        ),
         MotorAction(sequence=0, keys_down=("e",), buttons_up=("left",)),
+        MotorAction(
+            sequence=0,
+            keys_down=("e",),
+            keys_up=("e",),
+            buttons_up=("left",),
+        ),
         MotorAction(sequence=0, keys_down=("q",), buttons_up=("left",)),
     ],
 )
@@ -1454,6 +1532,10 @@ def test_active_lease_releases_before_conflicting_interaction(
 
     assert stopped.run.failure_code == SkillFailureCode.MINING_CONFLICTING_INPUT
     assert stopped.action is not None and "left" in stopped.action.buttons_up
+    assert set(conflicting_action.keys_down).issubset(stopped.action.keys_up)
+    assert set(conflicting_action.buttons_down).issubset(stopped.action.buttons_up)
+    assert executor._mining_guard.held_keys == ()
+    assert executor._mining_guard.held_buttons == ()
 
 
 def test_hard_block_lease_fails_closed_if_tool_evidence_disappears() -> None:

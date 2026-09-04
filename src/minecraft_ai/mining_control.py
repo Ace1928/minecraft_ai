@@ -231,8 +231,10 @@ class MiningLeaseGuard:
     ) -> MiningGuardDecision:
         held_keys = set(self._held_keys)
         held_buttons = set(self._held_buttons)
-        next_keys = (held_keys | set(action.keys_down)) - set(action.keys_up)
-        next_buttons = (held_buttons | set(action.buttons_down)) - set(action.buttons_up)
+        next_keys = (held_keys - set(action.keys_up)) | set(action.keys_down)
+        next_buttons = (held_buttons - set(action.buttons_up)) | set(
+            action.buttons_down
+        )
         release_keys = tuple(
             sorted(held_keys | set(action.keys_down) | set(action.keys_up))
         )
@@ -284,7 +286,6 @@ class MiningLeaseGuard:
             intent,
             lease=lease,
             now_ns=now_ns,
-            locomotion_requested=locomotion_requested,
             tool_change_requested=tool_change_requested,
             conflicting_input=conflicting_input,
         )
@@ -297,15 +298,18 @@ class MiningLeaseGuard:
                 force_release_buttons=release_buttons,
             )
 
+        policy_action = action
+        action = _quiesce_active_lease_action(action, held_keys=held_keys)
+        next_keys = (held_keys - set(action.keys_up)) | set(action.keys_down)
         buttons_up = tuple(button for button in action.buttons_up if button != "left")
         buttons_down = action.buttons_down
         if lease.override_active:
             buttons_down = tuple(button for button in buttons_down if button != "left")
         suppressed_release = len(buttons_up) != len(action.buttons_up)
         lease.override_active = lease.override_active or suppressed_release
-        synthetic = lease.override_active
+        synthetic = lease.override_active or action != policy_action
         self._held_keys = next_keys
-        self._held_buttons = (held_buttons | set(buttons_down)) - set(buttons_up)
+        self._held_buttons = (held_buttons - set(buttons_up)) | set(buttons_down)
         if buttons_up == action.buttons_up and buttons_down == action.buttons_down:
             return MiningGuardDecision(action, synthetic=synthetic)
         return MiningGuardDecision(
@@ -610,10 +614,10 @@ class MiningLeaseGuard:
         )
 
     def _remember_emitted(self, action: MotorAction) -> None:
-        self._held_keys.update(action.keys_down)
         self._held_keys.difference_update(action.keys_up)
-        self._held_buttons.update(action.buttons_down)
+        self._held_keys.update(action.keys_down)
         self._held_buttons.difference_update(action.buttons_up)
+        self._held_buttons.update(action.buttons_down)
 
     def _continuation_interlock(
         self,
@@ -623,7 +627,6 @@ class MiningLeaseGuard:
         *,
         lease: _MiningLease,
         now_ns: int,
-        locomotion_requested: bool,
         tool_change_requested: bool,
         conflicting_input: bool,
     ) -> SkillFailureCode | None:
@@ -635,14 +638,10 @@ class MiningLeaseGuard:
             return SkillFailureCode.MINING_UNSAFE_SCENE
         if action.camera_semantics != "world":
             return SkillFailureCode.MINING_CAMERA_CHANGED
-        if locomotion_requested:
-            return SkillFailureCode.MINING_MOVEMENT_CHANGED
         if tool_change_requested:
             return SkillFailureCode.MINING_TOOL_CHANGED
         if conflicting_input:
             return SkillFailureCode.MINING_CONFLICTING_INPUT
-        if action.mouse_dx or action.mouse_dy:
-            return SkillFailureCode.MINING_CAMERA_CHANGED
         target_failure = _continuation_target_failure(
             blackboard,
             lease.target,
@@ -675,6 +674,27 @@ class MiningLeaseGuard:
         if now_ns >= lease.deadline_ns:
             return SkillFailureCode.MINING_LEASE_EXPIRED
         return None
+
+
+def _quiesce_active_lease_action(
+    action: MotorAction,
+    *,
+    held_keys: set[str],
+) -> MotorAction:
+    """Keep a bound block attempt stationary despite ordinary policy drift."""
+    locomotion = _LOCOMOTION_KEYS.intersection(
+        held_keys | set(action.keys_down) | set(action.keys_up)
+    )
+    return action.model_copy(
+        update={
+            "keys_down": tuple(
+                key for key in action.keys_down if key not in _LOCOMOTION_KEYS
+            ),
+            "keys_up": tuple(sorted(set(action.keys_up) | locomotion)),
+            "mouse_dx": 0,
+            "mouse_dy": 0,
+        }
+    )
 
 
 def _suppress_left_press(action: MotorAction) -> MotorAction:
