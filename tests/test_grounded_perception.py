@@ -280,7 +280,9 @@ def test_crosshair_rgb_signature_detects_equal_luma_center_color_swap() -> None:
     (
         ("0000000000000007", (bytes((1, 0)) * 384).hex(), True),
         ("000000000000000f", (bytes((1,)) * 768).hex(), True),
+        ("0000000000000003", (bytes((2,)) * 768).hex(), True),
         ("0000000000000007", (bytes((2,)) * 768).hex(), False),
+        ("0000000000000003", (bytes((3,)) + bytes((2,)) * 767).hex(), False),
         ("000000000000001f", (bytes((0,)) * 768).hex(), False),
     ),
 )

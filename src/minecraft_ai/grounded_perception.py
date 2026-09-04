@@ -22,6 +22,8 @@ JsonScalar = bool | int | float | str
 CROSSHAIR_BLOCK_FAST_SOURCE = "bootstrap:bootstrap-rgb-v1:not-training-label"
 CROSSHAIR_BLOCK_EQUIVALENT_DHASH_MAX = 4
 CROSSHAIR_BLOCK_EQUIVALENT_RGB_MAE_MAX = 1.0
+CROSSHAIR_BLOCK_LIGHTING_DHASH_MAX = 2
+CROSSHAIR_BLOCK_LIGHTING_RGB_MAE_MAX = 2.0
 _CROSSHAIR_DHASH_HEX = re.compile(r"[0-9a-fA-F]{16}")
 _CROSSHAIR_RGB_GRID_HEX = re.compile(r"[0-9a-fA-F]{1536}")
 
@@ -546,7 +548,13 @@ def crosshair_block_visually_equivalent(
     reference_rgb_grid: str,
     current_rgb_grid: str,
 ) -> bool:
-    """Accept only tiny structural drift with near-identical absolute color."""
+    """Accept tiny drift, allowing two RGB levels only with a tighter hash match.
+
+    A stationary Bedrock leaf-canopy pair 20.57 seconds apart measured two
+    changed hash bits and RGB MAE 1.833 under changing world lighting. Keep
+    the original color bound for less tightly matched structure; no color
+    normalization or arbitrary brightness shifts are permitted.
+    """
 
     if (
         _CROSSHAIR_DHASH_HEX.fullmatch(reference_dhash) is None
@@ -559,13 +567,16 @@ def crosshair_block_visually_equivalent(
         ).bit_count()
     except ValueError:
         return False
+    rgb_distance = crosshair_block_rgb_grid_distance(reference_rgb_grid, current_rgb_grid)
     return bool(
-        dhash_distance <= CROSSHAIR_BLOCK_EQUIVALENT_DHASH_MAX
-        and crosshair_block_rgb_grid_distance(
-            reference_rgb_grid,
-            current_rgb_grid,
+        (
+            dhash_distance <= CROSSHAIR_BLOCK_EQUIVALENT_DHASH_MAX
+            and rgb_distance <= CROSSHAIR_BLOCK_EQUIVALENT_RGB_MAE_MAX
         )
-        <= CROSSHAIR_BLOCK_EQUIVALENT_RGB_MAE_MAX
+        or (
+            dhash_distance <= CROSSHAIR_BLOCK_LIGHTING_DHASH_MAX
+            and rgb_distance <= CROSSHAIR_BLOCK_LIGHTING_RGB_MAE_MAX
+        )
     )
 
 
