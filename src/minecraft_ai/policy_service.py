@@ -1784,6 +1784,7 @@ class _VPTBackend:
         }
         factored = self.mapper.to_factored(raw)
         decoded = self.transformer.policy2env(factored)
+        decoded, suppressed = _apply_action_constraints(decoded, intent or {})
         return _decoded_policy_output(
             decoded,
             inference_ns=time.perf_counter_ns() - started,
@@ -1799,6 +1800,7 @@ class _VPTBackend:
                 gui_scale=self.gui_camera_scale,
             ),
             camera_semantics=_intent_camera_semantics(intent or {}),
+            suppressed_actions=suppressed,
         )
 
     @staticmethod

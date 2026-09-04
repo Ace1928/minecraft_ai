@@ -25,6 +25,7 @@ from minecraft_ai.policy_service import (
     _PolicyRequestContext,
     _RocketTwoBackend,
     _SteveOneBackend,
+    _VPTBackend,
     _apply_action_constraints,
     _apply_discrete_action_contract,
     _crop_bbox_to_full,
@@ -1573,6 +1574,104 @@ def test_explicit_action_constraints_mask_only_prohibited_learned_bits() -> None
     assert int(constrained["forward"][0]) == 1
     assert int(decoded["attack"][0]) == 1
     assert suppressed == ("attack", "use", "drop", "inventory", "hotbar")
+
+
+def test_vpt_backend_enforces_option_action_constraints() -> None:
+    class _Tensor:
+        def __init__(self, value: numpy.ndarray) -> None:
+            self.value = value
+
+        def to(self, _device: str) -> "_Tensor":
+            return self
+
+        def cpu(self) -> "_Tensor":
+            return self
+
+        def numpy(self) -> numpy.ndarray:
+            return self.value
+
+    class _Torch:
+        @staticmethod
+        def from_numpy(value: numpy.ndarray) -> _Tensor:
+            return _Tensor(value)
+
+        @staticmethod
+        def inference_mode():
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+    class _CV2:
+        INTER_LINEAR = 1
+
+        @staticmethod
+        def resize(value: numpy.ndarray, _size: tuple[int, int], *, interpolation: int):
+            assert interpolation == _CV2.INTER_LINEAR
+            return value
+
+    decoded = {
+        "camera": numpy.asarray([[0.0, 0.0]]),
+        "attack": numpy.asarray([1]),
+        "use": numpy.asarray([1]),
+        "forward": numpy.asarray([1]),
+        "back": numpy.asarray([0]),
+        "left": numpy.asarray([0]),
+        "right": numpy.asarray([0]),
+        "jump": numpy.asarray([0]),
+        "sneak": numpy.asarray([0]),
+        "sprint": numpy.asarray([0]),
+        "inventory": numpy.asarray([0]),
+        "drop": numpy.asarray([0]),
+        **{f"hotbar.{slot}": numpy.asarray([0]) for slot in range(1, 10)},
+    }
+
+    class _Policy:
+        @staticmethod
+        def act(_observation, _first, hidden_state, *, stochastic: bool):
+            assert stochastic
+            return (
+                {
+                    "buttons": _Tensor(numpy.asarray([0])),
+                    "camera": _Tensor(numpy.asarray([[0.0, 0.0]])),
+                },
+                hidden_state,
+                None,
+            )
+
+    class _Mapper:
+        @staticmethod
+        def to_factored(_raw):
+            return decoded
+
+    class _Transformer:
+        @staticmethod
+        def policy2env(value):
+            return value
+
+    backend = object.__new__(_VPTBackend)
+    backend.numpy = numpy
+    backend.cv2 = _CV2()
+    backend.torch = _Torch()
+    backend.policy = _Policy()
+    backend.mapper = _Mapper()
+    backend.transformer = _Transformer()
+    backend.hidden_state = []
+    backend.first = object()
+    backend.device = "cpu"
+    backend.stochastic = True
+    backend.model_version = "vpt-test"
+    backend.camera_scale = 1.0
+    backend.camera_pitch_scale = 1.0
+    backend.gui_camera_scale = 1.0
+
+    output = backend.infer(
+        numpy.zeros((16, 16, 4), dtype=numpy.uint8),
+        {"mode": "traverse", "parameters": {"allow_attack": False, "allow_use": False}},
+    )
+
+    assert output.keys == ("w",)
+    assert output.buttons == ()
+    assert output.suppressed_actions == ("attack", "use")
 
 
 def test_close_inventory_learned_toggle_is_one_event_until_option_reset() -> None:
