@@ -712,7 +712,12 @@ def test_verified_break_precedence_respects_safety_boundary(
 
 @pytest.mark.parametrize(
     "skill_id",
-    ("explore_forward", "traverse_level_ground", "traverse_visible_obstacle"),
+    (
+        "explore_forward",
+        "gather_nearby_wood",
+        "traverse_level_ground",
+        "traverse_visible_obstacle",
+    ),
 )
 def test_traversal_stall_fails_early_with_typed_evidence_and_full_release(
     skill_id: str,
@@ -763,6 +768,47 @@ def test_traversal_stall_fails_early_with_typed_evidence_and_full_release(
     assert stopped.outcome_verification is not None
     assert stopped.outcome_verification.signal.value == "locomotion_stalled"
     assert stopped.recovery_skills == spec.recovery_skills
+
+
+def test_gather_scan_without_locomotion_does_not_report_traversal_stall() -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy(
+        MotorAction(sequence=0, buttons_down=("left",)),
+        MotorAction(sequence=0),
+        MotorAction(sequence=0),
+    )
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("gather_nearby_wood"),
+        run_id="gather-scan-only",
+        now_ns=now,
+    )
+
+    executor.tick(
+        _traversal_board(now, luma_grid=_LUMA_A),
+        sequence=1,
+        now_ns=now,
+    )
+    scanning = executor.tick(
+        _traversal_board(now + 3_100_000_000, luma_grid=_LUMA_A),
+        sequence=2,
+        now_ns=now + 3_100_000_000,
+    )
+    acquisition_timeout = executor.tick(
+        _traversal_board(now + 6_100_000_000, luma_grid=_LUMA_A),
+        sequence=3,
+        now_ns=now + 6_100_000_000,
+    )
+
+    assert scanning.run.outcome == SkillOutcome.RUNNING
+    assert scanning.outcome_verification is None
+    assert acquisition_timeout.run.outcome == SkillOutcome.FAILED
+    assert (
+        acquisition_timeout.run.failure_code
+        == SkillFailureCode.MINING_ACQUISITION_TIMEOUT
+    )
+    assert acquisition_timeout.outcome_verification is None
+    assert executor._outcome_verifier.active_run_id is None
 
 
 def test_traversal_progress_is_evidence_without_finishing_the_skill() -> None:

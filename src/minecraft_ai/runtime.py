@@ -127,6 +127,7 @@ class _HeadroomRecovery:
     context_key: str
     traversal_parameters: dict[str, str | int | float | bool]
     deadline_ns: int
+    origin_skill_id: str = "traverse_visible_obstacle"
     phase: str = "reorient"
     reoriented_frame_id: int | None = None
     reorientation_moved: bool = False
@@ -266,11 +267,11 @@ def _verified_log_break(verification: OutcomeVerification | None) -> bool:
 
 
 def _verified_obstacle_stall(result: ExecutionTick) -> bool:
-    """Accept only the traversal verifier's exact obstacle-stall terminal signal."""
+    """Accept only an exact action-bound traversal stall from an eligible option."""
 
     verification = result.outcome_verification
     return bool(
-        result.run.skill_id == "traverse_visible_obstacle"
+        result.run.skill_id in {"gather_nearby_wood", "traverse_visible_obstacle"}
         and result.run.outcome == SkillOutcome.FAILED
         and result.run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
         and verification is not None
@@ -335,6 +336,10 @@ def _headroom_retry_advances_plan(
     """Consume a plan step only when that active plan owned the recovered run."""
 
     if not _verified_headroom_retry(result, recovery) or recovery is None:
+        return False
+    if recovery.origin_skill_id != "traverse_visible_obstacle":
+        # Clearing terrain while gathering restores mobility; it does not
+        # prove that any log was acquired or complete the gather plan node.
         return False
     if recovery.context_key == _EXPLORE_KEEPALIVE_CONTEXT:
         return False
@@ -1638,10 +1643,15 @@ class AgentRuntime:
             now_ns = time.monotonic_ns()
             active_vlm = self.perception.active_vlm
             assert active_vlm is not None
+            traversal = self.skills.get("traverse_visible_obstacle")
             self._headroom_recovery = _HeadroomRecovery(
                 context_key=result.run.context_key,
-                traversal_parameters=dict(result.run.parameters),
+                traversal_parameters=_compatible_recovery_parameters(
+                    result.run,
+                    traversal,
+                ),
                 deadline_ns=_headroom_deadline_ns(active_vlm, now_ns=now_ns),
+                origin_skill_id=result.run.skill_id,
             )
         return True
 

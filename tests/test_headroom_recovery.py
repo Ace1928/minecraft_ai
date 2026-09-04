@@ -65,11 +65,16 @@ def _install_strict_monotonic_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(time, "monotonic_ns", lambda: next(timestamps))
 
 
-def _stall_result(run_id: str = "obstacle-stall") -> ExecutionTick:
+def _stall_result(
+    run_id: str = "obstacle-stall",
+    *,
+    skill_id: str = "traverse_visible_obstacle",
+    context_key: str = "explore-keepalive",
+) -> ExecutionTick:
     run = SkillRun(
         run_id=run_id,
-        skill_id="traverse_visible_obstacle",
-        context_key="explore-keepalive",
+        skill_id=skill_id,
+        context_key=context_key,
         started_ns=1,
         ended_ns=2,
         outcome=SkillOutcome.FAILED,
@@ -269,14 +274,57 @@ def test_headroom_trigger_requires_exact_verified_obstacle_stall() -> None:
     exact = _stall_result()
     assert _verified_obstacle_stall(exact) is True
 
+    gather = _stall_result("gather-stall", skill_id="gather_nearby_wood")
+    assert _verified_obstacle_stall(gather) is True
+
     no_verification = replace(exact, outcome_verification=None)
     assert _verified_obstacle_stall(no_verification) is False
+
+    gather_acquisition_timeout = replace(
+        gather,
+        run=gather.run.model_copy(
+            update={
+                "failure_reason": SkillFailureCode.MINING_ACQUISITION_TIMEOUT.value,
+                "failure_code": SkillFailureCode.MINING_ACQUISITION_TIMEOUT,
+            }
+        ),
+        outcome_verification=None,
+    )
+    assert _verified_obstacle_stall(gather_acquisition_timeout) is False
 
     level_ground = replace(
         exact,
         run=exact.run.model_copy(update={"skill_id": "traverse_level_ground"}),
     )
     assert _verified_obstacle_stall(level_ground) is False
+
+
+def test_gather_stall_starts_plan_neutral_headroom_with_filtered_parameters() -> None:
+    runtime, _, _ = _runtime_for_probe()
+    gather = _stall_result(
+        "gather-stall",
+        skill_id="gather_nearby_wood",
+        context_key="strategic-goal",
+    )
+    gather = replace(
+        gather,
+        run=gather.run.model_copy(
+            update={
+                "parameters": {
+                    "wood_kind": "oak",
+                    "minimum_logs": 3,
+                    "allow_jump": True,
+                }
+            }
+        ),
+    )
+
+    assert runtime._route_headroom_terminal(gather) is True
+    recovery = runtime._headroom_recovery
+    assert recovery is not None
+    assert recovery.origin_skill_id == "gather_nearby_wood"
+    assert recovery.context_key == "strategic-goal"
+    assert recovery.traversal_parameters == {"allow_jump": True}
 
 
 def test_headroom_deadline_respects_serialized_vlm_timeout_budget() -> None:
@@ -1351,6 +1399,21 @@ def test_verified_retry_progress_clears_escalation_and_advances_plan_once() -> N
         plan_goal_id="strategic-goal",
     )
     assert advances_plan is True
+
+    gather_recovery = replace(
+        planned_recovery,
+        origin_skill_id="gather_nearby_wood",
+    )
+    assert (
+        _headroom_retry_advances_plan(
+            planned_result,
+            gather_recovery,
+            plan_steps=("gather three logs",),
+            plan_index=0,
+            plan_goal_id="strategic-goal",
+        )
+        is False
+    )
 
     recorder = object.__new__(AgentRuntime)
     recorder.skills = build_bootstrap_skill_library()

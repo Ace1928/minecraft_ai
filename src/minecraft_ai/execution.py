@@ -70,8 +70,15 @@ _MINING_SUCCESS_OVERRIDABLE_FAILURES = frozenset(
     }
 )
 _TRAVERSAL_SKILL_IDS = frozenset(
-    {"explore_forward", "traverse_level_ground", "traverse_visible_obstacle"}
+    {
+        "explore_forward",
+        "gather_nearby_wood",
+        "traverse_level_ground",
+        "traverse_visible_obstacle",
+    }
 )
+_ACTION_PROVEN_TRAVERSAL_SKILL_IDS = frozenset({"gather_nearby_wood"})
+_TRAVERSAL_MOVEMENT_KEYS = frozenset({"a", "d", "s", "space", "w"})
 _LOCOMOTION_RELEASE_KEYS = ("a", "ctrl", "d", "s", "shift", "space", "w")
 _REACQUIRE_MIN_CONFIDENCE = 0.65
 
@@ -709,6 +716,18 @@ class SkillExecutor:
         if self._spec.skill_id not in _TRAVERSAL_SKILL_IDS:
             return None
         if self._outcome_verifier.active_run_id != self._run.run_id:
+            if (
+                self._spec.skill_id in _ACTION_PROVEN_TRAVERSAL_SKILL_IDS
+                and (
+                    action is None
+                    or not set(action.keys_down).intersection(_TRAVERSAL_MOVEMENT_KEYS)
+                )
+            ):
+                # Gathering legitimately scans before moving. Do not turn a
+                # stationary target search into the traversal verifier's
+                # controller-starvation signal; arm only on a real movement
+                # command that survives the mining guard.
+                return None
             self._outcome_verifier.begin(
                 self._run.run_id,
                 OutcomeKind.TRAVERSAL,
