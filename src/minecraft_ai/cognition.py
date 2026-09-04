@@ -313,6 +313,16 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
     """
 
     normalized = " ".join(text.casefold().split())
+    # A terminal "then stop and reassess" clause describes what to do after
+    # the requested skill succeeds; it must not negate the affirmative action.
+    # Keep this deliberately narrow so directives such as "stop mining" still
+    # fall through to deliberation instead of starting a motor skill.
+    normalized = re.sub(
+        r"(?:,\s*)?\bthen\s+stop(?:\s+and\s+reassess"
+        r"(?:\s+(?:the\s+)?(?:opening|result|situation))?)?[.!]?$",
+        "",
+        normalized,
+    ).rstrip(" ,.!")
     if not normalized:
         return ()
     if "?" in normalized or re.match(

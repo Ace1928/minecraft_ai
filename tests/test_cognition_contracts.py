@@ -613,8 +613,17 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
     "status",
     (OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED),
 )
+@pytest.mark.parametrize(
+    "text",
+    (
+        "Mine the marked dirt block.",
+        "Mine the marked dirt block, then stop and reassess.",
+        "Mine the marked dirt block until it breaks, then stop and reassess the opening.",
+    ),
+)
 def test_marked_dirt_instruction_uses_immediate_operator_fast_path(
     status: OperatorMessageStatus,
+    text: str,
 ) -> None:
     now = time.monotonic_ns()
     reference = PerceptionFact(
@@ -643,7 +652,7 @@ def test_marked_dirt_instruction_uses_immediate_operator_fast_path(
     message = OperatorMessage(
         message_id="mine-marked-dirt",
         created_ns=now,
-        text="Mine the marked dirt block.",
+        text=text,
         kind=OperatorMessageKind.CORRECTION,
         status=status,
     )
@@ -695,6 +704,7 @@ def test_direct_operator_action_uses_sampler_grammar_that_requires_a_skill() -> 
 def test_negated_question_and_unsupported_actions_keep_null_available() -> None:
     cases = (
         ("Do not move.", OperatorMessageKind.INSTRUCTION),
+        ("Stop mining.", OperatorMessageKind.INSTRUCTION),
         ("Can you tell me how to craft a pickaxe?", OperatorMessageKind.INSTRUCTION),
         ("Move forward.", OperatorMessageKind.QUESTION),
         ("Eat food now.", OperatorMessageKind.INSTRUCTION),
