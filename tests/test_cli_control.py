@@ -481,7 +481,14 @@ def test_manual_bedrock_stop_revokes_before_waiting_for_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
+
+    @contextmanager
+    def bedrock_lock(*, wait_timeout_s: float = 0.0) -> Iterator[None]:
+        assert wait_timeout_s == 30.0
+        yield
+
     monkeypatch.setattr(cli, "latch_operator_pause", lambda: calls.append("latch"))
+    monkeypatch.setattr(cli, "bedrock_lifecycle_lock", bedrock_lock)
     monkeypatch.setattr(cli, "AGENT_FILE", tmp_path / "missing-agent.json")
     monkeypatch.setattr(cli, "supervisor_alive", lambda: True)
     monkeypatch.setattr(

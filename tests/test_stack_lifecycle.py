@@ -1006,6 +1006,7 @@ def test_pre_ready_cleanup_survivor_retains_provisional_identity(
 
     monkeypatch.setattr(stack_module, "_IS_WINDOWS", False)
     monkeypatch.setattr(stack_module, "_IS_LINUX", True)
+    monkeypatch.setattr(stack_module, "_pid_alive", lambda _pid: True)
     monkeypatch.setattr(launcher, "_spawn", lambda _service, _command: _ExitedChild())
     monkeypatch.setattr(
         launcher,

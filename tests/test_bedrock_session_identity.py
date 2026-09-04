@@ -175,6 +175,9 @@ def test_stop_rechecks_identity_immediately_before_signal(
     session = _session()
     matching = ("python3", "/usr/bin/bedrock-on-linux", "play")
     identities = iter(((22, matching), (999, ("/usr/bin/unrelated",))))
+    # Exercise the Linux identity/revalidation path on every CI host instead
+    # of accidentally testing the host platform's unsupported fallback.
+    monkeypatch.setattr(sessions, "_IS_LINUX", True)
     monkeypatch.setattr(sessions, "BEDROCK_SESSION_FILE", descriptor)
     monkeypatch.setattr(sessions, "_pid_alive", lambda _pid: True)
     monkeypatch.setattr(sessions, "_linux_process_identity", lambda _pid: next(identities))
