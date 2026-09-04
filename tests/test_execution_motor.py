@@ -3,7 +3,8 @@ from __future__ import annotations
 import time
 
 from minecraft_ai.action_levels import ActionLevel
-from minecraft_ai.execution import SkillExecutor
+from minecraft_ai.builtin_skills import build_bootstrap_skill_library
+from minecraft_ai.execution import SkillExecutor, conditions_satisfied
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.safety import MotorAction
@@ -80,6 +81,32 @@ def test_running_skill_emits_bounded_motor_action() -> None:
     assert tick.action.keys_down == ("w",)
     assert abs(tick.action.mouse_dx) <= policy.max_mouse_step
     assert abs(tick.action.mouse_dy) <= policy.max_mouse_step
+
+
+def test_open_inventory_success_requires_grounded_inventory_gui() -> None:
+    spec = build_bootstrap_skill_library().get("open_inventory")
+
+    assert conditions_satisfied(
+        spec.success_conditions,
+        _board(
+            _fact("scene.mode", "gui"),
+            _fact("gui.mode", "inventory"),
+        ),
+    )
+    assert not conditions_satisfied(
+        spec.success_conditions,
+        _board(
+            _fact("scene.mode", "gui"),
+            _fact("gui.mode", "crafting"),
+        ),
+    )
+    assert not conditions_satisfied(
+        spec.success_conditions,
+        _board(
+            _fact("scene.mode", "world"),
+            _fact("gui.mode", "inventory"),
+        ),
+    )
 
 
 def test_skill_contract_becomes_learned_policy_instruction() -> None:

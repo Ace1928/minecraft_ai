@@ -330,7 +330,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="open_inventory",
-            version=1,
+            version=2,
             name="Open inventory",
             description=(
                 "Open the Bedrock inventory through the learned GUI expert and verify the "
@@ -338,7 +338,8 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             ),
             stage=SkillStage.EXPERIMENTAL,
             success_conditions=(
-                SkillCondition(key="scene.mode", operator="eq", value="inventory"),
+                SkillCondition(key="scene.mode", operator="eq", value="gui"),
+                SkillCondition(key="gui.mode", operator="eq", value="inventory"),
             ),
             expected_effects=("inventory_opened", "inventory_scene_verified"),
             max_duration_ms=10_000,
