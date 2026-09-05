@@ -1441,6 +1441,8 @@ class AgentRuntime:
             if self._stop.is_set():
                 return
             self.telemetry.publish(self._telemetry_payload(state="warming"), force=True)
+            if self._stop.is_set():
+                return
             # Strategic inference and policy checkpoint loading are independent.
             # Start the first typed decision from a real captured frame before
             # warming the learned policies so CPU model startup latency is not

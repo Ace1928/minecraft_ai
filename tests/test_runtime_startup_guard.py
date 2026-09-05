@@ -171,6 +171,28 @@ def test_stop_during_startup_does_not_start_a_later_phase(
     assert runtime._lease_thread is not None and not runtime._lease_thread.is_alive()
 
 
+def test_stop_during_warming_telemetry_prevents_capture_and_model_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = startup_runtime()
+    monkeypatch.setattr("minecraft_ai.runtime.send_command", lambda *_args, **_kwargs: {})
+    runtime.perception.last_capture = None
+    runtime.telemetry.publish.side_effect = lambda *_args, **_kwargs: runtime.stop()
+
+    runtime.run_forever()
+
+    runtime.perception.capture_once.assert_not_called()
+    runtime._merge_operator_target.assert_not_called()
+    runtime._start_cognition_if_due.assert_not_called()
+    runtime._warmup_policy.assert_not_called()
+    runtime._failsafe.assert_not_called()
+    runtime.perception.close.assert_called_once()
+    runtime.executor.close.assert_called_once()
+    runtime.trajectory.close.assert_called_once()
+    runtime._pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+    assert runtime.telemetry.publish.call_count == 2  # Warming, then stopped.
+
+
 @pytest.mark.parametrize("cancellation", ["stop", "pause"])
 def test_rejected_renewal_during_cancellation_is_not_a_fault(
     monkeypatch: pytest.MonkeyPatch, cancellation: str,
