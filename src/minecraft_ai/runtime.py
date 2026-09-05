@@ -12,8 +12,9 @@ import uuid
 from collections.abc import Callable, Iterable
 from collections import deque
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from .cognition import (
     BootstrapCognitionPolicy,
@@ -131,6 +132,26 @@ _HEADROOM_STABLE_SUCCESSOR_FRAMES = 2
 _GATHER_ACQUISITIONS_REQUIRED = 3
 
 
+class SkillStartSource(str, Enum):
+    """Why execution created a new run, not an attribution of model credit."""
+
+    COGNITION = "cognition"
+    RECOVERY = "recovery"
+    CONTINUATION = "continuation"
+    KEEPALIVE = "keepalive"
+    BOOTSTRAP = "bootstrap"
+
+
+@dataclass(frozen=True, slots=True)
+class SkillDecisionOrigin:
+    """Exact accepted model decision which started this run, if one exists."""
+
+    request: RequestBinding
+    attempt_id: str
+    source_decision_sha256: str
+    final_decision_sha256: str
+
+
 @dataclass(frozen=True)
 class _CraftSemanticProbe:
     run_id: str
@@ -178,6 +199,7 @@ class _HeadroomRecovery:
     traversal_parameters: dict[str, str | int | float | bool]
     deadline_ns: int
     origin_skill_id: str = "traverse_visible_obstacle"
+    origin_run_id: str | None = None
     phase: str = "reorient"
     reoriented_frame_id: int | None = None
     reorientation_moved: bool = False
@@ -1650,8 +1672,9 @@ class AgentRuntime:
             # emitting movement. Cognition switches skills when it returns.
             rescue = self._explore_keep_alive()
             if rescue is not None:
-                self.executor.start(
+                self._start_skill(
                     rescue,
+                    source=SkillStartSource.KEEPALIVE,
                     run_id=uuid.uuid4().hex,
                     context_key=_EXPLORE_KEEPALIVE_CONTEXT,
                 )
@@ -1842,8 +1865,10 @@ class AgentRuntime:
                     )
                     return
                 gather_run_id = uuid.uuid4().hex
-                self.executor.start(
+                self._start_skill(
                     self.skills.get("gather_nearby_wood"),
+                    source=SkillStartSource.CONTINUATION,
+                    parent_run_id=result.run.run_id,
                     run_id=gather_run_id,
                     context_key=continuation.context_key,
                     parameters=continuation.parameters,
@@ -1901,8 +1926,10 @@ class AgentRuntime:
                 expires_after_ms=6_000,
             ),),
         )
-        return self.executor.start(
+        return self._start_skill(
             self.skills.get("collect_recent_drop"),
+            source=SkillStartSource.CONTINUATION,
+            parent_run_id=broken_run.run_id,
             run_id=uuid.uuid4().hex,
             context_key=broken_run.context_key,
             collection_hotbar_log_baseline=baseline,
@@ -1986,8 +2013,10 @@ class AgentRuntime:
                     retry_id = uuid.uuid4().hex
                     recovery.phase = "retry"
                     recovery.retry_run_id = retry_id
-                    self.executor.start(
+                    self._start_skill(
                         self.skills.get("traverse_visible_obstacle"),
+                        source=SkillStartSource.RECOVERY,
+                        parent_run_id=result.run.run_id,
                         run_id=retry_id,
                         context_key=recovery.context_key,
                         parameters=recovery.traversal_parameters,
@@ -2045,6 +2074,7 @@ class AgentRuntime:
                 ),
                 deadline_ns=_headroom_deadline_ns(active_vlm, now_ns=now_ns),
                 origin_skill_id=result.run.skill_id,
+                origin_run_id=result.run.run_id,
             )
         return True
 
@@ -2338,8 +2368,10 @@ class AgentRuntime:
                 return
             recovery.phase = "mining"
             recovery.mining_run_id = run_id
-            self.executor.start(
+            self._start_skill(
                 self.skills.get("mine_visible_block"),
+                source=SkillStartSource.RECOVERY,
+                parent_run_id=recovery.origin_run_id,
                 run_id=run_id,
                 context_key=recovery.context_key,
                 parameters={
@@ -2606,8 +2638,10 @@ class AgentRuntime:
             return
         self._gather_acquisition_continuation = None
         context_key = "scene-recovery"
+        parent_run_id = None
         if running is not None and running.outcome == SkillOutcome.RUNNING:
             context_key = running.context_key
+            parent_run_id = running.run_id
             cancelled = self.executor.cancel()
             try:
                 if cancelled.action is not None:
@@ -2615,8 +2649,10 @@ class AgentRuntime:
             finally:
                 self._record_terminal_run(cancelled.run)
             self._execution_revision += 1
-        recovery_run = self.executor.start(
+        recovery_run = self._start_skill(
             recovery,
+            source=SkillStartSource.RECOVERY,
+            parent_run_id=parent_run_id,
             run_id=uuid.uuid4().hex,
             context_key=context_key,
         )
@@ -2937,8 +2973,9 @@ class AgentRuntime:
                 if stop_event is not None:
                     stop_event.set()
                 return
-            safety_run = self.executor.start(
+            safety_run = self._start_skill(
                 safety,
+                source=SkillStartSource.RECOVERY,
                 run_id=uuid.uuid4().hex,
                 context_key="perception-safety-recovery",
             )
@@ -4062,6 +4099,7 @@ class AgentRuntime:
             self._last_decision = decision
             if idle_stall_run_id is None:
                 self._adopt_plan_if_revised(decision)
+        skill_origin = self._skill_decision_origin(record, decision)
         operator_acknowledged = False
         if self.state_db is not None and self._pending_operator_message_ids:
             if selected_message_id is not None and not decision.request_replan:
@@ -4147,8 +4185,10 @@ class AgentRuntime:
                         self._record_terminal_run(cancelled.run)
                     self._execution_revision += 1
                     spec = self.skills.get(decision.skill_id)
-                    self.executor.start(
+                    self._start_skill(
                         spec,
+                        source=SkillStartSource.COGNITION,
+                        origin=skill_origin,
                         run_id=uuid.uuid4().hex,
                         context_key=decision.chosen_goal_id or "default",
                         parameters=decision.skill_parameters,
@@ -4156,8 +4196,10 @@ class AgentRuntime:
                     )
             else:
                 spec = self.skills.get(decision.skill_id)
-                self.executor.start(
+                self._start_skill(
                     spec,
+                    source=SkillStartSource.COGNITION,
+                    origin=skill_origin,
                     run_id=uuid.uuid4().hex,
                     context_key=decision.chosen_goal_id or "default",
                     parameters=decision.skill_parameters,
@@ -4387,6 +4429,79 @@ class AgentRuntime:
             ),
         )
 
+    @staticmethod
+    def _skill_decision_origin(
+        record: tuple[ModelRequestLifecycle, object] | None,
+        decision: CognitionDecision,
+    ) -> SkillDecisionOrigin | None:
+        """Bind only this accepted decision, never a latest-admission lookup.
+
+        A deterministic fallback can pass runtime admission while its failed
+        model request is rejected. It deliberately has no model origin.
+        """
+        origin = decision.model_origin
+        if record is None or origin is None:
+            return None
+        snapshot = record[0].snapshot()
+        if (
+            snapshot.disposition != "accepted"
+            or snapshot.binding.request_id != origin.request_id
+            or snapshot.selected_attempt_id != origin.attempt_id
+            or snapshot.final_decision_sha256 != cognition_decision_sha256(decision)
+        ):
+            return None
+        assert snapshot.final_decision_sha256 is not None
+        return SkillDecisionOrigin(
+            request=snapshot.binding,
+            attempt_id=origin.attempt_id,
+            source_decision_sha256=origin.source_decision_sha256,
+            final_decision_sha256=snapshot.final_decision_sha256,
+        )
+
+    def on_skill_run_started(
+        self, *, run: SkillRun, source: SkillStartSource,
+        origin: SkillDecisionOrigin | None, parent_run_id: str | None,
+    ) -> None:
+        """Observe an actual new run; default implementation does nothing.
+
+        Called synchronously on the runtime thread, after executor.start returns.
+        Overrides must be short, nonblocking metadata operations: no input,
+        inference or IO. The run is detached from executor-owned parameters.
+        Non-model/recovery/continuation runs have no model origin; a parent ID
+        is a factual relationship, not inherited model credit. Admission of a
+        same-action decision does not create a run or call this hook again.
+        """
+
+    def on_skill_run_terminal(
+        self, *, run: SkillRun, outcome_verification: OutcomeVerification | None,
+    ) -> None:
+        """Observe a terminal run and its matching, runtime-filtered evidence.
+
+        Same nonblocking contract as on_skill_run_started. Called before storage,
+        even without a database or a matching observed start. Deduplication uses
+        the existing 4096-ID window, not a durable exactly-once guarantee. Consumers
+        own run-ID joins and replay handling; never use the latest model decision.
+        Terminal recording can follow failed input delivery: this hook does not
+        prove supervisor-accepted actuation or authorize learning from it.
+        """
+
+    def _start_skill(
+        self, spec: SkillSpec, *, source: SkillStartSource,
+        origin: SkillDecisionOrigin | None = None, parent_run_id: str | None = None,
+        **kwargs: Any,
+    ) -> SkillRun:
+        run = self.executor.start(spec, **kwargs)
+        try:
+            self.on_skill_run_started(
+                run=run.model_copy(deep=True), source=source, origin=origin,
+                parent_run_id=parent_run_id,
+            )
+        except Exception as error:
+            logging.getLogger(__name__).error(
+                "Skill-start observer failed: %s", type(error).__name__,
+            )
+        return run
+
     def _record_terminal_run(
         self,
         run: SkillRun,
@@ -4394,7 +4509,7 @@ class AgentRuntime:
         outcome_verification: OutcomeVerification | None = None,
         advance_plan: bool = True,
     ) -> None:
-        """Record one terminal option exactly once across every exit path."""
+        """Record one terminal option, deduplicated within the recent ID window."""
 
         if run.outcome == SkillOutcome.RUNNING:
             raise ValueError("cannot record a running skill")
@@ -4413,6 +4528,18 @@ class AgentRuntime:
             self._recorded_run_ids.discard(self._recorded_run_order.popleft())
         self._recorded_run_order.append(run.run_id)
         self._recorded_run_ids.add(run.run_id)
+        matching_verification = outcome_verification
+        if matching_verification is not None and matching_verification.run_id != run.run_id:
+            matching_verification = None
+            logging.getLogger(__name__).error("Skill-terminal evidence rejected: ValueError")
+        try:
+            self.on_skill_run_terminal(
+                run=run.model_copy(deep=True), outcome_verification=matching_verification,
+            )
+        except Exception as error:
+            logging.getLogger(__name__).error(
+                "Skill-terminal observer failed: %s", type(error).__name__,
+            )
         if not _expected_keepalive_expiry(run):
             self._recent_skill_runs.appendleft(run)
 
@@ -4699,8 +4826,10 @@ class AgentRuntime:
         *,
         plan_neutral: bool = False,
     ) -> SkillRun:
-        run = self.executor.start(
+        run = self._start_skill(
             recovery,
+            source=SkillStartSource.RECOVERY,
+            parent_run_id=parent.run_id,
             run_id=uuid.uuid4().hex,
             context_key=parent.context_key,
             parameters=_compatible_recovery_parameters(parent, recovery),
@@ -4966,8 +5095,9 @@ class AgentRuntime:
             skill_id = _standing_goal_skill(chosen.goal, self.blackboard)
         if skill_id is None or skill_id not in self.skills.specs:
             skill_id = "explore_forward"
-        self.executor.start(
+        self._start_skill(
             self.skills.get(skill_id),
+            source=SkillStartSource.BOOTSTRAP,
             run_id=uuid.uuid4().hex,
             context_key=f"role:{self.role.role_id}",
         )

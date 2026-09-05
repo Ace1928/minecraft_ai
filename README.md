@@ -177,6 +177,32 @@ Import, native constructors and arbitrary close callbacks are cooperatively
 cancelled, not forcibly preempted. This is a trusted extension boundary, not a
 sandbox or a claim of live model activation.
 
+### Skill lifecycle observations
+
+Runtime subclasses can implement `on_skill_run_started` and
+`on_skill_run_terminal` to connect their own experience handling. Both are
+no-op by default and run synchronously on the runtime thread: overrides must
+only handle or queue metadata, without blocking, IO, inference or game inputs.
+Callback exceptions are logged by type and do not interrupt normal execution.
+
+The start hook receives a detached `SkillRun`, `SkillStartSource`, optional
+`SkillDecisionOrigin` and optional `parent_run_id`, only after a new run actually
+exists. A direct accepted model decision carries its exact `RequestBinding`,
+selected attempt, source decision hash and final admitted decision hash.
+Deterministic fallbacks (including after failed model work), legacy unbound
+decisions and recovery/continuation runs have no model origin. Parent IDs do not
+inherit model credit. A later same-action admission does not relabel a running
+skill or emit another start.
+
+The terminal hook receives a detached terminal run and only matching,
+runtime-filtered `OutcomeVerification`, or `None`. It also reports unmatched
+runs, cancellation and timeout; it does not require a database. Duplicate
+suppression uses the existing 4096-run-ID window, not durable exactly-once
+delivery. Consumers own run-ID joins, replay handling and any learning policy;
+never associate a delayed outcome using the latest admission. A terminal record
+does not prove that the supervisor accepted game input. These hooks neither
+activate online learning nor change action authority.
+
 ## License
 
 Apache License 2.0. Minecraft is a trademark and intellectual property of Microsoft/Mojang. This project is independent and is not affiliated with, endorsed by, or sponsored by Microsoft or Mojang.
