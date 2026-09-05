@@ -631,7 +631,11 @@ class BootstrapFastPerception:
             return ()
         now = time.monotonic_ns()
         inventory_overlay = bedrock_inventory_overlay_present(frame)
-        ui_overlay = inventory_overlay or _bedrock_top_ui_chrome_present(frame)
+        ui_overlay = (
+            inventory_overlay
+            or bedrock_away_overlay_present(frame)
+            or _bedrock_top_ui_chrome_present(frame)
+        )
         bootstrap_source = (
             CROSSHAIR_BLOCK_FAST_SOURCE
             if self.model_id == "bootstrap-rgb-v1"
@@ -973,7 +977,11 @@ def bedrock_ui_chrome_present(frame: CapturedFrame) -> bool:
     This intentionally has no positive world classification and is never an
     eligible training label. It only blocks input during an obvious overlay.
     """
-    return _bedrock_top_ui_chrome_present(frame) or bedrock_inventory_overlay_present(frame)
+    return (
+        _bedrock_top_ui_chrome_present(frame)
+        or bedrock_inventory_overlay_present(frame)
+        or bedrock_away_overlay_present(frame)
+    )
 
 
 def _bedrock_top_ui_chrome_present(frame: CapturedFrame) -> bool:
@@ -1800,7 +1808,9 @@ def bedrock_survival_hud_present(frame: CapturedFrame) -> bool:
     training label. Requiring both the red heart bank and neutral hotbar frame
     prevents calibration motion from being emitted over menus or loading UI.
     """
-    return _bedrock_hud_present(frame, require_hearts=True)
+    return not bedrock_away_overlay_present(frame) and _bedrock_hud_present(
+        frame, require_hearts=True,
+    )
 
 
 def bedrock_creative_hud_present(frame: CapturedFrame) -> bool:
@@ -1811,6 +1821,8 @@ def bedrock_creative_hud_present(frame: CapturedFrame) -> bool:
     is sufficient to arm in-world creative play.
     """
     if not frame.bgra or frame.width < 320 or frame.height < 180:
+        return False
+    if bedrock_away_overlay_present(frame):
         return False
     pixels = _numpy_bgra(frame)
     hotbar_ratio = _hud_palette_ratio(
@@ -1832,6 +1844,46 @@ def bedrock_in_world_hud_present(frame: CapturedFrame) -> bool:
     Survival shows the heart bank; creative omits it. Either is playable.
     """
     return bedrock_survival_hud_present(frame) or bedrock_creative_hud_present(frame)
+
+
+def bedrock_away_overlay_present(frame: CapturedFrame) -> bool:
+    """Block the calibrated lower-center away panel, even with a visible HUD.
+
+    Require its quiet gray inset, lighter bottom rim, and three separate
+    light-on-gray text rows together. A hotbar, gray world, or one text row
+    alone is insufficient. These bounded pixel checks are negative-only:
+    they do not read the notice, identify a clickable point, or authorize a
+    wake action. Exact text recognition remains owned by the menu navigator.
+    Unknown UI scales/layouts are not certified by this detector.
+    """
+    if (
+        frame.width < 320 or frame.height < 180
+        or len(frame.bgra) != frame.width * frame.height * 4
+    ):
+        return False
+    pixels = _numpy_bgra(frame)
+
+    def neutral(bounds: tuple[float, float, float, float], low: int, high: int) -> float:
+        left, top, right, bottom = bounds
+        return _sampled_neutral_ratio(
+            frame, x_start=left, x_end=right, y_start=top, y_end=bottom,
+            luma_min=low, luma_max=high, pixels=pixels,
+        )
+
+    if neutral((0.42, 0.700, 0.69, 0.712), 75, 110) < 0.95:
+        return False
+    if neutral((0.694, 0.712, 0.703, 0.827), 75, 110) < 0.95:
+        return False
+    if neutral((0.42, 0.844, 0.69, 0.850), 125, 155) < 0.80:
+        return False
+    for bounds in (
+        (0.43, 0.716, 0.68, 0.744),
+        (0.43, 0.755, 0.69, 0.783),
+        (0.43, 0.791, 0.56, 0.820),
+    ):
+        if neutral(bounds, 75, 110) < 0.50 or not 0.08 <= neutral(bounds, 210, 255) <= 0.40:
+            return False
+    return True
 
 
 def _bedrock_hud_present(frame: CapturedFrame, *, require_hearts: bool) -> bool:

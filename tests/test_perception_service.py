@@ -32,10 +32,13 @@ from minecraft_ai.perception_service import (
     SemanticJob,
     SemanticObservation,
     bedrock_air_bubbles,
+    bedrock_away_overlay_present,
+    bedrock_creative_hud_present,
     bedrock_death_screen_present,
     bedrock_hotbar_log_count,
     bedrock_inventory_overlay_present,
     bedrock_inventory_slot_observation,
+    bedrock_in_world_hud_present,
     bedrock_survival_hud_present,
     bedrock_ui_chrome_present,
     crosshair_block_dhash,
@@ -663,6 +666,80 @@ def test_complete_survival_hud_is_required_for_camera_calibration() -> None:
     assert not bedrock_survival_hud_present(
         _frame(bytes((20, 20, 20, 255)) * width * height, width=width, height=height)
     )
+
+
+def _away_notice_image(*, hearts: int = 120, missing: str = "") -> Image.Image:
+    """Synthetic UI geometry only; no retained gameplay or text/image assets."""
+    width, height = 640, 360
+    image = Image.new("RGB", (width, height), (28, 50, 38))
+    draw = ImageDraw.Draw(image)
+
+    def box(bounds: tuple[float, float, float, float], color: tuple[int, int, int]) -> None:
+        left, top, right, bottom = bounds
+        draw.rectangle((int(left * width), int(top * height),
+                        int(right * width) - 1, int(bottom * height) - 1), fill=color)
+
+    box((0.28, 0.92, 0.72, 1.0), (140, 140, 140))
+    box((0.30, 0.87, 0.47, 0.90), (hearts, 20, 20))
+    if missing == "panel":
+        return image
+    box((0.288, 0.684, 0.712, 0.854), (139, 139, 139))
+    box((0.294, 0.692, 0.707, 0.843), (93, 93, 93))
+    for index, (left, top, right, bottom) in enumerate((
+        (0.43, 0.716, 0.68, 0.744),
+        (0.43, 0.755, 0.69, 0.783),
+        (0.43, 0.791, 0.56, 0.820),
+    )):
+        if missing == f"text-{index}":
+            continue
+        for x in range(int(left * width) + 1, int(right * width) - 3, 8):
+            draw.rectangle((x, int(top * height) + 1, x + 2,
+                            int(bottom * height) - 3), fill=(255, 255, 255))
+    if missing == "rim":
+        box((0.42, 0.843, 0.69, 0.854), (93, 93, 93))
+    if missing == "inset":
+        box((0.42, 0.700, 0.69, 0.712), (28, 50, 38))
+    return image
+
+
+@pytest.mark.parametrize("hearts", [120, 230])
+@pytest.mark.parametrize("without_numpy", [False, True])
+def test_away_notice_blocks_playable_hud_without_authorizing_wake(
+    hearts: int, without_numpy: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if without_numpy:
+        monkeypatch.setattr(perception_service, "_numpy_bgra", lambda _frame: None)
+    image = _away_notice_image(hearts=hearts)
+    frame = _frame(image.convert("RGBA").tobytes("raw", "BGRA"),
+                   width=image.width, height=image.height)
+
+    assert bedrock_away_overlay_present(frame)
+    assert bedrock_ui_chrome_present(frame)
+    assert not bedrock_survival_hud_present(frame)
+    assert not bedrock_creative_hud_present(frame)
+    assert not bedrock_in_world_hud_present(frame)
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["scene.playable"].value is False
+    assert facts["scene.ui_overlay"].value is True
+    assert facts["scene.ui_overlay"].source.endswith(":not-training-label")
+    assert "scene.mode" not in facts
+    assert "scene.inventory_overlay" not in facts
+
+
+@pytest.mark.parametrize("missing", ["rim", "inset", "text-0", "text-1", "text-2", "panel"])
+def test_away_notice_requires_separate_panel_and_text_cues(missing: str) -> None:
+    image = _away_notice_image(missing=missing)
+    frame = _frame(image.convert("RGBA").tobytes("raw", "BGRA"),
+                   width=image.width, height=image.height)
+    assert not bedrock_away_overlay_present(frame)
+    if missing == "panel":
+        assert bedrock_in_world_hud_present(frame)
+
+
+@pytest.mark.parametrize("shade", [20, 93, 139, 230])
+def test_uniform_world_is_not_an_away_notice(shade: int) -> None:
+    frame = _frame(bytes((shade, shade, shade, 255)) * 640 * 360, width=640, height=360)
+    assert not bedrock_away_overlay_present(frame)
 
 
 @pytest.mark.parametrize("count", range(1, 17))
