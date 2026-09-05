@@ -184,6 +184,187 @@ def test_wrong_lease_id_releases_existing_input() -> None:
     assert backend.held_keys == set()
 
 
+@pytest.mark.parametrize("clear_fails", [False, True])
+def test_revoke_clears_backend_even_when_release_fails(
+    monkeypatch: pytest.MonkeyPatch, clear_fails: bool,
+) -> None:
+    backend = FakeInputBackend()
+    gate = MotorGate(backend)
+    gate.issue(session_id="test", target_instance="minecraft")
+    release_error = RuntimeError("synthetic release failure")
+    callbacks = []
+
+    def release() -> None:
+        assert gate.lease is None
+        callbacks.append("release")
+        raise release_error
+
+    def clear() -> None:
+        assert gate.lease is None
+        callbacks.append("clear")
+        backend.lease_id = None
+        if clear_fails:
+            raise OSError("synthetic clear failure")
+
+    monkeypatch.setattr(backend, "release_all", release)
+    monkeypatch.setattr(backend, "clear_lease", clear)
+    with pytest.raises(RuntimeError) as caught:
+        gate.revoke("test-stop")
+    assert caught.value is release_error
+    assert callbacks == ["release", "clear"]
+    assert gate.lease is None and backend.lease_id is None
+    assert gate.revocation_reason == "test-stop"
+    if clear_fails:
+        assert release_error.__notes__ == ["motor lease clearing also failed: OSError"]
+
+
+@pytest.mark.parametrize("operation", ["issue", "renew", "refresh", "apply"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_backend_failure_preserves_original_error_and_clears_capability(
+    monkeypatch: pytest.MonkeyPatch, operation: str, cleanup_fails: bool,
+) -> None:
+    backend = FakeInputBackend()
+    gate = MotorGate(backend)
+    lease = gate.issue(session_id="test", target_instance="minecraft")
+    gate.apply(lease.lease_id, MotorAction(sequence=0, keys_down=("w",)))
+    original_error = RuntimeError("synthetic backend failure")
+    failure_started = False
+    cleanup = []
+    original_release = backend.release_all
+    original_clear = backend.clear_lease
+    original_apply = backend.apply
+    original_bind = backend.bind_lease
+
+    def bind(value) -> None:
+        nonlocal failure_started
+        if operation in {"issue", "renew"}:
+            assert gate.lease is None
+        original_bind(value)
+        failure_started = True
+        raise original_error
+
+    def apply(action) -> None:
+        nonlocal failure_started
+        original_apply(action)
+        failure_started = True
+        raise original_error
+
+    def release() -> None:
+        assert gate.lease is None
+        original_release()
+        if failure_started:
+            cleanup.append("release")
+            if cleanup_fails:
+                raise OSError("synthetic cleanup release failure")
+
+    def clear() -> None:
+        assert gate.lease is None
+        original_clear()
+        if failure_started:
+            cleanup.append("clear")
+            if cleanup_fails:
+                raise ValueError("synthetic cleanup clear failure")
+
+    monkeypatch.setattr(backend, "bind_lease", bind)
+    monkeypatch.setattr(backend, "release_all", release)
+    monkeypatch.setattr(backend, "clear_lease", clear)
+    with pytest.raises(RuntimeError) as caught:
+        if operation == "issue":
+            gate.issue(session_id="test", target_instance="minecraft")
+        elif operation == "renew":
+            gate.renew(lease.lease_id)
+        else:
+            if operation == "apply":
+                monkeypatch.setattr(backend, "apply", apply)
+            gate.apply(
+                lease.lease_id, MotorAction(sequence=1, keys_down=("a",)),
+                accepted_action_ttl_ms=750,
+            )
+    assert caught.value is original_error
+    assert gate.lease is None and backend.lease_id is None
+    assert not backend.held_keys
+    assert cleanup == ["release", "clear"]
+    assert gate.revocation_reason == {
+        "issue": "lease-issue-failed", "renew": "lease-renewal-failed",
+        "refresh": "accepted-action-refresh-failed", "apply": "backend-apply-failed",
+    }[operation]
+    if cleanup_fails:
+        assert original_error.__notes__ == ["motor cleanup also failed: OSError"]
+
+
+def test_invalid_lease_clears_gate_before_failing_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeInputBackend()
+    gate = MotorGate(backend)
+    gate.issue(session_id="test", target_instance="minecraft")
+
+    def release() -> None:
+        assert gate.lease is None
+        raise OSError("synthetic release failure")
+
+    monkeypatch.setattr(backend, "release_all", release)
+    with pytest.raises(MotorRejected, match="invalid or missing motor lease"):
+        gate.renew("wrong-lease")
+    assert gate.lease is None and backend.lease_id is None
+    assert gate.revocation_reason == "invalid-or-missing-lease"
+
+
+@pytest.mark.parametrize("operation", ["issue-ttl", "issue-duration", "renew"])
+def test_invalid_lease_parameters_do_not_release_existing_input(operation: str) -> None:
+    backend = FakeInputBackend()
+    gate = MotorGate(backend)
+    lease = gate.issue(session_id="test", target_instance="minecraft")
+    gate.apply(lease.lease_id, MotorAction(sequence=0, keys_down=("w",)))
+    releases = backend.release_count
+    with pytest.raises(MotorRejected):
+        if operation == "renew":
+            gate.renew(lease.lease_id, ttl_ms=5001)
+        else:
+            gate.issue(
+                session_id="test", target_instance="minecraft",
+                ttl_ms=5001 if operation == "issue-ttl" else 750,
+                max_action_duration_ms=1001 if operation == "issue-duration" else 250,
+            )
+    assert gate.lease == lease and backend.lease_id == lease.lease_id
+    assert backend.held_keys == {"w"} and backend.release_count == releases
+
+
+def test_successful_renew_keeps_held_input_and_sequence() -> None:
+    backend = FakeInputBackend()
+    gate = MotorGate(backend)
+    lease = gate.issue(session_id="test", target_instance="minecraft")
+    gate.apply(lease.lease_id, MotorAction(sequence=4, keys_down=("w",)))
+    releases = backend.release_count
+    renewed = gate.renew(lease.lease_id)
+    assert renewed.lease_id == lease.lease_id and gate.revocation_reason == "active"
+    assert backend.held_keys == {"w"} and backend.release_count == releases
+    with pytest.raises(MotorRejected, match="monotonically"):
+        gate.apply(lease.lease_id, MotorAction(sequence=4))
+
+
+def test_input_release_failure_revokes_capability_and_preserves_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = FakeInputBackend()
+    gate = MotorGate(backend)
+    lease = gate.issue(session_id="test", target_instance="minecraft")
+    gate.apply(lease.lease_id, MotorAction(sequence=0, keys_down=("w",)))
+    error = OSError("synthetic release failure")
+
+    def release() -> None:
+        raise error
+
+    monkeypatch.setattr(backend, "release_all", release)
+    with pytest.raises(OSError) as caught:
+        gate.release_inputs(lease.lease_id)
+    assert caught.value is error
+    assert gate.lease is None and backend.lease_id is None
+    assert gate.revocation_reason == "input-release-failed"
+    # Revoked authority is not a claim that failed physical release succeeded.
+    assert backend.held_keys == {"w"}
+
+
 def test_action_model_rejects_unbounded_mouse_and_duration() -> None:
     with pytest.raises(ValueError):
         MotorAction(sequence=0, mouse_dx=5000)

@@ -236,8 +236,7 @@ class MotorGate:
         if max_action_duration_ms < 1 or max_action_duration_ms > 1000:
             raise MotorRejected("action duration outside safety bounds")
         with self._lock:
-            self.backend.release_all()
-            self.backend.clear_lease()
+            self._revoke_locked("lease-issue")
             lease = MotorLease(
                 lease_id=uuid.uuid4().hex,
                 session_id=session_id,
@@ -248,7 +247,11 @@ class MotorGate:
                 max_action_duration_ms=max_action_duration_ms,
                 first_sequence=first_sequence,
             )
-            self.backend.bind_lease(lease)
+            try:
+                self.backend.bind_lease(lease)
+            except Exception as exc:
+                self._revoke_after_failure_locked("lease-issue-failed", exc)
+                raise
             self._lease = lease
             self._last_sequence = first_sequence - 1
             self._revocation_reason = "active"
@@ -271,8 +274,17 @@ class MotorGate:
                 max_action_duration_ms=lease.max_action_duration_ms,
                 first_sequence=lease.first_sequence,
             )
-            self.backend.bind_lease(renewed)
+            # Do not publish the old capability while the backend is replacing
+            # its binding. Successful renewal must not release held inputs.
+            self._lease = None
+            self._revocation_reason = "lease-renewal"
+            try:
+                self.backend.bind_lease(renewed)
+            except Exception as exc:
+                self._revoke_after_failure_locked("lease-renewal-failed", exc)
+                raise
             self._lease = renewed
+            self._revocation_reason = "active"
             return renewed
 
     def apply(
@@ -307,11 +319,11 @@ class MotorGate:
                 raise MotorRejected("action kind not allowed by lease")
             try:
                 self.backend.apply(action)
-            except Exception:
+            except Exception as exc:
                 # A physical backend can fail after emitting only part of an
                 # action. Revoke synchronously so a pressed key/button is not
                 # left behind while the runtime attempts a separate fault IPC.
-                self._revoke_locked("backend-apply-failed")
+                self._revoke_after_failure_locked("backend-apply-failed", exc)
                 raise
             self._last_sequence = action.sequence
             if accepted_action_ttl_ms is not None:
@@ -329,8 +341,8 @@ class MotorGate:
                 )
                 try:
                     self.backend.bind_lease(refreshed)
-                except Exception:
-                    self._revoke_locked("accepted-action-refresh-failed")
+                except Exception as exc:
+                    self._revoke_after_failure_locked("accepted-action-refresh-failed", exc)
                     raise
                 self._lease = refreshed
 
@@ -341,7 +353,11 @@ class MotorGate:
             if lease.expired():
                 self._revoke_locked("lease-expired")
                 raise MotorRejected("motor lease expired")
-            self.backend.release_all()
+            try:
+                self.backend.release_all()
+            except Exception as exc:
+                self._revoke_after_failure_locked("input-release-failed", exc)
+                raise
 
     def check_expiry(self, now_ns: int | None = None) -> bool:
         with self._lock:
@@ -358,18 +374,38 @@ class MotorGate:
 
     def _require_lease(self, lease_id: str) -> MotorLease:
         if self._lease is None or self._lease.lease_id != lease_id:
-            self.backend.release_all()
-            self.backend.clear_lease()
-            self._lease = None
-            self._revocation_reason = "invalid-or-missing-lease"
-            raise MotorRejected("invalid or missing motor lease")
+            error = MotorRejected("invalid or missing motor lease")
+            self._revoke_after_failure_locked("invalid-or-missing-lease", error)
+            raise error
         return self._lease
+
+    def _revoke_after_failure_locked(self, reason: str, error: Exception) -> None:
+        """Retain the original failure if emergency cleanup also fails."""
+        try:
+            self._revoke_locked(reason)
+        except Exception as cleanup_error:
+            error.add_note(f"motor cleanup also failed: {type(cleanup_error).__name__}")
 
     def _revoke_locked(self, reason: str) -> None:
         self._lease = None
         self._revocation_reason = reason
-        self.backend.release_all()
-        self.backend.clear_lease()
+        release_error: BaseException | None = None
+        try:
+            self.backend.release_all()
+        except BaseException as exc:
+            release_error = exc
+            raise
+        finally:
+            # Capability clearing is independent of whether physical release
+            # succeeded. Neither a release nor a clear failure proves neutrality.
+            try:
+                self.backend.clear_lease()
+            except BaseException as clear_error:
+                if release_error is None:
+                    raise
+                release_error.add_note(
+                    f"motor lease clearing also failed: {type(clear_error).__name__}"
+                )
 
 
 def allowed_targets(current: SupervisorState) -> frozenset[SupervisorState]:
