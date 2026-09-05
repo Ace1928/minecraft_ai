@@ -17,10 +17,12 @@ Python environment, creates a disposable compositor and its own test window.
 It never loads a managed game session or starts Wine. It retains a JSON report,
 X input receipts and images, and cleans up only its owned processes.
 
-The qualified production module and command passed 16 checks: keyboard delivery
+The module and command passed 19 disposable-session checks: keyboard delivery
 and a held-key interval, release, stable focus, exact relative raw/core motion,
 button hold/release, pointer confinement, captured drawable updates, accelerated
-rendering, changing GPU animation, restricted access and process cleanup. A
+rendering, changing GPU animation, restricted access and process cleanup, plus
+live environment validation, exact Xwayland listener ownership and 30 read-only
+production admission calls. A
 separate interrupted run verified cleanup during a held-key phase. These are
 display/input boundary results, not proof of correct Bedrock camera processing.
 
@@ -28,7 +30,19 @@ Bare headless Weston failed keyboard focus qualification. The virtual seat is
 required; removing it is not an equivalent configuration. Its Xwayland wrappers
 still have names beginning `xwayland-`, so names alone are not an isolation test.
 The loaded module, executable command, process identity, source and binary
-provenance are verified before admitting autonomous input.
+provenance are verified before admitting autonomous input. Admission also binds
+the exact Xwayland child and process start time to every observed pathname and
+abstract Unix listener for the selected display. A substituted display, reused
+PID or listener owned by another server fails closed. Inherited parent-display
+handles and Weston/dynamic-loader overrides are stripped at launch and rejected
+when observed in the live compositor environment; this includes
+`WAYLAND_SERVER_SOCKET` and `WESTON_MODULE_MAP`.
+
+The 2026-09-06 disposable run measured 30 admission calls at median 2.55 ms,
+nearest-rank p95 3.72 ms and maximum 4.28 ms. These are single-call observations,
+not complete action-loop latency or a performance guarantee: an action can
+revalidate more than once. The retained qualifier source SHA-256 was
+`e278eb72bc138fc1ca45dee269a581ecd3b4e504973b0a9a2ef7338ce5d45e0d`.
 
 Normal desktop use cannot enter this input path through the host compositor.
 Programs with the same Linux credentials, privileged processes, and authorized

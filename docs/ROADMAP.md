@@ -6,7 +6,7 @@ The roadmap is ordered by dependency and release gates. Later phases must not by
 
 This is the immediate gameplay critical path, not a claim that whole phases below are complete.
 
-- [ ] Finish review and publish the headless Weston virtual-only seat implementation. Its disposable-session prototype passed keyboard holds/releases, relative raw/core mouse input, confinement and accelerated capture. Exact display-to-compositor ownership and inherited module-override admission checks remain review requirements before promotion; these prototype results do not qualify Wine or the preserved game.
+- [x] Implement and review the headless Weston virtual-only seat input path, including exact display-to-Xwayland-to-compositor ownership and inherited host-transport/module-override rejection. The disposable session passed 19 checks covering holds/releases, relative raw/core mouse input, confinement, accelerated capture and live admission. These source/display results do not qualify Wine or the preserved game; see [scope and evidence](INPUT_ISOLATION.md).
 - [ ] Deliberately migrate the preserved game to the headless session, then qualify Win32 clipping, camera response and actual gameplay movement. Display-level tests do not close this live gate.
 
 - [x] Guarded private-LAN operator viewing and commands; agent output uses the private game display. Excluding host-origin input from that display is a separate, still-open qualification below.

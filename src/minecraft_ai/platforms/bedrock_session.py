@@ -32,6 +32,11 @@ from .weston_seat import (
     build_headless_seat_module,
     require_loaded_headless_seat,
 )
+from .xwayland_identity import (
+    XwaylandIdentity,
+    capture_xwayland_identity,
+    require_owned_xwayland,
+)
 
 
 RUNTIME_DIR = Path(user_runtime_dir("minecraft-ai"))
@@ -40,6 +45,12 @@ BEDROCK_LIFECYCLE_LOCK = RUNTIME_DIR / "bedrock-session.lock"
 DEFAULT_BEDROCK_WIDTH = 1920
 DEFAULT_BEDROCK_HEIGHT = 1080
 HEADLESS_INPUT_ISOLATION = "headless-virtual-seat-v1"
+_HEADLESS_FORBIDDEN_ENVIRONMENT = frozenset({
+    "DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "WAYLAND_SERVER_SOCKET",
+    "XAUTHORITY", "BOL_DISPLAY",
+    "WESTON_MODULE_MAP", "WESTON_MODULE_DIR", "WESTON_XWAYLAND_PATH",
+    "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH",
+})
 _IS_LINUX = sys.platform.startswith("linux")
 
 
@@ -157,6 +168,9 @@ class BedrockSession:
     input_isolation_module: str | None = None
     input_isolation_module_sha256: str | None = None
     input_isolation_source_sha256: str | None = None
+    xwayland_pid: int | None = None
+    xwayland_proc_start_ticks: int | None = None
+    xwayland_command_sha256: str | None = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> BedrockSession:
@@ -209,6 +223,15 @@ class BedrockSession:
             input_isolation_source_sha256=(
                 None if raw.get("input_isolation_source_sha256") is None
                 else str(raw["input_isolation_source_sha256"])
+            ),
+            xwayland_pid=None if raw.get("xwayland_pid") is None else int(raw["xwayland_pid"]),
+            xwayland_proc_start_ticks=(
+                None if raw.get("xwayland_proc_start_ticks") is None
+                else int(raw["xwayland_proc_start_ticks"])
+            ),
+            xwayland_command_sha256=(
+                None if raw.get("xwayland_command_sha256") is None
+                else str(raw["xwayland_command_sha256"])
             ),
             compositor_fullscreen=bool(raw.get("compositor_fullscreen", False)),
             wayland_socket=None
@@ -470,6 +493,28 @@ def require_autonomous_input_isolation(session: BedrockSession) -> None:
     sessions remain inspectable/stoppable; they cannot acquire motor authority
     by adopting a new descriptor label.  This is a read-only readiness check.
     """
+    _require_headless_compositor_identity(session)
+    if (
+        session.xwayland_pid is None
+        or session.xwayland_proc_start_ticks is None
+        or not session.xwayland_command_sha256
+        or session.xserver_proc_start_ticks is None
+    ):
+        raise IsolationError("managed Xwayland display ownership identity is missing")
+    require_owned_xwayland(
+        session.xserver_pid,
+        session.display,
+        XwaylandIdentity(
+            session.xwayland_pid,
+            session.xwayland_proc_start_ticks,
+            session.xwayland_command_sha256,
+        ),
+        compositor_start_ticks=session.xserver_proc_start_ticks,
+    )
+
+
+def _require_headless_compositor_identity(session: BedrockSession) -> None:
+    """Check compositor provenance before fresh geometry starts lazy Xwayland."""
     if session.mode != "weston" or session.input_isolation != HEADLESS_INPUT_ISOLATION:
         raise IsolationError(
             "autonomous input requires a verified headless Weston session without a host "
@@ -507,6 +552,7 @@ def require_autonomous_input_isolation(session: BedrockSession) -> None:
         or command != expected
     ):
         raise IsolationError("live compositor command does not prove headless input isolation")
+    _require_headless_compositor_environment(session.xserver_pid)
     require_loaded_headless_seat(session.xserver_pid, HeadlessSeatArtifact(
         session.input_isolation_module,
         session.input_isolation_module_sha256,
@@ -775,8 +821,18 @@ def launch_weston_bedrock_session(
             compositor_log=str(compositor_log),
             launcher_log=str(launcher_log),
         )
-        require_autonomous_input_isolation(session)
+        _require_headless_compositor_identity(session)
         _prepare_new_isolated_bedrock_geometry(session)
+        xwayland = capture_xwayland_identity(
+            compositor.pid, display, compositor_start_ticks=xserver_start,
+        )
+        session = replace(
+            session,
+            xwayland_pid=xwayland.pid,
+            xwayland_proc_start_ticks=xwayland.proc_start_ticks,
+            xwayland_command_sha256=xwayland.command_sha256,
+        )
+        require_autonomous_input_isolation(session)
         session.persist()
         return session
     except Exception as exc:
@@ -823,11 +879,35 @@ def _weston_command(
 
 
 def _headless_compositor_environment() -> dict[str, str]:
-    """Remove inherited host display handles before creating the private server."""
+    """Remove host transports and ambient code-loading overrides for the private server."""
     env = dict(os.environ)
-    for name in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "XAUTHORITY", "BOL_DISPLAY"):
+    for name in _HEADLESS_FORBIDDEN_ENVIRONMENT:
         env.pop(name, None)
     return env
+
+
+def _require_headless_compositor_environment(pid: int) -> None:
+    """Check the actual compositor startup environment without exposing its values.
+
+    An exact command and the expected virtual-seat mapping are insufficient if
+    an inherited Weston module map or dynamic-loader override can substitute
+    another backend. Do not infer a running process's environment from ours.
+    """
+    try:
+        environment = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError as exc:
+        raise IsolationError("headless compositor startup environment is unverifiable") from exc
+    forbidden = {name.encode("ascii") for name in _HEADLESS_FORBIDDEN_ENVIRONMENT}
+    for entry in environment.split(b"\0"):
+        if not entry:
+            continue
+        name, separator, _value = entry.partition(b"=")
+        if not name or not separator:
+            raise IsolationError("headless compositor startup environment is malformed")
+        if name in forbidden:
+            raise IsolationError(
+                "headless compositor inherited a forbidden display or code-loading override"
+            )
 
 
 def _wait_for_weston_xwayland(

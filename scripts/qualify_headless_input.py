@@ -18,11 +18,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import pwd
 import re
 import shutil
 import signal
+import statistics
 import subprocess
 import tempfile
 import time
@@ -31,17 +33,23 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from minecraft_ai.agent_lifecycle import _command_sha256, _linux_process_identity
 from minecraft_ai.platforms.bedrock_session import (
+    HEADLESS_INPUT_ISOLATION,
+    BedrockSession,
     _headless_compositor_environment,
     _terminate_spawned_process_group,
     _wait_for_weston_xwayland,
     _weston_command,
+    require_autonomous_input_isolation,
 )
 from minecraft_ai.platforms.bedrock_x11 import require_isolated_display
 from minecraft_ai.platforms.weston_seat import (
+    HeadlessSeatArtifact,
     build_headless_seat_module,
     require_loaded_headless_seat,
 )
+from minecraft_ai.platforms.xwayland_identity import capture_xwayland_identity
 
 
 def _focus_id(connection: Any) -> int:
@@ -120,6 +128,80 @@ def _raw_motion_receipts(text: str) -> list[dict[str, Any]]:
             }
         )
     return receipts
+
+
+def _measure_readonly_admission(
+    compositor: subprocess.Popen[bytes],
+    private_display: str,
+    artifact: HeadlessSeatArtifact,
+    output: Path,
+    report: dict[str, Any],
+) -> None:
+    """Use an in-memory fixture for this compositor and this Python X client only."""
+    compositor_identity = _linux_process_identity(compositor.pid)
+    client_identity = _linux_process_identity(os.getpid())
+    if compositor_identity is None or client_identity is None:
+        raise RuntimeError("owned qualification process identity is unavailable")
+    compositor_ticks, compositor_command = compositor_identity
+    client_ticks, client_command = client_identity
+    xwayland = capture_xwayland_identity(
+        compositor.pid,
+        private_display,
+        compositor_start_ticks=compositor_ticks,
+    )
+    fixture = BedrockSession(
+        display=private_display,
+        host_display=os.environ.get("DISPLAY", ""),
+        xserver_pid=compositor.pid,
+        launcher_pid=os.getpid(),
+        width=800,
+        height=600,
+        created_ns=time.monotonic_ns(),
+        launcher_command=client_command,
+        xserver_proc_start_ticks=compositor_ticks,
+        xserver_command_sha256=_command_sha256(compositor_command),
+        launcher_proc_start_ticks=client_ticks,
+        launcher_command_sha256=_command_sha256(client_command),
+        mode="weston",
+        compositor_fullscreen=False,
+        wayland_socket="qualify",
+        compositor_log=str(output / "weston.log"),
+        input_isolation=HEADLESS_INPUT_ISOLATION,
+        input_isolation_module=artifact.module_path,
+        input_isolation_module_sha256=artifact.module_sha256,
+        input_isolation_source_sha256=artifact.source_sha256,
+        xwayland_pid=xwayland.pid,
+        xwayland_proc_start_ticks=xwayland.proc_start_ticks,
+        xwayland_command_sha256=xwayland.command_sha256,
+    )
+    report["admission_fixture"] = {
+        "scope": "in_memory_only_owned_compositor_and_qualifier_x_client",
+        "compositor_pid": compositor.pid,
+        "compositor_start_ticks": compositor_ticks,
+        "test_client_pid": os.getpid(),
+        "xwayland_identity": asdict(xwayland),
+        "managed_session_loaded_or_persisted": False,
+    }
+    samples: list[float] = []
+    report["admission_latency"] = {"samples_ms": samples, "requested_samples": 30}
+    for _ in range(30):
+        start_ns = time.perf_counter_ns()
+        require_autonomous_input_isolation(fixture)
+        samples.append((time.perf_counter_ns() - start_ns) / 1_000_000)
+    ordered = sorted(samples)
+    report["admission_latency"].update(
+        {
+            "sample_count": len(samples),
+            "median_ms": statistics.median(samples),
+            "p95_ms": ordered[math.ceil(0.95 * len(ordered)) - 1],
+            "p95_method": "nearest_rank",
+            "minimum_ms": min(samples),
+            "maximum_ms": max(samples),
+        }
+    )
+    report["checks"]["live_headless_environment"] = True
+    report["checks"]["exact_xwayland_child_and_listener_ownership"] = True
+    report["checks"]["thirty_readonly_production_admissions"] = True
 
 
 def _qualify(args: argparse.Namespace, output: Path, report: dict[str, Any]) -> None:
@@ -215,6 +297,8 @@ def _qualify(args: argparse.Namespace, output: Path, report: dict[str, Any]) -> 
                     ]
 
             connection = display.Display(private_display)
+            # Connecting starts lazy Xwayland; admission precedes all test input.
+            _measure_readonly_admission(compositor, private_display, artifact, output, report)
             root = connection.screen().root
             window = root.create_window(
                 0,

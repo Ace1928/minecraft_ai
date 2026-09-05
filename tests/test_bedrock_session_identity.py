@@ -235,6 +235,11 @@ def test_fresh_preparation_precedes_persist_and_failure_cleans_owned_processes(
         str(tmp_path / "seat.so"), "module-digest", "source-digest",
     ))
     monkeypatch.setattr(sessions, "require_autonomous_input_isolation", lambda _session: None)
+    monkeypatch.setattr(sessions, "_require_headless_compositor_identity", lambda _session: None)
+    monkeypatch.setattr(
+        sessions, "capture_xwayland_identity",
+        lambda *_args, **_kwargs: sessions.XwaylandIdentity(302, 2, "xwayland-digest"),
+    )
     monkeypatch.setattr(sessions, "choose_free_display", lambda: ":71")
     monkeypatch.setattr(sessions, "_x_socket", lambda _display: tmp_path)
     monkeypatch.setattr(sessions, "require_isolated_display", lambda *_args: None)

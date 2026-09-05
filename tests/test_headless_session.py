@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import minecraft_ai.platforms.bedrock_session as sessions
 from minecraft_ai.cli import _require_autonomous_isolated_session
 from minecraft_ai.platforms.bedrock_x11 import IsolationError
 from minecraft_ai.platforms.weston_seat import HeadlessSeatArtifact
+from minecraft_ai.platforms.xwayland_identity import XwaylandIdentity
 
 
 def _verified_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sessions.BedrockSession:
@@ -27,6 +29,17 @@ def _verified_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sessio
     monkeypatch.setattr(sessions, "_pid_alive", lambda _pid: True)
     monkeypatch.setattr(sessions, "_linux_process_identity", lambda _pid: (99, command))
     monkeypatch.setattr(sessions, "require_loaded_headless_seat", lambda *_args: None)
+    monkeypatch.setattr(sessions, "require_owned_xwayland", lambda *_args, **_kwargs: None)
+    read_bytes = Path.read_bytes
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda path: (
+            b"XDG_RUNTIME_DIR=/run/user/1000\0"
+            if path == Path("/proc/300/environ")
+            else read_bytes(path)
+        ),
+    )
     return sessions.BedrockSession(
         display=":71",
         host_display=":0",
@@ -45,6 +58,9 @@ def _verified_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sessio
         input_isolation_module=str(tmp_path / "seat.so"),
         input_isolation_module_sha256="module",
         input_isolation_source_sha256="source",
+        xwayland_pid=301,
+        xwayland_proc_start_ticks=100,
+        xwayland_command_sha256="xwayland",
     )
 
 
@@ -57,6 +73,35 @@ def test_verified_headless_identity_passes_cli_and_descriptor_round_trip(
     loaded = sessions.BedrockSession.load(tmp_path / "session.json")
     assert loaded == session
     _require_autonomous_isolated_session(loaded)
+
+
+@pytest.mark.parametrize("field", [
+    "xwayland_pid", "xwayland_proc_start_ticks", "xwayland_command_sha256",
+])
+def test_verified_compositor_cannot_admit_missing_display_ownership_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str,
+) -> None:
+    session = replace(_verified_session(tmp_path, monkeypatch), **{field: None})
+    with pytest.raises(IsolationError, match="Xwayland display ownership identity is missing"):
+        sessions.require_autonomous_input_isolation(session)
+
+
+def test_full_admission_delegates_exact_display_child_and_compositor_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _verified_session(tmp_path, monkeypatch)
+    calls: list[tuple[object, ...]] = []
+
+    def reject_other_listener(
+        compositor: int, display: str, child: XwaylandIdentity, *, compositor_start_ticks: int,
+    ) -> None:
+        calls.append((compositor, display, child, compositor_start_ticks))
+        raise IsolationError("abstract listener belongs to another X server")
+
+    monkeypatch.setattr(sessions, "require_owned_xwayland", reject_other_listener)
+    with pytest.raises(IsolationError, match="abstract listener belongs"):
+        sessions.require_autonomous_input_isolation(session)
+    assert calls == [(300, ":71", XwaylandIdentity(301, 100, "xwayland"), 99)]
 
 
 @pytest.mark.parametrize("mutation", ["legacy", "parent-backend", "extra-module", "reused-pid"])
@@ -99,6 +144,7 @@ def test_legacy_liveness_is_separate_from_authority_to_avoid_automatic_restart(
         sessions.require_autonomous_input_isolation(session)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="managed compositor launcher is Linux-only")
 def test_launch_without_host_display_drops_inherited_host_handles_and_verifies_before_publish(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -138,6 +184,16 @@ def test_launch_without_host_display_drops_inherited_host_handles_and_verifies_b
         sessions, "require_autonomous_input_isolation", lambda _session: order.append("verify")
     )
     monkeypatch.setattr(
+        sessions, "_require_headless_compositor_identity",
+        lambda _session: order.append("verify-compositor"),
+    )
+    monkeypatch.setattr(
+        sessions, "capture_xwayland_identity",
+        lambda *_args, **_kwargs: (
+            order.append("bind-xwayland") or XwaylandIdentity(303, 2, "xwayland-hash")
+        ),
+    )
+    monkeypatch.setattr(
         sessions, "_prepare_new_isolated_bedrock_geometry", lambda _session: order.append("prepare")
     )
     monkeypatch.setattr(
@@ -149,7 +205,10 @@ def test_launch_without_host_display_drops_inherited_host_handles_and_verifies_b
     assert session.host_display == ""
     assert session.input_isolation == sessions.HEADLESS_INPUT_ISOLATION
     assert not session.compositor_fullscreen
-    assert order == ["verify", "prepare", "persist"]
+    assert order == ["verify-compositor", "prepare", "bind-xwayland", "verify", "persist"]
+    assert session.xwayland_pid == 303
+    assert session.xwayland_proc_start_ticks == 2
+    assert session.xwayland_command_sha256 == "xwayland-hash"
     compositor_env = calls[0][1]["env"]
     launcher_env = calls[1][1]["env"]
     assert isinstance(compositor_env, dict) and isinstance(launcher_env, dict)
@@ -160,6 +219,7 @@ def test_launch_without_host_display_drops_inherited_host_handles_and_verifies_b
     assert "WAYLAND_SOCKET" not in launcher_env
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="managed compositor launcher is Linux-only")
 def test_missing_weston_never_falls_back_to_host_fed_xephyr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -249,3 +309,59 @@ def test_proven_absent_resources_allow_fresh_launch_without_probing_host_socket(
     else:
         monkeypatch.setattr(sessions, "_x_socket", lambda _display: tmp_path / "absent-X71")
     assert sessions.bedrock_session_resources_absent(session)
+
+
+@pytest.mark.parametrize("name", sorted(sessions._HEADLESS_FORBIDDEN_ENVIRONMENT))
+def test_compositor_launch_removes_host_transport_and_code_loading_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    monkeypatch.setenv(name, "sentinel-secret-value")
+    monkeypatch.setenv("MINECRAFT_AI_PRESERVED_SETTING", "preserved")
+    environment = sessions._headless_compositor_environment()
+    assert name not in environment
+    assert environment["MINECRAFT_AI_PRESERVED_SETTING"] == "preserved"
+
+
+@pytest.mark.parametrize("name", sorted(sessions._HEADLESS_FORBIDDEN_ENVIRONMENT))
+@pytest.mark.parametrize("value", ["", "sentinel-secret-value"])
+def test_live_compositor_environment_overrides_reject_even_matching_command_and_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    session = _verified_session(tmp_path, monkeypatch)
+    read_bytes = Path.read_bytes
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda path: (
+            f"XDG_RUNTIME_DIR=/run/user/1000\0{name}={value}\0".encode()
+            if path == Path("/proc/300/environ")
+            else read_bytes(path)
+        ),
+    )
+    with pytest.raises(IsolationError, match="forbidden display or code-loading") as caught:
+        sessions.require_autonomous_input_isolation(session)
+    assert "sentinel-secret-value" not in str(caught.value)
+
+
+@pytest.mark.parametrize("environment", [b"broken-secret-entry\0", b"=secret-value\0"])
+def test_malformed_compositor_environment_fails_closed_without_disclosing_values(
+    monkeypatch: pytest.MonkeyPatch,
+    environment: bytes,
+) -> None:
+    monkeypatch.setattr(Path, "read_bytes", lambda _path: environment)
+    with pytest.raises(IsolationError, match="environment is malformed") as caught:
+        sessions._require_headless_compositor_environment(300)
+    assert "secret" not in str(caught.value)
+
+
+def test_inaccessible_compositor_environment_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def denied(_path: Path) -> bytes:
+        raise PermissionError("cannot read process")
+
+    monkeypatch.setattr(Path, "read_bytes", denied)
+    with pytest.raises(IsolationError, match="environment is unverifiable"):
+        sessions._require_headless_compositor_environment(300)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -12,6 +13,11 @@ import pytest
 
 import minecraft_ai.platforms.weston_seat as seat
 from minecraft_ai.platforms.bedrock_x11 import IsolationError
+
+
+_posix_native_build = pytest.mark.skipif(
+    os.name != "posix", reason="native artifact publication requires POSIX flock and permissions"
+)
 
 
 def _artifact(tmp_path: Path) -> seat.HeadlessSeatArtifact:
@@ -37,6 +43,7 @@ def test_module_provenance_rejects_binary_source_and_version_drift(tmp_path: Pat
             seat.require_headless_seat_artifact(changed)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux procfs device/inode mapping contract")
 @pytest.mark.parametrize("mapping", ["valid", "inode-changed", "not-executable", "deleted"])
 def test_loaded_module_requires_executable_mapping_of_exact_inode(
     tmp_path: Path,
@@ -58,7 +65,7 @@ def test_loaded_module_requires_executable_mapping_of_exact_inode(
         Path,
         "read_text",
         lambda path, *args, **kwargs: (
-            maps if str(path) == "/proc/123/maps" else original(path, *args, **kwargs)
+            maps if path == Path("/proc/123/maps") else original(path, *args, **kwargs)
         ),
     )
     if mapping == "valid":
@@ -68,6 +75,7 @@ def test_loaded_module_requires_executable_mapping_of_exact_inode(
             seat.require_loaded_headless_seat(123, artifact)
 
 
+@_posix_native_build
 def test_build_uses_explicit_headers_and_reuses_existing_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -96,6 +104,7 @@ def test_build_uses_explicit_headers_and_reuses_existing_artifact(
     }
 
 
+@_posix_native_build
 def test_bad_installed_abi_is_rejected_before_compile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -107,6 +116,7 @@ def test_bad_installed_abi_is_rejected_before_compile(
         seat.build_headless_seat_module(root=tmp_path)
 
 
+@_posix_native_build
 def test_compiler_failure_does_not_publish_module_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -124,6 +134,7 @@ def test_compiler_failure_does_not_publish_module_manifest(
     assert not list(tmp_path.rglob("manifest.json"))
 
 
+@_posix_native_build
 def test_concurrent_builders_share_one_binary_without_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -156,6 +167,7 @@ def test_concurrent_builders_share_one_binary_without_replacement(
     assert Path(artifact.module_path).stat().st_ino == inode
 
 
+@_posix_native_build
 def test_incomplete_or_tampered_artifact_is_never_recompiled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
