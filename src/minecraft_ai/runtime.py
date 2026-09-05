@@ -3465,9 +3465,21 @@ class AgentRuntime:
                 statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED},
                 limit=20,
             )
-            if messages or _active_operator_messages(self.state_db.load_operator_messages(
+            if messages:
+                return None
+            acknowledged = self.state_db.load_operator_messages(
                 statuses={OperatorMessageStatus.ACKNOWLEDGED}, limit=20,
-            )):
+            )
+            if _active_operator_messages(acknowledged) or (
+                len(acknowledged) == 20 and not any(
+                    message.kind in {
+                        OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION,
+                    }
+                    for message in acknowledged
+                )
+            ):
+                # A full page of replies must not hide an older durable wait
+                # instruction. Unknown authority is not autonomous permission.
                 return None
         goal = self._plan_goal_id
         if (

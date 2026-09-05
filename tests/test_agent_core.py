@@ -3530,6 +3530,42 @@ def test_idle_stall_probe_never_overrides_operator_instruction(
         assert runtime._idle_stall_probe_run_id(decision) is None
 
 
+@pytest.mark.parametrize("correction_tombstone", (False, True))
+def test_idle_stall_probe_full_ack_page_cannot_hide_operator_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, correction_tombstone: bool,
+) -> None:
+    with StateDatabase(tmp_path / "idle-stall-history.sqlite3") as database:
+        runtime, _, decision = _runtime_with_idle_stalls(
+            monkeypatch, [10_000_000_000], database=database,
+        )
+        database.save_operator_message(OperatorMessage(
+            message_id="older-wait", created_ns=1, text="Stay here until I return.",
+            kind=OperatorMessageKind.INSTRUCTION,
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ))
+        for index in range(20):
+            database.save_operator_message(OperatorMessage(
+                message_id=f"newer-question-{index}", created_ns=index + 2,
+                text="What are you doing?", kind=OperatorMessageKind.QUESTION,
+                status=OperatorMessageStatus.ACKNOWLEDGED,
+            ))
+        if correction_tombstone:
+            database.save_operator_message(OperatorMessage(
+                message_id="newest-completed-correction", created_ns=22,
+                text="Stop following that old instruction.",
+                kind=OperatorMessageKind.CORRECTION,
+                status=OperatorMessageStatus.ACKNOWLEDGED,
+            ))
+        page = database.load_operator_messages(
+            statuses={OperatorMessageStatus.ACKNOWLEDGED}, limit=20,
+        )
+        assert len(page) == 20
+        assert all(message.message_id != "older-wait" for message in page)
+        assert runtime._idle_stall_probe_run_id(decision) == (
+            "stall-1" if correction_tombstone else None
+        )
+
+
 def test_perception_only_replan_combines_questions_and_waits_for_one_fresh_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
