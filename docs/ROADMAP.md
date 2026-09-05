@@ -6,7 +6,7 @@ The roadmap is ordered by dependency and release gates. Later phases must not by
 
 This is the immediate gameplay critical path, not a claim that whole phases below are complete.
 
-- [x] Guarded private-LAN operator viewing and commands; game input remains isolated.
+- [x] Guarded private-LAN operator viewing and commands; agent output uses the private game display. Excluding host-origin input from that display is a separate, still-open qualification below.
 - [x] Repair local hostname advertisement collisions without restarting the game; verify the dashboard, live frame, message history, and readiness over the physical LAN interface. Access from a second physical device remains unverified.
 - [x] Deterministic inventory open/close: live transitions verified without restarting Minecraft.
 - [x] Recognize the lower-center AFK notice with narrowly cropped OCR and implement one screenshot-bound menu click followed by fresh normal-HUD verification. The complete new autonomous branch passed its next natural occurrence: after 12 missing-HUD checks, one AWAY-to-IN_WORLD click restored navigation and agent readiness without a game/GPU restart. Failed wake-key attempts were retained, not shipped as fallback inputs.
@@ -44,6 +44,8 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Make capture/GUI geometry resolution read-only and reject changed, clipped or incomplete frame geometry. Confine measured window fitting to a new isolated launch before publishing its session, with existing-session/host paths excluded. Regression coverage and live capture pass; a fresh game launch has deliberately not been exercised on the running world.
 - [x] Reject render-only keyboard focus inside the game subtree and restore the verified private input parent, with interlock and focus readback. Live recovery then opened the pause menu with one Escape tap and returned to normal HUD with one screenshot-bound Resume Game click. This verifies that UI sequence, not sustained locomotion or universal key delivery.
 - [x] Classify exact pointer-route failures separately from generic motor errors and retain that classification through supervisor retirement. The persistent launcher now holds without navigation, calibration or game-restart escalation until an externally recovered healthy generation passes readiness. Regression tests cover 50 held polls/500 simulated seconds, unreadable status, unavailable startup dependencies and failed status publication. Existing launchers do not acquire changed shell functions in place; the current launcher remains explicitly held until a safe handoff.
+- [x] Run the registration-free, window-free Win32 ownership probe before further input experiments: 50 samples at 100 ms retain Minecraft foreground/active/focus/capture while the reported clip and actual cursor disagree. This diagnoses a confinement mismatch, not its precise implementation cause or a repaired controller.
+- [ ] Exclude host-origin pointer, keyboard, modifiers and activation changes from the private game session, then qualify simulated input and retained-image response while the host is used independently. A different display name or XTEST acceptance alone does not establish this boundary.
 - [ ] Complete the end-to-end input audit and retained-image qualification: camera response, held-key continuity after stale frames, geometry/capture consistency, authenticated malformed actions and supervisor cleanup faults. Do not promote accepted input into physical translation or flawless delivery.
 - [ ] Demonstrate a fresh accepted movement prediction after a retired worker response is drained by its owner, then verify actual translation rather than infer it from accepted keys.
 - [ ] Demonstrate autonomous soft-block clearance and escape from the observed dirt pocket.
@@ -116,6 +118,29 @@ change; it does not establish the game's receipt of any future raw packet.
 No clipping setter, hidden pointer warp, raw-input packet forgery, GPU reset
 or game restart was used. The input qualification and live playback gates
 remain open; the public preview is withheld while the agent is not ready.
+
+The follow-up five-second, registration-free/window-free probe includes
+`GetGUIThreadInfo(game_tid)`, not calling-thread `GetCapture`. All 50 samples
+retained the discovered Minecraft window as foreground, active, focused and
+captured, with flags zero and clip `(565, 376, 565, 376)`. Both Win32 and X
+cursor queries instead returned `(0, 83)`. All 53 read-only X snapshots kept
+the same Wine-desktop focus, zero held-input mask, drawable geometry
+`(0, 26, 1920, 1054)` and pointer hit-chain through the game. Thus the logical
+clip is not physically enforced; the actual cursor APIs agree with each other.
+The unique visible window title identified the read-only query target;
+`QueryFullProcessImageNameA` returned success with an empty image name, so the
+earlier executable-identity checks failed closed before sampling. This is not
+an executable-identity authorization for an injector.
+
+Before/after images retained normal-world HUD. Feature tracking kept 198/200
+correspondences, median displacement 0.010 pixels and 95th percentile 0.115,
+but a 20.67-pixel outlier prevents claiming a strict stationary-scene input
+qualification. No input was injected and no raw registration or cursor/focus
+setter followed this probe. The user separately reports that ordinary host
+mouse usage changes the private game pointer/camera: the nested Wayland
+backend still forwards its parent seat. A separate X display therefore does
+not by itself prove host-to-game input exclusion. That correction is now an
+explicit open gate, independent of Wine clipping and motor-policy quality.
 
 At the next natural AFK episode the existing launcher performed one
 AWAY-to-IN_WORLD UI action and started the updated runtime, retaining the
