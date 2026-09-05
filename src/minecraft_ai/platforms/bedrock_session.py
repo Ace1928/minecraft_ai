@@ -21,6 +21,7 @@ from .bedrock_x11 import (
     HostMonitorBinding,
     IsolationError,
     ScreenRect,
+    _prepare_new_isolated_window_geometry,
     bind_host_monitor,
     find_minecraft_window,
     request_window_close,
@@ -409,6 +410,24 @@ def choose_free_display(*, start: int = 70, stop: int = 199) -> str:
     raise IsolationError("no free isolated X display number is available")
 
 
+def _prepare_new_isolated_bedrock_geometry(session: BedrockSession) -> None:
+    """Fresh-launch-only preflight, before a descriptor enables capture/attach."""
+    from ..emergency import emergency_stop_latched
+    from ..supervisor import operator_pause_latched
+
+    if session.mode not in {"weston", "xephyr"}:
+        raise IsolationError("geometry preparation requires a new isolated session")
+    _prepare_new_isolated_window_geometry(
+        session.display,
+        session.host_display,
+        preparation_permitted=lambda: (
+            bedrock_session_alive(session)
+            and not emergency_stop_latched()
+            and not operator_pause_latched()
+        ),
+    )
+
+
 def launch_xephyr_bedrock_session(
     *,
     width: int = DEFAULT_BEDROCK_WIDTH,
@@ -514,6 +533,7 @@ def launch_xephyr_bedrock_session(
             launcher_proc_start_ticks=launcher_start,
             launcher_command_sha256=launcher_digest,
         )
+        _prepare_new_isolated_bedrock_geometry(session)
         session.persist()
         return session
     except Exception as exc:
@@ -625,6 +645,7 @@ def launch_weston_bedrock_session(
             compositor_log=str(compositor_log),
             launcher_log=str(launcher_log),
         )
+        _prepare_new_isolated_bedrock_geometry(session)
         session.persist()
         return session
     except Exception as exc:

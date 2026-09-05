@@ -41,6 +41,7 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Revoke motor authority when lease binding, renewal, accepted-action refresh or input release fails; attempt backend capability clearing even after release failure without masking the original fault. Successful renewal preserves held input. Fault-injection tests prove logical containment, not physical release after an X-server failure.
 - [x] Reconcile acknowledged external input release with policy, mining and outcome bookkeeping without resetting worker memory or crafting phase. Unknown acknowledgements block positive actions; retired predictions are drained without replay, the next fresh desired hold emits a new press, and traversal waits for a post-release image. Pure regressions pass; live interruption-to-resumed-key delivery remains unqualified.
 - [x] Authenticated malformed actions revoke previous held input; pause/disarm/fault/stop state and every owned shutdown cleanup progress even if physical release raises. The first error remains attributable. These are fault-injection results, not a claim that an unavailable input server physically released a key.
+- [x] Make capture/GUI geometry resolution read-only and reject changed, clipped or incomplete frame geometry. Confine measured window fitting to a new isolated launch before publishing its session, with existing-session/host paths excluded. Regression coverage and live capture pass; a fresh game launch has deliberately not been exercised on the running world.
 - [ ] Complete the end-to-end input audit and retained-image qualification: camera response, held-key continuity after stale frames, geometry/capture consistency, authenticated malformed actions and supervisor cleanup faults. Do not promote accepted input into physical translation or flawless delivery.
 - [ ] Demonstrate a fresh accepted movement prediction after a retired worker response is drained by its owner, then verify actual translation rather than infer it from accepted keys.
 - [ ] Demonstrate autonomous soft-block clearance and escape from the observed dirt pocket.
@@ -62,6 +63,20 @@ individually observed. The accepted pitch counter is not physical pose truth.
 The preceding non-actuating attempt was rejected by a colour-drift gate;
 retained-image tracking later showed its geometry was effectively stationary.
 Neither failed attempt is discarded or counted as camera qualification.
+
+A later isolated `dx=+8, dy=0` probe retained the supervisor, game, sensitivity
+profile and stationary pre-action controls. Passive observation recorded one
+XInput raw/transformed `(8,0)` event and one corresponding core client motion
+from `x=1887` to `1895`, with `y=441` unchanged and no focus/crossing event.
+The retained game image nevertheless stayed effectively stationary. Review
+found this experiment was observer-contaminated: selecting core motion on the
+inner drawable can stop propagation before Wine's already-interested parent.
+The trace establishes the XTEST raw request, but its lack of camera response
+does not establish a normal delivery failure or a root cause inside Wine.
+Future core observation must not introduce a new event-propagation endpoint.
+No reverse pulse, key/button press, calibration change or game restart followed.
+Preceding non-actuating trials rejected ambiguous tracking or insufficient
+scene features; their receipts remain failures, not successful experiments.
 
 At the next natural AFK episode the existing launcher performed one
 AWAY-to-IN_WORLD UI action and started the updated runtime, retaining the

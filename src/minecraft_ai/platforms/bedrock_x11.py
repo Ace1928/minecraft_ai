@@ -1131,7 +1131,12 @@ def _wine_content_rect(
     width: int,
     height: int,
 ) -> tuple[int, int, int, int] | None:
-    """Resolve Wine's real Minecraft drawable relative to its desktop window."""
+    """Read Wine's drawable bounds without moving or resizing any window.
+
+    Capture and screenshot-bound GUI actions must use the scene as observed.
+    Repairing geometry here changes that scene, and a failed query must not
+    silently turn a known Wine client crop into the surrounding desktop.
+    """
     try:
         target = display.create_resource_object("window", target_window_id)
         minecraft_window: Any | None = None
@@ -1141,51 +1146,22 @@ def _wine_content_rect(
                 minecraft_window = child
                 break
         if minecraft_window is None:
+            if "wine desktop" in str(target.get_wm_name() or "").casefold():
+                raise IsolationError("cannot resolve Minecraft inside Wine desktop")
             return None
         candidates = list(minecraft_window.query_tree().children)
         if not candidates:
-            return None
+            raise IsolationError("cannot resolve Wine Minecraft client drawable")
         client = max(
             candidates,
             key=lambda item: int(item.get_geometry().width) * int(item.get_geometry().height),
         )
         geometry = client.get_geometry()
         translated = target.translate_coords(client, 0, 0)
-        horizontal_shift = _content_axis_reposition_delta(
-            parent_size=width,
-            start=int(translated.x),
-            content_size=int(geometry.width),
-        )
-        if horizontal_shift:
-            # Wine maximizes its decorated child at x=-8 while the actual game
-            # drawable begins four pixels outside the desktop. Moving only the
-            # decorated Minecraft window by that measured delta exposes the
-            # complete game surface; it does not synthesize input or guess a
-            # title-bar size. Once the drawable is contained, the normal
-            # ConfigureNotify path below can fit it to the remaining viewport.
-            minecraft_position = target.translate_coords(minecraft_window, 0, 0)
-            minecraft_window.configure(x=int(minecraft_position.x) + horizontal_shift)
-            display.sync()
-            geometry = client.get_geometry()
-            translated = target.translate_coords(client, 0, 0)
-        available_width, available_height = _client_fit_dimensions(
-            parent_width=width,
-            parent_height=height,
-            x=int(translated.x),
-            y=int(translated.y),
-        )
-        if int(geometry.width) != available_width or int(geometry.height) != available_height:
-            # A nested Weston surface can be resized by the host while Wine's
-            # client drawable retains its previous dimensions. Resize only the
-            # isolated Minecraft drawable to the exact visible client area;
-            # this sends the normal X ConfigureNotify path and makes Bedrock
-            # redraw its complete HUD without synthesizing game input.
-            client.configure(width=available_width, height=available_height)
-            display.sync()
-            geometry = client.get_geometry()
-            translated = target.translate_coords(client, 0, 0)
-    except Exception:
-        return None
+    except IsolationError:
+        raise
+    except Exception as exc:
+        raise IsolationError("cannot resolve Wine Minecraft drawable geometry") from exc
     return _contained_content_rect(
         parent_width=width,
         parent_height=height,
@@ -1204,10 +1180,9 @@ def resolve_host_monitor_content_rect(
 
     A host-monitor ScreenCast contains the complete physical output, including
     Wine's desktop/title-bar pixels.  The agent must consume only the exact
-    Minecraft drawable.  Unlike ``_wine_content_rect`` (which may repair a
-    nested compositor), this host path is deliberately read-only: any clipped
-    or unexpected geometry invalidates capture instead of moving or resizing a
-    window on the operator's desktop.
+    Minecraft drawable.  Like the isolated resolver, this path is read-only:
+    clipped or unexpected geometry invalidates capture instead of moving or
+    resizing a window on the operator's desktop.
     """
     if binding.display != display_name:
         raise IsolationError("host-monitor binding display does not match capture display")
@@ -1309,6 +1284,116 @@ def _contained_content_rect(
     return x, y, content_width, content_height
 
 
+def _new_wine_geometry(display: Any) -> tuple[Any, Any, tuple[int, ...]]:
+    """Identify one viewable Minecraft client; generic window fallbacks are unsafe."""
+    pending = list(display.screen().root.query_tree().children)
+    matches = []
+    visited: set[int] = set()
+    while pending and len(visited) < 256:
+        window = pending.pop()
+        if int(window.id) in visited:
+            continue
+        visited.add(int(window.id))
+        attributes = window.get_attributes()
+        if int(attributes.map_state) != 2:
+            continue
+        identity = " ".join(str(value) for value in (window.get_wm_class() or ())).casefold()
+        if str(window.get_wm_name() or "").casefold() == "minecraft" and "minecraft" in identity:
+            matches.append(window)
+        pending.extend(window.query_tree().children)
+    if pending or len(matches) != 1:
+        raise IsolationError("fresh launch needs one exact viewable Minecraft window")
+    minecraft = matches[0]
+    client = _pointer_client_window(display, int(minecraft.id), None)
+    parent = minecraft.query_tree().parent
+    if int(parent.get_attributes().map_state) != 2:
+        raise IsolationError("fresh Minecraft parent is not viewable")
+    outer = parent.get_geometry()
+    inner = client.get_geometry()
+    point = parent.translate_coords(client, 0, 0)
+    window_point = parent.translate_coords(minecraft, 0, 0)
+    snapshot = (
+        int(parent.id), int(minecraft.id), int(client.id),
+        int(outer.width), int(outer.height), int(point.x), int(point.y),
+        int(inner.width), int(inner.height), int(window_point.x),
+    )
+    return minecraft, client, snapshot
+
+
+def _prepare_new_isolated_window_geometry(
+    display_name: str,
+    host_display: str,
+    *,
+    preparation_permitted: Callable[[], bool],
+    timeout_s: float = 30.0,
+) -> None:
+    """Prepare a newly owned launch once, before its session is published.
+
+    Never call from capture, status, menu input or an existing-session attach.
+    Wait for stable identity/geometry, make at most one horizontal correction
+    and one client fit, then verify containment without further mutations.
+    """
+    require_isolated_display(display_name, host_display)
+    display_module = importlib.import_module("Xlib.display")
+    display = display_module.Display(display_name)
+    deadline = time.monotonic() + timeout_s
+    previous: tuple[int, ...] | None = None
+    prepared_ids: tuple[int, ...] | None = None
+    last_error: Exception | None = None
+    try:
+        while time.monotonic() < deadline:
+            if not preparation_permitted():
+                raise IsolationError("fresh Minecraft geometry preparation lost launch authority")
+            try:
+                minecraft, client, snapshot = _new_wine_geometry(display)
+            except Exception as exc:
+                previous = None
+                last_error = exc
+                time.sleep(0.25)
+                continue
+            if prepared_ids is not None and snapshot[:3] != prepared_ids:
+                raise IsolationError("Minecraft drawable changed during launch preparation")
+            if snapshot != previous:
+                previous = snapshot
+                time.sleep(0.25)
+                continue
+            _, _, _, width, height, x, y, content_width, content_height, window_x = snapshot
+            if prepared_ids is None:
+                prepared_ids = snapshot[:3]
+                shift = _content_axis_reposition_delta(
+                    parent_size=width, start=x, content_size=content_width,
+                )
+                fit_width, fit_height = _client_fit_dimensions(
+                    parent_width=width, parent_height=height, x=x + shift, y=y,
+                )
+                # Keep already-contained content exactly as it is. Only a
+                # clipped fresh drawable needs fitting to the visible parent.
+                resize = content_width > fit_width or content_height > fit_height
+                if shift:
+                    if not preparation_permitted():
+                        raise IsolationError("fresh Minecraft geometry preparation was interrupted")
+                    minecraft.configure(x=window_x + shift)
+                    display.sync()
+                if resize:
+                    if not preparation_permitted():
+                        raise IsolationError("fresh Minecraft geometry preparation was interrupted")
+                    client.configure(width=min(content_width, fit_width),
+                                     height=min(content_height, fit_height))
+                    display.sync()
+                if shift or resize:
+                    previous = None
+                    time.sleep(0.25)
+                    continue
+            _contained_content_rect(
+                parent_width=width, parent_height=height, x=x, y=y,
+                content_width=content_width, content_height=content_height,
+            )
+            return
+        raise IsolationError(f"timed out preparing fresh Minecraft geometry: {last_error}")
+    finally:
+        display.close()
+
+
 class IsolatedX11Capture:
     """Window-scoped BGRA capture from the same isolated X server as input."""
 
@@ -1360,6 +1445,10 @@ class IsolatedX11Capture:
 
     def capture(self) -> CapturedFrame:
         bounds = self._bounds()
+        content_rect = self._content_rect(bounds["width"], bounds["height"])
+        # Timestamp the start of pixel acquisition, not the later geometry
+        # checks/cropping: those checks must not make old pixels appear newer.
+        captured_ns = time.monotonic_ns()
         bgra_bytes: bytes = b""
         # Capture the target drawable first. Under nested Weston/Xwayland, root
         # capture can succeed while returning an all-black uncomposited buffer;
@@ -1398,7 +1487,13 @@ class IsolatedX11Capture:
                 bgra_bytes = raw.data
             except Exception as exc:
                 raise IsolationError(f"isolated X11 capture failed: {exc}") from exc
-        content_rect = self._content_rect(bounds["width"], bounds["height"])
+        if (
+            self._bounds() != bounds
+            or self._content_rect(bounds["width"], bounds["height"]) != content_rect
+        ):
+            raise IsolationError("Minecraft window geometry changed during capture")
+        if len(bgra_bytes) != bounds["width"] * bounds["height"] * 4:
+            raise IsolationError("isolated X11 capture returned an incomplete BGRA frame")
         frame_width = bounds["width"]
         frame_height = bounds["height"]
         if content_rect is not None:
@@ -1411,7 +1506,7 @@ class IsolatedX11Capture:
         self._frame_id += 1
         return CapturedFrame(
             frame_id=self._frame_id,
-            captured_ns=time.monotonic_ns(),
+            captured_ns=captured_ns,
             width=frame_width,
             height=frame_height,
             bgra=bgra_bytes,

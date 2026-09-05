@@ -199,12 +199,17 @@ def test_stop_rechecks_identity_immediately_before_signal(
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux procfs")
-def test_weston_persist_failure_cleans_both_fresh_process_groups(
+@pytest.mark.parametrize("mode", ["weston", "xephyr"])
+@pytest.mark.parametrize("failure", ["preparation", "persist"])
+def test_fresh_preparation_precedes_persist_and_failure_cleans_owned_processes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    failure: str,
 ) -> None:
     created: list[object] = []
     cleaned: list[int] = []
+    steps: list[str] = []
 
     class _Child:
         def __init__(self, pid: int) -> None:
@@ -225,6 +230,8 @@ def test_weston_persist_failure_cleans_both_fresh_process_groups(
     monkeypatch.setattr(sessions.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(sessions.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(sessions, "_wait_for_weston_xwayland", lambda *_args: ":71")
+    monkeypatch.setattr(sessions, "choose_free_display", lambda: ":71")
+    monkeypatch.setattr(sessions, "_x_socket", lambda _display: tmp_path)
     monkeypatch.setattr(sessions, "require_isolated_display", lambda *_args: None)
     monkeypatch.setattr(
         sessions,
@@ -236,19 +243,28 @@ def test_weston_persist_failure_cleans_both_fresh_process_groups(
         "_terminate_spawned_process_group",
         lambda child: cleaned.append(child.pid) or True,
     )
-    monkeypatch.setattr(
-        BedrockSession,
-        "persist",
-        lambda _self, _path=None: (_ for _ in ()).throw(OSError("disk full")),
-    )
+    def prepare(_session: BedrockSession) -> None:
+        steps.append("prepare")
+        if failure == "preparation":
+            raise IsolationError("geometry unavailable")
 
-    with pytest.raises(OSError, match="disk full"):
-        sessions.launch_weston_bedrock_session(
-            launcher_command=("/usr/bin/bedrock-on-linux", "play")
-        )
+    def persist(_session: BedrockSession, _path: Path | None = None) -> None:
+        steps.append("persist")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(BedrockSession, "persist", persist)
+    monkeypatch.setattr(sessions, "_prepare_new_isolated_bedrock_geometry", prepare)
+
+    launch = (
+        sessions.launch_weston_bedrock_session if mode == "weston"
+        else sessions.launch_xephyr_bedrock_session
+    )
+    with pytest.raises((OSError, IsolationError), match="disk full|geometry unavailable"):
+        launch(launcher_command=("/usr/bin/bedrock-on-linux", "play"))
 
     assert len(created) == 2
     assert cleaned == [301, 300]
+    assert steps == (["prepare"] if failure == "preparation" else ["prepare", "persist"])
 
 
 def test_failed_residual_cleanup_preserves_descriptor(
