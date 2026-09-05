@@ -532,6 +532,58 @@ def _window_is_descendant_or_same(window: Any, ancestor_window_id: int) -> bool:
     return False
 
 
+def _pointer_client_window(display: Any, input_id: int, capture_id: int | None) -> Any:
+    """Resolve the viewable game surface without repairing Wine geometry."""
+    window = display.create_resource_object("window", input_id)
+    geometry = window.get_geometry()
+    if int(window.get_attributes().map_state) != 2:
+        raise IsolationError("Minecraft pointer target is not viewable")
+    area = int(geometry.width) * int(geometry.height)
+    if area <= 0:
+        raise IsolationError("Minecraft pointer target has invalid geometry")
+    clients = []
+    for child in window.query_tree().children:
+        attributes = child.get_attributes()
+        child_geometry = child.get_geometry()
+        if (
+            int(attributes.map_state) == 2
+            and int(attributes.win_class) == 1
+            and int(child_geometry.width) * int(child_geometry.height) >= area * 0.80
+        ):
+            clients.append(child)
+    if len(clients) == 1:
+        return clients[0]
+    if not clients and input_id == capture_id:
+        return window
+    raise IsolationError("Minecraft pointer client is unavailable or ambiguous")
+
+
+def _pointer_hits_client(root: Any, client_id: int, rect: ScreenRect) -> bool:
+    """Require both client bounds and a bounded root-to-pointer-hit chain."""
+    current = root
+    visited: set[int] = set()
+    point: tuple[int, int] | None = None
+    for _ in range(32):
+        window_id = int(getattr(current, "id", 0))
+        if window_id <= 0 or window_id in visited:
+            return False
+        visited.add(window_id)
+        pointer = current.query_pointer()
+        if not pointer.same_screen:
+            return False
+        current_point = (int(pointer.root_x), int(pointer.root_y))
+        if point is not None and point != current_point:
+            return False
+        point = current_point
+        if not (rect.x <= point[0] < rect.x + rect.width
+                and rect.y <= point[1] < rect.y + rect.height):
+            return False
+        if window_id == client_id:
+            return True
+        current = pointer.child
+    return False
+
+
 def _focus_belongs_to_minecraft_session(
     window: Any,
     *,
@@ -693,23 +745,37 @@ class IsolatedX11InputBackend:
     def _input_window(self) -> Any:
         return self._display.create_resource_object("window", self._input_window_id)
 
-    def _park_pointer_in_game(self) -> None:
-        """Warp the real server pointer into the game client.
-
-        XTEST click/motion events are delivered to the window under the pointer,
-        not the focused window. Parking the pointer inside the game client (in
-        absolute root coordinates) routes those events to the game regardless of
-        which window owns the operator's focus.
-        """
+    def _park_pointer_in_game(self) -> bool:
+        """Return verified routing; releases must proceed even on failure."""
         try:
-            window = self._display.create_resource_object("window", self._input_window_id)
-            geometry = window.get_geometry()
             root = self._display.screen().root
-            coords = root.translate_coords(window, geometry.width // 2, geometry.height // 2)
-            root.warp_pointer(int(coords.x), int(coords.y))
+            if self._targeted:
+                # Preserve the existing host-debug route; this correction is
+                # scoped to the autonomous private-X-server backend only.
+                window = self._input_window()
+                geometry = window.get_geometry()
+                coords = root.translate_coords(window, geometry.width // 2, geometry.height // 2)
+                root.warp_pointer(int(coords.x), int(coords.y))
+                self._display.sync()
+                return True
+            if self._input_window_id is None:
+                return False
+            client = _pointer_client_window(
+                self._display, self._input_window_id, self.target_window_id,
+            )
+            rect = _window_root_rect(self._display, int(client.id))
+            try:
+                if _pointer_hits_client(root, int(client.id), rect):
+                    return True
+            except Exception:
+                # Unknown pointer ownership cannot justify skipping parking.
+                # Inspection must never prevent the caller's release sweep.
+                pass
+            root.warp_pointer(rect.x + rect.width // 2, rect.y + rect.height // 2)
             self._display.sync()
+            return _pointer_hits_client(root, int(client.id), rect)
         except Exception:
-            pass
+            return False
 
     def _position_pointer_in_game(self, cursor_x: float, cursor_y: float) -> None:
         """Place the GUI cursor at one normalized captured-frame point.
@@ -893,7 +959,8 @@ class IsolatedX11InputBackend:
                     action.mouse_dy,
                 )
                 self._require_positive_input_permitted()
-                self._park_pointer_in_game()
+                if not self._park_pointer_in_game() and not self._targeted:
+                    raise MotorRejected("Minecraft pointer routing could not be verified")
                 self._require_positive_input_permitted()
                 self._relative_mouse.move(relative_x, relative_y)
             for key in action.keys_down:
@@ -907,7 +974,8 @@ class IsolatedX11InputBackend:
                     raise IsolationError(f"unsupported mouse button: {button!r}")
                 self._require_positive_input_permitted()
                 if not absolute_cursor:
-                    self._park_pointer_in_game()
+                    if not self._park_pointer_in_game() and not self._targeted:
+                        raise MotorRejected("Minecraft pointer routing could not be verified")
                 self._require_positive_input_permitted()
                 self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
                 self._held_buttons.add(button.lower())

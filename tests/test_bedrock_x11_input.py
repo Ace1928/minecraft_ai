@@ -125,7 +125,7 @@ def test_atomic_gui_tap_leaves_bedrock_backend_and_guard_state_in_agreement(
     backend._held_buttons = set()
     backend.probe_target = lambda: True  # type: ignore[method-assign]
     backend._ensure_input_focus = lambda: None  # type: ignore[method-assign]
-    backend._park_pointer_in_game = lambda: None  # type: ignore[method-assign]
+    backend._park_pointer_in_game = lambda: True  # type: ignore[method-assign]
     backend._position_pointer_in_game = lambda _x, _y: None  # type: ignore[method-assign]
     backend._keycode = lambda _key: 26  # type: ignore[method-assign]
 
@@ -174,11 +174,12 @@ def test_apply_rechecks_interlock_before_positive_events_but_keeps_releases() ->
     mouse_moves: list[tuple[int, int]] = []
     pointer_parks = 0
 
-    def park_then_latch() -> None:
+    def park_then_latch() -> bool:
         nonlocal permitted, pointer_parks
         pointer_parks += 1
         if pointer_parks == 2:
             permitted = False
+        return True
 
     backend._targeted = False
     backend._display = SimpleNamespace(sync=lambda: None)
@@ -278,7 +279,7 @@ def test_apply_blocks_each_positive_event_when_interlock_is_latched(
     backend._held_buttons = set()
     backend.probe_target = lambda: True  # type: ignore[method-assign]
     backend._ensure_input_focus = lambda: None  # type: ignore[method-assign]
-    backend._park_pointer_in_game = lambda: None  # type: ignore[method-assign]
+    backend._park_pointer_in_game = lambda: True  # type: ignore[method-assign]
     backend._keycode = lambda _key: 25  # type: ignore[method-assign]
 
     with pytest.raises(MotorRejected, match="interlock"):
@@ -300,7 +301,7 @@ def test_release_all_ignores_latched_positive_input_interlock() -> None:
     backend._held_buttons = {"left"}
     backend.release_count = 0
     backend._ensure_input_focus = lambda: None  # type: ignore[method-assign]
-    backend._park_pointer_in_game = lambda: None  # type: ignore[method-assign]
+    backend._park_pointer_in_game = lambda: False  # type: ignore[method-assign]
     backend._keycode = lambda _key: 25  # type: ignore[method-assign]
     backend._send_key = lambda _keycode, down: sent_keys.append(down)  # type: ignore[method-assign]
 
@@ -312,3 +313,240 @@ def test_release_all_ignores_latched_positive_input_interlock() -> None:
     assert backend._held_keys == set()
     assert backend._held_buttons == set()
     assert backend.release_count == 1
+
+
+def _pointer_parking_backend() -> tuple[IsolatedX11InputBackend, dict[str, Any]]:
+    state: dict[str, Any] = {
+        "point": (1012, 748), "warps": [], "relative": [], "keys": [],
+        "query_failure": False,
+    }
+
+    class Window:
+        def __init__(self, identity: int, rect: tuple[int, int, int, int]) -> None:
+            self.id = identity
+            self.rect = rect
+            self.children: list[Window] = []
+            self.viewable = True
+            self.geometry_failure = False
+
+        def get_geometry(self) -> Any:
+            if self.geometry_failure:
+                raise RuntimeError("unavailable geometry")
+            return SimpleNamespace(width=self.rect[2], height=self.rect[3])
+
+        def get_attributes(self) -> Any:
+            return SimpleNamespace(map_state=2 if self.viewable else 0, win_class=1)
+
+        def query_tree(self) -> Any:
+            return SimpleNamespace(children=self.children)
+
+        def query_pointer(self) -> Any:
+            if state["query_failure"]:
+                raise RuntimeError("unavailable pointer")
+            path = state["hit_path"]
+            next_index = path.index(self) + 1 if self in path else len(path)
+            child = path[next_index] if next_index < len(path) else 0
+            return SimpleNamespace(
+                same_screen=True, root_x=state["point"][0], root_y=state["point"][1],
+                child=child,
+            )
+
+    root = Window(1, (0, 0, 1920, 1080))
+    desktop = Window(2, (0, 0, 1920, 1080))
+    wrapper = Window(3, (-4, -4, 1928, 1088))
+    client = Window(4, (0, 26, 1920, 1054))
+    overlay = Window(5, (0, 26, 1920, 1054))
+    root.children = [desktop]
+    desktop.children = [wrapper, overlay]
+    wrapper.children = [client]
+    state.update(root=root, desktop=desktop, wrapper=wrapper, client=client, overlay=overlay)
+    state["hit_path"] = [root, desktop, wrapper, client]
+    windows = {w.id: w for w in (root, desktop, wrapper, client, overlay)}
+
+    def warp(x: int, y: int) -> None:
+        state["warps"].append((x, y))
+        state["point"] = (x, y)
+
+    root.warp_pointer = warp  # type: ignore[attr-defined]
+    root.translate_coords = lambda window, x, y: SimpleNamespace(  # type: ignore[attr-defined]
+        x=window.rect[0] + x, y=window.rect[1] + y,
+    )
+    backend = object.__new__(IsolatedX11InputBackend)
+    backend._display = SimpleNamespace(
+        screen=lambda: SimpleNamespace(root=root),
+        create_resource_object=lambda _kind, identity: windows[identity],
+        sync=lambda: None,
+    )
+    backend._targeted = False
+    backend.target_window_id = desktop.id
+    backend._input_window_id = wrapper.id
+    backend._host_monitor_binding = None
+    backend._input_permitted = lambda: True
+    backend._held_keys = set()
+    backend._held_buttons = set()
+    backend.release_count = 0
+    backend._x = SimpleNamespace(KeyPress=2, KeyRelease=3, ButtonPress=4, ButtonRelease=5)
+    backend._xtest = _FakeXTest()
+    backend._relative_mouse = SimpleNamespace(move=lambda x, y: state["relative"].append((x, y)))
+    backend._lease = MotorLease(
+        lease_id="lease", session_id="session", target_instance="bedrock:test",
+        backend_id=backend.backend_id,
+        expires_monotonic_ns=time.monotonic_ns() + 1_000_000_000,
+        allowed_actions=frozenset({"keyboard", "button", "mouse"}),
+        max_action_duration_ms=250, first_sequence=0,
+    )
+    backend._ensure_input_focus = lambda: None  # type: ignore[method-assign]
+    backend._keycode = lambda _key: 25  # type: ignore[method-assign]
+    return backend, state
+
+
+def test_pointer_already_in_exact_game_client_does_not_warp() -> None:
+    backend, state = _pointer_parking_backend()
+    assert backend._park_pointer_in_game()
+    assert state["warps"] == []
+
+
+def test_pointer_outside_game_parks_at_client_not_decorated_wrapper_center() -> None:
+    backend, state = _pointer_parking_backend()
+    state["point"] = (10, 5)
+    assert backend._park_pointer_in_game()
+    assert state["warps"] == [(960, 553)]
+    assert (960, 540) not in state["warps"]
+
+
+@pytest.mark.parametrize("hit", ["overlay", "desktop", "wrapper"])
+def test_pointer_bounds_without_exact_game_hit_do_not_skip_parking(hit: str) -> None:
+    backend, state = _pointer_parking_backend()
+    path = [state["root"], state["desktop"]]
+    if hit != "desktop":
+        path.append(state[hit])
+    state["hit_path"] = path
+    assert not backend._park_pointer_in_game()
+    assert state["warps"] == [(960, 553)]
+
+
+def test_pointer_hit_cycle_is_bounded_and_does_not_authorize_skip() -> None:
+    backend, state = _pointer_parking_backend()
+    state["root"].query_pointer = lambda: SimpleNamespace(
+        same_screen=True, root_x=1012, root_y=748, child=state["root"],
+    )
+    assert not backend._park_pointer_in_game()
+    assert state["warps"] == [(960, 553)]
+
+
+def test_unknown_pointer_position_falls_back_to_client_center() -> None:
+    backend, state = _pointer_parking_backend()
+    state["query_failure"] = True
+    assert not backend._park_pointer_in_game()
+    assert state["warps"] == [(960, 553)]
+
+
+@pytest.mark.parametrize("failure", ["pointer", "geometry", "unmapped", "ambiguous"])
+def test_pointer_inspection_failures_never_block_release_sweep(failure: str) -> None:
+    backend, state = _pointer_parking_backend()
+    if failure == "pointer":
+        state["query_failure"] = True
+    elif failure == "geometry":
+        state["client"].geometry_failure = True
+    elif failure == "unmapped":
+        state["client"].viewable = False
+    else:
+        state["wrapper"].children.append(state["overlay"])
+    backend._input_permitted = lambda: False
+    backend._held_keys = {"w"}
+    backend._held_buttons = {"left"}
+
+    backend.release_all()
+
+    releases = [(event, detail) for _display, event, detail in backend._xtest.calls]
+    assert (backend._x.KeyRelease, 25) in releases
+    assert {detail for event, detail in releases if event == backend._x.ButtonRelease} == {1, 2, 3}
+    assert all(event in {backend._x.KeyRelease, backend._x.ButtonRelease} for event, _ in releases)
+    assert backend.held_keys == backend.held_buttons == frozenset()
+    if failure != "pointer":
+        assert state["warps"] == []
+
+
+def test_relative_motion_remains_exact_without_extra_absolute_warp() -> None:
+    backend, state = _pointer_parking_backend()
+    backend.apply(MotorAction(sequence=0, mouse_dx=7, mouse_dy=-9))
+    assert state["relative"] == [(7, -9)]
+    assert state["warps"] == []
+
+
+@pytest.mark.parametrize("positive", ["motion", "button"])
+@pytest.mark.parametrize("uncertainty", ["geometry", "ambiguous", "pointer", "overlay"])
+def test_unverified_pointer_routing_blocks_positive_input_but_keeps_releases(
+    positive: str, uncertainty: str,
+) -> None:
+    backend, state = _pointer_parking_backend()
+    if uncertainty == "geometry":
+        state["client"].geometry_failure = True
+    elif uncertainty == "ambiguous":
+        state["wrapper"].children.append(state["overlay"])
+    elif uncertainty == "pointer":
+        state["query_failure"] = True
+    else:
+        state["hit_path"] = [state["root"], state["desktop"], state["overlay"]]
+    backend._held_keys = {"a"}
+    backend._held_buttons = {"right"}
+    action = MotorAction(
+        sequence=0, keys_up=("a",), buttons_up=("right",),
+        mouse_dx=7 if positive == "motion" else 0,
+        buttons_down=("left",) if positive == "button" else (),
+    )
+
+    with pytest.raises(MotorRejected, match="pointer routing could not be verified"):
+        backend.apply(action)
+
+    assert state["relative"] == []
+    events = [event for _display, event, _detail in backend._xtest.calls]
+    assert backend._x.KeyRelease in events
+    assert backend._x.ButtonRelease in events
+    assert backend._x.KeyPress not in events
+    assert backend._x.ButtonPress not in events
+    assert backend.held_keys == backend.held_buttons == frozenset()
+
+
+def test_relative_motion_after_necessary_park_requires_successful_hit_confirmation() -> None:
+    backend, state = _pointer_parking_backend()
+    state["point"] = (10, 5)
+    backend.apply(MotorAction(sequence=0, mouse_dx=7, mouse_dy=-9))
+    assert state["warps"] == [(960, 553)]
+    assert state["relative"] == [(7, -9)]
+
+
+def test_host_debug_parking_behavior_is_not_changed_by_private_routing_gate() -> None:
+    backend, state = _pointer_parking_backend()
+    backend._targeted = True
+    state["wrapper"].geometry_failure = True
+    backend.apply(MotorAction(sequence=0, mouse_dx=7, mouse_dy=-9))
+    assert state["relative"] == [(7, -9)]
+    assert state["warps"] == []
+
+
+def test_already_inside_button_release_and_release_all_do_not_move_pointer() -> None:
+    backend, state = _pointer_parking_backend()
+    backend._held_buttons = {"left"}
+    backend.apply(MotorAction(sequence=0, buttons_up=("left",)))
+    backend.release_all()
+    assert state["warps"] == []
+    assert backend.held_buttons == frozenset()
+    assert sum(event == backend._x.ButtonRelease for _d, event, _b in backend._xtest.calls) == 4
+
+
+def test_gui_target_remains_explicit_and_release_does_not_recenter_it() -> None:
+    backend, state = _pointer_parking_backend()
+    targets = []
+
+    def position(x: float, y: float) -> None:
+        targets.append((x, y))
+        state["point"] = (480, 289)
+
+    backend._position_pointer_in_game = position  # type: ignore[method-assign]
+    backend.apply(MotorAction(sequence=0, cursor_x=0.25, cursor_y=0.25,
+                              camera_semantics="cursor", buttons_down=("left",)))
+    backend.apply(MotorAction(sequence=1, buttons_up=("left",)))
+    assert targets == [(0.25, 0.25)]
+    assert state["point"] == (480, 289)
+    assert state["warps"] == []
