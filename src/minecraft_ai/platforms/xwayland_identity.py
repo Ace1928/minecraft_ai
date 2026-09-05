@@ -77,7 +77,9 @@ def _require_safe_command(command: tuple[str, ...]) -> None:
     Listener ownership is checked separately; this is not a live ACL query.
     """
     for index, argument in enumerate(command[2:], start=2):
-        if argument in {"-ac", "-query", "-broadcast", "-indirect"}:
+        if argument in {
+            "-ac", "-query", "-broadcast", "-multicast", "-indirect", "-enable-ei-portal",
+        }:
             raise IsolationError("Xwayland command weakens private display access")
         if argument in {"-listen", "-listenfd"} and (
             index + 1 >= len(command)

@@ -34,14 +34,19 @@ provenance are verified before admitting autonomous input. Admission also binds
 the exact Xwayland child and process start time to every observed pathname and
 abstract Unix listener for the selected display. A substituted display, reused
 PID or listener owned by another server fails closed. Initial enrollment also
-rejects disabled access control (`-ac`), remote query flags and non-descriptor
+rejects disabled access control (`-ac`), input-emulation forwarding
+(`-enable-ei-portal`), remote query flags and non-descriptor
 listening options. It preserves Weston's numeric `-listen <fd>` compatibility
 syntax; a stable command hash alone would otherwise accept an unsafe initial
 command. This command policy is not a query of dynamically changed X access rules.
 Inherited parent-display handles and Weston/dynamic-loader overrides are stripped
 at launch and rejected
 when observed in the live compositor environment; this includes
-`WAYLAND_SERVER_SOCKET` and `WESTON_MODULE_MAP`.
+`WAYLAND_SERVER_SOCKET`, `WESTON_MODULE_MAP` and `LIBEI_SOCKET`. The latter can
+otherwise give Xwayland an external input-emulation endpoint even without the
+portal flag; blocking it protects outgoing simulated input as well as excluding
+incoming host input. This is a source-identified possible route, not a claim
+that the preserved session used it.
 
 The 2026-09-06 disposable run measured 30 admission calls at median 2.55 ms,
 nearest-rank p95 3.72 ms and maximum 4.28 ms. These are single-call observations,

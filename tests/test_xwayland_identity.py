@@ -72,8 +72,8 @@ def test_binds_exact_child_and_both_listener_aliases(namespace: Path) -> None:
 
 
 @pytest.mark.parametrize("arguments", [
-    ("-ac",), ("-query", "remote"), ("-broadcast",), ("-indirect", "remote"),
-    ("-listen", "tcp"), ("-listen",), ("-listenfd", "invalid"),
+    ("-ac",), ("-query", "remote"), ("-broadcast",), ("-multicast",), ("-indirect", "remote"),
+    ("-listen", "tcp"), ("-listen",), ("-listenfd", "invalid"), ("-enable-ei-portal",),
 ])
 def test_unsafe_initial_command_cannot_be_enrolled(
     namespace: Path, arguments: tuple[str, ...],
