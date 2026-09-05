@@ -299,6 +299,30 @@ def test_headroom_trigger_requires_exact_verified_obstacle_stall() -> None:
     assert _verified_obstacle_stall(level_ground) is False
 
 
+def test_controller_starvation_does_not_start_headroom_or_body_intervention() -> None:
+    runtime, perception, sent = _runtime_for_probe()
+    stalled = _stall_result()
+    assert stalled.outcome_verification is not None
+    starved = replace(
+        stalled,
+        run=stalled.run.model_copy(update={
+            "failure_code": SkillFailureCode.CONTROLLER_STARVATION,
+            "failure_reason": "controller emitted no sustained locomotion",
+        }),
+        outcome_verification=stalled.outcome_verification.model_copy(update={
+            "signal": OutcomeSignal.CONTROLLER_STARVATION,
+            "reason": "controller emitted no sustained locomotion",
+        }),
+    )
+
+    assert not _verified_obstacle_stall(starved)
+    assert not runtime._route_headroom_terminal(starved)
+    assert runtime._headroom_recovery is None
+    assert runtime.executor.run is None
+    assert perception.requests == []
+    assert sent == []
+
+
 def test_gather_stall_starts_plan_neutral_headroom_with_filtered_parameters() -> None:
     runtime, _, _ = _runtime_for_probe()
     gather = _stall_result(

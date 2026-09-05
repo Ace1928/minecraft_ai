@@ -1191,6 +1191,38 @@ def test_traversal_stall_fails_early_with_typed_evidence_and_full_release(
     assert stopped.recovery_skills == spec.recovery_skills
 
 
+@pytest.mark.parametrize("skill_id", (
+    "explore_forward", "traverse_level_ground", "traverse_visible_obstacle",
+))
+def test_no_input_traversal_reports_starvation_without_physical_recovery(skill_id: str) -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get(skill_id)
+    executor.start(spec, run_id=f"starved-{skill_id}", now_ns=now)
+
+    started = executor.tick(
+        _traversal_board(now, luma_grid=_LUMA_A), sequence=1, now_ns=now,
+    )
+    assert started.run.outcome == SkillOutcome.RUNNING
+    terminal = executor.tick(
+        _traversal_board(now + 3_100_000_000, luma_grid=_LUMA_A),
+        sequence=2, now_ns=now + 3_100_000_000,
+    )
+
+    assert terminal.run.outcome == SkillOutcome.FAILED
+    assert terminal.run.failure_code == SkillFailureCode.CONTROLLER_STARVATION
+    assert terminal.outcome_verification is not None
+    assert terminal.outcome_verification.signal == OutcomeSignal.CONTROLLER_STARVATION
+    assert terminal.run.failure_reason == terminal.outcome_verification.reason
+    assert "no sustained locomotion" in terminal.run.failure_reason
+    assert terminal.recovery_skills == ()
+    assert terminal.action is not None
+    assert not terminal.action.keys_down and not terminal.action.buttons_down
+    assert terminal.action.mouse_dx == terminal.action.mouse_dy == 0
+    assert set(terminal.action.keys_up) == {"w", "a", "s", "d", "ctrl", "shift", "space"}
+
+
 def test_gather_scan_without_locomotion_does_not_report_traversal_stall() -> None:
     now = time.monotonic_ns()
     policy = _TraversalPolicy(

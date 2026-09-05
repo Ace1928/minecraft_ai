@@ -13,7 +13,7 @@ from minecraft_ai.runtime import (
     _trajectory_outcome_annotations,
     _verified_outcome_event,
 )
-from minecraft_ai.skills import SkillOutcome, SkillRun, SkillStats
+from minecraft_ai.skills import SkillFailureCode, SkillOutcome, SkillRun, SkillStats
 
 
 def _block_broken() -> tuple[SkillRun, OutcomeVerification]:
@@ -87,3 +87,29 @@ def test_non_terminal_or_mismatched_evidence_never_claims_block_broken() -> None
         )
         is None
     )
+
+
+def test_starvation_memory_keeps_controller_cause_not_obstacle_claim() -> None:
+    reason = "controller emitted no sustained locomotion within the bounded startup window"
+    run = SkillRun(
+        run_id="starved-controller", skill_id="traverse_visible_obstacle",
+        started_ns=100, ended_ns=3_100_000_100, outcome=SkillOutcome.FAILED,
+        failure_code=SkillFailureCode.CONTROLLER_STARVATION, failure_reason=reason,
+    )
+    verification = OutcomeVerification(
+        run_id=run.run_id, kind=OutcomeKind.TRAVERSAL, status=OutcomeStatus.STALLED,
+        signal=OutcomeSignal.CONTROLLER_STARVATION, observed_ns=run.ended_ns or 0,
+        confidence=0.96, reason=reason,
+    )
+
+    memory = _terminal_run_memory(
+        run, SkillStats(failures=1), observed_ns=4_000_000_000, existing={},
+        outcome_verification=verification,
+    )
+
+    assert memory is not None
+    assert reason in memory.text
+    assert memory.metadata["reported_reason"] == reason
+    assert memory.metadata["failure_code"] == "controller.starvation"
+    assert memory.metadata["verified_outcome"] == "controller_starvation"
+    assert memory.metadata["verified_outcome_evidence_json"] == "[]"

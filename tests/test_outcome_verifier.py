@@ -1244,7 +1244,7 @@ def test_camera_rebaseline_does_not_erase_accumulated_no_progress() -> None:
     assert verdict.signal == OutcomeSignal.LOCOMOTION_STALLED
 
 
-def test_controller_without_locomotion_stalls_before_skill_timeout() -> None:
+def test_controller_without_locomotion_reports_starvation_not_collision() -> None:
     now = time.monotonic_ns()
     board = _board(now)
     _publish_hashes(board, now, frame_hash="0000000000000000", luma_grid=_LUMA_A)
@@ -1267,8 +1267,9 @@ def test_controller_without_locomotion_stalls_before_skill_timeout() -> None:
     )
 
     assert verdict.status == OutcomeStatus.STALLED
-    assert verdict.signal == OutcomeSignal.LOCOMOTION_STALLED
+    assert verdict.signal == OutcomeSignal.CONTROLLER_STARVATION
     assert "controller emitted no sustained locomotion" in verdict.reason
+    assert verdict.evidence_keys == ()  # This branch makes no claim from the changed pixels.
 
 
 def test_inventory_open_requires_input_stable_pixels_and_fresh_scene_fact() -> None:

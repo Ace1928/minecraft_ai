@@ -620,12 +620,19 @@ class SkillExecutor:
             traversal_verification is not None
             and traversal_verification.status == OutcomeStatus.STALLED
         ):
+            starved = traversal_verification.signal == OutcomeSignal.CONTROLLER_STARVATION
+            failure_code = (
+                SkillFailureCode.CONTROLLER_STARVATION
+                if starved else SkillFailureCode.LOCOMOTION_STALLED
+            )
             return self._finish(
                 SkillOutcome.FAILED,
                 now,
-                SkillFailureCode.LOCOMOTION_STALLED.value,
-                recover=True,
-                failure_code=SkillFailureCode.LOCOMOTION_STALLED,
+                traversal_verification.reason if starved else failure_code.value,
+                # No commanded motion means no evidence for a physical
+                # obstacle remedy. Return the actual cause to cognition.
+                recover=not starved,
+                failure_code=failure_code,
                 force_release_keys=_LOCOMOTION_RELEASE_KEYS,
                 outcome_verification=traversal_verification,
             )

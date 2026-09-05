@@ -3404,6 +3404,7 @@ def test_idle_stall_probe_ineligible_idle_is_unchanged(
 @pytest.mark.parametrize("case", (
     "no-history", "one-failure", "duplicate-id", "different-context", "older-task",
     "intervening-success", "wrong-failure", "timeout", "non-locomotion",
+    "starved-newest", "starved-older",
     "operator-decision", "operator-plan", "operator-history", "exhausted-plan",
 ))
 def test_idle_stall_probe_rejects_unrelated_or_ineligible_history(
@@ -3432,6 +3433,12 @@ def test_idle_stall_probe_rejects_unrelated_or_ineligible_history(
     elif case == "timeout":
         runtime._recent_skill_runs[0] = newest.model_copy(update={
             "outcome": SkillOutcome.TIMED_OUT,
+        })
+    elif case in {"starved-newest", "starved-older"}:
+        index = 0 if case == "starved-newest" else 1
+        runtime._recent_skill_runs[index] = runtime._recent_skill_runs[index].model_copy(update={
+            "failure_code": SkillFailureCode.CONTROLLER_STARVATION,
+            "failure_reason": "controller emitted no sustained locomotion",
         })
     elif case == "non-locomotion":
         runtime._recent_skill_runs[0] = newest.model_copy(update={"skill_id": "open_inventory"})

@@ -35,6 +35,7 @@ class OutcomeSignal(StrEnum):
     MINING_STALLED = "mining_stalled"
     LOCOMOTION_PROGRESS = "locomotion_progress"
     LOCOMOTION_STALLED = "locomotion_stalled"
+    CONTROLLER_STARVATION = "controller_starvation"
     GUI_TRANSITION_PROGRESS = "gui_transition_progress"
     INVENTORY_OPENED = "inventory_opened"
     INVENTORY_CLOSED = "inventory_closed"
@@ -536,11 +537,11 @@ class TemporalOutcomeVerifier:
         ):
             return self._result(
                 OutcomeStatus.STALLED,
-                OutcomeSignal.LOCOMOTION_STALLED,
+                OutcomeSignal.CONTROLLER_STARVATION,
                 now_ns,
                 0.96,
                 "controller emitted no sustained locomotion within the bounded startup window",
-                ("frame.crosshair_luma_grid",),
+                (),
             )
 
         luma = _luma_observation(blackboard, "frame.crosshair_luma_grid", now_ns)
