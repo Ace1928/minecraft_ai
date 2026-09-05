@@ -29,7 +29,7 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Implement an observation-only visible-surface survey for body-clearance investigation: one nullable underside/riser/side-face point, exact WORLD provenance, and no motor tracks or action permissions. Retained-image probing is executable; this is not a measured body collision or a local 3D map. See [body-clearance scope and qualification](BODY_CLEARANCE.md).
 - [ ] Qualify correct overhead, footstep and mirrored side-edge obstruction selection, with open/high-ceiling/occluded controls, before promoting survey targeting into live recovery.
 - [ ] Qualify camera-origin delivery before using the pitch accumulator as body-relative pose. Retained upright trunk edges indicate upward viewing despite a downward estimate; a later ordinary homing sequence again reported zero while the image remained upward-looking. Accepted mouse counts and a completed open-loop calibration are not measured physical orientation.
-- [x] Invalidate an established camera origin before recalibration motion and recheck pause/emergency after final settling and lease cleanup, before publishing success. Interrupted return, backend failure, final-settle and cleanup regressions preserve the measured sensitivity/profile but leave origin validity false; invalid requests preserve the prior origin. This corrects state publication, not physical horizon delivery.
+- [x] Invalidate an established camera origin before recalibration lease issuance (which itself releases backend inputs) and recheck pause/emergency after final settling and lease cleanup, before publishing success. Issue-time failure, interrupted return, backend failure, final-settle and cleanup regressions preserve the measured sensitivity/profile but leave origin validity false; invalid requests and pre-existing interlocks preserve the prior origin. This corrects state publication, not physical horizon delivery.
 - [x] Distinguish controller starvation from action-backed collision stalls. The existing bounded no-input startup guard now reports `controller.starvation`, retains its actual cause, and does not nominate a physical obstacle recovery or count toward the two-stall observation fallback. Regression coverage includes release, memory attribution and fallback exclusion; live movement remains a separate gate.
 - [x] Preserve run-lifetime startup movement evidence across progress-window resets, and exclude typed controller starvation from failure-derived canonical perception questions. Explicit operator/model requests remain independent; regression cases retain later genuine stalls and new-run starvation.
 - [x] Qualify the optional external raw-motion adapter through the actual temporal client without actuators, including matching replies, retired-request drainage and fresh option context after reset. Private deployment configuration and measurements remain outside this repository. This is delivery/reset qualification, not live movement, survival competence, online learning or a universal latency guarantee.
@@ -57,6 +57,17 @@ dismissed via a screenshot-gated menu click; normal navigation, replacement
 agent readiness and recording recovered with the same game/GPU processes.
 The saved baseline configuration was used for this recovery; the earlier
 private canary remains retired. Detailed deployment receipts stay private.
+
+A later natural AFK episode did not repeat that successful click recovery:
+two separate one-click navigation attempts failed their normal-HUD gate. The
+launcher was contained before escalation. A desktop-focus click variant also
+failed; one bounded supervisor-owned sneak tap subsequently restored the HUD.
+The view changed markedly upward across backend attachment, lease issuance,
+the tap and cleanup despite zero commanded camera deltas. This does not isolate
+which boundary moved the view. Do not promote the click path as universally
+reliable or treat command integration as observed camera orientation. The
+planned small camera-pulse comparison never reached actuation; its failed
+dependency preflight was retained, not counted as a physical experiment.
 
 The trace also exposed a training-data limitation: the retained trajectory frame
 is the observation at action acceptance, not necessarily the asynchronous
