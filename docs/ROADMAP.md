@@ -26,6 +26,7 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Make the focused crosshair probe produce useful, correctly grounded live answers within the small model's output budget. On the live 1920x1054 dirt-overhang frame, the strict two-field probe returned `dirt` at 0.90 confidence in 36.96s; source/current crop dHash matched and RGB-grid drift was 0.318 against the 1.0 admission limit.
 - [x] Implement an observation-only visible-surface survey for body-clearance investigation: one nullable underside/riser/side-face point, exact WORLD provenance, and no motor tracks or action permissions. Retained-image probing is executable; this is not a measured body collision or a local 3D map. See [body-clearance scope and qualification](BODY_CLEARANCE.md).
 - [ ] Qualify correct overhead, footstep and mirrored side-edge obstruction selection, with open/high-ceiling/occluded controls, before promoting survey targeting into live recovery.
+- [ ] Distinguish controller starvation from action-backed collision stalls before using either as evidence for local body/world geometry; demonstrate a fresh accepted movement prediction after a retired worker response is drained by its owner.
 - [ ] Demonstrate autonomous soft-block clearance and escape from the observed dirt pocket.
 - [ ] Demonstrate three consecutive verified log acquisitions without manual intervention or game restart; extend item recognition only from calibrated evidence if the local tree variant requires it.
 - [ ] Demonstrate a verified log-to-planks inventory transformation, then use that run to select the next progression upgrade.
@@ -43,6 +44,14 @@ perception and replanning, so the runtime pure-idle fallback marker remained
 unused: its live acceptance gate has **not** passed. No post-observation escape,
 new acquisition or crafting success is claimed; the visible 10 dirt and 15
 spruce logs are pre-existing stock.
+
+A later read-only audit of the same agent's 193 contiguous recorded steps found
+no locomotion key presses in either latest run: `b404fae` (37 steps) and
+`177a7b0` (21 steps). Both three-second failures used `locomotion.stalled`, but
+the verifier also emits that code for insufficient commanded movement. These
+are controller-starvation evidence, not proof of a terrain collision. No worker
+stdout was consumed externally and no in-flight shared frame was overwritten to
+force resubmission. The old idle-stall fallback eligibility remains unchanged.
 
 Deployment incident: an intent-lock/IPC timeout during the first reload let the
 outer launcher replace the supervisor; Minecraft and the GPU model survived.

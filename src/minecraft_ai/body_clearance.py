@@ -51,13 +51,24 @@ class BodyClearanceInspection:
     candidate: VisibleClearanceSurface | None
     latency_ms: float
     raw_response: str
+    model_input_sha256: str
+    model_input_size: tuple[int, int]
+    validation_error: str | None = None
+
+
+class BodyClearanceValidationError(ValueError):
+    """Rejected submitted reply with its evidence retained for honest evaluation."""
+
+    def __init__(self, inspection: BodyClearanceInspection) -> None:
+        super().__init__(inspection.validation_error)
+        self.inspection = inspection
 
 
 class _VisionModel(Protocol):
     def inspect(self, prompt: str, *, image_bytes: bytes, mime_type: str) -> ModelResponse: ...
 
 
-def _survey_image(frame: CapturedFrame) -> tuple[bytes, PerceptionEvidence]:
+def _survey_image(frame: CapturedFrame) -> tuple[bytes, PerceptionEvidence, tuple[int, int]]:
     if frame.width <= 0 or frame.height <= 0 or not frame.bgra:
         raise ValueError("clearance survey requires a nonempty captured frame")
     image_module = importlib.import_module("PIL.Image")
@@ -87,13 +98,20 @@ def _survey_image(frame: CapturedFrame) -> tuple[bytes, PerceptionEvidence]:
         )
     buffer = io.BytesIO()
     crop.save(buffer, format="PNG")
-    return buffer.getvalue(), evidence
+    return buffer.getvalue(), evidence, (int(crop.width), int(crop.height))
 
 
-def _surface_prompt() -> str:
+def _surface_prompt(requested_feature: SurfaceFeature | None) -> str:
+    selection = (
+        "Locate ONE clearly visible nearby surface relevant to inspecting the immediate passage. "
+        if requested_feature is None
+        else f"Locate ONLY a clearly visible nearby {requested_feature}. "
+        "Do not substitute another feature or the most visually prominent trunk face. "
+        "If the requested feature is hidden, absent or uncertain, use unknown and a null point. "
+    )
     return (
-        "Minecraft first-person view. Locate ONE clearly visible nearby surface relevant "
-        "to inspecting the immediate passage. An underside is the bottom face of an "
+        "Minecraft first-person view. " + selection
+        + "An underside is the bottom face of an "
         "overhang; a riser is the raised vertical front face of a step, not its top; "
         "a side_face is a vertical face bordering the passage. Pick a point INSIDE the "
         "visible face, not its edge. Do not select the ground supporting the player, "
@@ -143,9 +161,16 @@ class BodyClearanceSurveyor:
 
     model: _VisionModel
 
-    def inspect(self, frame: CapturedFrame) -> BodyClearanceInspection:
-        image_bytes, evidence = _survey_image(frame)
-        prompt = _surface_prompt()
+    def inspect(
+        self, frame: CapturedFrame, *, requested_feature: SurfaceFeature | None = None,
+    ) -> BodyClearanceInspection:
+        if requested_feature is not None and requested_feature not in {
+            "underside", "riser", "side_face",
+        }:
+            raise ValueError("unsupported requested clearance feature")
+        image_bytes, evidence, image_size = _survey_image(frame)
+        model_input_hash = hashlib.sha256(image_bytes).hexdigest()
+        prompt = _surface_prompt(requested_feature)
         schema = _SurfaceResponse.model_json_schema()
         constrained = getattr(self.model, "inspect_constrained", None)
         structured = getattr(self.model, "inspect_structured", None)
@@ -162,13 +187,23 @@ class BodyClearanceSurveyor:
         else:
             response = self.model.inspect(prompt, image_bytes=image_bytes, mime_type="image/png")
         # Do not let last-key-wins JSON hide a conflicting surface nomination.
-        json.loads(response.text, object_pairs_hook=_unique_fields)
-        parsed = _SurfaceResponse.model_validate_json(response.text)
+        try:
+            json.loads(response.text, object_pairs_hook=_unique_fields)
+            parsed = _SurfaceResponse.model_validate_json(response.text)
+        except ValueError as exc:
+            raise BodyClearanceValidationError(BodyClearanceInspection(
+                evidence=evidence, candidate=None, latency_ms=response.latency_ms,
+                raw_response=response.text, model_input_sha256=model_input_hash,
+                model_input_size=image_size,
+                validation_error=f"{type(exc).__name__}: {exc}"[:2048],
+            )) from exc
         candidate = None
         if (
             parsed.feature is not None and parsed.feature != "unknown"
             and parsed.point is not None and parsed.confidence is not None
             and parsed.confidence > 0
+            and all(0 < coordinate < 1 for coordinate in parsed.point)
+            and (requested_feature is None or parsed.feature == requested_feature)
         ):
             candidate = VisibleClearanceSurface(
                 feature=parsed.feature,
@@ -181,4 +216,5 @@ class BodyClearanceSurveyor:
         return BodyClearanceInspection(
             evidence=evidence, candidate=candidate,
             latency_ms=response.latency_ms, raw_response=response.text,
+            model_input_sha256=model_input_hash, model_input_size=image_size,
         )

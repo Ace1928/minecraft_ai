@@ -40,6 +40,12 @@ Run one retained-image qualification when the configured local model is idle:
 .venv/bin/python scripts/probe_body_clearance.py retained-view.png --output survey.json
 ```
 
+To test a particular feature instead of allowing a prominent trunk to satisfy
+the general survey, add `--feature underside` (or `riser` / `side_face`). This
+changes the question, not the answer: a mismatched feature is retained in the
+raw response but produces no candidate. A point on the crop boundary also
+abstains; it is not clipped into the image or accepted as an interior target.
+
 The tool requires the already-running single-slot server, refuses busy or
 unconfirmed availability, never starts a model or game, and will not overwrite
 an evidence record. Availability is advisory; the server's single slot serializes
@@ -73,6 +79,22 @@ establishes overlap with the body, a removable obstruction, a clear route, or a
 useful action. Neither qualified underside/riser discrimination; no open or
 occluded control was evaluated. Subsequent attempted probes deferred on model
 availability instead of stopping live cognition. The survey remains offline.
+
+### Feature-conditioned follow-up: failed localization, not promotion
+
+On exactly the same upward image and WORLD crop, the explicit `underside`
+request returned `underside`, point `(0.3, 0.5)` in the crop, confidence 0.90,
+after 32.24 seconds. At the actual 512×236 model-input resolution that point is
+approximately `(154, 118)`, inside the **vertical trunk face**, not its exposed
+bottom face. The label changed; the requested geometric distinction did not
+pass. Do not turn this high-confidence error into a collider or mining target.
+
+The exact resized PNG SHA-256, recomputed from the retained original, is
+`5d2e425cb5ab28713d0f181b8913b31d55d3fe5d1f34f351703168e601fe9385`.
+The probe predates the addition of this field to emitted reports. New records
+include model-input dimensions/hash and retain malformed raw replies as explicit
+validation errors instead of silently dropping submitted failures. The live
+recovery path is unchanged; the useful body-clearance gate remains open.
 
 ## What this does not establish
 

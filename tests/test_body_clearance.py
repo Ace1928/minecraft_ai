@@ -7,7 +7,7 @@ import json
 import pytest
 from PIL import Image
 
-from minecraft_ai.body_clearance import BodyClearanceSurveyor
+from minecraft_ai.body_clearance import BodyClearanceSurveyor, BodyClearanceValidationError
 from minecraft_ai.models import ModelResponse
 from minecraft_ai.perception import EvidenceRegion, ScreenRegion
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
@@ -85,6 +85,8 @@ def test_body_clearance_reports_visible_candidate_with_exact_frame_provenance(fe
     image = Image.open(io.BytesIO(model.calls[0][2])).convert("RGB")
     assert image.size == expected.size
     assert image.tobytes() == expected.tobytes()  # No labels, header, or collage.
+    assert result.model_input_sha256 == hashlib.sha256(model.calls[0][2]).hexdigest()
+    assert result.model_input_size == image.size
     assert not hasattr(result, "claims")
     assert not hasattr(result, "tracks")
     assert not hasattr(result.candidate, "action_permissions")
@@ -183,12 +185,12 @@ def test_body_clearance_duplicate_fields_are_not_last_value_wins(duplicate: str)
 def test_body_clearance_uses_best_available_model_contract_once(
     model_type: type[_PlainModel], route: str,
 ) -> None:
-    model = model_type('{"feature":"side_face","point":[0,1],"confidence":1}')
+    model = model_type('{"feature":"side_face","point":[0.25,0.75],"confidence":1}')
     result = BodyClearanceSurveyor(model).inspect(_frame())
     assert len(model.calls) == 1
     assert model.calls[0][0] == route
     assert result.candidate is not None
-    assert result.candidate.point == pytest.approx((0, 0.84))
+    assert result.candidate.point == pytest.approx((0.25, 0.63))
     metadata = model.calls[0][3]
     if route != "plain":
         assert metadata["name"]
@@ -199,3 +201,90 @@ def test_body_clearance_uses_best_available_model_contract_once(
     if route == "constrained":
         assert isinstance(metadata["grammar"], str)
         assert "root" in metadata["grammar"]
+
+
+@pytest.mark.parametrize("point", (
+    [0, 0.5], [0.5, 0], [1, 0.5], [0.5, 1], [0, 0], [1, 1],
+))
+def test_body_clearance_boundary_points_abstain_without_clipping(point: list[float]) -> None:
+    raw = json.dumps({"feature": "riser", "point": point, "confidence": 0.9})
+    model = _PlainModel(raw)
+    result = BodyClearanceSurveyor(model).inspect(_frame())
+    assert result.candidate is None
+    assert result.raw_response == raw
+    assert len(model.calls) == 1
+
+
+@pytest.mark.parametrize("requested", ("underside", "riser", "side_face"))
+@pytest.mark.parametrize("observed", ("underside", "riser", "side_face", "unknown"))
+def test_body_clearance_requested_feature_cannot_be_replaced_by_salient_other_surface(
+    requested: str, observed: str,
+) -> None:
+    raw = json.dumps({"feature": observed, "point": [0.5, 0.5], "confidence": 0.9})
+    model = _PlainModel(raw)
+    result = BodyClearanceSurveyor(model).inspect(
+        _frame(), requested_feature=requested,  # type: ignore[arg-type]
+    )
+    assert result.raw_response == raw
+    assert len(model.calls) == 1
+    if requested == observed:
+        assert result.candidate is not None
+        assert result.candidate.feature == requested
+    else:
+        assert result.candidate is None
+
+
+@pytest.mark.parametrize("requested", ("underside", "riser", "side_face"))
+def test_body_clearance_requested_feature_is_expressed_in_prompt(requested: str) -> None:
+    raw = '{"feature":"unknown","point":null,"confidence":null}'
+    model = _PlainModel(raw)
+    surveyor = BodyClearanceSurveyor(model)
+    surveyor.inspect(_frame())
+    surveyor.inspect(_frame(), requested_feature=requested)  # type: ignore[arg-type]
+    assert len(model.calls) == 2
+    assert model.calls[1][1] != model.calls[0][1]
+    assert requested in model.calls[1][1]
+
+
+@pytest.mark.parametrize("requested", ("unknown", "head", "", True, 42))
+def test_body_clearance_invalid_requested_feature_rejected_before_model_call(
+    requested: object,
+) -> None:
+    model = _PlainModel('{"feature":"riser","point":[0.5,0.5],"confidence":0.9}')
+    with pytest.raises(ValueError):
+        BodyClearanceSurveyor(model).inspect(
+            _frame(), requested_feature=requested,  # type: ignore[arg-type]
+        )
+    assert model.calls == []
+
+
+@pytest.mark.parametrize("raw", (
+    "not JSON",
+    '{"feature":"unknown","feature":"riser","point":[0.5,0.5],"confidence":0.9}',
+    '{"feature":"riser","point":[true,0.5],"confidence":0.9}',
+    '{"feature":"riser","point":[0.5,NaN],"confidence":0.9}',
+    '{"feature":"riser","point":[0.5,0.5],"confidence":1.1}',
+    '{"feature":"riser","point":[0.5,0.5],"confidence":"0.9"}',
+))
+def test_body_clearance_validation_failure_retains_exact_inspection_evidence(raw: str) -> None:
+    frame = _frame(640, 400)
+    model = _PlainModel(raw)
+    with pytest.raises(BodyClearanceValidationError) as error:
+        BodyClearanceSurveyor(model).inspect(frame)
+    assert isinstance(error.value, ValueError)
+    inspection = error.value.inspection
+    assert inspection.candidate is None
+    assert inspection.raw_response == raw
+    assert inspection.latency_ms == 12.5
+    assert inspection.validation_error
+    assert len(model.calls) == 1
+    assert inspection.evidence.frame_id == frame.frame_id
+    assert inspection.evidence.captured_ns == frame.captured_ns
+    assert (inspection.evidence.crop_width, inspection.evidence.crop_height) == (640, 336)
+    source = Image.frombytes("RGBA", (640, 400), frame.bgra, "raw", "BGRA").convert("RGB")
+    assert inspection.evidence.pixel_sha256 == hashlib.sha256(
+        source.crop((0, 0, 640, 336)).tobytes()
+    ).hexdigest()
+    submitted_png = model.calls[0][2]
+    assert inspection.model_input_sha256 == hashlib.sha256(submitted_png).hexdigest()
+    assert inspection.model_input_size == Image.open(io.BytesIO(submitted_png)).size

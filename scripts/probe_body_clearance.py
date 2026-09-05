@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx
 from PIL import Image
 
-from minecraft_ai.body_clearance import BodyClearanceSurveyor
+from minecraft_ai.body_clearance import BodyClearanceSurveyor, BodyClearanceValidationError
 from minecraft_ai.config import load_config
 from minecraft_ai.models import OpenAICompatibleLocalModel
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
@@ -29,6 +29,7 @@ def main() -> None:
     parser.add_argument("image", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--config", type=Path)
+    parser.add_argument("--feature", choices=("underside", "riser", "side_face"))
     args = parser.parse_args()
     if args.output.exists():
         raise SystemExit("output already exists; choose a new evidence record")
@@ -66,11 +67,19 @@ def main() -> None:
         frame_id=0, captured_ns=1, width=image.width, height=image.height,
         bgra=image.tobytes("raw", "BGRA"),
     )
-    result = BodyClearanceSurveyor(model).inspect(frame)
+    try:
+        result = BodyClearanceSurveyor(model).inspect(frame, requested_feature=args.feature)
+    except BodyClearanceValidationError as exc:
+        result = exc.inspection
     report = {
         "mode": "offline_observation_only",
         "image_sha256": hashlib.sha256(image_bytes).hexdigest(),
         "model": config.model_id,
+        "requested_feature": args.feature,
+        "status": "parsed" if result.validation_error is None else "validation_error",
+        "validation_error": result.validation_error,
+        "model_input_png_sha256": result.model_input_sha256,
+        "model_input_size": result.model_input_size,
         "evidence": result.evidence.model_dump(mode="json"),
         "candidate": None if result.candidate is None else asdict(result.candidate),
         "latency_ms": result.latency_ms,
