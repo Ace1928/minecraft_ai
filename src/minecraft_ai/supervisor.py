@@ -310,12 +310,13 @@ class Supervisor:
                 return
             if self.state in {SupervisorState.STOPPED, SupervisorState.STOPPING}:
                 return
-            self.motor.revoke("operator-pause")
-            if self.state == SupervisorState.FAILSAFE:
-                return
-            validate_transition(self.state, SupervisorState.PAUSED)
-            self.state = SupervisorState.PAUSED
-            self._persist_status()
+            if self.state != SupervisorState.FAILSAFE:
+                validate_transition(self.state, SupervisorState.PAUSED)
+                self.state = SupervisorState.PAUSED
+            try:
+                self.motor.revoke("operator-pause")
+            finally:
+                self._persist_status()
 
     def resume(self) -> None:
         with self._lock:
@@ -675,11 +676,13 @@ class Supervisor:
                 if self.state == SupervisorState.PAUSED and operator_pause_latched()
                 else reason
             )
-            self.motor.revoke(effective_reason)
             if self.state in {SupervisorState.ARMED, SupervisorState.RUNNING}:
                 validate_transition(self.state, SupervisorState.PAUSED)
                 self.state = SupervisorState.PAUSED
-            self._persist_status()
+            try:
+                self.motor.revoke(effective_reason)
+            finally:
+                self._persist_status()
 
     def fail(self, reason: str) -> None:
         with self._lock:

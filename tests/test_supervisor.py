@@ -201,7 +201,7 @@ def test_authenticated_malformed_action_revokes_previous_hold(
         supervisor.apply_motor_action(lease_id, {"sequence": 2})
 
 
-@pytest.mark.parametrize("operation", ["fault", "stop", "stop-again"])
+@pytest.mark.parametrize("operation", ["fault", "stop", "stop-again", "pause", "disarm"])
 def test_cleanup_failure_cannot_leave_supervisor_running(
     monkeypatch: pytest.MonkeyPatch, operation: str,
 ) -> None:
@@ -223,13 +223,21 @@ def test_cleanup_failure_cannot_leave_supervisor_running(
     with pytest.raises(OSError, match="synthetic release failure"):
         if operation == "fault":
             supervisor.fail("test-fault")
+        elif operation == "pause":
+            supervisor.pause()
+        elif operation == "disarm":
+            supervisor.disarm()
         else:
             supervisor.stop()
 
-    expected = SupervisorState.FAILSAFE if operation == "fault" else SupervisorState.STOPPED
+    expected = {
+        "fault": SupervisorState.FAILSAFE,
+        "pause": SupervisorState.PAUSED,
+        "disarm": SupervisorState.PAUSED,
+    }.get(operation, SupervisorState.STOPPED)
     assert supervisor.state == expected and published == [expected]
     assert supervisor.motor.lease is None and supervisor.backend.lease_id is None
-    assert supervisor._stop.is_set() is (operation != "fault")
+    assert supervisor._stop.is_set() is operation.startswith("stop")
 
 
 @pytest.mark.parametrize("prior_failure", [False, True])
