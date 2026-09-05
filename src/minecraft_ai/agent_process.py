@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import platform
-import signal
 import sys
 import time
 from pathlib import Path
@@ -21,7 +20,7 @@ from .platforms.bedrock_session import BedrockSession
 from .platforms.bedrock_x11 import IsolationError
 from .policy_service import GroundedPolicyRouter, TemporalPolicyClient
 from .roles import get_role
-from .runtime import AgentRuntime
+from .runtime_factory import RuntimeStartupCleanupIncomplete, run_agent_runtime
 from .storage import StateDatabase
 from .supervisor import send_command
 from .trajectory import TrajectoryRecorder, new_trajectory_id
@@ -50,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
 
     paths = app_paths()
     database = StateDatabase(paths.state_db)
+    close_database = True
     try:
         persisted = database.load_skills()
         bootstrap = build_bootstrap_skill_library()
@@ -211,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         # Startup and migrations may wait for the operator console, but the
         # realtime loop must never spend seconds blocked behind a UI write.
         database.set_busy_timeout_ms(100)
-        runtime = AgentRuntime(
+        runtime_kwargs = dict(
             perception=perception,
             blackboard=blackboard,
             executor=executor,
@@ -231,15 +231,14 @@ def main(argv: list[str] | None = None) -> int:
             trajectory_disabled_reason=trajectory_disabled_reason,
         )
 
-        def _stop(_signum: int, _frame: object) -> None:
-            runtime.stop()
-
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            signal.signal(sig, _stop)
-        runtime.run_forever()
+        run_agent_runtime(runtime_kwargs, factory_config=config.runtime_factory)
         return 0
+    except RuntimeStartupCleanupIncomplete:
+        close_database = False
+        raise
     finally:
-        database.close()
+        if close_database:
+            database.close()
 
 
 if __name__ == "__main__":

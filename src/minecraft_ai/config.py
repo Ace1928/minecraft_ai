@@ -117,6 +117,18 @@ class PolicyConfig(BaseModel):
         return self.camera_scale if self.camera_pitch_scale is None else self.camera_pitch_scale
 
 
+class RuntimeFactoryConfig(BaseModel):
+    """Explicit trusted local planning integration, never an installed default."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reference: str = Field(
+        pattern=r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*$",
+        max_length=256,
+    )
+    startup_timeout_s: float = Field(default=120.0, ge=1.0, le=600.0)
+
+
 class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -130,6 +142,7 @@ class RuntimeConfig(BaseModel):
     stale_frame_ms: int = Field(default=500, ge=100, le=5000)
     stale_frame_consecutive_limit: int = Field(default=3, ge=1, le=20)
     lease_renew_ms: int = Field(default=500, ge=100, le=2000)
+    runtime_factory: RuntimeFactoryConfig | None = None
     high_level: ModelConfig = Field(default_factory=ModelConfig)
     vision_language: ModelConfig = Field(default_factory=ModelConfig)
     # Semantic/LATENT body (normally STEVE-1). Existing configurations retain

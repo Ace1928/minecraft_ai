@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import math
 from collections import deque
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -74,6 +75,15 @@ class SingleWorkerDaemonExecutor:
             self._condition.notify_all()
         if wait:
             self._thread.join()
+
+    def wait_closed(self, timeout_s: float) -> bool:
+        """Boundedly observe worker exit after shutdown; never stop running work."""
+        if not math.isfinite(timeout_s) or timeout_s < 0:
+            raise ValueError("worker wait timeout must be finite and nonnegative")
+        if threading.current_thread() is self._thread:
+            return False
+        self._thread.join(timeout=timeout_s)
+        return not self._thread.is_alive()
 
     def _worker(self) -> None:
         while True:

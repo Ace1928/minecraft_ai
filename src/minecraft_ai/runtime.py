@@ -4,6 +4,7 @@ import concurrent.futures
 import copy
 import json
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -1329,6 +1330,8 @@ class AgentRuntime:
     trajectory: TrajectoryRecorder | None = None
     trajectory_disabled_reason: str | None = None
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
+    _run_started: bool = field(default=False, init=False)
+    _pre_run_closed_resources: set[str] = field(default_factory=set, init=False, repr=False)
     _sequence: int = field(default=0, init=False)
     _last_renew_ns: int = field(default=0, init=False)
     _last_cognition_ns: int = field(default=0, init=False)
@@ -1420,7 +1423,47 @@ class AgentRuntime:
     def stop(self) -> None:
         self._stop.set()
 
+    def close_before_run(self, *, timeout_s: float = 2.0) -> bool:
+        """Drain an unstarted runtime without claiming supervisor authority.
+
+        The factory must not start inference/gameplay or replace owned resources.
+        Its private lifecycle must be drained first. Explicit waits share one
+        deadline; perception/executor close callbacks must cooperate because this
+        method cannot hard-preempt arbitrary callbacks. False retains ownership
+        for retry, including the caller-owned database, which is never closed here.
+        """
+        self._stop.set()
+        if self._run_started:
+            return False
+        if not math.isfinite(timeout_s) or timeout_s < 0:
+            raise ValueError("pre-run cleanup timeout must be finite and nonnegative")
+        deadline = time.monotonic() + timeout_s
+        closed = self._pre_run_closed_resources
+        try:
+            if "pool" not in closed:
+                self._pool.shutdown(wait=False, cancel_futures=True)
+                if not self._pool.wait_closed(max(0.0, deadline - time.monotonic())):
+                    return False
+                closed.add("pool")
+            for name in ("perception", "executor", "trajectory"):
+                if name in closed:
+                    continue
+                resource = getattr(self, name)
+                if resource is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    if name == "trajectory":
+                        resource.close(timeout_s=remaining)
+                    else:
+                        resource.close()
+                closed.add(name)
+        except Exception:
+            return False
+        return True
+
     def run_forever(self) -> None:
+        self._run_started = True
         period = 1.0 / self.motor_hz
         self._lease_thread = None
         try:

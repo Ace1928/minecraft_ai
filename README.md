@@ -148,6 +148,33 @@ This interface does not select, load or activate a custom model. Deployment,
 learning state and proprietary adapter details remain external; compatibility
 tests do not establish gameplay competence.
 
+### Optional local runtime factory
+
+A trusted, separately installed planner can opt into the canonical agent process
+through local configuration only: `runtime_factory.reference` is a
+`module:callable`, and `runtime_factory.startup_timeout_s` bounds construction
+renewals (default 120 seconds). The default remains the existing runtime; no
+custom module is imported unless configured.
+
+The callable receives `runtime_kwargs` and a sticky `cancel_event`, returning an
+`AgentRuntime`. This first integration permits replacing `high_level` only;
+preserve the supplied executor/policy, camera state, perception, database, lease
+and trajectory ownership. Construction must not start inference or game input.
+It renews only an already-valid lease, checks pause/emergency cancellation and
+joins its renewal worker before normal runtime startup. It cannot revive an
+expired lease or cover the earlier process/database/capture assembly gap.
+
+The result must supply `close_constructed_runtime() -> bool`: drain private
+owners, then call `close_before_run(timeout_s=remaining_budget)`. Neither cleanup
+path may change supervisor state. Return exactly `True` only after cleanup;
+otherwise borrowed resources and the database remain retained until process
+exit. A factory whose partial construction cannot safely close must raise
+`RuntimeStartupCleanupIncomplete` from `minecraft_ai.runtime_factory` instead
+of an ordinary exception. Normal runtime shutdown remains its own responsibility.
+Import, native constructors and arbitrary close callbacks are cooperatively
+cancelled, not forcibly preempted. This is a trusted extension boundary, not a
+sandbox or a claim of live model activation.
+
 ## License
 
 Apache License 2.0. Minecraft is a trademark and intellectual property of Microsoft/Mojang. This project is independent and is not affiliated with, endorsed by, or sponsored by Microsoft or Mojang.
