@@ -33,6 +33,7 @@ from .safety import (
     MAX_MOTOR_LEASE_TTL_MS,
     FakeInputBackend,
     InputBackend,
+    InputRouteUnavailable,
     MotorAction,
     MotorGate,
     SupervisorState,
@@ -270,6 +271,9 @@ class Supervisor:
         self.started_monotonic_ns = time.monotonic_ns()
         self.last_command_monotonic_ns = self.started_monotonic_ns
         self.last_fault: str | None = None
+        # Preserve typed recovery authority across later runtime wrappers and
+        # retirement. Only a deliberately replaced generation starts clean.
+        self.fault_code: str | None = None
         self.world_camera_pitch_units = 0
         self.world_camera_updates = 0
         self.world_camera_origin_calibrated = False
@@ -480,6 +484,8 @@ class Supervisor:
                 # crossed at least one Bedrock render/input boundary.
                 time.sleep(0.1)
             except Exception as exc:
+                if isinstance(exc, InputRouteUnavailable):
+                    self.fault_code = exc.fault_code
                 if emergency_stop_latched():
                     self.fail("emergency-stop-latched")
                 elif operator_pause_latched():
@@ -488,11 +494,14 @@ class Supervisor:
                     self.fail(f"camera-calibration:{type(exc).__name__}")
                 raise
             finally:
-                self.motor.revoke(
-                    "operator-pause"
-                    if operator_pause_latched()
-                    else "camera-calibration-complete"
-                )
+                try:
+                    self.motor.revoke(
+                        "operator-pause"
+                        if operator_pause_latched()
+                        else "camera-calibration-complete"
+                    )
+                finally:
+                    self._persist_status()
             # The final settle and lease cleanup are still interruptible;
             # never publish a valid origin after either latches operator intent.
             if not self._actuation_permitted():
@@ -568,11 +577,19 @@ class Supervisor:
             # still alive. Refresh the same capability atomically with action
             # acceptance so the 20 Hz motor stream cannot starve a separately
             # queued heartbeat. Silence still expires at the fixed safety cap.
-            self.motor.apply(
-                lease_id,
-                action,
-                accepted_action_ttl_ms=MAX_MOTOR_LEASE_TTL_MS,
-            )
+            try:
+                self.motor.apply(
+                    lease_id,
+                    action,
+                    accepted_action_ttl_ms=MAX_MOTOR_LEASE_TTL_MS,
+                )
+            except InputRouteUnavailable as exc:
+                self.fault_code = exc.fault_code
+                try:
+                    self.fail(f"motor-action:{type(exc).__name__}")
+                except Exception as cleanup_error:
+                    exc.add_note(f"motor cleanup also failed: {type(cleanup_error).__name__}")
+                raise
             if action.camera_semantics == "world" and (action.mouse_dx or action.mouse_dy):
                 self.world_camera_pitch_units += action.mouse_dy
                 self.world_camera_updates += 1
@@ -746,6 +763,7 @@ class Supervisor:
                     "calibration_id": self.world_camera_calibration_id,
                 },
                 "last_fault": self.last_fault,
+                "fault_code": self.fault_code,
                 "emergency_stop_latched": emergency_stop_latched(),
                 "operator_pause_latched": operator_pause_latched(),
                 "uptime_s": round(

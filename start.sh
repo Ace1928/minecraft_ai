@@ -13,6 +13,8 @@ START_FAILURES_BEFORE_BEDROCK_RELAUNCH="${MINECRAFT_AI_START_FAILURES_BEFORE_BED
 START_FAILURE_GRACE_S="${MINECRAFT_AI_START_FAILURE_GRACE_S:-420}"
 bedrock_start_failures=0
 bedrock_failure_started_s=0
+input_route_hold_generation=""
+input_route_recovery_adopted=false
 
 if [ ! -x "$CLI" ] || [ ! -x "$PYTHON" ]; then
     echo "Missing repo environment. Run: python3 -m venv .venv && .venv/bin/pip install -e '.[full,dev]'" >&2
@@ -100,20 +102,85 @@ reset_start_failures() {
     bedrock_failure_started_s=0
 }
 
+input_route_held() {
+    local payload observation
+    input_route_recovery_adopted=false
+    payload="$("$CLI" status 2>/dev/null)" || payload=""
+    observation="$(printf '%s' "$payload" | "$PYTHON" -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except (ValueError, TypeError):
+    raise SystemExit(1)
+if not isinstance(payload, dict):
+    raise SystemExit(1)
+generation = payload.get("session_id")
+if payload.get("fault_code") == "input-route-unverified":
+    print("hold:" + (generation if isinstance(generation, str) and generation else "unknown"))
+elif (
+    isinstance(generation, str) and generation
+    and payload.get("fault_code", "unknown") is None
+    and payload.get("supervisor_reachable") is not False
+    and payload.get("state") == "RUNNING"
+    and payload.get("live_capable") is True
+    and payload.get("motor_lease_active") is True
+    and payload.get("emergency_stop_latched") is False
+    and payload.get("operator_pause_latched") is False
+    and isinstance(payload.get("agent"), dict)
+    and payload["agent"].get("alive") is True
+):
+    print("healthy:" + generation)
+' 2>/dev/null)" || observation=""
+    if [[ "$observation" == hold:* ]]; then
+        if [ -z "$input_route_hold_generation" ]; then
+            echo "Input routing is unverified; holding automatic recovery and preserving Bedrock." \
+                "A deliberately recovered healthy supervisor generation is required." >&2
+        fi
+        input_route_hold_generation="${observation#hold:}"
+    fi
+    if [ -z "$input_route_hold_generation" ]; then
+        return 1
+    fi
+    if [[ "$observation" == healthy:* ]] \
+        && [ "${observation#healthy:}" != "$input_route_hold_generation" ] \
+        && readiness_ok
+    then
+        echo "A healthy replacement supervisor is ready; adopting the recovered agent."
+        input_route_hold_generation=""
+        input_route_recovery_adopted=true
+        reset_start_failures
+        return 1
+    fi
+    # No stop, navigation, calibration, pointer warp, or retry is allowed here.
+    # Remain alive: exiting also invokes the service unit's Bedrock ExecStop.
+    return 0
+}
+
 abort_failed_start() {
     local result="$1"
     local force_relaunch="${2:-false}"
     local now_s elapsed_s
-    stop_runtime
     if [ "$result" -eq 64 ]; then
+        stop_runtime
         return "$result"
     fi
     if emergency_latched; then
+        stop_runtime
         return 64
     fi
     if operator_paused; then
+        stop_runtime
         return 65
     fi
+    if input_route_held; then
+        return 69
+    fi
+    if [ "$input_route_recovery_adopted" = true ]; then
+        return 0
+    fi
+    stop_runtime
     now_s="$(date +%s)"
     if [ "$bedrock_failure_started_s" -eq 0 ]; then
         bedrock_failure_started_s="$now_s"
@@ -222,6 +289,12 @@ start_live_runtime() {
         echo "Explicit operator pause is active; persistent startup remains suspended." >&2
         return 65
     fi
+    if input_route_held; then
+        return 69
+    fi
+    if [ "$input_route_recovery_adopted" = true ]; then
+        return 0
+    fi
 
     selected_role="$(runtime_role)"
     result=$?
@@ -321,14 +394,33 @@ echo " Minecraft AI persistent Bedrock runtime"
 echo " Role: configured | capture: $CAPTURE_SOURCE"
 echo "=================================================="
 
-if ! "$CLI" install; then
-    trap - EXIT INT TERM
-    exit 2
-fi
-start_support_services || exit $?
-wait_for_model || exit $?
-
+# A retired route fault also owns startup: fallible model/service bootstrap
+# must not exit through cleanup and destroy an otherwise healthy game.
 while true; do
+    if emergency_latched; then
+        trap - EXIT INT TERM
+        exit 64
+    fi
+    if operator_paused; then
+        sleep "$CHECK_INTERVAL_S"
+        continue
+    fi
+    if ! input_route_held; then
+        break
+    fi
+    sleep "$CHECK_INTERVAL_S"
+done
+
+if [ "$input_route_recovery_adopted" != true ]; then
+    if ! "$CLI" install; then
+        trap - EXIT INT TERM
+        exit 2
+    fi
+    start_support_services || exit $?
+    wait_for_model || exit $?
+fi
+
+while [ "$input_route_recovery_adopted" != true ]; do
     start_live_runtime
     result=$?
     if [ "$result" -eq 0 ]; then
@@ -341,7 +433,7 @@ while true; do
     if [ "$result" -eq 67 ]; then
         exit 67
     fi
-    if [ "$result" -eq 65 ]; then
+    if [ "$result" -eq 65 ] || [ "$result" -eq 69 ]; then
         sleep "$CHECK_INTERVAL_S"
         continue
     fi
@@ -388,6 +480,17 @@ while true; do
     fi
     if operator_paused; then
         failures=0
+        continue
+    fi
+    if input_route_held; then
+        failures=0
+        nonplayable_failures=0
+        continue
+    fi
+    if [ "$input_route_recovery_adopted" = true ]; then
+        failures=0
+        nonplayable_failures=0
+        healthy_generation="$(healthy_agent_generation 2>/dev/null || true)"
         continue
     fi
     if [ "$nonplayable_failures" -eq 0 ]; then
@@ -437,7 +540,7 @@ while true; do
         if [ "$result" -eq 67 ]; then
             exit 67
         fi
-        if [ "$result" -eq 65 ]; then
+        if [ "$result" -eq 65 ] || [ "$result" -eq 69 ]; then
             sleep "$CHECK_INTERVAL_S"
             continue
         fi

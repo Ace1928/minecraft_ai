@@ -11,7 +11,7 @@ from minecraft_ai.mining_control import MiningLeaseGuard
 from minecraft_ai.motor import MotorIntent
 from minecraft_ai.perception import PerceptionBlackboard
 from minecraft_ai.platforms.bedrock_x11 import IsolatedX11InputBackend
-from minecraft_ai.safety import MotorAction, MotorLease, MotorRejected
+from minecraft_ai.safety import InputRouteUnavailable, MotorAction, MotorLease, MotorRejected
 
 
 class _FakeXTest:
@@ -437,7 +437,7 @@ def test_pointer_change_during_chain_does_not_preserve_stale_client_routing(
         child=state["overlay"] if uncertainty == "wrong_subtree" else state["wrapper"],
     )
 
-    with pytest.raises(MotorRejected, match="pointer routing could not be verified"):
+    with pytest.raises(InputRouteUnavailable, match="pointer routing could not be verified"):
         backend.apply(MotorAction(sequence=0, mouse_dx=7, mouse_dy=-9))
 
     assert state["relative"] == []
@@ -532,7 +532,7 @@ def test_unverified_pointer_routing_blocks_positive_input_but_keeps_releases(
         buttons_down=("left",) if positive == "button" else (),
     )
 
-    with pytest.raises(MotorRejected, match="pointer routing could not be verified"):
+    with pytest.raises(InputRouteUnavailable, match="pointer routing could not be verified"):
         backend.apply(action)
 
     assert state["relative"] == []
@@ -548,7 +548,7 @@ def test_unverified_pointer_routing_blocks_positive_input_but_keeps_releases(
 def test_outside_pointer_rejects_positive_input_without_warp(positive: str) -> None:
     backend, state = _pointer_parking_backend()
     state["point"] = (10, 5)
-    with pytest.raises(MotorRejected, match="pointer routing could not be verified"):
+    with pytest.raises(InputRouteUnavailable, match="pointer routing could not be verified"):
         backend.apply(MotorAction(
             sequence=0, mouse_dx=7 if positive == "motion" else 0,
             buttons_down=("left",) if positive == "button" else (),

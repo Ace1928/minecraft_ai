@@ -73,6 +73,12 @@ class MotorRejected(RuntimeError):
     pass
 
 
+class InputRouteUnavailable(MotorRejected):
+    """A verified input-routing prerequisite failed, not the game process."""
+
+    fault_code = "input-route-unverified"
+
+
 MIN_MOTOR_LEASE_TTL_MS = 50
 MAX_MOTOR_LEASE_TTL_MS = 5_000
 

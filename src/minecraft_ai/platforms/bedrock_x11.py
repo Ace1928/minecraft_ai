@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
-from ..safety import MotorAction, MotorLease, MotorRejected
+from ..safety import InputRouteUnavailable, MotorAction, MotorLease, MotorRejected
 
 
 class IsolationError(RuntimeError):
@@ -949,7 +949,7 @@ class IsolatedX11InputBackend:
                 )
                 self._require_positive_input_permitted()
                 if not self._park_pointer_in_game() and not self._targeted:
-                    raise MotorRejected("Minecraft pointer routing could not be verified")
+                    raise InputRouteUnavailable("Minecraft pointer routing could not be verified")
                 self._require_positive_input_permitted()
                 # XTEST MotionNotify detail=1 encodes signed relative distances;
                 # root=None uses this private server's current pointer screen.
@@ -971,7 +971,9 @@ class IsolatedX11InputBackend:
                 self._require_positive_input_permitted()
                 if not absolute_cursor:
                     if not self._park_pointer_in_game() and not self._targeted:
-                        raise MotorRejected("Minecraft pointer routing could not be verified")
+                        raise InputRouteUnavailable(
+                            "Minecraft pointer routing could not be verified"
+                        )
                 self._require_positive_input_permitted()
                 self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
                 self._held_buttons.add(button.lower())

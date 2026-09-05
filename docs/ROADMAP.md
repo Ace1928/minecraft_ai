@@ -2,7 +2,7 @@
 
 The roadmap is ordered by dependency and release gates. Later phases must not bypass earlier safety and observability requirements.
 
-## Current Bedrock execution checkpoint — 2026-09-05
+## Current Bedrock execution checkpoint — 2026-09-06
 
 This is the immediate gameplay critical path, not a claim that whole phases below are complete.
 
@@ -43,6 +43,7 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Authenticated malformed actions revoke previous held input; pause/disarm/fault/stop state and every owned shutdown cleanup progress even if physical release raises. The first error remains attributable. These are fault-injection results, not a claim that an unavailable input server physically released a key.
 - [x] Make capture/GUI geometry resolution read-only and reject changed, clipped or incomplete frame geometry. Confine measured window fitting to a new isolated launch before publishing its session, with existing-session/host paths excluded. Regression coverage and live capture pass; a fresh game launch has deliberately not been exercised on the running world.
 - [x] Reject render-only keyboard focus inside the game subtree and restore the verified private input parent, with interlock and focus readback. Live recovery then opened the pause menu with one Escape tap and returned to normal HUD with one screenshot-bound Resume Game click. This verifies that UI sequence, not sustained locomotion or universal key delivery.
+- [x] Classify exact pointer-route failures separately from generic motor errors and retain that classification through supervisor retirement. The persistent launcher now holds without navigation, calibration or game-restart escalation until an externally recovered healthy generation passes readiness. Regression tests cover 50 held polls/500 simulated seconds, unreadable status, unavailable startup dependencies and failed status publication. Existing launchers do not acquire changed shell functions in place; the current launcher remains explicitly held until a safe handoff.
 - [ ] Complete the end-to-end input audit and retained-image qualification: camera response, held-key continuity after stale frames, geometry/capture consistency, authenticated malformed actions and supervisor cleanup faults. Do not promote accepted input into physical translation or flawless delivery.
 - [ ] Demonstrate a fresh accepted movement prediction after a retired worker response is drained by its owner, then verify actual translation rather than infer it from accepted keys.
 - [ ] Demonstrate autonomous soft-block clearance and escape from the observed dirt pocket.
@@ -89,6 +90,32 @@ autonomous pointer-routing rejection and failed startup homing required guarded
 recovery. The keyboard-focus fix and observed menu sequence restored normal
 startup/readiness with Minecraft and the GPU process unchanged. Camera
 qualification remains open; homing completion is still not physical pose truth.
+
+The later route failure recurred after the keyboard recovery: the private X
+pointer reached `(804, 0)`, outside the drawable whose top is at `y=26`.
+Repeated startup navigation correctly found the world, but homing rejected
+the same unchanged pointer route. The outer launcher was held before its
+generic failure-count path could restart the still-running game.
+
+A separately compiled, window-free, registration-free Win32 query helper
+then found a persistent mismatch: `GetClipCursor` returned the point rectangle
+`(565, 376, 565, 376)` (the earlier Resume-click location), while both
+`GetCursorPos` and private X queries returned `(804, 0)`. This was measured
+first with the AFK overlay and separately with normal-world HUD, retaining
+before/after images and unchanged focus, geometry and neutral inputs. In the
+normal-world run, 31 Windows samples across about 15 seconds agreed. This is
+logical clipping versus physical pointer disagreement, not yet proof of the
+exact camera-delta corruption mechanism.
+
+The pinned WineGDK focus handlers reapply virtual-desktop clipping on desktop
+FocusIn, but one explicit private desktop-focus restoration did **not** fix
+this live state: subsequent query samples retained the same mismatch. That
+negative result is retained. A separate no-input GUI raw-input-sink smoke
+exited cleanly with zero raw events and no observed X focus/pointer/geometry
+change; it does not establish the game's receipt of any future raw packet.
+No clipping setter, hidden pointer warp, raw-input packet forgery, GPU reset
+or game restart was used. The input qualification and live playback gates
+remain open; the public preview is withheld while the agent is not ready.
 
 At the next natural AFK episode the existing launcher performed one
 AWAY-to-IN_WORLD UI action and started the updated runtime, retaining the
