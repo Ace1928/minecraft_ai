@@ -15,7 +15,7 @@ from .models import LanguageModel, ModelMessage, ModelResponse
 from .perception import PerceptionBlackboard
 from .planning import Goal, GoalSource
 from .roles import RoleProfile
-from .skills import SkillLibrary, SkillOutcome, SkillRun
+from .skills import SkillFailureCode, SkillLibrary, SkillOutcome, SkillRun
 from .social import (
     OperatorMessage,
     OperatorMessageKind,
@@ -1043,6 +1043,7 @@ class HighLevelController:
                     run.skill_id
                     for run in context.recent_skill_runs
                     if run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}
+                    and run.failure_code != SkillFailureCode.CONTROLLER_STARVATION
                 )
                 if candidates:
                     decision = decision.model_copy(update={

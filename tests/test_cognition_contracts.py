@@ -18,7 +18,7 @@ from minecraft_ai.perception import (
 )
 from minecraft_ai.roles import get_role
 from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
-from minecraft_ai.skills import SkillLibrary, SkillOutcome, SkillRun
+from minecraft_ai.skills import SkillFailureCode, SkillLibrary, SkillOutcome, SkillRun
 from minecraft_ai.wiki import WikiEvidence
 
 
@@ -1326,6 +1326,80 @@ def test_top_level_research_request_does_not_buy_unrelated_visual_work(
 
     assert decision.ask_perception == ()
     assert decision.research_query == "Minecraft oak plank recipe"
+
+
+@pytest.mark.parametrize("outcome", [SkillOutcome.FAILED, SkillOutcome.TIMED_OUT])
+@pytest.mark.parametrize(
+    ("questions", "instruction", "selected_skill", "expected"),
+    (
+        ((), None, None, ()),
+        (("scene.horizon_visible",), None, None, ("scene.horizon_visible",)),
+        (("obstacle.ahead",), None, None, ("obstacle.ahead",)),
+        ((), "break the blocks in front of you", None, ("target.visible", "target.mineable")),
+        (("scene.horizon_visible",), None, "explore_forward", ("obstacle.ahead",)),
+    ),
+)
+def test_controller_starvation_does_not_invent_perception_but_preserves_explicit_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: SkillOutcome,
+    questions: tuple[str, ...],
+    instruction: str | None,
+    selected_skill: str | None,
+    expected: tuple[str, ...],
+) -> None:
+    context = _context()
+    context.recent_skill_runs = (SkillRun(
+        run_id="starved", skill_id="explore_forward", started_ns=1, ended_ns=2,
+        outcome=outcome, failure_code=SkillFailureCode.CONTROLLER_STARVATION,
+    ),)
+    if instruction is not None:
+        context.operator_messages = (OperatorMessage(
+            message_id="current", created_ns=3, text=instruction,
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),)
+    controller = HighLevelController(_IdleCapturingModel(), build_bootstrap_skill_library())
+    calls = []
+
+    def complete(*_args: object, **_kwargs: object) -> CognitionDecision:
+        calls.append(True)
+        return CognitionDecision(
+            skill_id=selected_skill, request_replan=True, ask_perception=questions,
+        )
+
+    monkeypatch.setattr(controller, "_complete", complete)
+    decision = controller.decide(_board(), context)
+
+    assert calls == [True]
+    assert decision.skill_id == selected_skill
+    assert decision.ask_perception == expected
+    assert decision.request_replan is True
+    if instruction is not None:
+        assert decision.chosen_goal_id == "operator:current"
+
+
+def test_failure_derived_perception_skips_starvation_but_retains_real_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context()
+    context.recent_skill_runs = (
+        SkillRun(
+            run_id="starved", skill_id="explore_forward", started_ns=3, ended_ns=4,
+            outcome=SkillOutcome.FAILED, failure_code=SkillFailureCode.CONTROLLER_STARVATION,
+        ),
+        SkillRun(
+            run_id="mining-failed", skill_id="mine_visible_block", started_ns=1, ended_ns=2,
+            outcome=SkillOutcome.FAILED,
+        ),
+    )
+    controller = HighLevelController(_IdleCapturingModel(), build_bootstrap_skill_library())
+    monkeypatch.setattr(
+        controller, "_complete", lambda *_args, **_kwargs: CognitionDecision(request_replan=True),
+    )
+
+    decision = controller.decide(_board(), context)
+
+    assert decision.skill_id is None
+    assert decision.ask_perception == ("target.visible", "target.mineable")
 
 
 @pytest.mark.parametrize(

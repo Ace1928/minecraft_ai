@@ -1272,6 +1272,67 @@ def test_controller_without_locomotion_reports_starvation_not_collision() -> Non
     assert verdict.evidence_keys == ()  # This branch makes no claim from the changed pixels.
 
 
+def test_traversal_progress_then_pause_is_not_reclassified_as_startup_starvation() -> None:
+    now = time.monotonic_ns()
+    board = _board(now)
+    _publish_hashes(board, now, frame_hash=_HASH_B, luma_grid=_LUMA_A)
+    verifier = TemporalOutcomeVerifier(
+        OutcomeVerifierConfig(
+            traversal_controller_starvation_ms=600,
+            traversal_stall_ms=1_000,
+        )
+    )
+    verifier.begin("walk-progress-pause", OutcomeKind.TRAVERSAL, board, now_ns=now)
+    verifier.observe(board, action=MotorAction(sequence=1, keys_down=("w",)), now_ns=now)
+    for elapsed_ms, luma in ((300, _LUMA_B), (600, _LUMA_C)):
+        sample_ns = now + elapsed_ms * 1_000_000
+        _publish_hashes(board, sample_ns, frame_hash=_HASH_B, luma_grid=luma)
+        progress = verifier.observe(board, now_ns=sample_ns)
+    assert progress.signal == OutcomeSignal.LOCOMOTION_PROGRESS
+
+    release_ns = now + 650_000_000
+    _publish_hashes(board, release_ns, frame_hash=_HASH_B, luma_grid=_LUMA_C)
+    paused = verifier.observe(
+        board, action=MotorAction(sequence=2, keys_up=("w",)), now_ns=release_ns,
+    )
+    assert paused.status == OutcomeStatus.PENDING
+    assert paused.signal != OutcomeSignal.CONTROLLER_STARVATION
+
+    later_ns = now + 900_000_000
+    _publish_hashes(board, later_ns, frame_hash=_HASH_B, luma_grid=_LUMA_C)
+    assert verifier.observe(board, now_ns=later_ns).status == OutcomeStatus.PENDING
+
+    # The independent no-progress window still detects a later genuine stall.
+    verifier.observe(
+        board, action=MotorAction(sequence=3, keys_down=("w",)), now_ns=now + _SECOND,
+    )
+    for elapsed_ms in (1_500, 2_000):
+        sample_ns = now + elapsed_ms * 1_000_000
+        _publish_hashes(board, sample_ns, frame_hash=_HASH_B, luma_grid=_LUMA_C)
+        stalled = verifier.observe(board, now_ns=sample_ns)
+    assert stalled.status == OutcomeStatus.STALLED
+    assert stalled.signal == OutcomeSignal.LOCOMOTION_STALLED
+
+
+def test_startup_movement_evidence_does_not_leak_into_next_traversal_run() -> None:
+    now = time.monotonic_ns()
+    board = _board(now)
+    verifier = TemporalOutcomeVerifier(
+        OutcomeVerifierConfig(traversal_controller_starvation_ms=600)
+    )
+    verifier.begin("walk-first", OutcomeKind.TRAVERSAL, board, now_ns=now)
+    verifier.observe(board, action=MotorAction(sequence=1, keys_down=("w",)), now_ns=now)
+    verifier.observe(board, now_ns=now + 700_000_000)
+
+    next_ns = now + _SECOND
+    verifier.begin("walk-next", OutcomeKind.TRAVERSAL, board, now_ns=next_ns)
+    verdict = verifier.observe(board, now_ns=next_ns + 650_000_000)
+
+    assert verdict.status == OutcomeStatus.STALLED
+    assert verdict.signal == OutcomeSignal.CONTROLLER_STARVATION
+    assert verdict.evidence_keys == ()
+
+
 def test_inventory_open_requires_input_stable_pixels_and_fresh_scene_fact() -> None:
     now = time.monotonic_ns()
     board = _board(now)
