@@ -176,6 +176,62 @@ def test_release_inputs_preserves_running_lease() -> None:
     assert not supervisor.backend.held_buttons
 
 
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_authenticated_malformed_action_revokes_previous_hold(
+    monkeypatch: pytest.MonkeyPatch, cleanup_fails: bool,
+) -> None:
+    supervisor = Supervisor()
+    supervisor.start()
+    lease_id = supervisor.arm("fake-instance")["lease_id"]
+    supervisor.activate()
+    supervisor.apply_motor_action(lease_id, {"sequence": 0, "keys_down": ["w"]})
+    if cleanup_fails:
+        def release() -> None:
+            raise OSError("synthetic release failure")
+        monkeypatch.setattr(supervisor.backend, "release_all", release)
+
+    with pytest.raises(ValueError):
+        supervisor.apply_motor_action(lease_id, {"sequence": 1, "mouse_dx": 5000})
+
+    assert supervisor.state == SupervisorState.FAILSAFE
+    assert supervisor.last_fault == "invalid-motor-action"
+    assert supervisor.motor.lease is None and supervisor.backend.lease_id is None
+    assert bool(supervisor.backend.held_keys) is cleanup_fails
+    with pytest.raises(RuntimeError, match="requires RUNNING"):
+        supervisor.apply_motor_action(lease_id, {"sequence": 2})
+
+
+@pytest.mark.parametrize("operation", ["fault", "stop", "stop-again"])
+def test_cleanup_failure_cannot_leave_supervisor_running(
+    monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    supervisor = Supervisor()
+    supervisor.start()
+    lease_id = supervisor.arm("fake-instance")["lease_id"]
+    supervisor.activate()
+    supervisor.apply_motor_action(lease_id, {"sequence": 0, "keys_down": ["w"]})
+    if operation == "stop-again":
+        supervisor.stop()
+    published = []
+    monkeypatch.setattr(supervisor, "_persist_status", lambda: published.append(supervisor.state))
+
+    def release() -> None:
+        assert supervisor.state != SupervisorState.RUNNING
+        raise OSError("synthetic release failure")
+
+    monkeypatch.setattr(supervisor.backend, "release_all", release)
+    with pytest.raises(OSError, match="synthetic release failure"):
+        if operation == "fault":
+            supervisor.fail("test-fault")
+        else:
+            supervisor.stop()
+
+    expected = SupervisorState.FAILSAFE if operation == "fault" else SupervisorState.STOPPED
+    assert supervisor.state == expected and published == [expected]
+    assert supervisor.motor.lease is None and supervisor.backend.lease_id is None
+    assert supervisor._stop.is_set() is (operation != "fault")
+
+
 def test_supervisor_tracks_only_accepted_world_camera_motion() -> None:
     supervisor = Supervisor()
     supervisor.start()

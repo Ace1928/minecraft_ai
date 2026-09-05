@@ -552,7 +552,17 @@ class Supervisor:
     def apply_motor_action(self, lease_id: str, raw_action: object) -> dict[str, Any]:
         with self._lock:
             self._require_running_lease(lease_id)
-            action = MotorAction.model_validate(raw_action)
+            try:
+                action = MotorAction.model_validate(raw_action)
+            except Exception as exc:
+                # An authenticated malformed command cannot prolong a previous
+                # held key/button until watchdog expiry. Keep the parse failure
+                # attributable even if the physical cleanup also fails.
+                try:
+                    self.fail("invalid-motor-action")
+                except Exception as cleanup_error:
+                    exc.add_note(f"motor cleanup also failed: {type(cleanup_error).__name__}")
+                raise
             # A valid, accepted action proves that the authenticated runtime is
             # still alive. Refresh the same capability atomically with action
             # acceptance so the 20 Hz motor stream cannot starve a separately
@@ -676,32 +686,31 @@ class Supervisor:
             if self.state == SupervisorState.STOPPED:
                 return
             self.last_fault = reason
-            self.motor.revoke(reason)
             if (
                 self.state != SupervisorState.FAILSAFE
                 and SupervisorState.FAILSAFE in allowed_targets(self.state)
             ):
                 self.state = SupervisorState.FAILSAFE
-            self._persist_status()
+            try:
+                self.motor.revoke(reason)
+            finally:
+                self._persist_status()
 
     def stop(self) -> None:
         with self._lock:
-            if self.state == SupervisorState.STOPPED:
-                self.motor.revoke("operator-stop")
-                self._stop.set()
-                self._persist_status()
-                return
-            self.motor.revoke("operator-stop")
             if self.state == SupervisorState.FAILSAFE:
                 self.state = SupervisorState.STOPPED
-            else:
+            elif self.state != SupervisorState.STOPPED:
                 if self.state != SupervisorState.STOPPING:
                     validate_transition(self.state, SupervisorState.STOPPING)
                     self.state = SupervisorState.STOPPING
                 validate_transition(self.state, SupervisorState.STOPPED)
                 self.state = SupervisorState.STOPPED
             self._stop.set()
-            self._persist_status()
+            try:
+                self.motor.revoke("operator-stop")
+            finally:
+                self._persist_status()
 
     def status(self) -> dict[str, Any]:
         with self._lock:
