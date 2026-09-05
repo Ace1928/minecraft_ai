@@ -6,8 +6,7 @@ The roadmap is ordered by dependency and release gates. Later phases must not by
 
 This is the immediate gameplay critical path, not a claim that whole phases below are complete.
 
-- [x] Confirm the preserved Win32 ownership/clip/cursor mismatch with a window-free, registration-free probe: all 50 samples retained Minecraft foreground/focus/capture and a point clip at `(565,376)`, while Win32/X cursor state remained `(0,83)`. Sampled X focus, geometry and hit-chain were unchanged. This localizes the state disagreement without proving the camera accumulation mechanism.
-- [x] Replace the production host-fed nested compositor default with headless Weston and a verified virtual-only seat. Disposable production-path qualification passed keyboard holds/releases, exact relative raw/core mouse input, confinement and accelerated capture; source/binary/process/mapping checks gate positive input and legacy sessions remain held for observation. See [input isolation evidence and limits](INPUT_ISOLATION.md).
+- [ ] Finish review and publish the headless Weston virtual-only seat implementation. Its disposable-session prototype passed keyboard holds/releases, relative raw/core mouse input, confinement and accelerated capture. Exact display-to-compositor ownership and inherited module-override admission checks remain review requirements before promotion; these prototype results do not qualify Wine or the preserved game.
 - [ ] Deliberately migrate the preserved game to the headless session, then qualify Win32 clipping, camera response and actual gameplay movement. Display-level tests do not close this live gate.
 
 - [x] Guarded private-LAN operator viewing and commands; agent output uses the private game display. Excluding host-origin input from that display is a separate, still-open qualification below.
