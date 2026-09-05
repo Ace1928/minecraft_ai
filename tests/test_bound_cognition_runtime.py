@@ -10,18 +10,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
 import minecraft_ai.runtime as runtime_module
 from minecraft_ai.action_levels import ActionLevel
+from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.cognition import (
     CognitionContext,
     CognitionDecision,
     DecisionModelOrigin,
+    HighLevelController,
     cognition_decision_sha256,
 )
 from minecraft_ai.model_requests import ModelRequestLifecycle, RequestBinding
+from minecraft_ai.models import ModelResponse
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, ScreenRegion, Track
 from minecraft_ai.roles import get_role
 from minecraft_ai.runtime import AgentRuntime
@@ -764,6 +768,111 @@ def test_failed_capture_never_runs_prerequisite_cleanup_or_builds_context(
 def test_optional_bound_detection_tolerates_controller_without_model(harness: _Harness) -> None:
     harness.runtime.high_level = SimpleNamespace()
     assert not harness.runtime._uses_bound_cognition()
+
+
+_BOUND_HOOKS = (
+    "complete_bound_constrained", "admit_bound_decision", "discard_bound_request",
+)
+
+
+@pytest.mark.parametrize("controller", [
+    None, SimpleNamespace(model=None), SimpleNamespace(model=object()),
+    SimpleNamespace(model=SimpleNamespace(complete=lambda messages: None)),
+])
+def test_optional_bound_detection_preserves_no_capability_legacy_mode(
+    harness: _Harness, controller: object,
+) -> None:
+    harness.runtime.high_level = controller
+    assert not harness.runtime._uses_bound_cognition()
+
+
+def test_optional_bound_detection_accepts_complete_callable_capability(harness: _Harness) -> None:
+    assert harness.runtime._uses_bound_cognition()
+    assert not harness.adapter.published and not harness.adapter.discarded
+    assert not harness.controller.requests and not harness.pool.jobs
+
+
+@pytest.mark.parametrize("present", [
+    (_BOUND_HOOKS[0],), (_BOUND_HOOKS[1],), (_BOUND_HOOKS[2],),
+    _BOUND_HOOKS[:2], _BOUND_HOOKS[1:], (_BOUND_HOOKS[0], _BOUND_HOOKS[2]),
+])
+def test_optional_bound_detection_keeps_partial_capability_legacy(
+    harness: _Harness, present: tuple[str, ...],
+) -> None:
+    hooks = {name: Mock(side_effect=AssertionError("must not invoke adapter")) for name in present}
+    harness.runtime.high_level = SimpleNamespace(model=SimpleNamespace(**hooks))
+    assert not harness.runtime._uses_bound_cognition()
+    for hook in hooks.values():
+        hook.assert_not_called()
+
+
+@pytest.mark.parametrize("invalid_hook", _BOUND_HOOKS)
+@pytest.mark.parametrize("invalid_value", [None, False, object()])
+def test_optional_bound_detection_keeps_noncallable_capability_legacy(
+    harness: _Harness, invalid_hook: str, invalid_value: object,
+) -> None:
+    hooks: dict[str, Any] = {
+        name: Mock(side_effect=AssertionError("must not invoke adapter")) for name in _BOUND_HOOKS
+    }
+    hooks[invalid_hook] = invalid_value
+    harness.runtime.high_level = SimpleNamespace(model=SimpleNamespace(**hooks))
+    assert not harness.runtime._uses_bound_cognition()
+    for name, hook in hooks.items():
+        if name != invalid_hook:
+            hook.assert_not_called()
+
+
+def test_optional_bound_detection_keeps_null_hooks_legacy(harness: _Harness) -> None:
+    harness.runtime.high_level = SimpleNamespace(
+        model=SimpleNamespace(**dict.fromkeys(_BOUND_HOOKS)),
+    )
+    assert not harness.runtime._uses_bound_cognition()
+
+
+def test_partial_capability_starts_real_controller_through_legacy_complete(
+    harness: _Harness,
+) -> None:
+    runtime = harness.runtime
+    legacy_complete = Mock(return_value=ModelResponse(
+        text=CognitionDecision(reasoning_summary="Legacy idle.").model_dump_json(),
+        model="synthetic-legacy", latency_ms=1.0,
+    ))
+    experimental_hook = Mock(side_effect=AssertionError("must not invoke partial bound hook"))
+    model = SimpleNamespace(
+        model_id="synthetic-legacy", complete=legacy_complete,
+        complete_bound_constrained=experimental_hook,
+    )
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+    runtime.high_level = controller
+    runtime.executor = SimpleNamespace(run=None)
+    runtime._cognition_requested = True
+    runtime.cognition_hz = 0.5
+    runtime._last_cognition_ns = 0
+    runtime.metrics = SimpleNamespace(cognition_calls=0)
+    runtime._new_queued_operator_message_waiting = Mock(return_value=False)
+    runtime._queued_operator_message_waiting = Mock(return_value=False)
+    context = CognitionContext(
+        role=get_role("generalist"), goals=(), memories=(), promises=(), wiki=(),
+    )
+    runtime._cognition_context = Mock(return_value=context)
+    runtime._capture_bound_cognition_inputs = Mock(wraps=runtime._capture_bound_cognition_inputs)
+    runtime._schedule_cognition_retry = Mock()
+
+    def submit(operation: Any, *args: Any) -> concurrent.futures.Future[CognitionDecision]:
+        future: concurrent.futures.Future[CognitionDecision] = concurrent.futures.Future()
+        future.set_result(operation(*args))
+        return future
+
+    runtime._pool = SimpleNamespace(submit=Mock(side_effect=submit))
+    runtime._start_cognition_if_due()
+    runtime._pool.submit.assert_called_once_with(controller.decide, harness.board, context)
+    legacy_complete.assert_called_once()
+    experimental_hook.assert_not_called()
+    runtime._capture_bound_cognition_inputs.assert_not_called()
+    runtime._schedule_cognition_retry.assert_not_called()
+    assert runtime._pending_decision.result().reasoning_summary == "Legacy idle."
+    assert runtime._pending_decision.result().model_origin is None
+    assert not runtime._bound_cognition_requests
 
 
 @pytest.mark.parametrize("edited_field", ["label", "region", "attributes"])

@@ -3401,8 +3401,12 @@ class AgentRuntime:
 
     def _uses_bound_cognition(self) -> bool:
         controller = self.high_level
-        return controller is not None and callable(
-            getattr(getattr(controller, "model", None), "complete_bound_constrained", None)
+        model = getattr(controller, "model", None)
+        return model is not None and all(
+            callable(getattr(model, name, None))
+            for name in (
+                "complete_bound_constrained", "admit_bound_decision", "discard_bound_request",
+            )
         )
 
     def _capture_bound_cognition_inputs(

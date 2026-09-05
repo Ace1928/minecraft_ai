@@ -134,6 +134,8 @@ Custom planners can implement `BoundCognitionModel` in `models.py` without placi
 their implementation or model assets in this repository. Its three optional hooks
 are `complete_bound_constrained`, `admit_bound_decision`, and
 `discard_bound_request`; existing `LanguageModel` adapters remain supported.
+All three hooks must be callable to select request-bound mode. An adapter with
+only part of that optional interface continues through its existing legacy path.
 
 The request-aware path binds inference to an immutable semantic observation and
 operator/execution revisions. Before accepting a decision, the runtime rechecks
