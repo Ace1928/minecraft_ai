@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import struct
 from types import SimpleNamespace
 from typing import Any
 
@@ -16,9 +17,12 @@ from minecraft_ai.safety import MotorAction, MotorLease, MotorRejected
 class _FakeXTest:
     def __init__(self) -> None:
         self.calls: list[tuple[Any, int, int]] = []
+        self.motions: list[tuple[int, int]] = []
 
-    def fake_input(self, display: Any, event_type: int, keycode: int) -> None:
-        self.calls.append((display, event_type, keycode))
+    def fake_input(self, display: Any, event_type: int, keycode: int = 0, **kwargs: int) -> None:
+        self.calls.append((display, event_type, kwargs.get("detail", keycode)))
+        if event_type == 6:
+            self.motions.append((kwargs["x"], kwargs["y"]))
 
 
 def _key_routing_backend(*, host_targeted: bool) -> tuple[IsolatedX11InputBackend, _FakeXTest]:
@@ -106,7 +110,6 @@ def test_atomic_gui_tap_leaves_bedrock_backend_and_guard_state_in_agreement(
         ButtonRelease=5,
     )
     backend._xtest = fake_xtest
-    backend._relative_mouse = SimpleNamespace(move=lambda _x, _y: None)
     backend._lease = MotorLease(
         lease_id="lease",
         session_id="session",
@@ -177,7 +180,7 @@ def test_apply_rechecks_interlock_before_positive_events_but_keeps_releases() ->
     def park_then_latch() -> bool:
         nonlocal permitted, pointer_parks
         pointer_parks += 1
-        if pointer_parks == 2:
+        if pointer_parks == 1:
             permitted = False
         return True
 
@@ -190,9 +193,7 @@ def test_apply_rechecks_interlock_before_positive_events_but_keeps_releases() ->
         ButtonRelease=5,
     )
     backend._xtest = fake_xtest
-    backend._relative_mouse = SimpleNamespace(
-        move=lambda x, y: mouse_moves.append((x, y))
-    )
+    fake_xtest.motions = mouse_moves
     backend._lease = MotorLease(
         lease_id="lease",
         session_id="session",
@@ -230,7 +231,7 @@ def test_apply_rechecks_interlock_before_positive_events_but_keeps_releases() ->
         event_type not in {backend._x.KeyPress, backend._x.ButtonPress}
         for _display, event_type, _detail in fake_xtest.calls
     )
-    assert pointer_parks == 2
+    assert pointer_parks == 1
     assert mouse_moves == []
     assert backend._held_keys == set()
     assert backend._held_buttons == set()
@@ -259,9 +260,7 @@ def test_apply_blocks_each_positive_event_when_interlock_is_latched(
         ButtonRelease=5,
     )
     backend._xtest = fake_xtest
-    backend._relative_mouse = SimpleNamespace(
-        move=lambda x, y: mouse_moves.append((x, y))
-    )
+    fake_xtest.motions = mouse_moves
     backend._lease = MotorLease(
         lease_id="lease",
         session_id="session",
@@ -385,9 +384,11 @@ def _pointer_parking_backend() -> tuple[IsolatedX11InputBackend, dict[str, Any]]
     backend._held_keys = set()
     backend._held_buttons = set()
     backend.release_count = 0
-    backend._x = SimpleNamespace(KeyPress=2, KeyRelease=3, ButtonPress=4, ButtonRelease=5)
+    backend._x = SimpleNamespace(
+        KeyPress=2, KeyRelease=3, ButtonPress=4, ButtonRelease=5, MotionNotify=6, NONE=0,
+    )
     backend._xtest = _FakeXTest()
-    backend._relative_mouse = SimpleNamespace(move=lambda x, y: state["relative"].append((x, y)))
+    state["relative"] = backend._xtest.motions
     backend._lease = MotorLease(
         lease_id="lease", session_id="session", target_instance="bedrock:test",
         backend_id=backend.backend_id,
@@ -500,8 +501,7 @@ def test_pointer_inspection_failures_never_block_release_sweep(failure: str) -> 
     assert {detail for event, detail in releases if event == backend._x.ButtonRelease} == {1, 2, 3}
     assert all(event in {backend._x.KeyRelease, backend._x.ButtonRelease} for event, _ in releases)
     assert backend.held_keys == backend.held_buttons == frozenset()
-    if failure != "pointer":
-        assert state["warps"] == []
+    assert state["warps"] == []
 
 
 def test_relative_motion_remains_exact_without_extra_absolute_warp() -> None:
@@ -553,6 +553,99 @@ def test_relative_motion_after_necessary_park_requires_successful_hit_confirmati
     assert state["relative"] == [(7, -9)]
 
 
+@pytest.mark.parametrize("dx,dy", [(7, -9), (-4096, 4096), (4096, -4096)])
+def test_relative_wire_uses_same_connection_as_releases_and_presses(dx: int, dy: int) -> None:
+    # Exercise the installed optional Xlib serializer, never a real Display or
+    # X server. Other routing/interlock tests use the platform-independent fake.
+    xtest = pytest.importorskip("Xlib.ext.xtest")
+    x = pytest.importorskip("Xlib.X")
+    wire: list[bytes | str] = []
+
+    class Connection:
+        def get_extension_major(self, name: str) -> int:
+            assert name == "XTEST"
+            return 200  # Synthetic extension opcode; no server query.
+
+        def send_request(self, request: Any, _want_error: bool) -> None:
+            wire.append(request._binary)
+
+    backend, _state = _pointer_parking_backend()
+    backend._display = SimpleNamespace(display=Connection(), sync=lambda: wire.append("sync"))
+    backend._xtest = xtest
+    backend._x = x
+    backend.probe_target = lambda: True  # type: ignore[method-assign]
+    backend._park_pointer_in_game = lambda: True  # type: ignore[method-assign]
+    backend._keycode = lambda key: {"a": 38, "w": 25}[key]  # type: ignore[method-assign]
+
+    backend.apply(MotorAction(
+        sequence=0, keys_up=("a",), buttons_up=("right",),
+        mouse_dx=dx, mouse_dy=dy, keys_down=("w",), buttons_down=("left",),
+    ))
+
+    assert wire[-1] == "sync"
+    requests = [packet for packet in wire if isinstance(packet, bytes)]
+    assert len(wire) == len(requests) + 1
+    assert [(packet[4], packet[5]) for packet in requests] == [
+        (x.KeyRelease, 38), (x.ButtonRelease, 3), (x.MotionNotify, 1),
+        (x.KeyPress, 25), (x.ButtonPress, 1),
+    ]
+    motion = requests[2]
+    assert len(motion) == 36
+    assert motion[:2] == bytes((200, 2))
+    assert struct.unpack("=II", motion[8:16]) == (x.CurrentTime, x.NONE)
+    assert struct.unpack("=hh", motion[24:28]) == (dx, dy)
+
+
+@pytest.mark.parametrize("pause_after_enter", [False, True])
+def test_chat_transition_waits_follow_same_connection_flushes(
+    pause_after_enter: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend, _state = _pointer_parking_backend()
+    backend._held_keys = {"w"}
+    keycodes = {"t": 28, "a": 38, "enter": 36, "escape": 9, "w": 25}
+    backend._keycode = lambda key: keycodes.get(key, 24)  # type: ignore[method-assign]
+    queued: list[tuple[int, int]] = []
+    delivered: list[tuple[int, int]] = []
+    waited_after: list[tuple[int, int]] = []
+    permitted = True
+
+    def send(_display: Any, kind: int, key: int) -> None:
+        queued.append((kind, key))
+
+    def sync() -> None:
+        delivered.extend(queued)
+        queued.clear()
+
+    def sleep(seconds: float) -> None:
+        nonlocal permitted
+        assert seconds == 0.04
+        assert not queued, "a UI delay must start after its events are flushed"
+        waited_after.append(delivered[-1])
+        if pause_after_enter and len(waited_after) == 2:
+            permitted = False
+
+    backend._xtest = SimpleNamespace(fake_input=send)
+    backend._display.sync = sync
+    monkeypatch.setattr("minecraft_ai.platforms.bedrock_x11.time.sleep", sleep)
+    if pause_after_enter:
+        with pytest.raises(RuntimeError, match="chat input interlock"):
+            backend.type_chat("a", input_permitted=lambda: permitted)
+    else:
+        backend.type_chat("a", input_permitted=lambda: permitted)
+
+    assert waited_after == [
+        (backend._x.KeyRelease, keycodes[key])
+        for key in (["t", "enter"] if pause_after_enter else ["t", "enter", "escape"])
+    ]
+    positive = [key for kind, key in delivered if kind == backend._x.KeyPress]
+    expected = ["t", "a", "enter"]
+    if not pause_after_enter:
+        expected.extend(("escape", "escape", "w"))
+    assert positive == [keycodes[key] for key in expected]
+    assert backend.held_keys == (frozenset() if pause_after_enter else frozenset({"w"}))
+    assert not queued
+
+
 def test_host_debug_parking_behavior_is_not_changed_by_private_routing_gate() -> None:
     backend, state = _pointer_parking_backend()
     backend._targeted = True
@@ -562,8 +655,15 @@ def test_host_debug_parking_behavior_is_not_changed_by_private_routing_gate() ->
     assert state["warps"] == []
 
 
-def test_already_inside_button_release_and_release_all_do_not_move_pointer() -> None:
+@pytest.mark.parametrize("position", [(10, 10), (960, 553)])
+@pytest.mark.parametrize("query_failure", [False, True])
+def test_button_release_and_release_all_never_move_pointer(
+    position: tuple[int, int], query_failure: bool,
+) -> None:
     backend, state = _pointer_parking_backend()
+    state["point"] = position
+    state["query_failure"] = query_failure
+    backend._input_permitted = lambda: False
     backend._held_buttons = {"left"}
     backend.apply(MotorAction(sequence=0, buttons_up=("left",)))
     backend.release_all()

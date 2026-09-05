@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
 import importlib
 import os
 import re
@@ -257,55 +255,6 @@ def validate_host_monitor_window(
             "host-display focus left Minecraft; motor input was released instead of "
             "stealing focus from the operator display"
         )
-
-
-class _NativeRelativeMouse:
-    """Issue genuine relative XTEST motion on the isolated X server.
-
-    python-xlib's ``xtest.fake_input`` exposes the protocol's absolute motion
-    request but not ``XTestFakeRelativeMotionEvent``. Bedrock uses a grabbed,
-    recentered pointer, so reconstructing an absolute coordinate races that
-    recenter and produces discontinuous camera jumps.
-    """
-
-    def __init__(self, display_name: str) -> None:
-        x11_path = ctypes.util.find_library("X11")
-        xtst_path = ctypes.util.find_library("Xtst")
-        if x11_path is None or xtst_path is None:
-            raise IsolationError("libX11 and libXtst are required for relative mouse input")
-        try:
-            self._x11 = ctypes.CDLL(x11_path)
-            self._xtst = ctypes.CDLL(xtst_path)
-        except OSError as exc:
-            raise IsolationError(f"cannot load native XTEST libraries: {exc}") from exc
-        self._x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
-        self._x11.XOpenDisplay.restype = ctypes.c_void_p
-        self._x11.XFlush.argtypes = [ctypes.c_void_p]
-        self._x11.XFlush.restype = ctypes.c_int
-        self._xtst.XTestFakeRelativeMotionEvent.argtypes = [
-            ctypes.c_void_p,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_ulong,
-        ]
-        self._xtst.XTestFakeRelativeMotionEvent.restype = ctypes.c_int
-        display_pointer = self._x11.XOpenDisplay(display_name.encode("utf-8"))
-        if not display_pointer:
-            raise IsolationError(f"cannot open {display_name} for native relative mouse input")
-        self._display = ctypes.c_void_p(int(display_pointer))
-
-    def move(self, mouse_dx: int, mouse_dy: int) -> None:
-        accepted = int(
-            self._xtst.XTestFakeRelativeMotionEvent(
-                self._display,
-                mouse_dx,
-                mouse_dy,
-                0,
-            )
-        )
-        if accepted == 0:
-            raise IsolationError("isolated X server rejected relative mouse input")
-        self._x11.XFlush(self._display)
 
 
 class _TargetedPointer:
@@ -701,7 +650,6 @@ class IsolatedX11InputBackend:
                 input_window_id=self._input_window_id,
                 require_focus=False,
             )
-        self._relative_mouse = _NativeRelativeMouse(display_name)
 
     @property
     def held_keys(self) -> frozenset[str]:
@@ -945,7 +893,8 @@ class IsolatedX11InputBackend:
                 button_id = _BUTTONS.get(button.lower())
                 if button_id is None:
                     raise IsolationError(f"unsupported mouse button: {button!r}")
-                self._park_pointer_in_game()
+                # Releases are unconditional cleanup, not permission to warp
+                # the camera when routing is unknown or input is paused.
                 self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
                 self._held_buttons.discard(button.lower())
             absolute_cursor = action.cursor_x is not None and action.cursor_y is not None
@@ -962,7 +911,14 @@ class IsolatedX11InputBackend:
                 if not self._park_pointer_in_game() and not self._targeted:
                     raise MotorRejected("Minecraft pointer routing could not be verified")
                 self._require_positive_input_permitted()
-                self._relative_mouse.move(relative_x, relative_y)
+                # XTEST MotionNotify detail=1 encodes signed relative distances;
+                # root=None uses this private server's current pointer screen.
+                # Keep motion on the same connection as releases/presses so
+                # their order and the final sync cover this complete action.
+                self._xtest.fake_input(
+                    self._display, self._x.MotionNotify, detail=1,
+                    root=self._x.NONE, x=relative_x, y=relative_y,
+                )
             for key in action.keys_down:
                 keycode = self._keycode(key)
                 self._require_positive_input_permitted()
@@ -1051,6 +1007,9 @@ class IsolatedX11InputBackend:
                 self._type_ascii(char)
             require_permitted()
             self._tap_key("enter")
+            # Sleeping alone does not transmit buffered X requests. Start each
+            # UI-settle gap only after the preceding input reaches the server.
+            self._display.sync()
             # Bedrock's full chat screen retains two nested UI layers after a
             # submitted message (compose, then history). Return explicitly to
             # the world so the learned policy never receives chat pixels as a
@@ -1058,9 +1017,11 @@ class IsolatedX11InputBackend:
             time.sleep(0.04)
             require_permitted()
             self._tap_key("escape")
+            self._display.sync()
             time.sleep(0.04)
             require_permitted()
             self._tap_key("escape")
+            self._display.sync()
         except Exception:
             # Never strand the player in a half-typed chat overlay.
             if input_permitted():
@@ -1119,7 +1080,6 @@ class IsolatedX11InputBackend:
                     continue
             for button_id in sorted(set(_BUTTONS.values())):
                 try:
-                    self._park_pointer_in_game()
                     self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
                 except Exception:
                     continue
@@ -1148,8 +1108,8 @@ def _wine_relative_motion_delta(
 
     MineRL camera actions are ordered as positive pitch-down and positive
     yaw-right. Bedrock uses the same signs for relative XTEST motion. Keep these
-    as deltas: absolute root coordinates passed with X.NONE are interpreted as
-    large relative movements by the XTEST protocol.
+    as deltas: XTEST detail=1 selects relative motion, whereas root=X.NONE
+    selects the current pointer screen and does not determine motion semantics.
     """
     return mouse_dx, mouse_dy
 
