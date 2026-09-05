@@ -418,27 +418,58 @@ def test_invalid_recalibration_request_preserves_established_origin(pitch, ident
     assert supervisor.status()["world_camera"] == before
 
 
-@pytest.mark.parametrize("blocked_at", ["lease", "interlock"])
-def test_recalibration_denied_before_motion_preserves_established_origin(
-    monkeypatch: pytest.MonkeyPatch, blocked_at: str
-) -> None:
+def test_recalibration_blocked_by_existing_interlock_preserves_established_origin() -> None:
     backend = _PhysicalFakeBackend(":2", 42)
     supervisor = _established_camera_supervisor(backend)
     before = supervisor.status()["world_camera"]
-    if blocked_at == "lease":
-        def deny_lease(**_kwargs):
-            raise RuntimeError("synthetic lease refusal")
-
-        monkeypatch.setattr(supervisor.motor, "issue", deny_lease)
-    else:
-        supervisor_module.latch_operator_pause()
+    releases_before = backend.release_count
+    supervisor_module.latch_operator_pause()
 
     with pytest.raises(RuntimeError):
         supervisor.calibrate_world_camera(pitch_counts_per_degree=1.0, calibration_id="new")
 
     assert not backend.actions
+    assert backend.release_count == releases_before
     assert supervisor.motor.lease is None
     assert supervisor.status()["world_camera"] == before
+
+
+@pytest.mark.parametrize("issue_fails", [False, True])
+def test_recalibration_invalidates_before_backend_release_during_lease_issue(
+    monkeypatch: pytest.MonkeyPatch, issue_fails: bool
+) -> None:
+    backend = _PhysicalFakeBackend(":2", 42)
+    supervisor = _established_camera_supervisor(backend)
+    before = supervisor.status()["world_camera"]
+    monkeypatch.setattr(supervisor, "_owns_control_file", lambda: True)
+    monkeypatch.setattr(supervisor_module.time, "sleep", lambda _seconds: None)
+    original_release = backend.release_all
+    releases = 0
+
+    def release() -> None:
+        nonlocal releases
+        releases += 1
+        assert not supervisor.world_camera_origin_calibrated
+        assert supervisor.world_camera_pitch_counts_per_degree == 47.96
+        assert supervisor.world_camera_calibration_id == "previous-measured-profile"
+        persisted = json.loads(supervisor_module.STATUS_FILE.read_text())
+        assert persisted["world_camera"]["origin_calibrated"] is False
+        original_release()
+        if issue_fails and releases == 1:
+            raise RuntimeError("synthetic issue-time backend release failure")
+
+    monkeypatch.setattr(backend, "release_all", release)
+    if issue_fails:
+        with pytest.raises(RuntimeError, match="issue-time"):
+            supervisor.calibrate_world_camera(pitch_counts_per_degree=1.0, calibration_id="new")
+        assert not backend.actions
+        assert supervisor.status()["world_camera"] == {**before, "origin_calibrated": False}
+    else:
+        supervisor.calibrate_world_camera(pitch_counts_per_degree=1.0, calibration_id="new")
+        assert backend.actions
+        assert supervisor.world_camera_origin_calibrated
+    assert releases >= 1
+    assert supervisor.motor.lease is None
 
 
 def test_stop_from_failsafe_reaches_stopped() -> None:

@@ -430,22 +430,21 @@ class Supervisor:
             if not calibration_id or len(calibration_id) > 128:
                 raise ValueError("camera calibration identity is required")
             deltas = _bounded_camera_calibration_deltas(pitch_counts_per_degree)
-            lease = self.motor.issue(
-                session_id=self.session_id,
-                target_instance=f"camera-calibration:{display_name}:{target_window_id}",
-                ttl_ms=5000,
-                allowed_actions=frozenset({"mouse"}),
-                max_action_duration_ms=50,
-            )
+            if not self._actuation_permitted():
+                raise RuntimeError("actuation interlock was latched during calibration")
+            # Lease issuance itself releases backend inputs and can park the
+            # private pointer. Invalidate before entering that physical path,
+            # while preserving the independently measured sensitivity profile.
+            self.world_camera_origin_calibrated = False
+            self._persist_status()
             try:
-                if not self._actuation_permitted():
-                    raise RuntimeError("actuation interlock was latched during calibration")
-                # The measured sensitivity remains useful, but the old origin
-                # ceases to be trustworthy as soon as calibration can move.
-                # Persist this before motion so an interrupted run cannot
-                # leave its previous valid origin in the status artifact.
-                self.world_camera_origin_calibrated = False
-                self._persist_status()
+                lease = self.motor.issue(
+                    session_id=self.session_id,
+                    target_instance=f"camera-calibration:{display_name}:{target_window_id}",
+                    ttl_ms=5000,
+                    allowed_actions=frozenset({"mouse"}),
+                    max_action_duration_ms=50,
+                )
                 return_phase = False
                 for sequence, mouse_dy in enumerate(deltas):
                     if not self._actuation_permitted():
