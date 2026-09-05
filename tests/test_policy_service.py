@@ -1563,6 +1563,8 @@ def test_async_action_provenance_stays_bound_to_consumed_request(
         condition=condition,
         target_track_id="log-1",
         interaction_id=2,
+        source_frame_id=7,
+        source_captured_ns=70,
     )
     responses: list[dict[str, object] | None] = [
         {
@@ -1591,6 +1593,8 @@ def test_async_action_provenance_stays_bound_to_consumed_request(
     assert first["behavior_token"] == 41
     assert first["latent_id"] == "z_041"
     assert first["condition"] == condition
+    assert first["source_frame_id"] == 7
+    assert first["source_captured_ns"] == 70
 
     new_intent = intent.model_copy(update={"episode_id": "episode-new"})
     new_condition = client._conditioned_intent(new_intent, board)
@@ -1600,6 +1604,8 @@ def test_async_action_provenance_stays_bound_to_consumed_request(
         condition=new_condition,
         target_track_id="log-1",
         interaction_id=2,
+        source_frame_id=8,
+        source_captured_ns=80,
     )
     client._pending_deadline_ns = time.monotonic_ns() + 100_000_000
 
@@ -1609,10 +1615,14 @@ def test_async_action_provenance_stays_bound_to_consumed_request(
     assert held["action_kind"] == "prediction_hold"
     assert held["request_id"] == "request-old"
     assert held["episode_id"] == "episode-old"
+    assert held["source_frame_id"] == 7
+    assert held["source_captured_ns"] == 70
     pending = client.status()["pending_request"]
     assert isinstance(pending, dict)
     assert pending["request_id"] == "request-new"
     assert pending["condition"] == new_condition
+    assert pending["source_frame_id"] == 8
+    assert pending["source_captured_ns"] == 80
 
     client.reset()
     released = client.status()["last_action_provenance"]
@@ -1620,6 +1630,15 @@ def test_async_action_provenance_stays_bound_to_consumed_request(
     assert released["action_kind"] == "release"
     assert released["request_id"] is None
     assert released["condition"] is None
+    assert released["source_frame_id"] is None
+    assert released["source_captured_ns"] is None
+
+    client.close()
+    assert client._applied_request_context is None
+    assert client._consumed_request_context is None
+    assert client._pending_request_context is None
+    assert client.status()["last_action_provenance"]["source_frame_id"] is None
+    assert client.status()["last_action_provenance"]["source_captured_ns"] is None
 
 
 def test_reset_immediately_retires_pending_option_context_without_restarting_worker(

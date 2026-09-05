@@ -69,6 +69,8 @@ class ActionProvenance(BaseModel):
     policy_action_kind: str | None = Field(default=None, min_length=1, max_length=128)
     policy_request_id: str | None = Field(default=None, min_length=1, max_length=256)
     prediction_id: str | None = Field(default=None, min_length=1, max_length=256)
+    source_frame_id: int | None = Field(default=None, strict=True, ge=0)
+    source_captured_ns: int | None = Field(default=None, strict=True, ge=0)
     action_level: ActionLevel
     origin: ActionOrigin
     condition_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
@@ -79,6 +81,8 @@ class ActionProvenance(BaseModel):
 
     @model_validator(mode="after")
     def validate_condition_identity(self) -> ActionProvenance:
+        if (self.source_frame_id is None) != (self.source_captured_ns is None):
+            raise ValueError("source_frame_id and source_captured_ns must be supplied together")
         if self.condition is None:
             return self
         _validate_condition_links(
@@ -102,6 +106,7 @@ class TrajectoryStep(BaseModel):
     trajectory_id: str
     step_index: int = Field(ge=0)
     captured_ns: int
+    frame_id: int | None = Field(default=None, strict=True, ge=0)
     accepted_ns: int | None = None
     frame_ref: str
     frame_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -119,6 +124,8 @@ class TrajectoryStep(BaseModel):
     policy_action_kind: str | None = Field(default=None, min_length=1, max_length=128)
     policy_request_id: str | None = Field(default=None, min_length=1, max_length=256)
     prediction_id: str | None = Field(default=None, min_length=1, max_length=256)
+    source_frame_id: int | None = Field(default=None, strict=True, ge=0)
+    source_captured_ns: int | None = Field(default=None, strict=True, ge=0)
     condition_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     condition: dict[str, Any] | None = None
     target_track_id: str | None = Field(default=None, min_length=1, max_length=512)
@@ -134,6 +141,8 @@ class TrajectoryStep(BaseModel):
 
     @model_validator(mode="after")
     def validate_provenance(self) -> TrajectoryStep:
+        if (self.source_frame_id is None) != (self.source_captured_ns is None):
+            raise ValueError("source_frame_id and source_captured_ns must be supplied together")
         if self.dropped_steps_before and self.previous_action is None:
             raise ValueError("dropped_steps_before requires the physical previous_action")
         if self.condition is None:
@@ -253,7 +262,9 @@ class TrajectoryReader:
                     yield ReplayTrajectorySample(
                         step=step,
                         frame=CapturedFrame(
-                            frame_id=blackboard.frame_id,
+                            frame_id=(
+                                blackboard.frame_id if step.frame_id is None else step.frame_id
+                            ),
                             captured_ns=step.captured_ns,
                             width=width,
                             height=height,
@@ -531,6 +542,7 @@ class TrajectoryRecorder:
             trajectory_id=self.manifest.trajectory_id,
             step_index=self._step_index,
             captured_ns=frame.captured_ns,
+            frame_id=frame.frame_id,
             accepted_ns=accepted_ns,
             frame_ref=f"wds://{self.manifest.trajectory_id}/{shard_id}.tar#{sample_key}.frame.jpg",
             frame_hash=frame_hash,
@@ -547,6 +559,8 @@ class TrajectoryRecorder:
             policy_action_kind=provenance.policy_action_kind,
             policy_request_id=provenance.policy_request_id,
             prediction_id=provenance.prediction_id,
+            source_frame_id=provenance.source_frame_id,
+            source_captured_ns=provenance.source_captured_ns,
             condition_id=provenance.condition_id,
             condition=provenance.condition,
             target_track_id=provenance.target_track_id,

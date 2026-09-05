@@ -151,6 +151,8 @@ def test_accepted_action_provenance_resolves_bound_model_route_and_condition() -
                     "action_kind": "prediction",
                     "request_id": "request-from-earlier-frame",
                     "prediction_id": "prediction-from-earlier-frame",
+                    "source_frame_id": 3,
+                    "source_captured_ns": 100,
                     "action_level": "grounded",
                     "condition": causal_condition,
                     "target_track_id": "track:weak-log",
@@ -179,6 +181,8 @@ def test_accepted_action_provenance_resolves_bound_model_route_and_condition() -
     assert provenance.policy_action_kind == "prediction"
     assert provenance.policy_request_id == "request-from-earlier-frame"
     assert provenance.prediction_id == "prediction-from-earlier-frame"
+    assert provenance.source_frame_id == 3
+    assert provenance.source_captured_ns == 100
     assert provenance.action_level == ActionLevel.GROUNDED
     assert provenance.behavior_token == 91
     assert provenance.latent_id == "z_091"
@@ -210,6 +214,9 @@ def test_reset_action_does_not_inherit_previous_prediction_condition() -> None:
             "active_route": "semantic",
             "last_action_provenance": {
                 "action_kind": "prediction_hold",
+                "request_id": "stale-request",
+                "source_frame_id": 3,
+                "source_captured_ns": 100,
                 "condition": intent.model_dump(mode="json"),
                 "policy_id": "learned:stale",
             },
@@ -233,6 +240,51 @@ def test_reset_action_does_not_inherit_previous_prediction_condition() -> None:
     assert provenance.policy_request_id is None
     assert provenance.prediction_id is None
     assert provenance.target_track_id is None
+    assert provenance.source_frame_id is None
+    assert provenance.source_captured_ns is None
+
+
+@pytest.mark.parametrize(
+    ("origin", "action_kind", "request_id", "source_id", "source_ns", "expected"),
+    [
+        (ActionOrigin.POLICY, "prediction_hold", "q1", 3, 100, (3, 100)),
+        (ActionOrigin.HUMAN, "prediction", "q1", 3, 100, (None, None)),
+        (ActionOrigin.SYNTHETIC, "prediction", "q1", 3, 100, (None, None)),
+        (ActionOrigin.LEGACY, "prediction", "q1", 3, 100, (None, None)),
+        (ActionOrigin.POLICY, "release", "q1", 3, 100, (None, None)),
+        (ActionOrigin.POLICY, "empty_hold", "q1", 3, 100, (None, None)),
+        (ActionOrigin.POLICY, "prediction", None, 3, 100, (None, None)),
+        (ActionOrigin.POLICY, "prediction", "q1", None, 100, (None, None)),
+        (ActionOrigin.POLICY, "prediction", "q1", 3, None, (None, None)),
+        (ActionOrigin.POLICY, "prediction", "q1", True, 100, (None, None)),
+        (ActionOrigin.POLICY, "prediction", "q1", 3, False, (None, None)),
+        (ActionOrigin.POLICY, "prediction", "q1", "3", 100, (None, None)),
+        (ActionOrigin.POLICY, "prediction", "q1", 3, 100.0, (None, None)),
+        (ActionOrigin.POLICY, "prediction", "q1", -1, 100, (None, None)),
+        (ActionOrigin.POLICY, "prediction", "q1", 3, -1, (None, None)),
+        (ActionOrigin.POLICY, "prediction", "q1", None, None, (None, None)),
+    ],
+)
+def test_action_source_identity_requires_causal_policy_prediction(
+    origin, action_kind, request_id, source_id, source_ns, expected
+) -> None:
+    execution = ExecutionTick(
+        run=SkillRun(run_id="run", skill_id="explore_forward", started_ns=1),
+        action=MotorAction(sequence=1),
+        policy_status={
+            "last_action_provenance": {
+                "action_kind": action_kind,
+                "request_id": request_id,
+                "source_frame_id": source_id,
+                "source_captured_ns": source_ns,
+            },
+        },
+        action_origin=origin,
+    )
+    provenance = _accepted_action_provenance(
+        execution, PerceptionBlackboard(), fallback_policy_id="fallback"
+    )
+    assert (provenance.source_frame_id, provenance.source_captured_ns) == expected
 
 
 def test_blackboard_rejects_instance_switch_and_stale_fact() -> None:

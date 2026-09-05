@@ -249,6 +249,167 @@ def test_records_only_supervisor_accepted_actions_into_aligned_shards(tmp_path: 
     assert report.frame_action_latency_ms_p95 == 5.0
 
 
+def test_source_frame_roundtrip_preserves_distinct_action_time_observation(tmp_path: Path) -> None:
+    trajectory_id = "distinct-source-and-action-frames"
+    source_ns = 1_000_000_000
+    action_ns = 1_300_000_000
+    accepted_ns = action_ns + 7_000_000
+    provenance = ActionProvenance.model_validate(
+        {
+            **_learned_provenance().model_dump(),
+            "source_frame_id": 11,
+            "source_captured_ns": source_ns,
+        }
+    )
+    frame = CapturedFrame(
+        frame_id=29,
+        captured_ns=action_ns,
+        width=4,
+        height=3,
+        bgra=bytes((7, 80, 150, 255)) * 12,
+    )
+    # Blackboard identity is deliberately neither the source nor action frame.
+    blackboard = FrameState(
+        frame_id=777,
+        captured_ns=action_ns,
+        instance_id="bedrock:test",
+        width=4,
+        height=3,
+    )
+    recorder = TrajectoryRecorder(
+        manifest=_manifest(trajectory_id),
+        artifact_root=tmp_path / "trajectories",
+        state_db_path=tmp_path / "state.sqlite3",
+        min_free_disk_bytes=0,
+    )
+    try:
+        assert recorder.record_accepted(
+            action=MotorAction(sequence=42, keys_down=("w",)),
+            provenance=provenance,
+            supervisor_response={
+                "accepted_sequence": 42,
+                "accepted_monotonic_ns": accepted_ns,
+            },
+            frame=frame,
+            blackboard=blackboard,
+        )
+    finally:
+        recorder.close()
+
+    directory = tmp_path / "trajectories" / trajectory_id
+    shard_path = next(directory.glob("*.tar"))
+    with tarfile.open(shard_path) as shard:
+        names = set(shard.getnames())
+        step_file = shard.extractfile("000000000000.step.json")
+        frame_file = shard.extractfile("000000000000.frame.jpg")
+        assert step_file is not None and frame_file is not None
+        step_payload = json.loads(step_file.read())
+        frame_payload = frame_file.read()
+    assert names == {
+        "000000000000.step.json",
+        "000000000000.frame.json",
+        "000000000000.frame.jpg",
+        "000000000000.blackboard.json",
+    }
+    assert step_payload["source_frame_id"] == 11
+    assert step_payload["source_captured_ns"] == source_ns
+    assert step_payload["frame_id"] == 29
+    assert step_payload["captured_ns"] == action_ns
+    assert step_payload["accepted_ns"] == accepted_ns
+    assert step_payload["frame_hash"] == hashlib.sha256(frame_payload).hexdigest()
+    assert urlparse(step_payload["frame_ref"]).fragment == "000000000000.frame.jpg"
+
+    reader = TrajectoryReader(directory)
+    replay = list(reader.iter_samples())
+    assert len(replay) == 1
+    sample = replay[0]
+    assert sample.frame.frame_id == sample.step.frame_id == 29
+    assert sample.frame.captured_ns == sample.step.captured_ns == action_ns
+    assert sample.blackboard.frame_id == 777
+    assert sample.step.source_frame_id == 11
+    assert sample.step.source_captured_ns == source_ns
+    assert sample.step.policy_request_id == provenance.policy_request_id
+    assert sample.step.prediction_id == provenance.prediction_id
+    assert sample.step.skill_run_id == "skill-run-42"
+    report = reader.validate()
+    assert report.valid
+    assert report.frame_action_latency_ms_p50 == 7.0
+
+
+@pytest.mark.parametrize("origin", [ActionOrigin.LEGACY, ActionOrigin.HUMAN, ActionOrigin.RESET])
+def test_source_free_provenance_does_not_invent_inference_frame(origin: ActionOrigin) -> None:
+    provenance = ActionProvenance(
+        policy_id="source-free:test",
+        route_id="direct",
+        action_level=ActionLevel.RAW,
+        origin=origin,
+    )
+    serialized = json.loads(provenance.model_dump_json())
+    assert serialized["source_frame_id"] is None
+    assert serialized["source_captured_ns"] is None
+    restored = ActionProvenance.model_validate_json(provenance.model_dump_json())
+    assert restored.source_frame_id is restored.source_captured_ns is None
+
+
+def _source_identity_payload(
+    model_type: type[ActionProvenance] | type[TrajectoryStep],
+) -> dict[str, object]:
+    if model_type is ActionProvenance:
+        return _learned_provenance().model_dump()
+    return {
+        "trajectory_id": "identity-validation",
+        "step_index": 0,
+        "captured_ns": 20,
+        "frame_ref": "wds://identity-validation/shard.tar#0.frame",
+        "frame_hash": "0" * 64,
+        "action": {"sequence": 0},
+        "action_level": "raw",
+        "blackboard_snapshot_ref": "wds://identity-validation/shard.tar#0.blackboard",
+    }
+
+
+@pytest.mark.parametrize("model_type", [ActionProvenance, TrajectoryStep])
+@pytest.mark.parametrize("field", ["source_frame_id", "source_captured_ns"])
+@pytest.mark.parametrize("invalid", [-1, True, "11", 1.5])
+def test_source_identity_requires_nonnegative_strict_integers(model_type, field, invalid) -> None:
+    payload = {
+        **_source_identity_payload(model_type),
+        "source_frame_id": 11,
+        "source_captured_ns": 10,
+        field: invalid,
+    }
+    with pytest.raises(ValueError, match=field):
+        model_type.model_validate(payload)
+
+
+@pytest.mark.parametrize("model_type", [ActionProvenance, TrajectoryStep])
+@pytest.mark.parametrize("field", ["source_frame_id", "source_captured_ns"])
+def test_source_identity_rejects_partial_pairs(model_type, field) -> None:
+    payload = _source_identity_payload(model_type)
+    payload[field] = 11
+    with pytest.raises(ValueError):
+        model_type.model_validate(payload)
+
+
+@pytest.mark.parametrize("model_type", [ActionProvenance, TrajectoryStep])
+def test_source_identity_accepts_zero_pair_and_serializes_fields(model_type) -> None:
+    payload = {
+        **_source_identity_payload(model_type),
+        "source_frame_id": 0,
+        "source_captured_ns": 0,
+    }
+    parsed = model_type.model_validate_json(json.dumps(payload))
+    assert parsed.source_frame_id == parsed.source_captured_ns == 0
+
+
+@pytest.mark.parametrize("invalid", [-1, True, "29", 1.5])
+def test_action_time_frame_identity_requires_nonnegative_strict_integer(invalid) -> None:
+    with pytest.raises(ValueError, match="frame_id"):
+        TrajectoryStep.model_validate(
+            {**_source_identity_payload(TrajectoryStep), "frame_id": invalid}
+        )
+
+
 def test_recorder_registers_trajectory_before_returning(tmp_path: Path) -> None:
     trajectory_id = "trajectory-synchronous-registration"
     db_path = tmp_path / "state.sqlite3"
@@ -714,14 +875,16 @@ def test_reader_validates_legacy_full_resolution_zlib_shard(tmp_path: Path) -> N
         blackboard_snapshot_ref="wds://legacy-zlib/shard.tar#000000000000.blackboard.json",
     )
     blackboard = FrameState(
-        frame_id=0,
+        frame_id=73,
         captured_ns=captured_ns,
         instance_id="bedrock:test",
         width=4,
         height=3,
     )
     payloads = {
-        "000000000000.step.json": step.model_dump_json().encode(),
+        "000000000000.step.json": step.model_dump_json(
+            exclude={"frame_id", "source_frame_id", "source_captured_ns"}
+        ).encode(),
         "000000000000.frame.json": json.dumps(
             {
                 "codec": "zlib",
@@ -749,6 +912,9 @@ def test_reader_validates_legacy_full_resolution_zlib_shard(tmp_path: Path) -> N
 
     assert len(replay) == 1
     assert replay[0].frame.bgra == pixels
+    assert replay[0].step.frame_id is None
+    assert replay[0].frame.frame_id == replay[0].blackboard.frame_id == 73
+    assert replay[0].step.source_frame_id is replay[0].step.source_captured_ns is None
     assert TrajectoryReader(directory).validate().valid
 
 
@@ -770,6 +936,8 @@ def test_legacy_step_without_provenance_remains_replay_compatible() -> None:
     assert legacy.policy_id is None
     assert legacy.route_id is None
     assert legacy.condition_id is None
+    assert legacy.frame_id is None
+    assert legacy.source_frame_id is legacy.source_captured_ns is None
 
 
 def test_condition_identity_rejects_mismatched_serialized_condition() -> None:

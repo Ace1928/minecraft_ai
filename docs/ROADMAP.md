@@ -31,6 +31,7 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Qualify the optional external raw-motion adapter through the actual temporal client without actuators, including matching replies, retired-request drainage and fresh option context after reset. Private deployment configuration and measurements remain outside this repository. This is delivery/reset qualification, not live movement, survival competence, online learning or a universal latency guarantee.
 - [x] Implement and regression-test a pause-preserving agent-reload resume capability. It requires the exact paused supervisor generation, revoked lease, retired agent and clear persistent intent; it neither clears pause/emergency nor recovers/stops FAILSAFE. The user-authorized supervisor update has now installed it without restarting Minecraft or the GPU server. The measured calibration profile was preserved and the isolated camera origin deliberately re-established, not copied as a verified pose.
 - [x] Require a successful worker-generation handshake after failed warmup, reject semantic/GUI output from raw-only external workers, and bound per-call reply reads while retaining partial-response ownership. Regression checks cover rejected startup reuse, fact publication, zero-budget fragmentation and positive deadlines. This is admission correctness, not live controller activation.
+- [x] Preserve immutable inference-source capture ID/time through predictions, held actions and accepted trajectory provenance, separately from the control-time capture and blackboard IDs. Delayed-reply, reset/retirement and legacy-replay regressions pass. Metadata does not retain missing source pixels or establish a learning/translation result.
 - [ ] Demonstrate a fresh accepted movement prediction after a retired worker response is drained by its owner, then verify actual translation rather than infer it from accepted keys.
 - [ ] Demonstrate autonomous soft-block clearance and escape from the observed dirt pocket.
 - [ ] Demonstrate three consecutive verified log acquisitions without manual intervention or game restart; extend item recognition only from calibrated evidence if the local tree variant requires it.
@@ -45,16 +46,21 @@ terminal reset released all locomotion keys. A preselected camera-free forward
 interval was effectively stationary in the retained images: accepted-input
 execution passed, but translation, escape and collision geometry did not.
 Surrounding no-input attempts now retain `controller.starvation` rather than
-manufacturing terrain failures. The live agent, recording and resumed outer
-watchdog remain operational. This is a private canary, not a durable change to
+manufacturing terrain failures. The live agent and recording were operational
+at that checkpoint; a later AFK overlay caused the launcher to retire the agent
+and supervisor despite the game remaining alive. Recovery qualification is
+pending; this is not a game/GPU crash. This is a private canary, not a durable change to
 the default recovery configuration; detailed deployment receipts stay private.
 
 The trace also exposed a training-data limitation: the retained trajectory frame
 is the observation at action acceptance, not necessarily the asynchronous
-prediction's original input. Request/condition identity is retained, but exact
-inference-source frame lineage is not yet carried into accepted provenance.
-Do not call this complete source-frame/action alignment or use an adjacent
-frame as invented training truth. The combined translation gate remains open.
+prediction's original input. The new generic annotation now carries source
+capture ID/time from the submitted request, while recording the control-time
+capture ID separately from the blackboard ID. Legacy records remain unknown;
+lookups must stay within their capture/recording generation. Missing source
+images are not retained by this metadata patch, and compact trajectory JPEGs
+are not pixel-exact worker inputs. Do not use an adjacent frame as invented
+training truth. Live source-lineage and translation gates remain open.
 
 Historical live observation (`b5a551c`): the user approved returning to autonomous
 play; prior operator directives were archived without deleting their history.

@@ -625,6 +625,24 @@ def _accepted_action_provenance(
     prediction_id = (
         prediction_value if isinstance(prediction_value, str) and prediction_value else None
     )
+    origin = ActionOrigin.POLICY if execution is None else execution.action_origin
+    source_frame_id = None
+    source_captured_ns = None
+    source_frame_value = causal_fields.get("source_frame_id")
+    source_time_value = causal_fields.get("source_captured_ns")
+    # Source identity belongs to the consumed prediction, never the latest
+    # blackboard or a reset/manual/release action that shares a status snapshot.
+    if (
+        origin == ActionOrigin.POLICY
+        and policy_action_kind in {"prediction", "prediction_hold"}
+        and policy_request_id is not None
+        and type(source_frame_value) is int
+        and source_frame_value >= 0
+        and type(source_time_value) is int
+        and source_time_value >= 0
+    ):
+        source_frame_id = source_frame_value
+        source_captured_ns = source_time_value
     intent = None if execution is None else execution.motor_intent
     causal_condition = causal_fields.get("condition")
     if is_reset or (causal and causal_condition is None):
@@ -662,8 +680,10 @@ def _accepted_action_provenance(
         policy_action_kind=policy_action_kind,
         policy_request_id=policy_request_id,
         prediction_id=prediction_id,
+        source_frame_id=source_frame_id,
+        source_captured_ns=source_captured_ns,
         action_level=action_level,
-        origin=(ActionOrigin.POLICY if execution is None else execution.action_origin),
+        origin=origin,
         condition_id=condition_id,
         condition=condition,
         behavior_token=behavior_token,

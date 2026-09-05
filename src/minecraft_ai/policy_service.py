@@ -106,12 +106,14 @@ class LearnedSceneObservation:
 
 @dataclass(frozen=True)
 class _PolicyRequestContext:
-    """Immutable condition identity attached to one asynchronous request."""
+    """Immutable condition and source-frame identity for one async request."""
 
     request_id: str
     condition: dict[str, object]
     target_track_id: str | None
     interaction_id: int | None
+    source_frame_id: int | None = None
+    source_captured_ns: int | None = None
 
 
 class _PolicyDeadlineExpired(TimeoutError):
@@ -366,6 +368,8 @@ class TemporalPolicyClient:
                     "condition": self._pending_request_context.condition,
                     "target_track_id": self._pending_request_context.target_track_id,
                     "interaction_id": self._pending_request_context.interaction_id,
+                    "source_frame_id": self._pending_request_context.source_frame_id,
+                    "source_captured_ns": self._pending_request_context.source_captured_ns,
                 }
             ),
             "transport_pending": (
@@ -673,6 +677,8 @@ class TemporalPolicyClient:
             condition=condition,
             target_track_id=target_track_id,
             interaction_id=interaction_id,
+            source_frame_id=frame.frame_id,
+            source_captured_ns=frame.captured_ns,
         )
         self._pending_deadline_ns = deadline_ns
         self._pending_frame_captured_ns = frame.captured_ns
@@ -1568,6 +1574,8 @@ def _empty_action_provenance(
         "action_kind": action_kind,
         "prediction_id": None,
         "request_id": None,
+        "source_frame_id": None,
+        "source_captured_ns": None,
         "condition_id": None,
         "condition": None,
         "episode_id": None,
@@ -1603,6 +1611,8 @@ def _prediction_action_provenance(
         "action_kind": action_kind,
         "prediction_id": request_id,
         "request_id": request_id,
+        "source_frame_id": None if context is None else context.source_frame_id,
+        "source_captured_ns": None if context is None else context.source_captured_ns,
         "condition_id": (
             None
             if condition is None

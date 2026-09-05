@@ -247,6 +247,55 @@ def _assert_no_new_inputs(action):
     assert action.mouse_dx == action.mouse_dy == 0
 
 
+def test_prediction_and_hold_keep_submitted_source_when_latest_capture_changes(pipe_client):
+    client, process, frames, memory, closes = pipe_client
+    board = PerceptionBlackboard()
+    intent = MotorIntent(skill_id="explore_forward", mode="explore", episode_id="run")
+    frames[0] = CapturedFrame(frame_id=11, captured_ns=100, width=2, height=2, bgra=b"a" * 16)
+    _assert_no_new_inputs(client.act(board, intent, sequence=1))
+    request = process.commands()[0]
+    submitted = client._pending_request_context
+    assert submitted.source_frame_id == 11
+    assert submitted.source_captured_ns == 100
+    assert client.status()["last_action_provenance"]["source_frame_id"] is None
+
+    frames[0] = CapturedFrame(frame_id=29, captured_ns=200, width=2, height=2, bgra=b"b" * 16)
+    process.send({
+        "type": "prediction",
+        "request_id": request["request_id"],
+        "output": {"keys": ["w"], "inference_ns": 1, "model_version": client.config.model_version},
+    })
+    assert client.act(board, intent, sequence=2).keys_down == ("w",)
+    prediction = client.status()["last_action_provenance"]
+    assert prediction["action_kind"] == "prediction"
+    assert prediction["source_frame_id"] == 11
+    assert prediction["source_captured_ns"] == 100
+    assert client._applied_request_context is submitted
+    assert bytes(memory.buf) == b"a" * 16
+
+    client.act(board, intent, sequence=3)
+    successor = process.commands()[0]
+    assert bytes(memory.buf) == b"b" * 16
+    assert client._pending_request_context.source_frame_id == 29
+    assert client._pending_request_context.source_captured_ns == 200
+    held = client.status()["last_action_provenance"]
+    assert held["action_kind"] == "prediction_hold"
+    assert held["request_id"] == request["request_id"]
+    assert held["source_frame_id"] == 11
+    assert held["source_captured_ns"] == 100
+
+    process.send({
+        "type": "error", "request_id": successor["request_id"], "error": "synthetic failure",
+    })
+    _assert_no_new_inputs(client.act(board, intent, sequence=4))
+    assert closes == [True]
+    assert client._applied_request_context is None
+    assert client._consumed_request_context is None
+    released = client.status()["last_action_provenance"]
+    assert released["source_frame_id"] is None
+    assert released["source_captured_ns"] is None
+
+
 @pytest.mark.parametrize(
     ("provider", "reply_kind"),
     [("openai-vpt", "prediction"), ("external", "prediction"), ("external", "error")],
@@ -282,6 +331,8 @@ def test_reset_drains_retired_response_before_reusing_frame_or_option_context(
     assert client._pending_request_id == old_request_id
     assert client._pending_request_context is None
     assert client.status()["pending_request"] is None
+    assert client.status()["last_action_provenance"]["source_frame_id"] is None
+    assert client.status()["last_action_provenance"]["source_captured_ns"] is None
     assert client.status()["transport_pending"] == {
         "request_id": old_request_id,
         "retired": True,
@@ -326,6 +377,8 @@ def test_reset_drains_retired_response_before_reusing_frame_or_option_context(
     assert client._applied_request_context is None
     provenance = client.status()["last_action_provenance"]
     assert provenance["request_id"] is None and provenance["condition"] is None
+    assert provenance["source_frame_id"] is None
+    assert provenance["source_captured_ns"] is None
     assert client.metrics.deadline_misses <= 1
     if already_missed or reply_kind == "error":
         assert client.metrics.deadline_misses == 1
@@ -348,6 +401,8 @@ def test_reset_drains_retired_response_before_reusing_frame_or_option_context(
     assert successor[0]["frame"]["captured_ns"] == 2
     assert client._pending_request_id == fresh_request_id
     assert client._pending_request_context.condition["episode_id"] == "run-new"
+    assert client._pending_request_context.source_frame_id == 2
+    assert client._pending_request_context.source_captured_ns == 2
     assert client.status()["transport_pending"] == {
         "request_id": fresh_request_id,
         "retired": False,
@@ -376,6 +431,8 @@ def test_reset_drains_retired_response_before_reusing_frame_or_option_context(
     provenance = client.status()["last_action_provenance"]
     assert provenance["request_id"] == fresh_request_id
     assert provenance["episode_id"] == "run-new"
+    assert provenance["source_frame_id"] == 2
+    assert provenance["source_captured_ns"] == 2
     assert client.status()["transport_pending"] is None
     assert client.status()["retired_responses"] == 1
     assert 0 <= client.metrics.last_response_age_ms < client.config.deadline_ms
