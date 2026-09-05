@@ -8,6 +8,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -41,6 +42,19 @@ def test_module_provenance_rejects_binary_source_and_version_drift(tmp_path: Pat
     ):
         with pytest.raises(IsolationError, match="provenance changed"):
             seat.require_headless_seat_artifact(changed)
+
+
+def test_windows_native_calls_fail_closed_before_creating_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path)
+    monkeypatch.setattr(seat, "sys", SimpleNamespace(platform="win32"))
+    with pytest.raises(IsolationError, match="requires Linux procfs"):
+        seat.require_loaded_headless_seat(123, artifact)
+    output = tmp_path / "must-not-be-created"
+    with pytest.raises(IsolationError, match="requires POSIX file locking"):
+        seat.build_headless_seat_module(root=output)
+    assert not output.exists()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux procfs device/inode mapping contract")

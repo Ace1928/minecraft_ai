@@ -8,6 +8,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -52,6 +53,8 @@ def require_headless_seat_artifact(artifact: HeadlessSeatArtifact) -> None:
 
 def require_loaded_headless_seat(pid: int, artifact: HeadlessSeatArtifact) -> None:
     """Bind the current binary to an executable mapping in the live compositor."""
+    if sys.platform != "linux":
+        raise IsolationError("live headless virtual-seat verification requires Linux procfs")
     require_headless_seat_artifact(artifact)
     module = Path(artifact.module_path)
     try:
@@ -109,6 +112,8 @@ def build_headless_seat_module(
     The helper does not install packages, change a compositor, or launch a game.
     An existing valid artifact is reused so a rebuild cannot replace a live inode.
     """
+    if sys.platform == "win32":
+        raise IsolationError("headless virtual-seat publication requires POSIX file locking")
     import fcntl
 
     selected_root = (SEAT_ARTIFACT_ROOT if root is None else root).resolve()
