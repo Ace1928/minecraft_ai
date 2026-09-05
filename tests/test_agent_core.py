@@ -2036,7 +2036,13 @@ def test_incomplete_gather_recovery_does_not_consume_plan_step(
         assert runtime._plan_index == 0
 
 
-def test_cancelled_collection_revokes_recent_break_authorization(tmp_path: Path) -> None:
+def test_cancelled_collection_revokes_recent_break_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This checks revocation, not storage performance within a 250ms fact TTL.
+    # Slow CI disk writes must not expire the evidence before its assertion.
+    clock_ns = time.monotonic_ns()
+    monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock_ns)
     with StateDatabase(tmp_path / "state.sqlite3") as database:
         runtime = _runtime_for_learning(database)
         runtime.skills = build_bootstrap_skill_library()
