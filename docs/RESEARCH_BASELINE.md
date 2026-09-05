@@ -91,3 +91,35 @@ The combination matters more than any individual component: a powerful planner w
 ## Evaluation principle
 
 No paper result is accepted as a project result. Every borrowed idea must beat the local baseline in our own reproducible evaluation harness before becoming the preferred implementation.
+
+## September 2026 update: adaptation after input qualification
+
+The immediate prerequisite remains measured input delivery and verified gameplay
+outcomes. None of the following research establishes competence on our Bedrock
+session or justifies training on actions whose physical delivery is unknown.
+
+- **Preference Goal Tuning (PGT):** the [May 2026 paper revision](https://arxiv.org/abs/2412.02125v2)
+  adapts a per-task latent goal from trajectory preferences while keeping the
+  policy weights fixed. This is a candidate for bounded task adaptation without
+  repeatedly fine-tuning the entire motor policy. The [released implementation](https://github.com/CraftJarvis/PGT)
+  targets GROOT and the Java MCP-Reborn environment with GPU rollouts; it is not
+  a drop-in Bedrock or custom-native adapter. Any local trial needs a compatible
+  conditioning interface, reliable outcome labels and held-out trajectories.
+- **CrossHA:** the [CVPR 2026 project](https://craftjarvis.github.io/CrossHA/)
+  learns to select between motion, grounding, raw, language and latent action
+  formats. This supports evaluating action abstraction as part of a policy,
+  while our supervisor still owns permissions and input delivery. It does not
+  establish that our current routing or custom models reproduce those results.
+- **ROCKET-3:** the [research](https://craftjarvis.github.io/ROCKET-3/)
+  combines cross-view goals, imitation pretraining and KL-constrained multi-task
+  reinforcement learning. Its published training setup uses roughly 100,000
+  tasks and 72 parallel Minecraft instances, not a plan for this desktop.
+  As checked on 2026-09-06, the [official repository](https://github.com/CraftJarvis/ROCKET-3)
+  contains a README and demonstration GIF with code release still promised;
+  the project's Hugging Face link leads to its paper, not a released checkpoint.
+  Do not treat it as an immediately installable controller upgrade.
+
+Practical order: qualify isolated camera and held-input response, retain fresh
+goal/action/outcome trajectories, verify wood acquisition and crafting, then
+compare one bounded adaptation against the unchanged policy. A smaller replay
+loss alone is not evidence of better survival, movement or continual learning.
