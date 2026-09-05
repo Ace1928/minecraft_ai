@@ -46,6 +46,34 @@ an evidence record. Availability is advisory; the server's single slot serialize
 a racing live request. Do not run batches against the live model. Offline frame
 IDs/timestamps are explicitly synthetic and never published as live observations.
 
+## Retained-image qualification — 2026-09-05
+
+Two individual local-model probes ran while the live agent/game stayed up:
+
+| Retained view | Surface result | Full-frame point | Latency | Independent pixel review |
+| --- | --- | --- | --- | --- |
+| Dark, forward view | `side_face`, confidence 0.90 | (0.300, 0.504) | 33.67 s | Point lies inside the large nearby trunk face at the left of the passage. |
+| Daylight, upward view | `side_face`, confidence 0.90 | (0.350, 0.462) | 36.85 s | Point lies inside the same trunk's visible vertical face; it does not select the exposed underside. |
+
+Source image SHA-256 values, in table order:
+
+```text
+76211f7ca5631f9fdfb360241f5394eb481d57e3060a9d96670cc9c3e121b331
+09799242595cef32d76d3630477a50a2f26921fc12b72066e6fb52fe93d6651d
+```
+
+The first was a prototype with an 885-row WORLD crop; the committed code fixes
+rounding to the existing 886-row WORLD boundary for these 1054-high frames.
+The second used the committed crop, whose exact RGB SHA-256 is
+`86ae39e57354984f752b35fc0e05aced955ecb8638695000ff8b6ceefc631db5`.
+Do not treat those two different crops as an identical-code accuracy comparison.
+
+These are successful **surface nominations**, not collision diagnoses. Neither
+establishes overlap with the body, a removable obstruction, a clear route, or a
+useful action. Neither qualified underside/riser discrimination; no open or
+occluded control was evaluated. Subsequent attempted probes deferred on model
+availability instead of stopping live cognition. The survey remains offline.
+
 ## What this does not establish
 
 - An underside is not automatically a head collision; a distant ceiling is a
