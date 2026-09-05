@@ -1102,9 +1102,9 @@ def _wine_relative_motion_delta(
 ) -> tuple[int, int]:
     """Map MineRL/VPT camera deltas onto Bedrock's relative pointer input.
 
-    MineRL camera actions are ordered as positive pitch-down and positive
-    yaw-right. Bedrock uses the same signs for relative XTEST motion. Keep these
-    as deltas: XTEST detail=1 selects relative motion, whereas root=X.NONE
+    MineRL requests positive pitch-down and positive yaw-right. Physical Bedrock
+    delivery must be qualified separately; this function only preserves those
+    requested deltas: XTEST detail=1 selects relative motion, whereas root=X.NONE
     selects the current pointer screen and does not determine motion semantics.
     """
     return mouse_dx, mouse_dy

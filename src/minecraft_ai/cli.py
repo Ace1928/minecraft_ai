@@ -622,12 +622,12 @@ def run(
             calibration_id=profile.profile_id,
         )
         print(
-            "[green]Physical camera horizon calibrated[/green] "
+            "[yellow]Camera homing commands completed; physical horizon unverified[/yellow] "
             f"Bedrock={version} pitch_counts_per_degree="
             f"{profile.pitch_counts_per_degree:.6f}"
         )
     else:
-        print("[green]Physical camera horizon calibration preserved[/green]")
+        print("[yellow]Camera command-origin state preserved; physical horizon unverified[/yellow]")
 
     target = f"bedrock:{version}:x11:{window_id}"
     process = _launch_realtime_agent_transaction(

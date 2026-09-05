@@ -17,6 +17,7 @@ import pytest
 from minecraft_ai.config import AppPaths
 from minecraft_ai.agent_lifecycle import AgentProcess
 from minecraft_ai.operator_server import (
+    DASHBOARD_HTML,
     OperatorRequestHandler,
     _capture_live_bedrock_frame,
     _default_operator_hostnames,
@@ -27,6 +28,12 @@ from minecraft_ai.operator_server import (
 from minecraft_ai.perception_service import frame_dhash
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.storage import StateDatabase
+
+
+def test_camera_counter_does_not_claim_verified_physical_pose() -> None:
+    assert "physical pose unverified" in DASHBOARD_HTML
+    assert "command origin set" in DASHBOARD_HTML
+    assert "physical horizon calibrated" not in DASHBOARD_HTML
 
 
 def test_operator_readiness_requires_fresh_matching_motor_telemetry(monkeypatch) -> None:
