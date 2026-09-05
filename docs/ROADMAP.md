@@ -30,14 +30,25 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 
 Retain failed trajectories as failures. Do not promote a successful block break into resource possession, or test coverage into a completed live gameplay milestone.
 
-Latest live observation (`5c258c1`): the agent-only reload preserved Minecraft,
-the supervisor, isolated input, and GPU server. The player remains beneath a
-leaf canopy; mining acquisition times out and traversal stalls. Two focused
-answers were rejected with crosshair RGB drift 1.013 and 1.456 against the 1.0
-limit after about 20 seconds. No successful decision-owned perception-to-action
-cycle was observed. A visible six-log stack predates the recorded accepted
-attacks and is not counted as an autonomous acquisition. The next execution
-gate remains actual guarded block clearance and movement, not activity counts.
+Latest live observation (`b5a551c`): the user approved returning to autonomous
+play; prior operator directives were archived without deleting their history.
+A six-minute canary recorded 48 accepted motor steps, zero recording drops and
+two distinct `locomotion.stalled` runs. Four cognition-owned `obstacle.ahead`
+jobs completed with unknown answers; the separate existing headroom query was
+rejected as stale. Even the final obstacle job, with frame dHash distance zero,
+returned unknown after 44.17 seconds. Consumed decisions already requested
+perception and replanning, so the runtime pure-idle fallback marker remained
+unused: its live acceptance gate has **not** passed. No post-observation escape,
+new acquisition or crafting success is claimed; the visible 10 dirt and 15
+spruce logs are pre-existing stock.
+
+Deployment incident: an intent-lock/IPC timeout during the first reload let the
+outer launcher replace the supervisor; Minecraft and the GPU model survived.
+The corrected agent-only reload to `b5a551c` preserved the replacement
+supervisor, game, GPU process and calibration, and readiness/recording passed.
+Do not hold the operator-intent lock across `resume` IPC: its server handler
+takes that lock. Keep the outer watchdog suspended until a guarded replacement
+agent is established; no emergency or operator pause may be cleared implicitly.
 
 ## Phase 0 — Public extraction and safety foundation
 
