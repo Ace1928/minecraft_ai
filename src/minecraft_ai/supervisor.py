@@ -700,6 +700,7 @@ class Supervisor:
                 "role": self.role,
                 "session_id": self.session_id,
                 "pid": os.getpid(),
+                "agent_reload_resume_supported": True,
                 "backend": self.backend.backend_id,
                 "live_capable": self.backend.live_capable,
                 "motor_lease_active": lease is not None and not lease.expired(),
@@ -827,6 +828,32 @@ class Supervisor:
                 with operator_intent_lock(), self._lock:
                     self.resume()
                     clear_operator_pause()
+                    result = self.status()
+            elif command == "resume-for-agent-reload":
+                # Cleanup pause is not renewed operator permission. Admit only
+                # this unarmed generation, under the same lock as durable intent.
+                with operator_intent_lock(), self._lock:
+                    requested_session = payload.get("session_id")
+                    if (
+                        not isinstance(requested_session, str)
+                        or requested_session != self.session_id
+                    ):
+                        raise RuntimeError("agent reload supervisor session mismatch")
+                    if self.state != SupervisorState.PAUSED:
+                        raise RuntimeError(f"cannot resume agent reload from {self.state}")
+                    if self.motor.lease is not None:
+                        raise RuntimeError("agent reload requires a revoked motor lease")
+                    if AGENT_FILE.exists() or AGENT_FILE.is_symlink():
+                        raise RuntimeError("agent reload requires confirmed agent retirement")
+                    if emergency_stop_latched():
+                        raise RuntimeError("emergency stop is latched")
+                    if operator_pause_latched():
+                        raise RuntimeError("operator pause is latched")
+                    # Do not call resume(): its FAILSAFE recovery may stop this
+                    # supervisor, and its IPC wrapper clears persistent intent.
+                    validate_transition(self.state, SupervisorState.SAFE_IDLE)
+                    self.state = SupervisorState.SAFE_IDLE
+                    self._persist_status()
                     result = self.status()
             elif command == "stop":
                 with operator_intent_lock():

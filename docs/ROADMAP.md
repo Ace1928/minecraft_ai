@@ -28,6 +28,8 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [ ] Qualify correct overhead, footstep and mirrored side-edge obstruction selection, with open/high-ceiling/occluded controls, before promoting survey targeting into live recovery.
 - [x] Distinguish controller starvation from action-backed collision stalls. The existing bounded no-input startup guard now reports `controller.starvation`, retains its actual cause, and does not nominate a physical obstacle recovery or count toward the two-stall observation fallback. Regression coverage includes release, memory attribution and fallback exclusion; live movement remains a separate gate.
 - [x] Preserve run-lifetime startup movement evidence across progress-window resets, and exclude typed controller starvation from failure-derived canonical perception questions. Explicit operator/model requests remain independent; regression cases retain later genuine stalls and new-run starvation.
+- [x] Qualify an optional pinned external raw-motion worker through the actual temporal client, without actuators. A 24-request replay accepted 23 predictions and safely retired one across reset, with zero deadline misses; 16 subsequent predictions retained only the new context. Maximum owner-side response age was 300.17 ms against 400 ms. A separate four-request 1920×1054 replay with the live camera settings accepted all four (maximum 287.84 ms; maximum client call 12.87 ms), using two CPU threads. This is delivery/reset qualification, not live movement, survival competence, or online learning.
+- [x] Implement and regression-test a pause-preserving agent-reload resume capability. It requires the exact paused supervisor generation, revoked lease, retired agent and clear persistent intent; it neither clears pause/emergency nor recovers/stops FAILSAFE. The running supervisor does not yet have this capability, so activation is deferred rather than bypassing operator intent.
 - [ ] Demonstrate a fresh accepted movement prediction after a retired worker response is drained by its owner, then verify actual translation rather than infer it from accepted keys.
 - [ ] Demonstrate autonomous soft-block clearance and escape from the observed dirt pocket.
 - [ ] Demonstrate three consecutive verified log acquisitions without manual intervention or game restart; extend item recognition only from calibrated evidence if the local tree variant requires it.
@@ -54,6 +56,15 @@ the verifier also emits that code for insufficient commanded movement. These
 are controller-starvation evidence, not proof of a terrain collision. No worker
 stdout was consumed externally and no in-flight shared frame was overwritten to
 force resubmission. The old idle-stall fallback eligibility remains unchanged.
+
+The external worker replay used an immutable, verified import root and no
+adaptation, resume or persistent learner state. It is not live yet: a reload
+safety review found that ordinary supervisor `resume` clears durable operator
+pause and may retire a FAILSAFE generation. Checking pause before that IPC is
+not an atomic guard against a new pause. The existing live agent was left
+running, with game, supervisor, GPU and launcher processes unchanged. A
+pause-preserving supervisor capability is required before automated activation;
+do not use ordinary `resume` as a workaround or restart the whole game stack.
 
 Deployment incident: an intent-lock/IPC timeout during the first reload let the
 outer launcher replace the supervisor; Minecraft and the GPU model survived.

@@ -56,6 +56,15 @@ with fresh request/frame/episode attribution, followed separately by a guarded
 live trace through the supervisor. Accepted inputs, observed displacement and
 successful gameplay remain different evidence gates.
 
+Before an automated agent-only reload, require supervisor status
+`agent_reload_resume_supported: true`. After confirmed retirement, use
+`resume-for-agent-reload` with that exact `session_id`; it permits only an
+unarmed cleanup pause with no remaining agent descriptor or persistent stop/pause
+intent. It never grants a new operator resume or retires a faulted supervisor.
+Older generations must not be probed after stopping the agent: leave them
+running until an authorized supervisor update can install this capability.
+Ordinary `resume` is an operator action, not the automated reload substitute.
+
 ### Required failure behavior
 
 If any of the following occur, the motor capability lease is revoked and all held inputs are released:
