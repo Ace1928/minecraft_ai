@@ -289,8 +289,15 @@ class ActiveVLMWorker:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="minecraft-ai-vlm", daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._run, name="minecraft-ai-vlm", daemon=True)
+        try:
+            thread.start()
+        except BaseException:
+            self._stop.set()
+            raise
+        # A failed start must not leave stop() trying to join an unstarted
+        # thread and interrupting the remaining runtime resource cleanup.
+        self._thread = thread
 
     def stop(self) -> None:
         self._stop.set()

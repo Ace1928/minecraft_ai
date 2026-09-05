@@ -1409,25 +1409,37 @@ class AgentRuntime:
 
     def run_forever(self) -> None:
         period = 1.0 / self.motor_hz
-        self._lease_thread = threading.Thread(
-            target=self._lease_heartbeat,
-            name="minecraft-ai-lease-heartbeat",
-            daemon=True,
-        )
-        # Secure the lease on the main thread before anything slow happens. The
-        # CLI arms with only a 3s TTL; interpreter import + policy warmup can
-        # easily exceed that before the heartbeat thread first renews, which
-        # would make the supervisor watchdog expire the lease during a cold
-        # start. An immediate, generous renewal hands ownership to the agent.
+        self._lease_thread = None
         try:
-            send_command("renew", lease_id=self.lease_id, ttl_ms=5_000)
-            self._last_renew_ns = time.monotonic_ns()
-        except Exception as exc:
-            self._lease_fault = f"{type(exc).__name__}: {exc}"
-        self._lease_thread.start()
-        if self.perception.active_vlm is not None:
-            self.perception.active_vlm.start()
-        try:
+            if self._stop.is_set():
+                return
+            # Confirm ownership before starting workers. A rejected renewal
+            # goes straight through cleanup; an expired lease cannot be revived
+            # by background retries. Earlier process assembly is a separate
+            # startup phase and is not covered by this runtime heartbeat.
+            try:
+                send_command("renew", lease_id=self.lease_id, ttl_ms=5_000)
+                self._last_renew_ns = time.monotonic_ns()
+            except Exception as exc:
+                self._lease_fault = f"{type(exc).__name__}: {exc}"
+                if self._stop.is_set() or operator_pause_latched():
+                    return
+                raise
+            if self._stop.is_set():
+                return
+            lease_thread = threading.Thread(
+                target=self._lease_heartbeat,
+                name="minecraft-ai-lease-heartbeat",
+                daemon=True,
+            )
+            lease_thread.start()
+            self._lease_thread = lease_thread
+            if self._stop.is_set():
+                return
+            if self.perception.active_vlm is not None:
+                self.perception.active_vlm.start()
+            if self._stop.is_set():
+                return
             self.telemetry.publish(self._telemetry_payload(state="warming"), force=True)
             # Strategic inference and policy checkpoint loading are independent.
             # Start the first typed decision from a real captured frame before
@@ -1435,12 +1447,18 @@ class AgentRuntime:
             # paid serially while the avatar stands idle.
             if self.perception.last_capture is None:
                 self.perception.capture_once()
+            if self._stop.is_set():
+                return
             # Operator grounding is deterministic and may make a pending
             # directive executable before the first strategic snapshot. Merge
             # it before launching slow cognition, including after a process
             # restart where the message was already marked delivered.
             self._merge_operator_target()
+            if self._stop.is_set():
+                return
             self._start_cognition_if_due()
+            if self._stop.is_set():
+                return
             self._warmup_policy()
             while not self._stop.is_set():
                 tick_started = time.perf_counter()
