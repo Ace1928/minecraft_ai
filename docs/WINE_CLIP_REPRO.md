@@ -99,8 +99,58 @@ The build fixture is `/tmp/minecraft-wine-driver-build-svfZwN/`. The resulting
 ELF requires GLIBC 2.38, so it is not a portable Bullseye release. The exact
 extracted predicate passes 15 native stub checks, including rejection when
 another process owns foreground. These tests model the call-site boundary;
-they do not establish the full driver's physical behavior. Matched disposable
-driver execution and live Bedrock qualification remain separate open gates.
+they do not establish the full driver's physical behavior. The separate
+disposable execution result follows; live Bedrock qualification remains open.
+
+### Matched driver execution
+
+All four subsequent comparison services and helpers completed successfully,
+with no cleanup errors. Each ran in its own fresh prefix and headless-pixman
+session inside a read-only mount namespace. Only the selected X11 driver ELF
+was overlaid at an installed-engine path. The writable case directory and
+Wine server sockets were private; the original installed file was unchanged.
+
+Before focus selection and again before the clip request, both the helper
+and Explorer passed executable-map path/device/inode checks and process-root
+hash checks for the selected driver and unchanged core/Windows modules.
+This establishes which binary executed despite its apparently installed path.
+
+| Loaded driver / X focus | Physical observations, 17 snapshots | Post-call Win32 cursor, 19 rows |
+| --- | --- | --- |
+| Rebuilt baseline / Explorer | Unmapped clip; pointer `(100,100)` | One transient `(300,250)`, then 18 at `(100,100)` |
+| Rebuilt baseline / application | Mapped clip; pointer `(300,250)` | All `(300,250)` |
+| Candidate / Explorer (P1) | Mapped clip; pointer `(300,250)` | All `(300,250)` |
+| Candidate / application (P3) | Mapped clip; pointer `(300,250)` | All `(300,250)` |
+
+The candidate P1 trace reaches `grab_clipping_window` in the helper's
+Windows process/thread; no keyboard-grab refusal appears. The baseline's
+transient logical cursor row does not override its independently observed
+physical pointer. Sampling is asynchronous; the first X snapshot in each
+case pairs with a pre-call Win32 row. No claim of simultaneous API pairs is made.
+
+The new fixture is `/tmp/minecraft-wine-driver-repro-v2-fkvOcq/`. Its helper
+source hash is `d9698ce038ec7a5d5f553eaabb37d3bd76e7432cad658d63140891230a4a0ef1`
+and binary hash is `1b19799dd29a5db63b0464ff23722939499590165fe161d4f21856834a89f5ca`.
+
+| Case receipt | SHA-256 |
+| --- | --- |
+| Baseline A | `57820ac72828a77942946430430417eadc5196d9345ffa8120c1150478b66927` |
+| Baseline B | `70c64541e14a40bc54e6add58009379699dc454c1dcf1c05f67d531afc3b2f04` |
+| Candidate P1 | `57ec2abc501b7720ef51df722ac7f999771e2fff6fec45c8d21fcf3b3c075f22` |
+| Candidate P3 | `c3f2c6fd568f67e27bd9a36971b5cb58fe8ff3e8b7d66ccd70e7824fa003fddc` |
+
+An earlier overlay fixture, `/tmp/minecraft-wine-driver-repro-ZUyrgr/`,
+failed before Wine started because its private `/tmp` lacked `.X11-unix`.
+That failure is retained, not reported as a Wine result or erased for retry.
+The corrected experiment used a separate fixture and fresh case directories.
+
+This qualifies the clipping correction for these disposable conditions.
+It does **not** qualify sustained relative camera motion, focus transitions,
+live game input, complete host-input exclusion, or a production deployment.
+The actual Minecraft, model, original compositor, paused supervisor and
+stopped launcher remained preserved. No Wine replacement was installed.
+
+### Original installed-build observations
 
 Artifacts remain under `/tmp/minecraft-wine-clip-repro-wppvRA/`; they are not
 portable public fixtures. These hashes identify the original measurements:
