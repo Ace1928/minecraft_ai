@@ -29,7 +29,7 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Distinguish controller starvation from action-backed collision stalls. The existing bounded no-input startup guard now reports `controller.starvation`, retains its actual cause, and does not nominate a physical obstacle recovery or count toward the two-stall observation fallback. Regression coverage includes release, memory attribution and fallback exclusion; live movement remains a separate gate.
 - [x] Preserve run-lifetime startup movement evidence across progress-window resets, and exclude typed controller starvation from failure-derived canonical perception questions. Explicit operator/model requests remain independent; regression cases retain later genuine stalls and new-run starvation.
 - [x] Qualify the optional external raw-motion adapter through the actual temporal client without actuators, including matching replies, retired-request drainage and fresh option context after reset. Private deployment configuration and measurements remain outside this repository. This is delivery/reset qualification, not live movement, survival competence, online learning or a universal latency guarantee.
-- [x] Implement and regression-test a pause-preserving agent-reload resume capability. It requires the exact paused supervisor generation, revoked lease, retired agent and clear persistent intent; it neither clears pause/emergency nor recovers/stops FAILSAFE. The running supervisor does not yet have this capability, so activation is deferred rather than bypassing operator intent.
+- [x] Implement and regression-test a pause-preserving agent-reload resume capability. It requires the exact paused supervisor generation, revoked lease, retired agent and clear persistent intent; it neither clears pause/emergency nor recovers/stops FAILSAFE. The user-authorized supervisor update has now installed it without restarting Minecraft or the GPU server. The measured calibration profile was preserved and the isolated camera origin deliberately re-established, not copied as a verified pose.
 - [x] Require a successful worker-generation handshake after failed warmup, reject semantic/GUI output from raw-only external workers, and bound per-call reply reads while retaining partial-response ownership. Regression checks cover rejected startup reuse, fact publication, zero-budget fragmentation and positive deadlines. This is admission correctness, not live controller activation.
 - [ ] Demonstrate a fresh accepted movement prediction after a retired worker response is drained by its owner, then verify actual translation rather than infer it from accepted keys.
 - [ ] Demonstrate autonomous soft-block clearance and escape from the observed dirt pocket.
@@ -38,7 +38,25 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 
 Retain failed trajectories as failures. Do not promote a successful block break into resource possession, or test coverage into a completed live gameplay milestone.
 
-Latest live observation (`b5a551c`): the user approved returning to autonomous
+Latest live observation (`16da921`): the generic external raw-motion route
+produced attributable, supervisor-accepted forward inputs through the unchanged
+skill/safety guards. The bounded traversal ended in `locomotion.stalled` and its
+terminal reset released all locomotion keys. A preselected camera-free forward
+interval was effectively stationary in the retained images: accepted-input
+execution passed, but translation, escape and collision geometry did not.
+Surrounding no-input attempts now retain `controller.starvation` rather than
+manufacturing terrain failures. The live agent, recording and resumed outer
+watchdog remain operational. This is a private canary, not a durable change to
+the default recovery configuration; detailed deployment receipts stay private.
+
+The trace also exposed a training-data limitation: the retained trajectory frame
+is the observation at action acceptance, not necessarily the asynchronous
+prediction's original input. Request/condition identity is retained, but exact
+inference-source frame lineage is not yet carried into accepted provenance.
+Do not call this complete source-frame/action alignment or use an adjacent
+frame as invented training truth. The combined translation gate remains open.
+
+Historical live observation (`b5a551c`): the user approved returning to autonomous
 play; prior operator directives were archived without deleting their history.
 A six-minute canary recorded 48 accepted motor steps, zero recording drops and
 two distinct `locomotion.stalled` runs. Four cognition-owned `obstacle.ahead`
@@ -67,12 +85,12 @@ negative controls, not verified collision geometry or a local 3D map; see
 [the retained-frame qualification](BODY_CLEARANCE.md#retained-motion-qualification--2026-09-05).
 
 The external worker replay used an immutable, verified import root and no
-adaptation, resume or persistent learner state. It is not live yet: a reload
+adaptation, resume or persistent learner state. Activation was initially deferred: a reload
 safety review found that ordinary supervisor `resume` clears durable operator
 pause and may retire a FAILSAFE generation. Checking pause before that IPC is
 not an atomic guard against a new pause. The existing live agent was left
-running, with game, supervisor, GPU and launcher processes unchanged. A
-pause-preserving supervisor capability is required before automated activation;
+running until the user approved the supervisor update described above. A
+pause-preserving supervisor capability is required before future agent-only reloads;
 do not use ordinary `resume` as a workaround or restart the whole game stack.
 
 Deadline misses remain failed delivery attempts even when safely contained.
