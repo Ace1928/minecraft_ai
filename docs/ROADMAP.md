@@ -37,6 +37,7 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Require a successful worker-generation handshake after failed warmup, reject semantic/GUI output from raw-only external workers, and bound per-call reply reads while retaining partial-response ownership. Regression checks cover rejected startup reuse, fact publication, zero-budget fragmentation and positive deadlines. This is admission correctness, not live controller activation.
 - [x] Preserve immutable inference-source capture ID/time through predictions, held actions and accepted trajectory provenance, separately from the control-time capture and blackboard IDs. Delayed-reply, reset/retirement and legacy-replay regressions pass. Metadata does not retain missing source pixels or establish a learning/translation result.
 - [x] Use one private X connection for ordered relative camera motion, key/button events and final synchronization. Chat settle delays now follow flushed events; unconditional releases never park or warp the pointer. Wire-level relative-motion and cleanup regressions pass; physical camera delivery remains the separate open gate above.
+- [x] Remove implicit private-pointer parking from WORLD motion/button admission: unknown/outside routing now rejects without an absolute warp. Explicit screenshot-bound GUI cursor placement remains separate. This removes an uncommanded motion source; it does not establish which input boundary caused the retained camera failure below.
 - [x] Revoke motor authority when lease binding, renewal, accepted-action refresh or input release fails; attempt backend capability clearing even after release failure without masking the original fault. Successful renewal preserves held input. Fault-injection tests prove logical containment, not physical release after an X-server failure.
 - [ ] Complete the end-to-end input audit and retained-image qualification: camera response, held-key continuity after stale frames, geometry/capture consistency, authenticated malformed actions and supervisor cleanup faults. Do not promote accepted input into physical translation or flawless delivery.
 - [ ] Demonstrate a fresh accepted movement prediction after a retired worker response is drained by its owner, then verify actual translation rather than infer it from accepted keys.
@@ -45,6 +46,28 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [ ] Demonstrate a verified log-to-planks inventory transformation, then use that run to select the next progression upgrade.
 
 Retain failed trajectories as failures. Do not promote a successful block break into resource possession, or test coverage into a completed live gameplay milestone.
+
+Input audit (`bf60511`): one supervisor-owned `dx=0, dy=+8` camera-only pulse
+produced a large lateral/rotational view change in the retained images, not
+the intended small vertical response. No key/button or second/reverse pulse
+was sent. Across stationary retirement, lease-issue and settling controls,
+200 tracked terrain features had median displacement below 0.005 pixels,
+95th percentile below 0.052 and maximum below 0.307. The same supervisor,
+game client geometry and sensitivity profile were retained through the pulse.
+This isolates an action-boundary delivery failure, not its internal cause:
+focus restoration, implicit parking and relative event handling were not
+individually observed. The accepted pitch counter is not physical pose truth.
+The preceding non-actuating attempt was rejected by a colour-drift gate;
+retained-image tracking later showed its geometry was effectively stationary.
+Neither failed attempt is discarded or counted as camera qualification.
+
+Diagnostic handoff defects are also retained: releasing an older outer
+watchdog before replacement readiness caused a warm-up replacement, and a
+later diagnostic process launched the agent with the policy interpreter,
+which lacked Xlib. The failed child was contained and the normal launcher
+restored readiness with Minecraft/GPU unchanged. Future probes must use the
+application interpreter for agent launch and confirm readiness before handing
+back to the outer watchdog. These operator errors are not model failures.
 
 Latest live observation (`16da921`): the generic external raw-motion route
 produced attributable, supervisor-accepted forward inputs through the unchanged

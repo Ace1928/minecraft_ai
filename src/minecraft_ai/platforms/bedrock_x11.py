@@ -694,7 +694,12 @@ class IsolatedX11InputBackend:
         return self._display.create_resource_object("window", self._input_window_id)
 
     def _park_pointer_in_game(self) -> bool:
-        """Return verified routing; releases must proceed even on failure."""
+        """Verify private routing without moving the pointer; releases remain unconditional.
+
+        The name is retained for the host-debug branch. Private WORLD input
+        must never turn a failed routing query into an absolute camera warp.
+        Only an explicit, screenshot-bound GUI cursor action may reposition it.
+        """
         try:
             root = self._display.screen().root
             if self._targeted:
@@ -712,15 +717,6 @@ class IsolatedX11InputBackend:
                 self._display, self._input_window_id, self.target_window_id,
             )
             rect = _window_root_rect(self._display, int(client.id))
-            try:
-                if _pointer_hits_client(root, int(client.id), rect):
-                    return True
-            except Exception:
-                # Unknown pointer ownership cannot justify skipping parking.
-                # Inspection must never prevent the caller's release sweep.
-                pass
-            root.warp_pointer(rect.x + rect.width // 2, rect.y + rect.height // 2)
-            self._display.sync()
             return _pointer_hits_client(root, int(client.id), rect)
         except Exception:
             return False

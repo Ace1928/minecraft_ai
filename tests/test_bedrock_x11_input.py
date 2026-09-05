@@ -441,26 +441,25 @@ def test_pointer_change_during_chain_does_not_preserve_stale_client_routing(
         backend.apply(MotorAction(sequence=0, mouse_dx=7, mouse_dy=-9))
 
     assert state["relative"] == []
-    assert state["warps"] == [(960, 553)]
+    assert state["warps"] == []
 
 
-def test_pointer_outside_game_parks_at_client_not_decorated_wrapper_center() -> None:
+def test_pointer_outside_game_cannot_authorize_implicit_repositioning() -> None:
     backend, state = _pointer_parking_backend()
     state["point"] = (10, 5)
-    assert backend._park_pointer_in_game()
-    assert state["warps"] == [(960, 553)]
-    assert (960, 540) not in state["warps"]
+    assert not backend._park_pointer_in_game()
+    assert state["warps"] == []
 
 
 @pytest.mark.parametrize("hit", ["overlay", "desktop", "wrapper"])
-def test_pointer_bounds_without_exact_game_hit_do_not_skip_parking(hit: str) -> None:
+def test_pointer_bounds_without_exact_game_hit_do_not_authorize_input(hit: str) -> None:
     backend, state = _pointer_parking_backend()
     path = [state["root"], state["desktop"]]
     if hit != "desktop":
         path.append(state[hit])
     state["hit_path"] = path
     assert not backend._park_pointer_in_game()
-    assert state["warps"] == [(960, 553)]
+    assert state["warps"] == []
 
 
 def test_pointer_hit_cycle_is_bounded_and_does_not_authorize_skip() -> None:
@@ -469,14 +468,14 @@ def test_pointer_hit_cycle_is_bounded_and_does_not_authorize_skip() -> None:
         same_screen=True, root_x=1012, root_y=748, child=state["root"],
     )
     assert not backend._park_pointer_in_game()
-    assert state["warps"] == [(960, 553)]
+    assert state["warps"] == []
 
 
-def test_unknown_pointer_position_falls_back_to_client_center() -> None:
+def test_unknown_pointer_position_never_falls_back_to_absolute_warp() -> None:
     backend, state = _pointer_parking_backend()
     state["query_failure"] = True
     assert not backend._park_pointer_in_game()
-    assert state["warps"] == [(960, 553)]
+    assert state["warps"] == []
 
 
 @pytest.mark.parametrize("failure", ["pointer", "geometry", "unmapped", "ambiguous"])
@@ -545,12 +544,18 @@ def test_unverified_pointer_routing_blocks_positive_input_but_keeps_releases(
     assert backend.held_keys == backend.held_buttons == frozenset()
 
 
-def test_relative_motion_after_necessary_park_requires_successful_hit_confirmation() -> None:
+@pytest.mark.parametrize("positive", ["motion", "button"])
+def test_outside_pointer_rejects_positive_input_without_warp(positive: str) -> None:
     backend, state = _pointer_parking_backend()
     state["point"] = (10, 5)
-    backend.apply(MotorAction(sequence=0, mouse_dx=7, mouse_dy=-9))
-    assert state["warps"] == [(960, 553)]
-    assert state["relative"] == [(7, -9)]
+    with pytest.raises(MotorRejected, match="pointer routing could not be verified"):
+        backend.apply(MotorAction(
+            sequence=0, mouse_dx=7 if positive == "motion" else 0,
+            buttons_down=("left",) if positive == "button" else (),
+        ))
+    assert state["warps"] == []
+    assert state["relative"] == []
+    assert all(event != backend._x.ButtonPress for _, event, _ in backend._xtest.calls)
 
 
 @pytest.mark.parametrize("dx,dy", [(7, -9), (-4096, 4096), (4096, -4096)])
