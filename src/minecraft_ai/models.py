@@ -3,13 +3,29 @@ from __future__ import annotations
 import base64
 import importlib
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+
+if TYPE_CHECKING:
+    from .model_requests import RequestBinding
 
 
 _LOCAL_MODEL_INFERENCE_LOCK = threading.Lock()
+
+
+@contextmanager
+def local_model_inference_lane() -> Iterator[None]:
+    """Serialize local adapter inference with the existing language/vision lane.
+
+    Acquire this in the worker that performs inference, never while submitting
+    it. The lane is not reentrant: adapters own one acquisition per call.
+    """
+    with _LOCAL_MODEL_INFERENCE_LOCK:
+        yield
 
 
 def local_model_inference_available() -> bool:
@@ -33,18 +49,55 @@ class ModelMessage(BaseModel):
     content: str
 
 
+@dataclass(frozen=True, slots=True)
+class ModelRequestAttempt:
+    request_id: str
+    attempt_id: str
+
+
 class ModelResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     text: str
     model: str
     latency_ms: float = Field(ge=0.0)
+    _request_attempt: ModelRequestAttempt | None = PrivateAttr(default=None)
+
+    @property
+    def request_attempt(self) -> ModelRequestAttempt | None:
+        """Controller-owned origin; absent from model wire data and schemas."""
+        return self._request_attempt
 
 
 class LanguageModel(Protocol):
     model_id: str
 
     def complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse: ...
+
+
+class BoundCognitionModel(LanguageModel, Protocol):
+    """Optional request-aware planner capability; the legacy interface is unchanged.
+
+    Inference owns one local_model_inference_lane acquisition per call. Admission
+    and discard are short metadata/state-handle operations: they must not acquire
+    that inference lane, perform model work or issue game inputs. Admission runs
+    synchronously under the runtime's ordinary operator/DB authority boundary;
+    emergency stop has an independent path. Success returns None; refusal raises.
+    The runtime supplies expanded final decision JSON, never a new model prompt.
+    """
+
+    def complete_bound_constrained(
+        self, messages: tuple[ModelMessage, ...], *, name: str,
+        schema: dict[str, object], grammar: str, request: RequestBinding, attempt_id: str,
+    ) -> ModelResponse: ...
+
+    def admit_bound_decision(
+        self, *, request: RequestBinding, attempt_id: str,
+        source_decision_sha256: str, final_decision: dict[str, object],
+        final_decision_sha256: str, rewritten: bool,
+    ) -> None: ...
+
+    def discard_bound_request(self, *, request: RequestBinding, reason: str) -> None: ...
 
 
 class VisionLanguageModel(Protocol):
@@ -158,7 +211,7 @@ class OpenAICompatibleLocalModel:
         # prefill and strategic decoding caused both requests to take roughly
         # six times longer on the managed machine. Serialize local inference
         # at the process boundary while capture and motor loops remain async.
-        with _LOCAL_MODEL_INFERENCE_LOCK:
+        with local_model_inference_lane():
             with self._client() as client:
                 response = client.post(
                     self.base_url.rstrip("/") + "/chat/completions",
@@ -283,7 +336,7 @@ class OpenAICompatibleLocalModel:
             payload["response_format"] = response_format
         if grammar is not None:
             payload["grammar"] = grammar
-        with _LOCAL_MODEL_INFERENCE_LOCK:
+        with local_model_inference_lane():
             with self._client() as client:
                 response = client.post(
                     self.base_url.rstrip("/") + "/chat/completions",

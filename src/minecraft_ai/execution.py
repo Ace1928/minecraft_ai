@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .perception import CognitionReadView
+
 import time
 from dataclasses import dataclass, field
 
@@ -1337,7 +1339,7 @@ def _policy_parameters(
 
 def conditions_satisfied(
     conditions: tuple[SkillCondition, ...],
-    blackboard: PerceptionBlackboard,
+    blackboard: CognitionReadView,
     now_ns: int | None = None,
 ) -> bool:
     """Evaluate a complete semantic option condition set against fresh observations."""
@@ -1346,7 +1348,7 @@ def conditions_satisfied(
 
 def initiation_satisfied(
     spec: SkillSpec,
-    blackboard: PerceptionBlackboard,
+    blackboard: CognitionReadView,
     now_ns: int | None = None,
 ) -> bool:
     """Evaluate OR-of-AND initiation groups for a learned option contract."""
@@ -1358,7 +1360,7 @@ def initiation_satisfied(
 
 def _first_matching(
     conditions: tuple[SkillCondition, ...],
-    blackboard: PerceptionBlackboard,
+    blackboard: CognitionReadView,
     now_ns: int | None = None,
 ) -> SkillCondition | None:
     for condition in conditions:
@@ -1369,7 +1371,7 @@ def _first_matching(
 
 def _matches(
     condition: SkillCondition,
-    blackboard: PerceptionBlackboard,
+    blackboard: CognitionReadView,
     now_ns: int | None = None,
 ) -> bool:
     try:

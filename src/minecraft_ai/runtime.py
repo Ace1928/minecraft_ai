@@ -1,21 +1,25 @@
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import json
+import logging
 import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import cast
 
 from .cognition import (
     BootstrapCognitionPolicy,
     CognitionContext,
     CognitionDecision,
     HighLevelController,
+    cognition_decision_sha256,
     planks_retry_requires_wood,
 )
 from .action_levels import ActionLevel
@@ -40,13 +44,15 @@ from .mining_control import (
     is_hand_safe_soft_block,
     normalize_block_kind,
 )
-from .models import local_model_inference_available
+from .models import BoundCognitionModel, local_model_inference_available
+from .model_requests import ModelRequestLifecycle, RequestBinding
 from .motor import MotorIntent
 from .outcome_verifier import OutcomeKind, OutcomeSignal, OutcomeStatus, OutcomeVerification
 from .perception import (
     ActivePerceptionQuery,
     EvidenceRegion,
     PerceptionBlackboard,
+    CognitionBlackboardSnapshot,
     PerceptionFact,
     PerceptionQueryMode,
     ScreenRegion,
@@ -80,8 +86,8 @@ from .social import (
 )
 from .telemetry import TelemetryPublisher
 from .trajectory import ActionOrigin, ActionProvenance, TrajectoryRecorder, motor_condition_id
-from .storage import StateDatabase
-from .supervisor import operator_pause_latched, send_command
+from .storage import OperatorContextSnapshot, StateDatabase
+from .supervisor import operator_intent_lock, operator_pause_latched, send_command
 
 
 _EXPLORE_KEEPALIVE_CONTEXT = "explore-keepalive"
@@ -1314,6 +1320,7 @@ class AgentRuntime:
     state_db: StateDatabase | None = None
     motor_hz: float = 20.0
     cognition_hz: float = 0.5
+    cognition_request_timeout_ms: int = 60_000
     semantic_hz: float = 2.0
     lease_renew_ms: int = 500
     stale_frame_consecutive_limit: int = 3
@@ -1335,6 +1342,9 @@ class AgentRuntime:
         default=None,
         init=False,
     )
+    _bound_cognition_requests: dict[
+        concurrent.futures.Future[CognitionDecision], tuple[ModelRequestLifecycle, object],
+    ] = field(default_factory=dict, init=False, repr=False)
     _pool: SingleWorkerDaemonExecutor = field(init=False)
     _last_decision: CognitionDecision | None = field(default=None, init=False)
     _pending_operator_message_ids: tuple[str, ...] = field(default=(), init=False)
@@ -1398,6 +1408,9 @@ class AgentRuntime:
             raise ValueError(
                 "motor/cognition frequencies must be positive and semantic nonnegative"
             )
+        if (type(self.cognition_request_timeout_ms) is not int
+                or not 1 <= self.cognition_request_timeout_ms <= 300_000):
+            raise ValueError("bound cognition timeout must be between 1 and 300000 ms")
         if self.stale_frame_consecutive_limit < 1:
             raise ValueError("stale_frame_consecutive_limit must be positive")
         self._pool = SingleWorkerDaemonExecutor(
@@ -1474,6 +1487,13 @@ class AgentRuntime:
             raise
         finally:
             self._stop.set()
+            # Retire requests before fallible device/telemetry cleanup. Running
+            # workers retain their accounting and discard only after completion.
+            # Partial/legacy runtime assembly may never initialize this optional
+            # registry. An existing invalid registry still fails visibly.
+            for future in tuple(getattr(self, "_bound_cognition_requests", {})):
+                self._reject_bound_cognition(future, "runtime_shutdown")
+            self._pool.shutdown(wait=False, cancel_futures=True)
             if self._lease_thread is not None:
                 self._lease_thread.join(timeout=2.0)
             try:
@@ -1504,7 +1524,6 @@ class AgentRuntime:
             except Exception as exc:
                 self._failsafe(f"learning-flush:{type(exc).__name__}:{exc}")
             self.telemetry.publish(self._telemetry_payload(state="stopped"), force=True)
-            self._pool.shutdown(wait=False, cancel_futures=True)
 
     def _warmup_policy(self) -> None:
         warmup = getattr(self.executor.policy, "warmup", None)
@@ -3065,6 +3084,7 @@ class AgentRuntime:
 
         future = probe.cognition_future
         if future is not None and self._pending_decision is future:
+            self._reject_bound_cognition(future, "perception_probe_revoked")
             future.cancel()
             self._pending_decision = None
             self._pending_operator_message_ids = ()
@@ -3148,7 +3168,9 @@ class AgentRuntime:
                 facts=target_facts,
             )
         if target.track_id == self._last_operator_target_id:
-            return
+            observed = self.blackboard.latest()
+            if observed is not None and any(track == target for track in observed.tracks):
+                return
         latest = self.blackboard.raw_latest()
         if latest is None:
             return
@@ -3304,7 +3326,16 @@ class AgentRuntime:
             return
         if not self._cognition_due(operator_waiting=operator_waiting):
             return
-        context = self._cognition_context()
+        bound_inputs = None
+        if self._uses_bound_cognition():
+            try:
+                bound_inputs = self._capture_bound_cognition_inputs()
+                context = bound_inputs[0]
+            except (ValueError, RuntimeError, sqlite3.Error):
+                self._schedule_cognition_retry(now_ns=now)
+                return
+        else:
+            context = self._cognition_context()
         if self._stage_operator_fast_path(context):
             # Literal, feasible operator authority does not need the model.
             # Apply the completed decision on this motor-loop turn even when a
@@ -3347,6 +3378,11 @@ class AgentRuntime:
                 self.blackboard,
                 context,
             )
+        elif bound_inputs is not None:
+            _, snapshot, operator_revision = bound_inputs
+            self._pending_decision = self._submit_bound_cognition(
+                context, snapshot, operator_revision=operator_revision,
+            )
         else:
             self._pending_decision = self._pool.submit(
                 self.high_level.decide,
@@ -3362,6 +3398,253 @@ class AgentRuntime:
                 self._cognition_perception_probe = replace(
                     perception_probe, cognition_future=self._pending_decision,
                 )
+
+    def _uses_bound_cognition(self) -> bool:
+        controller = self.high_level
+        return controller is not None and callable(
+            getattr(getattr(controller, "model", None), "complete_bound_constrained", None)
+        )
+
+    def _capture_bound_cognition_inputs(
+        self,
+    ) -> tuple[CognitionContext, CognitionBlackboardSnapshot, int]:
+        """Freeze semantic observations and intent before queueing model work."""
+        if self.state_db is None or self.high_level is None:
+            raise RuntimeError("bound cognition requires durable operator authority")
+        model = self.high_level.model
+        if not all(callable(getattr(model, name, None)) for name in (
+            "complete_bound_constrained", "admit_bound_decision", "discard_bound_request",
+        )):
+            raise RuntimeError("bound cognition adapter lacks its complete lifecycle")
+        with operator_intent_lock(timeout_s=0.05):
+            if self._stop.is_set() or operator_pause_latched() or emergency_stop_latched():
+                raise RuntimeError("operator suspension prevents model submission")
+            operator = self.state_db.load_operator_context(
+                statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED},
+                limit=20,
+            )
+            with self.state_db.admit_operator_revision(operator.revision) as current:
+                if not current:
+                    raise RuntimeError("operator changed during cognition snapshot")
+                if not operator.messages:
+                    operator = self.state_db.load_operator_context(
+                        statuses={OperatorMessageStatus.ACKNOWLEDGED}, limit=20,
+                    )
+                # Keep the target and semantic snapshot on the captured revision.
+                self._merge_operator_target()
+                snapshot = self.blackboard.cognition_snapshot()
+        # Reconciliation can flush durable learning records. Only do it after
+        # successful snapshot construction and outside the rollback boundary,
+        # using exactly the observation the queued planner will receive.
+        requires_wood = self._planks_retry_requires_wood(snapshot=snapshot)
+        context = copy.deepcopy(self._cognition_context(
+            operator, requires_wood=requires_wood,
+        ))
+        return context, snapshot, operator.revision
+
+    @staticmethod
+    def _notify_bound_discard(request: ModelRequestLifecycle, model: object) -> None:
+        reason = request.take_discard_notice()
+        if reason is None:
+            return
+        try:
+            discard = cast(BoundCognitionModel, model).discard_bound_request
+            discard(request=request.binding, reason=reason)
+        except Exception as error:
+            # A broken adapter notification cannot reopen a rejected request.
+            # Detailed model work remains adapter-owned; delivery is not claimed.
+            logging.getLogger(__name__).error(
+                "Bound cognition discard notification failed: %s", type(error).__name__,
+            )
+
+    def _submit_bound_cognition(
+        self, context: CognitionContext, snapshot: CognitionBlackboardSnapshot,
+        *, operator_revision: int,
+    ) -> concurrent.futures.Future[CognitionDecision]:
+        controller = self.high_level
+        assert controller is not None
+        model = controller.model
+        now = time.monotonic_ns()
+        request = ModelRequestLifecycle(RequestBinding.from_snapshot(
+            snapshot, request_id=uuid.uuid4().hex, operator_revision=operator_revision,
+            execution_revision=self._execution_revision, submitted_ns=now,
+            deadline_ns=now + self.cognition_request_timeout_ms * 1_000_000,
+        ))
+
+        def compute() -> CognitionDecision:
+            try:
+                if time.monotonic_ns() >= request.binding.deadline_ns:
+                    request.reject("deadline_before_start")
+                    raise RuntimeError("bound cognition expired while queued")
+                # The call scope is installed inside this worker by decide().
+                # No runtime, blackboard or database lock crosses this call.
+                return controller.decide(snapshot, context, request=request)
+            finally:
+                request.mark_computation_complete()
+
+        def completed(future: concurrent.futures.Future[CognitionDecision]) -> None:
+            # Capture this exact request; a newer pending decision is unrelated.
+            if future.cancelled():
+                request.reject("cancelled_before_start")
+                request.mark_computation_complete()
+            elif future.exception() is not None:
+                request.reject("computation_failed")
+            self._notify_bound_discard(request, model)
+
+        try:
+            future = self._pool.submit(compute)
+        except Exception:
+            request.reject("submission_failed")
+            request.mark_computation_complete()
+            self._notify_bound_discard(request, model)
+            raise
+        self._bound_cognition_requests[future] = request, model
+        future.add_done_callback(completed)
+        return future
+
+    def _reject_bound_cognition(
+        self, future: concurrent.futures.Future[CognitionDecision], reason: str,
+    ) -> None:
+        record = getattr(self, "_bound_cognition_requests", {}).pop(future, None)
+        if record is not None:
+            request, model = record
+            request.reject(reason)  # Must precede cancel(), which may call back immediately.
+            self._notify_bound_discard(request, model)
+
+    def _preflight_bound_cognition(
+        self, record: tuple[ModelRequestLifecycle, object],
+    ) -> bool:
+        """Discard already stale requests early; this check never authorizes inputs.
+
+        This short metadata check grants no publication and retains no lock over
+        recovery or inputs. Final transactional admission must still repeat the
+        authority checks after any decision rewriting.
+        """
+        request, model = record
+        binding = request.binding
+        snapshot = request.snapshot()
+        if (self.state_db is None or snapshot.disposition != "pending"
+                or snapshot.computation_completed_ns is None):
+            return False
+        try:
+            with operator_intent_lock(timeout_s=0.05):
+                with self.state_db.admit_operator_revision(binding.operator_revision) as current:
+                    latest = self.blackboard.raw_latest()
+                    return not (
+                        not current or self._stop.is_set() or operator_pause_latched()
+                        or emergency_stop_latched()
+                        or self._input_release_pending_ns is not None
+                        or self._execution_revision != binding.execution_revision
+                        or self.high_level is None
+                        or getattr(self.high_level, "model", None) is not model
+                        or latest is None or latest.instance_id != binding.instance_id
+                        or time.monotonic_ns() >= binding.deadline_ns
+                    )
+        except Exception as error:
+            logging.getLogger(__name__).error(
+                "Bound cognition preflight rejected: %s", type(error).__name__,
+            )
+            return False
+
+    def _admit_bound_cognition(
+        self, record: tuple[ModelRequestLifecycle, object], decision: CognitionDecision,
+        *, adopt_plan: bool,
+    ) -> bool:
+        """Compare authority and publish once; never perform inference or inputs here.
+
+        New ordinary frames do not invalidate an older semantic snapshot. Current
+        instance, intent, execution, selected-skill preconditions and existing
+        perception-probe rules remain the publication authority.
+        """
+        request, model = record
+        binding = request.binding
+        origin = decision.model_origin
+        previous = (
+            self._last_decision, self._plan_steps, self._plan_goal_id,
+            self._plan_index, self._plan_started_ns,
+        )
+
+        def restore_metadata() -> None:
+            (
+                self._last_decision, self._plan_steps, self._plan_goal_id,
+                self._plan_index, self._plan_started_ns,
+            ) = previous
+
+        def publish() -> None:
+            try:
+                if self.state_db is None:
+                    raise RuntimeError("operator_authority_unavailable")
+                with operator_intent_lock(timeout_s=0.05):
+                    with self.state_db.admit_operator_revision(
+                        binding.operator_revision,
+                    ) as current:
+                        latest = self.blackboard.raw_latest()
+                        if (not current or self._stop.is_set() or operator_pause_latched()
+                                or emergency_stop_latched()
+                                or self._input_release_pending_ns is not None
+                                or self._execution_revision != binding.execution_revision
+                                or self.high_level is None or self.high_level.model is not model
+                                or latest is None or latest.instance_id != binding.instance_id
+                                or time.monotonic_ns() >= binding.deadline_ns):
+                            raise RuntimeError("publication_authority_changed")
+                        if decision.skill_id is not None:
+                            if (decision.skill_id not in self.skills.specs
+                                    or not initiation_satisfied(
+                                        self.skills.get(decision.skill_id), self.blackboard,
+                                    )):
+                                raise RuntimeError("selected_skill_no_longer_feasible")
+                        if origin is not None:
+                            admit: Callable[..., object] = (
+                                cast(BoundCognitionModel, model).admit_bound_decision
+                            )
+                            result = admit(
+                                request=binding, attempt_id=origin.attempt_id,
+                                source_decision_sha256=origin.source_decision_sha256,
+                                final_decision=decision.model_dump(mode="json"),
+                                final_decision_sha256=final_sha,
+                                rewritten=final_sha != origin.source_decision_sha256,
+                            )
+                            if result is not None:
+                                raise TypeError("bound admission must return None or raise")
+                        self._last_decision = decision
+                        if adopt_plan:
+                            self._adopt_plan_if_revised(decision)
+            except BaseException:
+                restore_metadata()
+                raise
+
+        try:
+            if origin is None:
+                # A fallback may be adopted, but earlier model attempts never
+                # become its publication. Claim the discard only after the
+                # complete authority transaction succeeds.
+                if request.snapshot().disposition != "pending":
+                    return False
+                try:
+                    publish()
+                    if request.reject("non_model_decision"):
+                        return True
+                except BaseException:
+                    restore_metadata()
+                    raise
+                restore_metadata()
+                return False
+            if origin.request_id != binding.request_id:
+                raise RuntimeError("model_attempt_origin_changed")
+            final_sha = cognition_decision_sha256(decision)
+            # Context-manager exits belong inside accept's callback: a failed
+            # database commit must trigger the existing publication compensation.
+            return request.accept(origin.attempt_id, final_sha, publish)
+        except BaseException as error:
+            request.reject(type(error).__name__)
+            if not isinstance(error, Exception):
+                raise
+            logging.getLogger(__name__).error(
+                "Bound cognition publication rejected: %s", type(error).__name__,
+            )
+            return False
+        finally:
+            self._notify_bound_discard(request, model)
 
     def _preempt_pending_cognition_for_operator(self) -> bool:
         """Replace a stale model future with one safe deterministic operator decision."""
@@ -3438,6 +3721,7 @@ class AgentRuntime:
         # use this completed-future route so they never queue behind a detached
         # worker.
         if stale_future is not None:
+            self._reject_bound_cognition(stale_future, "operator_preempted")
             stale_future.cancel()
         replacement: concurrent.futures.Future[CognitionDecision] = (
             concurrent.futures.Future()
@@ -3625,6 +3909,7 @@ class AgentRuntime:
         try:
             decision = future.result()
         except Exception:
+            self._reject_bound_cognition(future, "result_failed")
             now = time.monotonic_ns()
             self._last_cognition_ns = now
             self._pending_operator_message_ids = ()
@@ -3632,7 +3917,15 @@ class AgentRuntime:
             return
         now = time.monotonic_ns()
         self._last_cognition_ns = now
+        record = getattr(self, "_bound_cognition_requests", {}).get(future)
+        if record is not None and not self._preflight_bound_cognition(record):
+            self._reject_bound_cognition(future, "consumption_authority_changed")
+            self._pending_operator_message_ids = ()
+            self._pending_operator_message_kinds = {}
+            self._schedule_cognition_retry(now_ns=now)
+            return
         if self._pending_execution_revision != self._execution_revision:
+            self._reject_bound_cognition(future, "execution_changed")
             # The decision was sampled before the option produced terminal
             # evidence. Re-evaluate with that failure/success in context rather
             # than immediately replaying the stale option choice.
@@ -3640,6 +3933,7 @@ class AgentRuntime:
             self._cognition_requested = True
             return
         if self._operator_message_arrived_after_snapshot():
+            self._reject_bound_cognition(future, "operator_changed")
             # This decision was produced from an older context snapshot. A
             # fresh operator message has higher authority and must be included
             # before any skill switch or acknowledgement is applied.
@@ -3651,10 +3945,23 @@ class AgentRuntime:
             and self._planks_retry_requires_wood()
             and planks_retry_requires_wood(self._cognition_context())
         ):
+            self._reject_bound_cognition(future, "wood_prerequisite_changed")
             self._pending_operator_message_ids = ()
             self._cognition_requested = True
             return
-        if self._close_crafting_gui_before_world_decision(decision):
+        if record is not None:
+            if self._crafting_gui_close_required(decision):
+                # This shortcut performs inputs without final publication.
+                # A preflight cannot authorize them after its locks expire.
+                # Keep crafting under its executor/operator recovery authority
+                # and let a later observation produce another bound decision.
+                self._reject_bound_cognition(future, "crafting_gui_close_deferred")
+                self._pending_operator_message_ids = ()
+                self._pending_operator_message_kinds = {}
+                self._schedule_cognition_retry(now_ns=now)
+                return
+        elif self._close_crafting_gui_before_world_decision(decision):
+            self._reject_bound_cognition(future, "crafting_gui_close_required")
             return
         selected_message_id = _selected_operator_message_id(
             decision,
@@ -3696,9 +4003,18 @@ class AgentRuntime:
                     "request_replan": True,
                 }
             )
-        self._last_decision = decision
-        if idle_stall_run_id is None:
-            self._adopt_plan_if_revised(decision)
+        record = getattr(self, "_bound_cognition_requests", {}).pop(future, None)
+        if record is not None:
+            if not self._admit_bound_cognition(
+                record, decision, adopt_plan=idle_stall_run_id is None,
+            ):
+                self._pending_operator_message_ids = ()
+                self._schedule_cognition_retry(now_ns=now)
+                return
+        else:
+            self._last_decision = decision
+            if idle_stall_run_id is None:
+                self._adopt_plan_if_revised(decision)
         operator_acknowledged = False
         if self.state_db is not None and self._pending_operator_message_ids:
             if selected_message_id is not None and not decision.request_replan:
@@ -3818,17 +4134,8 @@ class AgentRuntime:
         else:
             self._clear_cognition_retry()
 
-    def _close_crafting_gui_before_world_decision(
-        self,
-        decision: CognitionDecision,
-    ) -> bool:
-        """Finish a verified inventory close before adopting world control.
-
-        A completed decision was sampled while crafting owned the inventory.
-        Reusing that decision after the visual scene changes would be stale, so
-        discard it, close the GUI, and let the close terminal event request a
-        fresh decision from the restored world frame.
-        """
+    def _crafting_gui_close_required(self, decision: CognitionDecision) -> bool:
+        """Inspect the GUI-close shortcut without cancelling, recovering or sending inputs."""
         if decision.skill_id is None or decision.skill_id == "craft_wood_planks":
             return False
         running = self.executor.run
@@ -3839,7 +4146,21 @@ class AgentRuntime:
         ):
             return False
         requested = self.skills.get(decision.skill_id)
-        if requested.action_level == ActionLevel.GUI:
+        return requested.action_level != ActionLevel.GUI
+
+    def _close_crafting_gui_before_world_decision(
+        self,
+        decision: CognitionDecision,
+    ) -> bool:
+        """Finish a verified inventory close before adopting legacy world control.
+
+        A completed decision was sampled while crafting owned the inventory.
+        Reusing that decision after the visual scene changes would be stale, so
+        discard it, close the GUI, and let the close terminal event request a
+        fresh decision from the restored world frame. Bound decisions defer
+        this shortcut because its inputs have no final admission boundary.
+        """
+        if not self._crafting_gui_close_required(decision):
             return False
         cancelled = self.executor.cancel()
         try:
@@ -4275,11 +4596,25 @@ class AgentRuntime:
         )
         return any(message.message_id not in pending_delivery for message in queued)
 
-    def _cognition_context(self) -> CognitionContext:
+    def _cognition_context(
+        self, operator_context: OperatorContextSnapshot | None = None,
+        *, requires_wood: bool | None = None,
+    ) -> CognitionContext:
         goals = tuple((*role_standing_goals(self.role), *self.custom_goals))
         memories = tuple(self.memories.retrieve(limit=20))
         operator_messages: tuple[OperatorMessage, ...] = ()
-        if self.state_db is not None:
+        if operator_context is not None:
+            messages = tuple(
+                message for message in operator_context.messages
+                if message.status in {
+                    OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+                }
+            )[:20]
+            if not messages:
+                messages = tuple(message for message in operator_context.messages
+                                 if message.status == OperatorMessageStatus.ACKNOWLEDGED)[:20]
+            operator_messages = _active_operator_messages(messages)
+        elif self.state_db is not None:
             messages = self.state_db.load_operator_messages(
                 statuses={
                     OperatorMessageStatus.QUEUED,
@@ -4305,7 +4640,9 @@ class AgentRuntime:
             plan_goal_id=self._plan_goal_id,
             plan_index=self._plan_index,
             plan_started_ns=self._plan_started_ns,
-            planks_retry_requires_wood=self._planks_retry_requires_wood(),
+            planks_retry_requires_wood=(
+                self._planks_retry_requires_wood() if requires_wood is None else requires_wood
+            ),
         )
 
     def _start_recovery_skill(
@@ -4331,7 +4668,9 @@ class AgentRuntime:
             }
         return run
 
-    def _planks_retry_requires_wood(self) -> bool:
+    def _planks_retry_requires_wood(
+        self, *, snapshot: CognitionBlackboardSnapshot | None = None,
+    ) -> bool:
         """Persist one prerequisite repair, not a stale claim of inventory absence."""
         memories = getattr(self, "memories", None)
         if memories is None:
@@ -4358,10 +4697,10 @@ class AgentRuntime:
             and cleared.metadata.get("failure_revision_ns") == failure.updated_ns
         ):
             return False
-        board = getattr(self, "blackboard", None)
+        board = snapshot if snapshot is not None else getattr(self, "blackboard", None)
         if board is None:
             return True
-        now = time.monotonic_ns()
+        now = time.monotonic_ns() if snapshot is None else snapshot.snapshot_ns
         for key in ("inventory.hotbar.logs", "inventory.logs"):
             fact = board.fact(key, min_confidence=0.9, now_ns=now)
             if (

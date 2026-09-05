@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,6 +16,7 @@ from .perception import Track
 from .skills import SkillLibrary, SkillSpec, SkillStats
 from .social import (
     OperatorMessage,
+    OperatorMessageKind,
     OperatorMessageStatus,
     Promise,
     SharedProject,
@@ -25,6 +29,28 @@ if TYPE_CHECKING:
 
 
 SCHEMA_VERSION = 7
+MAX_OPERATOR_REVISION = (1 << 63) - 1
+_OPERATOR_REVISION_KEY = "operator_authority_revision"
+
+
+@dataclass(frozen=True)
+class OperatorContextSnapshot:
+    revision: int
+    messages: tuple[OperatorMessage, ...]
+    target: Track | None
+
+
+def _message_authority(message: OperatorMessage) -> dict[str, object]:
+    """Delivery receipts do not change intent; consumed corrections do."""
+    content = message.model_dump(mode="json", exclude={
+        "status", "delivered_ns", "acknowledged_ns", "response_text",
+    })
+    content["archived"] = message.status == OperatorMessageStatus.ARCHIVED
+    content["correction_consumed"] = (
+        message.kind == OperatorMessageKind.CORRECTION
+        and message.status == OperatorMessageStatus.ACKNOWLEDGED
+    )
+    return content
 
 
 class StateDatabase:
@@ -37,6 +63,7 @@ class StateDatabase:
         self.connection.execute("PRAGMA busy_timeout=15000")
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA foreign_keys=ON")
+        self._transaction_depth = 0
         self._migrate()
 
     def close(self) -> None:
@@ -53,6 +80,119 @@ class StateDatabase:
 
     def __exit__(self, *_args: object) -> None:
         self.close()
+
+    def _commit(self) -> None:
+        if not self._transaction_depth:
+            self.connection.commit()
+
+    def _execute_write(
+        self, statement: str, parameters: tuple[object, ...], *, commit: bool = True,
+    ) -> None:
+        """Own new writes while preserving existing caller-owned batch semantics.
+
+        A failed implicit INSERT can leave SQLite in a deferred transaction.
+        Owning the transaction before executing guarantees rollback on failure,
+        so later operator work can establish its own authority boundary. Inside
+        an admission transaction the existing savepoint defers the outer commit.
+        ``commit=False`` leaves its batch open. A later ``commit=True`` write
+        joins and commits an already open unmanaged batch, as before; failures
+        in that path leave rollback of prior caller-owned work to the caller.
+        """
+        if not commit:
+            self.connection.execute(statement, parameters)
+            return
+        if not self._transaction_depth and self.connection.in_transaction:
+            self.connection.execute(statement, parameters)
+            self.connection.commit()
+            return
+        with self._transaction(write=True):
+            self.connection.execute(statement, parameters)
+
+    @contextmanager
+    def _transaction(self, *, write: bool) -> Iterator[None]:
+        """Own a short transaction, or isolate a nested storage operation."""
+        outer = self._transaction_depth == 0
+        savepoint = f"state_boundary_{self._transaction_depth}"
+        if outer:
+            if self.connection.in_transaction:
+                raise RuntimeError("finish the pending storage transaction before this boundary")
+            self.connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+        else:
+            self.connection.execute(f"SAVEPOINT {savepoint}")
+        self._transaction_depth += 1
+        try:
+            yield
+            if outer:
+                self.connection.commit()
+            else:
+                self.connection.execute(f"RELEASE {savepoint}")
+        except BaseException:
+            if outer:
+                self.connection.rollback()
+            else:
+                self.connection.execute(f"ROLLBACK TO {savepoint}")
+                self.connection.execute(f"RELEASE {savepoint}")
+            raise
+        finally:
+            self._transaction_depth -= 1
+
+    def operator_revision(self) -> int:
+        """Durable monotonic intent revision; legacy stores start at zero."""
+        row = self.connection.execute(
+            "SELECT value FROM meta WHERE key=?", (_OPERATOR_REVISION_KEY,),
+        ).fetchone()
+        if row is None:
+            return 0
+        raw = row[0]
+        if (not isinstance(raw, str) or not 1 <= len(raw) <= 19
+                or not raw.isascii() or not raw.isdecimal()):
+            raise ValueError("invalid persisted operator authority revision")
+        revision = int(raw)
+        if not 0 <= revision <= MAX_OPERATOR_REVISION:
+            raise ValueError("persisted operator authority revision is out of bounds")
+        if str(revision) != raw:
+            raise ValueError("invalid persisted operator authority revision")
+        return revision
+
+    def _advance_operator_revision(self) -> None:
+        revision = self.operator_revision()
+        if revision == MAX_OPERATOR_REVISION:
+            raise OverflowError("operator authority revision exhausted; mutation rejected")
+        self.connection.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (_OPERATOR_REVISION_KEY, str(revision + 1)),
+        )
+
+    def load_operator_context(
+        self, *, statuses: set[OperatorMessageStatus] | None = None, limit: int = 100,
+    ) -> OperatorContextSnapshot:
+        """Read revision, messages and target from one short SQLite snapshot.
+
+        No database lock is retained after return: model work uses this value,
+        then checks its revision at the separate admission boundary.
+        """
+        with self._transaction(write=False):
+            return OperatorContextSnapshot(
+                revision=self.operator_revision(),
+                messages=self.load_operator_messages(statuses=statuses, limit=limit),
+                target=self.load_operator_target(),
+            )
+
+    @contextmanager
+    def admit_operator_revision(self, expected: int) -> Iterator[bool]:
+        """Serialize a short revision check and decision application with writers.
+
+        Run model work BEFORE entering. Apply the result only when the yielded
+        value is true. Storage saves inside the boundary commit together at its
+        exit; exceptions roll them back. External pause/lease authority must be
+        checked separately by its owner, as it is not stored in this database.
+        Do not call connection.commit() directly from within this boundary.
+        """
+        if type(expected) is not int or not 0 <= expected <= MAX_OPERATOR_REVISION:
+            raise ValueError("expected operator authority revision is out of bounds")
+        with self._transaction(write=True):
+            yield self.operator_revision() == expected
 
     def _migrate(self) -> None:
         try:
@@ -256,7 +396,7 @@ class StateDatabase:
             "CREATE INDEX IF NOT EXISTS idx_trajectory_steps_policy_route "
             "ON trajectory_steps_index(policy_id, model_version, route_id)"
         )
-        self.connection.commit()
+        self._commit()
 
     def _migrate_v2_to_v3(self) -> None:
         self.connection.executescript(
@@ -432,7 +572,7 @@ class StateDatabase:
         )
 
     def save_memory(self, record: MemoryRecord) -> None:
-        self.connection.execute(
+        self._execute_write(
             """
             INSERT INTO memories(memory_id, kind, updated_ns, payload)
             VALUES(?, ?, ?, ?)
@@ -448,7 +588,6 @@ class StateDatabase:
                 record.model_dump_json(),
             ),
         )
-        self.connection.commit()
 
     def load_memories(self, kinds: set[MemoryKind] | None = None) -> MemoryStore:
         if kinds:
@@ -467,7 +606,7 @@ class StateDatabase:
     def save_runtime_event(self, event: RuntimeEvent) -> None:
         """Persist one idempotent append-only runtime observation."""
 
-        self.connection.execute(
+        self._execute_write(
             """
             INSERT INTO events(event_id, trajectory_id, step_index, observed_ns, kind, payload)
             VALUES(?, ?, ?, ?, ?, ?)
@@ -482,7 +621,6 @@ class StateDatabase:
                 event.model_dump_json(),
             ),
         )
-        self.connection.commit()
 
     def load_runtime_events(
         self,
@@ -509,7 +647,7 @@ class StateDatabase:
         return tuple(RuntimeEvent.model_validate_json(payload) for (payload,) in rows)
 
     def save_place(self, record: PlaceRecord) -> None:
-        self.connection.execute(
+        self._execute_write(
             """
             INSERT INTO spatial_places(place_id, kind, dimension, x, y, z, payload)
             VALUES(?, ?, ?, ?, ?, ?, ?)
@@ -531,7 +669,6 @@ class StateDatabase:
                 record.model_dump_json(),
             ),
         )
-        self.connection.commit()
 
     def load_places(self) -> SpatialPlaceMemory:
         rows = self.connection.execute("SELECT payload FROM spatial_places").fetchall()
@@ -541,7 +678,7 @@ class StateDatabase:
         return memory
 
     def save_skill(self, spec: SkillSpec) -> None:
-        self.connection.execute(
+        self._execute_write(
             """
             INSERT INTO skills(skill_id, version, payload) VALUES(?, ?, ?)
             ON CONFLICT(skill_id) DO UPDATE SET
@@ -550,10 +687,9 @@ class StateDatabase:
             """,
             (spec.skill_id, spec.version, spec.model_dump_json()),
         )
-        self.connection.commit()
 
     def save_skill_stats(self, skill_id: str, context_key: str, stats: SkillStats) -> None:
-        self.connection.execute(
+        self._execute_write(
             """
             INSERT INTO skill_stats(
                 skill_id, context_key, successes, failures, timeouts, cancellations,
@@ -576,7 +712,6 @@ class StateDatabase:
                 stats.consecutive_failures,
             ),
         )
-        self.connection.commit()
 
     def load_skills(self) -> SkillLibrary:
         library = SkillLibrary()
@@ -644,11 +779,24 @@ class StateDatabase:
         return state
 
     def save_operator_message(self, message: OperatorMessage) -> None:
+        with self._transaction(write=True):
+            self._store_operator_message(message)
+
+    def _store_operator_message(self, message: OperatorMessage) -> None:
+        row = self.connection.execute(
+            "SELECT payload FROM operator_messages WHERE message_id=?", (message.message_id,),
+        ).fetchone()
+        current = None if row is None else OperatorMessage.model_validate_json(row[0])
+        if current == message:
+            return
+        if current is None or _message_authority(current) != _message_authority(message):
+            self._advance_operator_revision()
         self.connection.execute(
             """
             INSERT INTO operator_messages(message_id, created_ns, status, payload)
             VALUES(?, ?, ?, ?)
             ON CONFLICT(message_id) DO UPDATE SET
+                created_ns=excluded.created_ns,
                 status=excluded.status,
                 payload=excluded.payload
             """,
@@ -659,23 +807,28 @@ class StateDatabase:
                 message.model_dump_json(),
             ),
         )
-        self.connection.commit()
 
     def save_operator_target(self, target: Track) -> None:
         """Persist one explicit operator grounding target and supersede older ones."""
-        self.connection.execute("UPDATE operator_targets SET active=0 WHERE active=1")
-        self.connection.execute(
-            """
-            INSERT INTO operator_targets(target_id, created_ns, active, payload)
-            VALUES(?, ?, 1, ?)
-            ON CONFLICT(target_id) DO UPDATE SET
-                created_ns=excluded.created_ns,
-                active=1,
-                payload=excluded.payload
-            """,
-            (target.track_id, target.last_seen_ns, target.model_dump_json()),
-        )
-        self.connection.commit()
+        with self._transaction(write=True):
+            rows = self.connection.execute(
+                "SELECT payload FROM operator_targets WHERE active=1",
+            ).fetchall()
+            if len(rows) == 1 and Track.model_validate_json(rows[0][0]) == target:
+                return
+            self._advance_operator_revision()
+            self.connection.execute("UPDATE operator_targets SET active=0 WHERE active=1")
+            self.connection.execute(
+                """
+                INSERT INTO operator_targets(target_id, created_ns, active, payload)
+                VALUES(?, ?, 1, ?)
+                ON CONFLICT(target_id) DO UPDATE SET
+                    created_ns=excluded.created_ns,
+                    active=1,
+                    payload=excluded.payload
+                """,
+                (target.track_id, target.last_seen_ns, target.model_dump_json()),
+            )
 
     def load_operator_target(self) -> Track | None:
         row = self.connection.execute(
@@ -689,8 +842,13 @@ class StateDatabase:
         return None if row is None else Track.model_validate_json(row[0])
 
     def clear_operator_target(self) -> None:
-        self.connection.execute("UPDATE operator_targets SET active=0 WHERE active=1")
-        self.connection.commit()
+        with self._transaction(write=True):
+            active = self.connection.execute(
+                "SELECT 1 FROM operator_targets WHERE active=1 LIMIT 1",
+            ).fetchone()
+            if active is not None:
+                self._advance_operator_revision()
+                self.connection.execute("UPDATE operator_targets SET active=0 WHERE active=1")
 
     def load_operator_messages(
         self,
@@ -721,25 +879,26 @@ class StateDatabase:
         timestamp_ns: int,
         response_text: str | None = None,
     ) -> OperatorMessage:
-        row = self.connection.execute(
-            "SELECT payload FROM operator_messages WHERE message_id=?",
-            (message_id,),
-        ).fetchone()
-        if row is None:
-            raise KeyError(message_id)
-        current = OperatorMessage.model_validate_json(row[0])
-        changes: dict[str, object] = {"status": status}
-        if status == OperatorMessageStatus.DELIVERED:
-            changes["delivered_ns"] = timestamp_ns
-        elif status == OperatorMessageStatus.ACKNOWLEDGED:
-            changes["acknowledged_ns"] = timestamp_ns
-            changes["response_text"] = response_text
-        updated = current.model_copy(update=changes)
-        self.save_operator_message(updated)
-        return updated
+        with self._transaction(write=True):
+            row = self.connection.execute(
+                "SELECT payload FROM operator_messages WHERE message_id=?",
+                (message_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(message_id)
+            current = OperatorMessage.model_validate_json(row[0])
+            changes: dict[str, object] = {"status": status}
+            if status == OperatorMessageStatus.DELIVERED:
+                changes["delivered_ns"] = timestamp_ns
+            elif status == OperatorMessageStatus.ACKNOWLEDGED:
+                changes["acknowledged_ns"] = timestamp_ns
+                changes["response_text"] = response_text
+            updated = current.model_copy(update=changes)
+            self._store_operator_message(updated)
+            return updated
 
     def save_trajectory_manifest(self, manifest: TrajectoryManifest) -> None:
-        self.connection.execute(
+        self._execute_write(
             """
             INSERT INTO trajectories(
                 trajectory_id, started_ns, ended_ns, source_type, game_version, payload
@@ -757,7 +916,6 @@ class StateDatabase:
                 manifest.model_dump_json(),
             ),
         )
-        self.connection.commit()
 
     def save_trajectory_shard(
         self,
@@ -772,7 +930,7 @@ class StateDatabase:
         bytes_count: int,
         commit: bool = True,
     ) -> None:
-        self.connection.execute(
+        self._execute_write(
             """
             INSERT INTO trajectory_shards(
                 shard_id, trajectory_id, path, sha256, first_step_index,
@@ -796,9 +954,8 @@ class StateDatabase:
                 step_count,
                 bytes_count,
             ),
+            commit=commit,
         )
-        if commit:
-            self.connection.commit()
 
     def save_trajectory_step_index(
         self,
@@ -831,7 +988,7 @@ class StateDatabase:
         correction_of_step: int | None,
         commit: bool = True,
     ) -> None:
-        self.connection.execute(
+        self._execute_write(
             """
             INSERT INTO trajectory_steps_index(
                 trajectory_id, step_index, captured_ns, accepted_ns, shard_id, sample_key,
@@ -894,14 +1051,13 @@ class StateDatabase:
                 plan_node_id,
                 correction_of_step,
             ),
+            commit=commit,
         )
-        if commit:
-            self.connection.commit()
 
     def save_benchmark_report(self, report: BenchmarkReport) -> None:
         """Persist an immutable benchmark report and its task-level evidence."""
         payload = report.model_dump_json()
-        with self.connection:
+        with (self._transaction(write=True) if self._transaction_depth else self.connection):
             self.connection.execute(
                 """
                 INSERT INTO benchmark_runs(
@@ -964,11 +1120,10 @@ class StateDatabase:
         if key_column not in {"goal_id", "promise_id", "project_id"}:
             raise ValueError("unsupported key column")
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        self.connection.execute(
+        self._execute_write(
             f"""
             INSERT INTO {table}({key_column}, payload) VALUES(?, ?)
             ON CONFLICT({key_column}) DO UPDATE SET payload=excluded.payload
             """,
             (key, serialized),
         )
-        self.connection.commit()

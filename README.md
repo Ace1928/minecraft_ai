@@ -128,6 +128,24 @@ This repository is intentionally standalone. Do not add private model adapters, 
 
 Third-party model/code integrations must be optional and must record their license and source in the integration documentation.
 
+### Optional request-aware cognition
+
+Custom planners can implement `BoundCognitionModel` in `models.py` without placing
+their implementation or model assets in this repository. Its three optional hooks
+are `complete_bound_constrained`, `admit_bound_decision`, and
+`discard_bound_request`; existing `LanguageModel` adapters remain supported.
+
+The request-aware path binds inference to an immutable semantic observation and
+operator/execution revisions. Before accepting a decision, the runtime rechecks
+its deadline, current authority and skill prerequisites. Expired or superseded
+work cannot authorize action. Admission/discard hooks must be short metadata-only
+operations: no inference, input or inference-lane acquisition. Inference itself
+owns one `local_model_inference_lane()` acquisition in its worker.
+
+This interface does not select, load or activate a custom model. Deployment,
+learning state and proprietary adapter details remain external; compatibility
+tests do not establish gameplay competence.
+
 ## License
 
 Apache License 2.0. Minecraft is a trademark and intellectual property of Microsoft/Mojang. This project is independent and is not affiliated with, endorsed by, or sponsored by Microsoft or Mojang.

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Generic, TypeVar
+from typing import Generic, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -119,6 +121,76 @@ class FrameState(BaseModel):
     chat: tuple[ChatLine, ...] = ()
     facts: tuple[PerceptionFact, ...] = ()
     evidence: tuple[PerceptionEvidence, ...] = ()
+
+
+class CognitionReadView(Protocol):
+    """Observation reads shared by live perception and immutable cognition snapshots."""
+
+    def latest(self) -> FrameState | None: ...
+
+    def raw_latest(self) -> FrameState | None: ...
+
+    def fact(
+        self, key: str, *, min_confidence: float = 0.0, now_ns: int | None = None,
+    ) -> PerceptionFact | None: ...
+
+    def fresh_facts(self, *, min_confidence: float = 0.0) -> dict[str, PerceptionFact]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CognitionBlackboardSnapshot:
+    """One bounded observation for queued cognition, with a fixed freshness clock.
+
+    The digest identifies ``canonical_source``: the captured raw frame and the
+    merged observations available to this snapshot. It is not a pixel digest or
+    a claim that a later live scene remains unchanged. Serialized internal state
+    is immutable; read methods return independent models, including nested track
+    attribute dictionaries. Live admission must still recheck current authority.
+    """
+
+    snapshot_ns: int
+    instance_id: str
+    frame_id: int
+    captured_ns: int
+    source_sha256: str
+    canonical_source: bytes = field(repr=False)
+    _latest_json: str = field(repr=False)
+    _raw_latest_json: str = field(repr=False)
+    _facts_json: tuple[tuple[str, str], ...] = field(repr=False)
+
+    def latest(self) -> FrameState:
+        return FrameState.model_validate_json(self._latest_json)
+
+    def raw_latest(self) -> FrameState:
+        return FrameState.model_validate_json(self._raw_latest_json)
+
+    def fact(
+        self, key: str, *, min_confidence: float = 0.0, now_ns: int | None = None,
+    ) -> PerceptionFact | None:
+        if now_ns is not None and now_ns != self.snapshot_ns:
+            raise ValueError("cognition snapshot freshness clock cannot be changed")
+        for name, encoded in self._facts_json:
+            if name == key:
+                fact = PerceptionFact.model_validate_json(encoded)
+                return fact if fact.confidence >= min_confidence else None
+        return None
+
+    def fresh_facts(self, *, min_confidence: float = 0.0) -> dict[str, PerceptionFact]:
+        facts = (PerceptionFact.model_validate_json(encoded) for _, encoded in self._facts_json)
+        return {fact.key: fact for fact in facts if fact.confidence >= min_confidence}
+
+
+def _snapshot_json(value: object, *, max_bytes: int) -> str:
+    """Bound serialized retained metadata; do not truncate an observation."""
+    chunks: list[str] = []
+    total = 0
+    encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"), allow_nan=False)
+    for chunk in encoder.iterencode(value):
+        total += len(chunk)  # ensure_ascii=True makes characters equal UTF-8 bytes.
+        if total > max_bytes:
+            raise ValueError("cognition snapshot exceeds its serialized metadata bound")
+        chunks.append(chunk)
+    return "".join(chunks)
 
 
 T = TypeVar("T")
@@ -367,6 +439,65 @@ class PerceptionBlackboard:
                 for key, fact in self._facts.items()
                 if fact.confidence >= min_confidence and fact.fresh()
             }
+
+    def cognition_snapshot(
+        self, *, now_ns: int | None = None, max_bytes: int = 1 << 20,
+    ) -> CognitionBlackboardSnapshot:
+        """Capture cognition's read surface once, without retaining the live board.
+
+        The byte limit bounds the canonical metadata payload (not arbitrary
+        pre-existing live objects). Derived immutable read indexes add at most
+        two payloads' worth of serialized data. No frame history or pixels
+        are copied. Facts are filtered exactly once at the captured clock.
+        """
+        if type(max_bytes) is not int or not 1 <= max_bytes <= 16 << 20:
+            raise ValueError("cognition snapshot byte bound must be between 1 and 16 MiB")
+        if now_ns is not None and (type(now_ns) is not int or now_ns <= 0):
+            raise ValueError("cognition snapshot clock must be a positive integer")
+        with self._lock:
+            captured_at = time.monotonic_ns() if now_ns is None else now_ns
+            frame = self._frames.latest()
+            if frame is None:
+                raise ValueError("cognition snapshot requires a captured frame")
+            if frame.captured_ns <= 0 or captured_at < frame.captured_ns:
+                raise ValueError("cognition snapshot requires a non-future capture timestamp")
+            if (len(self._facts) > 4096 or len(self._semantic_tracks) > 256
+                    or len(self._chat) > 100 or len(self._evidence) > 512
+                    or len(frame.facts) > 4096 or len(frame.tracks) > 256
+                    or len(frame.chat) > 100 or len(frame.evidence) > 512):
+                raise ValueError("cognition snapshot exceeds its observation count bound")
+            facts = tuple(
+                fact for _, fact in sorted(self._facts.items()) if fact.fresh(captured_at)
+            )
+            tracks = self._semantic_tracks or frame.tracks
+            referenced = {ref for fact in facts for ref in fact.evidence_refs}
+            referenced.update(ref for track in tracks for ref in track.evidence_refs)
+            referenced.update(ref for line in self._chat for ref in line.evidence_refs)
+            latest = frame.model_copy(update={
+                "facts": facts, "tracks": tracks, "chat": self._chat,
+                "evidence": tuple(self._evidence[ref] for ref in sorted(referenced)
+                                  if ref in self._evidence),
+            })
+            # Serialize under the one existing lock. No source model or nested
+            # dictionary is retained after release, and no live accessor is called.
+            latest_json = _snapshot_json(latest.model_dump(mode="json"), max_bytes=max_bytes)
+            raw_json = _snapshot_json(frame.model_dump(mode="json"), max_bytes=max_bytes)
+            fact_rows = tuple(
+                (fact.key, _snapshot_json(fact.model_dump(mode="json"), max_bytes=max_bytes))
+                for fact in facts
+            )
+            canonical = _snapshot_json({
+                "contract": "minecraft_ai.cognition_source.v1",
+                "snapshot_ns": captured_at,
+                "raw_frame": json.loads(raw_json),
+                "merged_frame": json.loads(latest_json),
+            }, max_bytes=max_bytes).encode("utf-8")
+            return CognitionBlackboardSnapshot(
+                snapshot_ns=captured_at, instance_id=frame.instance_id,
+                frame_id=frame.frame_id, captured_ns=frame.captured_ns,
+                source_sha256=hashlib.sha256(canonical).hexdigest(), canonical_source=canonical,
+                _latest_json=latest_json, _raw_latest_json=raw_json, _facts_json=fact_rows,
+            )
 
 
 class ActivePerceptionQuery(BaseModel):

@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from .execution import initiation_satisfied
 from .grounded_perception import resolve_grounded_output_keys
 from .memory import MemoryRecord
-from .models import LanguageModel, ModelMessage, ModelResponse
-from .perception import PerceptionBlackboard
+from .model_requests import ModelRequestLifecycle
+from .models import LanguageModel, ModelMessage, ModelRequestAttempt, ModelResponse
+from .perception import CognitionReadView
 from .planning import Goal, GoalSource
 from .roles import RoleProfile
 from .skills import SkillFailureCode, SkillLibrary, SkillOutcome, SkillRun
@@ -27,6 +30,13 @@ from .wiki import WikiEvidence
 
 
 _WOOD_INVENTORY_AUDIT_SKILLS = frozenset({"craft_wood_planks", "open_inventory"})
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionModelOrigin:
+    request_id: str
+    attempt_id: str
+    source_decision_sha256: str
 
 
 class CognitionDecision(BaseModel):
@@ -58,6 +68,28 @@ class CognitionDecision(BaseModel):
         max_length=5,
         description="Short sequential next-actions the agent intends to pursue.",
     )
+
+    _model_origin: DecisionModelOrigin | None = PrivateAttr(default=None)
+
+    @property
+    def model_origin(self) -> DecisionModelOrigin | None:
+        """Selected parsed model attempt before any foundation authority rewrite."""
+        return self._model_origin
+
+
+def cognition_decision_sha256(decision: CognitionDecision) -> str:
+    """Digest public decision content, excluding private request bookkeeping."""
+    canonical = json.dumps(
+        decision.model_dump(mode="json"), sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _without_model_origin(decision: CognitionDecision) -> CognitionDecision:
+    result = decision.model_copy()
+    result._model_origin = None
+    return result
 
 
 class _CognitionWireDecision(BaseModel):
@@ -313,7 +345,7 @@ _URGENT_FACT_KEYS = frozenset(
 
 
 def _high_level_fact_payload(
-    blackboard: PerceptionBlackboard,
+    blackboard: CognitionReadView,
     *,
     required_keys: set[str] | None = None,
 ) -> dict[str, list[object]]:
@@ -626,7 +658,7 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
     return tuple(requested)
 
 
-def _urgent_safety_required(blackboard: PerceptionBlackboard) -> bool:
+def _urgent_safety_required(blackboard: CognitionReadView) -> bool:
     for key in ("danger.immediate", "environment.underwater", "scene.death"):
         fact = blackboard.fact(key, min_confidence=0.7)
         if fact is not None and bool(fact.value):
@@ -647,7 +679,7 @@ class BootstrapCognitionPolicy:
 
     def decide(
         self,
-        blackboard: PerceptionBlackboard,
+        blackboard: CognitionReadView,
         context: CognitionContext,
     ) -> CognitionDecision:
         danger = blackboard.fact("danger.immediate")
@@ -727,13 +759,32 @@ class HighLevelController:
     skills: SkillLibrary
     _bootstrap: BootstrapCognitionPolicy = field(init=False)
     metrics: HighLevelMetrics = field(default_factory=HighLevelMetrics, init=False)
+    _request_context: ContextVar[ModelRequestLifecycle | None] = field(
+        default_factory=lambda: ContextVar("cognition_request", default=None),
+        init=False, repr=False,
+    )
 
     def __post_init__(self) -> None:
         self._bootstrap = BootstrapCognitionPolicy(self.skills)
 
     def decide(
         self,
-        blackboard: PerceptionBlackboard,
+        blackboard: CognitionReadView,
+        context: CognitionContext,
+        *,
+        request: ModelRequestLifecycle | None = None,
+    ) -> CognitionDecision:
+        # This entry runs inside the worker. Thread-pool submission context is
+        # deliberately irrelevant, and even a legacy nested call clears it.
+        token = self._request_context.set(request)
+        try:
+            return self._decide(blackboard, context)
+        finally:
+            self._request_context.reset(token)
+
+    def _decide(
+        self,
+        blackboard: CognitionReadView,
         context: CognitionContext,
     ) -> CognitionDecision:
         try:
@@ -1065,7 +1116,7 @@ class HighLevelController:
 
     def _operator_fast_path_decision(
         self,
-        blackboard: PerceptionBlackboard,
+        blackboard: CognitionReadView,
         context: CognitionContext,
     ) -> CognitionDecision | None:
         """Execute one literal, unambiguous operator option without model latency."""
@@ -1113,7 +1164,7 @@ class HighLevelController:
     def _apply_decision_authority(
         self,
         decision: CognitionDecision,
-        blackboard: PerceptionBlackboard,
+        blackboard: CognitionReadView,
         context: CognitionContext,
     ) -> CognitionDecision:
         decision = self._scope_operator_decision(decision, blackboard, context)
@@ -1140,7 +1191,7 @@ class HighLevelController:
     def _scope_operator_decision(
         self,
         decision: CognitionDecision,
-        blackboard: PerceptionBlackboard,
+        blackboard: CognitionReadView,
         context: CognitionContext,
     ) -> CognitionDecision:
         if _urgent_safety_required(blackboard):
@@ -1204,7 +1255,7 @@ class HighLevelController:
 
     def _feasible_skill_payloads(
         self,
-        blackboard: PerceptionBlackboard,
+        blackboard: CognitionReadView,
         *,
         query_text: str = "",
         context: CognitionContext | None = None,
@@ -1310,7 +1361,7 @@ class HighLevelController:
 
     def _decision_repair_bounds(
         self,
-        blackboard: PerceptionBlackboard,
+        blackboard: CognitionReadView,
         context: CognitionContext,
         *,
         allowed_skill_ids: set[str] | None = None,
@@ -1399,7 +1450,7 @@ class HighLevelController:
     def _repair_repeated_failure(
         self,
         decision: CognitionDecision,
-        blackboard: PerceptionBlackboard,
+        blackboard: CognitionReadView,
         context: CognitionContext,
         blocked_run: SkillRun,
     ) -> CognitionDecision:
@@ -1449,7 +1500,7 @@ class HighLevelController:
             self.metrics.last_error = None
             return _enforce_repair_bounds(repaired, repair_bounds)
         self.metrics.last_error = f"repeated-option-blocked:{failed_skill}"
-        return decision.model_copy(
+        return _without_model_origin(decision.model_copy(
             update={
                 "reasoning_summary": (
                     f"Blocked repeated {failed_skill} after empirical timeout/failure evidence."
@@ -1461,7 +1512,7 @@ class HighLevelController:
                     dict.fromkeys((*decision.ask_perception, "obstacle.ahead"))
                 ),
             }
-        )
+        ))
 
     def _prerequisite_perception_keys(self, skill_id: str | None) -> tuple[str, ...]:
         """Ask for canonical visual prerequisites, never internal run witnesses."""
@@ -1485,7 +1536,7 @@ class HighLevelController:
             repair_bounds=repair_bounds,
         )
         try:
-            return _parse_decision(response.text)
+            return _decision_from_response(response)
         except (RuntimeError, ValidationError):
             self.metrics.repairs += 1
             self.metrics.json_repairs += 1
@@ -1496,7 +1547,7 @@ class HighLevelController:
                 repair_bounds=repair_bounds,
             )
             try:
-                repaired = _parse_decision(repaired_response.text)
+                repaired = _decision_from_response(repaired_response)
             except (RuntimeError, ValidationError) as repair_exc:
                 self.metrics.json_repair_failures += 1
                 raise RuntimeError(
@@ -1511,29 +1562,56 @@ class HighLevelController:
         name: str,
         repair_bounds: _DecisionRepairBounds,
     ) -> ModelResponse:
+        request = self._request_context.get()
+        bound = getattr(self.model, "complete_bound_constrained", None)
         constrained = getattr(self.model, "complete_constrained", None)
         structured = getattr(self.model, "complete_structured", None)
-        if callable(constrained):
-            response = cast(
-                ModelResponse,
-                constrained(
-                    messages,
-                    name=name,
-                    schema=_CognitionWireDecision.model_json_schema(),
-                    grammar=_cognition_decision_grammar(repair_bounds),
-                ),
+        use_bound = request is not None and callable(bound)
+        schema = (
+            _CognitionWireDecision.model_json_schema()
+            if use_bound or callable(constrained) or callable(structured) else {}
+        )
+        grammar = (
+            _cognition_decision_grammar(repair_bounds)
+            if use_bound or callable(constrained) else ""
+        )
+        attempt_id = None if request is None else request.start_attempt(name)
+        try:
+            if request is not None and callable(bound):
+                response = cast(
+                    ModelResponse,
+                    bound(
+                        messages, name=name, schema=schema, grammar=grammar,
+                        request=request.binding, attempt_id=attempt_id,
+                    ),
+                )
+            elif callable(constrained):
+                response = cast(
+                    ModelResponse,
+                    constrained(messages, name=name, schema=schema, grammar=grammar),
+                )
+            elif callable(structured):
+                response = cast(
+                    ModelResponse,
+                    structured(messages, name=name, schema=schema),
+                )
+            else:
+                response = self.model.complete(messages)
+            if not isinstance(response, ModelResponse):
+                raise TypeError("model adapter must return ModelResponse")
+            # Adapters may reuse a response instance. Never mutate its metadata
+            # or trust an origin supplied by an adapter or an earlier call.
+            response = response.model_copy()
+            response._request_attempt = (
+                ModelRequestAttempt(request.binding.request_id, attempt_id)
+                if request is not None and attempt_id is not None else None
             )
-        elif callable(structured):
-            response = cast(
-                ModelResponse,
-                structured(
-                    messages,
-                    name=name,
-                    schema=_CognitionWireDecision.model_json_schema(),
-                ),
-            )
-        else:
-            response = self.model.complete(messages)
+        except BaseException as error:
+            if request is not None and attempt_id is not None:
+                request.finish_attempt(attempt_id, type(error).__name__)
+            raise
+        if request is not None and attempt_id is not None:
+            request.finish_attempt(attempt_id)
         self.metrics.calls += 1
         self.metrics.last_latency_ms = response.latency_ms
         self.metrics.last_model = response.model
@@ -1542,7 +1620,7 @@ class HighLevelController:
     def _repair_infeasible(
         self,
         decision: CognitionDecision,
-        blackboard: PerceptionBlackboard,
+        blackboard: CognitionReadView,
         context: CognitionContext,
         *,
         reason: str,
@@ -1580,7 +1658,7 @@ class HighLevelController:
             self.metrics.last_error = None
             return _enforce_repair_bounds(repaired, repair_bounds)
         self.metrics.last_error = f"infeasible-decision: {reason}"
-        return decision.model_copy(
+        return _without_model_origin(decision.model_copy(
             update={
                 "reasoning_summary": f"Blocked infeasible decision; {reason}",
                 "skill_id": None,
@@ -1588,7 +1666,7 @@ class HighLevelController:
                 "request_replan": True,
                 "ask_perception": tuple(dict.fromkeys((*decision.ask_perception, *missing))),
             }
-        )
+        ))
 
 
 def _compact_wire_payload(decision: CognitionDecision) -> dict[str, object]:
@@ -1723,6 +1801,16 @@ def _bound_skill_parameters(
     }
     parameters.update(required_constraints)
     return decision.model_copy(update={"skill_parameters": parameters})
+
+
+def _decision_from_response(response: ModelResponse) -> CognitionDecision:
+    decision = _parse_decision(response.text)
+    origin = response.request_attempt
+    if origin is not None:
+        decision._model_origin = DecisionModelOrigin(
+            origin.request_id, origin.attempt_id, cognition_decision_sha256(decision),
+        )
+    return decision
 
 
 def _parse_decision(text: str) -> CognitionDecision:
