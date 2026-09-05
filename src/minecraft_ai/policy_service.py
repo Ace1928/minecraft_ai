@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import importlib
 import json
+import os
 import pickle
 import select
 import subprocess
@@ -58,11 +59,13 @@ class PolicyServiceMetrics:
     requests: int = 0
     responses: int = 0
     invalidated_requests: int = 0
+    retired_responses: int = 0
     deadline_misses: int = 0
     failures: int = 0
     scene_blocks: int = 0
     camera_feedback_waits: int = 0
     last_inference_ms: float = 0.0
+    last_response_age_ms: float = 0.0
     last_error: str | None = None
 
 
@@ -111,6 +114,10 @@ class _PolicyRequestContext:
     interaction_id: int | None
 
 
+class _PolicyDeadlineExpired(TimeoutError):
+    """A drained, identified response missed its parent-owned deadline."""
+
+
 @dataclass
 class TemporalPolicyClient:
     """Deadline-aware client for an isolated learned temporal policy process."""
@@ -120,6 +127,7 @@ class TemporalPolicyClient:
     policy_id: str = field(init=False)
     metrics: PolicyServiceMetrics = field(default_factory=PolicyServiceMetrics, init=False)
     _process: subprocess.Popen[str] | None = field(default=None, init=False)
+    _response_bytes: bytearray = field(default_factory=bytearray, init=False)
     _memory: shared_memory.SharedMemory | None = field(default=None, init=False)
     _memory_size: int = field(default=0, init=False)
     _held_keys: set[str] = field(default_factory=set, init=False)
@@ -129,6 +137,7 @@ class TemporalPolicyClient:
     _last_sequence: int = field(default=-1, init=False)
     _pending_request_id: str | None = field(default=None, init=False)
     _pending_deadline_ns: int = field(default=0, init=False)
+    _consumed_deadline_ns: int = field(default=0, init=False)
     _pending_miss_recorded: bool = field(default=False, init=False)
     _consumed_miss_recorded: bool = field(default=False, init=False)
     _pending_frame_captured_ns: int = field(default=0, init=False)
@@ -253,10 +262,17 @@ class TemporalPolicyClient:
             self.metrics.responses += 1
             self.metrics.last_inference_ms = output.inference_ns / 1_000_000.0
             self.metrics.last_error = None
-            if output.inference_ns > self.config.deadline_ms * 1_000_000:
+            if output.inference_ns > self.config.deadline_ms * 1_000_000 or (
+                self._consumed_deadline_ns > 0 and time.monotonic_ns() >= self._consumed_deadline_ns
+            ):
                 if not self._consumed_miss_recorded:
                     self.metrics.deadline_misses += 1
                 return self._release(sequence, reason="inference-deadline-exceeded")
+            if (
+                self.config.provider == "external"
+                and output.model_version != self.config.model_version
+            ):
+                raise RuntimeError("external worker prediction model identity changed")
             action = self._output_action(
                 output,
                 sequence,
@@ -264,6 +280,10 @@ class TemporalPolicyClient:
             )
             self._consumed_request_context = None
             return action
+        except _PolicyDeadlineExpired:
+            if not self._consumed_miss_recorded:
+                self.metrics.deadline_misses += 1
+            return self._release(sequence, reason="request-deadline-expired")
         except Exception as exc:
             self.metrics.failures += 1
             self.metrics.last_error = f"{type(exc).__name__}: {exc}"
@@ -297,14 +317,16 @@ class TemporalPolicyClient:
         return {
             "policy_id": self.policy_id,
             "provider": self.config.provider,
+            "architecture": self.config.external_architecture or self.config.provider,
+            "model_sha256": self.config.model_sha256,
             "model_version": self.config.model_version,
             "source_commit": self.config.source_commit,
             "license": self.config.license,
-            "goal_conditioned": self.config.provider
-            in {
-                "minestudio-steve1",
-                "minestudio-rocket2",
-            },
+            "goal_conditioned": (
+                self.config.external_goal_conditioned
+                if self.config.provider == "external"
+                else self.config.provider in {"minestudio-steve1", "minestudio-rocket2"}
+            ),
             "grounding_mode": (
                 "cross-view-object" if self.config.provider == "minestudio-rocket2" else "text"
             ),
@@ -329,7 +351,12 @@ class TemporalPolicyClient:
             "estimated_pitch_units": self._world_camera_state.estimated_pitch_units,
             "camera_envelope_saturated": self._camera_envelope_saturated,
             "button_zero_order_hold": True,
-            "last_action_provenance": dict(self._last_action_provenance),
+            "last_action_provenance": dict(self._last_action_provenance)
+            | {
+                "architecture": self.config.external_architecture or self.config.provider,
+                "model_sha256": self.config.model_sha256,
+                "source_commit": self.config.source_commit,
+            },
             "pending_request": (
                 None
                 if self._pending_request_context is None
@@ -338,6 +365,15 @@ class TemporalPolicyClient:
                     "condition": self._pending_request_context.condition,
                     "target_track_id": self._pending_request_context.target_track_id,
                     "interaction_id": self._pending_request_context.interaction_id,
+                }
+            ),
+            "transport_pending": (
+                None
+                if self._pending_request_id is None
+                else {
+                    "request_id": self._pending_request_id,
+                    "retired": self._discard_pending_response,
+                    "deadline_ns": self._pending_deadline_ns,
                 }
             ),
             "last_prediction": (
@@ -401,11 +437,13 @@ class TemporalPolicyClient:
             "requests": self.metrics.requests,
             "responses": self.metrics.responses,
             "invalidated_requests": self.metrics.invalidated_requests,
+            "retired_responses": self.metrics.retired_responses,
             "deadline_misses": self.metrics.deadline_misses,
             "failures": self.metrics.failures,
             "scene_blocks": self.metrics.scene_blocks,
             "camera_feedback_waits": self.metrics.camera_feedback_waits,
             "last_inference_ms": round(self.metrics.last_inference_ms, 3),
+            "last_response_age_ms": round(self.metrics.last_response_age_ms, 3),
             "last_error": self.metrics.last_error,
         }
 
@@ -435,8 +473,10 @@ class TemporalPolicyClient:
                 pass
             self._memory = None
         self._memory_size = 0
+        self._response_bytes.clear()
         self._pending_request_id = None
         self._pending_deadline_ns = 0
+        self._consumed_deadline_ns = 0
         self._pending_miss_recorded = False
         self._consumed_miss_recorded = False
         self._pending_frame_captured_ns = 0
@@ -519,9 +559,11 @@ class TemporalPolicyClient:
             "--gui-camera-scale",
             str(self.config.gui_camera_scale),
         ]
+        if self.config.provider == "external":
+            command = _external_worker_command(self.config, self._memory.name)
         if self.config.stochastic:
             command.append("--stochastic")
-        if self.config.deterministic_condition:
+        if self.config.deterministic_condition and self.config.provider != "external":
             command.append("--deterministic-condition")
         self._process = subprocess.Popen(
             command,
@@ -529,13 +571,20 @@ class TemporalPolicyClient:
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=(
+                _external_worker_environment(self.config)
+                if self.config.provider == "external" else None
+            ),
         )
         ready = self._read_response(self.config.startup_timeout_s)
         if ready is None or ready.get("type") != "ready":
             raise RuntimeError(f"learned policy did not become ready: {ready}")
+        if self.config.provider == "external":
+            _validate_external_ready(self.config, ready)
 
     def _consume_pending_response(self) -> dict[str, Any] | None:
         self._consumed_miss_recorded = False
+        self._consumed_deadline_ns = 0
         if self._pending_request_id is None:
             return None
         response = self._read_response(0.0)
@@ -543,6 +592,7 @@ class TemporalPolicyClient:
             return None
         request_id = self._pending_request_id
         request_context = self._pending_request_context
+        self._consumed_deadline_ns = self._pending_deadline_ns
         self._consumed_frame_captured_ns = self._pending_frame_captured_ns
         self._pending_request_id = None
         self._pending_request_context = None
@@ -552,7 +602,23 @@ class TemporalPolicyClient:
         self._pending_miss_recorded = False
         if response.get("request_id") != request_id:
             raise RuntimeError("learned policy response/request identity mismatch")
+        if self._consumed_deadline_ns > 0:
+            submitted_ns = self._consumed_deadline_ns - self.config.deadline_ms * 1_000_000
+            self.metrics.last_response_age_ms = max(
+                0.0, (time.monotonic_ns() - submitted_ns) / 1_000_000.0,
+            )
+        if self._discard_pending_response:
+            self.metrics.retired_responses += 1
         if response.get("type") == "error":
+            if (
+                self.config.provider == "external"
+                and self._consumed_deadline_ns > 0
+                and time.monotonic_ns() >= self._consumed_deadline_ns
+                and str(response.get("error", "")).startswith("TimeoutError:")
+            ):
+                # Perception can advance temporal memory without emitting an
+                # action. Keep that worker alive; release the actuator only.
+                raise _PolicyDeadlineExpired
             raise RuntimeError(str(response.get("error", "policy inference failed")))
         if response.get("type") != "prediction":
             raise RuntimeError(f"unexpected policy response: {response.get('type')}")
@@ -603,18 +669,35 @@ class TemporalPolicyClient:
         process = self._process
         if process is None or process.stdout is None:
             raise RuntimeError("learned policy process is not running")
-        readable, _, _ = select.select([process.stdout], [], [], timeout_s)
-        if not readable:
-            if process.poll() is not None:
-                raise RuntimeError(f"learned policy exited with code {process.returncode}")
-            return None
-        line = process.stdout.readline()
-        if not line:
-            raise RuntimeError("learned policy closed its response stream")
-        payload = json.loads(line)
-        if not isinstance(payload, dict):
-            raise RuntimeError("learned policy returned a non-object response")
-        return payload
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        maximum_line_bytes = 64 * 1024
+        while True:
+            newline = self._response_bytes.find(b"\n")
+            if newline > maximum_line_bytes or (
+                newline < 0 and len(self._response_bytes) > maximum_line_bytes
+            ):
+                raise RuntimeError("learned policy response exceeds 64 KiB")
+            if newline >= 0:
+                line = bytes(self._response_bytes[:newline])
+                del self._response_bytes[:newline + 1]
+                payload = json.loads(line)
+                if not isinstance(payload, dict):
+                    raise RuntimeError("learned policy returned a non-object response")
+                return payload
+            readable, _, _ = select.select(
+                [process.stdout], [], [], max(0.0, deadline - time.monotonic()),
+            )
+            if not readable:
+                if process.poll() is not None:
+                    raise RuntimeError(f"learned policy exited with code {process.returncode}")
+                return None
+            # This is the sole reader. TextIOWrapper.readline can block past
+            # the deadline on a partial record, or hide a second complete line
+            # from select in its own buffer. Keep bounded bytes here instead.
+            chunk = os.read(process.stdout.fileno(), 4096)
+            if not chunk:
+                raise RuntimeError("learned policy closed its response stream")
+            self._response_bytes.extend(chunk)
 
     def _output_action(
         self,
@@ -1568,7 +1651,80 @@ def _merge_policy_release(action: MotorAction, release: MotorAction) -> MotorAct
     )
 
 
+def _external_worker_environment(config: PolicyConfig) -> dict[str, str]:
+    """Prefer the explicitly selected worker import root over editable installs."""
+    environment = dict(os.environ)
+    previous = environment.get("PYTHONPATH", "")
+    environment["PYTHONPATH"] = config.source_path + (os.pathsep + previous if previous else "")
+    return environment
+
+
+def _external_worker_command(config: PolicyConfig, memory_name: str) -> list[str]:
+    """The parent owns transport, artifact identity and motor calibration flags."""
+    controlled = {
+        "shared-memory": memory_name,
+        "model-path": config.model_path,
+        "model-sha256": config.model_sha256,
+        "model-version": config.model_version,
+        "threads": str(config.threads),
+        "seed": str(config.seed),
+        "camera-scale": str(config.camera_scale),
+        "camera-pitch-scale": str(config.effective_camera_pitch_scale),
+        "gui-camera-scale": str(config.gui_camera_scale),
+    }
+    reserved = set(controlled) | {"stochastic", "deterministic-condition"}
+    for argument in config.external_args:
+        option = argument.split("=", 1)[0]
+        if (
+            not argument
+            or len(argument) > 4096
+            or "\0" in argument
+            or option == "--"
+            or (option.startswith("--") and any(name.startswith(option[2:]) for name in reserved))
+        ):
+            raise ValueError("external worker arguments cannot override parent-owned options")
+    return [
+        config.python_path,
+        "-m",
+        config.external_module,
+        *config.external_args,
+        *(item for name, value in controlled.items() for item in ("--" + name, value)),
+    ]
+
+
+def _validate_external_ready(config: PolicyConfig, ready: dict[str, Any]) -> None:
+    expected = {
+        "protocol": "minecraft-ai.temporal-policy.v1",
+        "architecture": config.external_architecture,
+        "model_sha256": config.model_sha256,
+        "model_version": config.model_version,
+        "goal_conditioned": config.external_goal_conditioned,
+    }
+    if any(
+        type(ready.get(key)) is not type(value) or ready.get(key) != value
+        for key, value in expected.items()
+    ):
+        raise RuntimeError("external worker ready identity or protocol differs from configuration")
+
+
 def _validate_policy_config(config: PolicyConfig) -> None:
+    if config.provider == "external":
+        if config.external_goal_conditioned:
+            raise ValueError("external worker admission currently supports raw motion only")
+        if (
+            not config.external_module
+            or not all(part.isidentifier() for part in config.external_module.split("."))
+            or not config.external_architecture.strip()
+        ):
+            raise ValueError("external worker module and explicit architecture are required")
+        _external_worker_command(config, "parent-owned")
+    elif (
+        config.external_module
+        or config.external_args
+        or config.external_architecture
+        or config.external_goal_conditioned
+    ):
+        raise ValueError("external worker settings require provider external")
     required = {
         "python_path": config.python_path,
         "source_path": config.source_path,

@@ -47,10 +47,15 @@ class PolicyConfig(BaseModel):
 
     enabled: bool = False
     provider: str = Field(
-        pattern="^(openai-vpt|minestudio-steve1|minestudio-rocket2)$",
+        pattern="^(openai-vpt|minestudio-steve1|minestudio-rocket2|external)$",
         default="openai-vpt",
     )
     python_path: str = ""
+    # Trusted local worker entrypoint; launch uses argv, never a shell.
+    external_module: str = ""
+    external_args: tuple[str, ...] = Field(default=(), max_length=64)
+    external_architecture: str = Field(default="", max_length=128)
+    external_goal_conditioned: bool = False
     source_path: str = ""
     model_path: str = ""
     weights_path: str = ""

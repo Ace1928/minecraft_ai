@@ -27,6 +27,35 @@ supervisor -------------------------------+
 
 The **supervisor is not part of the agent's cognition**. It owns process lifecycle, input capability leases, watchdogs, pause/stop state, and forced key/button release.
 
+### Optional external temporal worker
+
+`PolicyConfig.provider: external` admits a trusted local raw-motion worker through
+the existing temporal client. No external implementation or private bundle ships
+in this repository. First admission is raw motion only; goal-conditioned and
+scene-model replacement require separate qualification.
+
+The configured Python module receives argv, not a shell command. `source_path`
+is its import root (for example an immutable checkout's `src` directory), placed
+first in `PYTHONPATH`. Pin the source revision and model digest, verify licensing,
+and keep mutable learning/resume state out of an initial canary. This is a
+trusted plugin boundary, **not an operating-system sandbox or attestation**.
+
+Workers use `minecraft-ai.temporal-policy.v1`: one BGRA shared frame and one
+JSONL inference request in flight. The ready record must match architecture,
+model digest, model version and `goal_conditioned: false`; the worker must verify
+the artifact it actually loads. `reset` has no acknowledgement. A retired reply
+must drain through its owning client before shared pixels are reused; it cannot
+restore the former skill's permissions, camera delta or target. A complete
+matching prediction must arrive inside the parent's absolute deadline, not just
+report a short compute duration. Responses are limited to 64 KiB per line.
+
+`transport_pending` distinguishes an outstanding retired reply from an active
+option; `retired_responses` and `last_response_age_ms` expose owner-side delivery.
+Neither means movement occurred. Admission requires a real client/worker replay
+with fresh request/frame/episode attribution, followed separately by a guarded
+live trace through the supervisor. Accepted inputs, observed displacement and
+successful gameplay remain different evidence gates.
+
 ### Required failure behavior
 
 If any of the following occur, the motor capability lease is revoked and all held inputs are released:
