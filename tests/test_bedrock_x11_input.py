@@ -27,8 +27,10 @@ class _FakeXTest:
 
 def _key_routing_backend(*, host_targeted: bool) -> tuple[IsolatedX11InputBackend, _FakeXTest]:
     backend = object.__new__(IsolatedX11InputBackend)
+    backend._require_input_isolation = lambda: None  # type: ignore[method-assign]
     fake_xtest = _FakeXTest()
     backend._targeted = host_targeted
+    backend._input_permitted = lambda: True
     backend._display = object()
     backend._x = SimpleNamespace(KeyPress=2, KeyRelease=3)
     backend._xtest = fake_xtest
@@ -81,6 +83,7 @@ def test_absolute_cursor_maps_cropped_frame_coordinates_to_wine_window(
         sync=lambda: None,
     )
     backend = object.__new__(IsolatedX11InputBackend)
+    backend._require_input_isolation = lambda: None  # type: ignore[method-assign]
     backend._targeted = False
     backend.target_window_id = 42
     backend._input_window_id = 99
@@ -100,6 +103,7 @@ def test_atomic_gui_tap_leaves_bedrock_backend_and_guard_state_in_agreement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     backend = object.__new__(IsolatedX11InputBackend)
+    backend._require_input_isolation = lambda: None  # type: ignore[method-assign]
     fake_xtest = _FakeXTest()
     backend._targeted = False
     backend._display = SimpleNamespace(sync=lambda: None)
@@ -172,6 +176,7 @@ def test_atomic_gui_tap_leaves_bedrock_backend_and_guard_state_in_agreement(
 
 def test_apply_rechecks_interlock_before_positive_events_but_keeps_releases() -> None:
     backend = object.__new__(IsolatedX11InputBackend)
+    backend._require_input_isolation = lambda: None  # type: ignore[method-assign]
     fake_xtest = _FakeXTest()
     permitted = True
     mouse_moves: list[tuple[int, int]] = []
@@ -249,6 +254,7 @@ def test_apply_blocks_each_positive_event_when_interlock_is_latched(
     action: MotorAction,
 ) -> None:
     backend = object.__new__(IsolatedX11InputBackend)
+    backend._require_input_isolation = lambda: None  # type: ignore[method-assign]
     fake_xtest = _FakeXTest()
     mouse_moves: list[tuple[int, int]] = []
     backend._targeted = False
@@ -290,6 +296,7 @@ def test_apply_blocks_each_positive_event_when_interlock_is_latched(
 
 def test_release_all_ignores_latched_positive_input_interlock() -> None:
     backend = object.__new__(IsolatedX11InputBackend)
+    backend._require_input_isolation = lambda: None  # type: ignore[method-assign]
     fake_xtest = _FakeXTest()
     sent_keys: list[bool] = []
     backend._display = SimpleNamespace(sync=lambda: None)
@@ -371,6 +378,7 @@ def _pointer_parking_backend() -> tuple[IsolatedX11InputBackend, dict[str, Any]]
         x=window.rect[0] + x, y=window.rect[1] + y,
     )
     backend = object.__new__(IsolatedX11InputBackend)
+    backend._require_input_isolation = lambda: None  # type: ignore[method-assign]
     backend._display = SimpleNamespace(
         screen=lambda: SimpleNamespace(root=root),
         create_resource_object=lambda _kind, identity: windows[identity],

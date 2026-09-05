@@ -69,8 +69,10 @@ from .platforms.bedrock_session import (
     BedrockSession,
     bedrock_lifecycle_lock,
     bedrock_session_alive,
+    bedrock_session_resources_absent,
     bind_direct_session_to_monitor,
     launch_isolated_bedrock_session,
+    require_autonomous_input_isolation,
     stop_bedrock_session,
     wait_for_minecraft_window,
 )
@@ -188,6 +190,7 @@ def _session_payload(session: BedrockSession) -> dict[str, object]:
         "width": session.width,
         "height": session.height,
         "mode": session.mode,
+        "input_isolation": session.input_isolation,
         "compositor_fullscreen": session.compositor_fullscreen,
         "wayland_socket": session.wayland_socket,
         "compositor_log": session.compositor_log,
@@ -196,6 +199,23 @@ def _session_payload(session: BedrockSession) -> dict[str, object]:
         "alive": alive,
         "minecraft_window": session.find_window() if alive else None,
     }
+
+
+def _input_isolation_status() -> dict[str, object]:
+    """Keep liveness separate from authority so recovery preserves legacy games."""
+    try:
+        session = BedrockSession.load()
+    except FileNotFoundError:
+        return {"verified": None, "reason": "no managed Bedrock session"}
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return {"verified": False, "reason": f"session descriptor is unreadable: {exc}"}
+    if bedrock_session_resources_absent(session):
+        return {"verified": None, "reason": "managed Bedrock resources are absent"}
+    try:
+        require_autonomous_input_isolation(session)
+    except (IsolationError, OSError, ValueError, TypeError, KeyError) as exc:
+        return {"verified": False, "reason": str(exc)}
+    return {"verified": True, "reason": None}
 
 
 def _agent_payload() -> dict[str, object] | None:
@@ -289,7 +309,7 @@ def doctor() -> None:
         "isolation": {
             "weston": shutil.which("weston"),
             "xephyr": shutil.which("Xephyr"),
-            "preferred_backend": "weston" if shutil.which("weston") else "xephyr",
+            "preferred_backend": "headless-weston-virtual-seat",
             "host_display": os.environ.get("DISPLAY"),
             "managed_session": _session_payload(session) if session is not None else None,
         },
@@ -405,12 +425,10 @@ def _prepare_human_recording_takeover() -> None:
 
 
 def _require_autonomous_isolated_session(session: BedrockSession) -> None:
-    if session.mode not in {"xephyr", "weston"}:
-        raise typer.BadParameter(
-            "Autonomous live control requires a nested Weston/Xephyr Bedrock session. "
-            "Direct and host-monitor sessions share the operator display and are manual-debug "
-            "or capture-only modes; stop this session and run `minecraft-ai bedrock launch`."
-        )
+    try:
+        require_autonomous_input_isolation(session)
+    except IsolationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _launch_realtime_agent_transaction(
@@ -701,6 +719,7 @@ def status() -> None:
         payload["emergency_stop_reason"] = emergency_reason()
     payload["operator_pause_latched"] = operator_pause_latched()
     payload["agent"] = _agent_payload()
+    payload["input_isolation"] = _input_isolation_status()
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
@@ -1329,7 +1348,7 @@ def bedrock_launch(
     fullscreen: bool = typer.Option(
         True,
         "--fullscreen/--windowed",
-        help="Present isolated Weston fullscreen so Bedrock's complete HUD remains visible.",
+        help="Compatibility option; headless Weston always uses the exact requested resolution.",
     ),
     direct: bool = typer.Option(
         False,
@@ -1380,6 +1399,8 @@ def _bedrock_launch_locked(
         # The launcher can exit while its nested compositor remains healthy.
         # Reap that exact persisted session before replacing the descriptor so
         # an orphaned fullscreen surface cannot occupy the Bedrock monitor.
+        if not bedrock_session_resources_absent(existing_session):
+            _require_autonomous_isolated_session(existing_session)
         stop_bedrock_session(existing_session)
     if direct:
         from .platforms.bedrock_session import launch_direct_bedrock_session

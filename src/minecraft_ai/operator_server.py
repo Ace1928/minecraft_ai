@@ -41,7 +41,11 @@ from .platforms import (
     discover_bedrock_linux_install,
     find_bedrock_linux_instances,
 )
-from .platforms.bedrock_session import BedrockSession, bedrock_session_alive
+from .platforms.bedrock_session import (
+    BedrockSession,
+    bedrock_session_alive,
+    require_autonomous_input_isolation,
+)
 from .platforms.bedrock_x11 import CapturedFrame
 from .social import OperatorMessage, OperatorMessageKind
 from .service_control import (
@@ -286,6 +290,15 @@ def operator_readiness(
     checks["isolated_bedrock"] = isolated_session
     if not isolated_session:
         reasons.append("no live private Weston/Xephyr Bedrock session")
+
+    input_isolated = False
+    if isolated_session and session is not None:
+        try:
+            require_autonomous_input_isolation(session)
+            input_isolated = True
+        except (IsolationError, OSError, ValueError, TypeError, KeyError) as exc:
+            reasons.append(f"host input isolation is unverified: {exc}")
+    checks["host_input_isolated"] = input_isolated
 
     window_id = session.find_window() if isolated_session and session is not None else None
     checks["bedrock_window"] = window_id is not None

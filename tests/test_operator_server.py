@@ -27,6 +27,7 @@ from minecraft_ai.operator_server import (
 )
 from minecraft_ai.perception_service import frame_dhash
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
+from minecraft_ai.platforms.bedrock_x11 import IsolationError
 from minecraft_ai.storage import StateDatabase
 
 
@@ -67,6 +68,10 @@ def test_operator_readiness_requires_fresh_matching_motor_telemetry(monkeypatch)
     )
     monkeypatch.setattr(
         "minecraft_ai.operator_server.bedrock_session_alive", lambda _session: True
+    )
+    monkeypatch.setattr(
+        "minecraft_ai.operator_server.require_autonomous_input_isolation",
+        lambda _session: None,
     )
     monkeypatch.setattr(
         "minecraft_ai.operator_server._capture_live_bedrock_frame",
@@ -116,6 +121,20 @@ def test_operator_readiness_requires_fresh_matching_motor_telemetry(monkeypatch)
     assert payload["checks"]["live_capture"] is True
     assert payload["checks"]["playable_capture"] is False
     assert "outside" in " ".join(payload["degradations"])
+
+    def host_seat_reachable(_session: object) -> None:
+        raise IsolationError("nested compositor still forwards host input")
+
+    monkeypatch.setattr(
+        "minecraft_ai.operator_server.require_autonomous_input_isolation",
+        host_seat_reachable,
+    )
+    ready, payload = operator_readiness(require_playable_capture=False)
+    assert ready is False
+    assert payload["checks"]["isolated_bedrock"] is True
+    assert payload["checks"]["live_capture"] is True
+    assert payload["checks"]["host_input_isolated"] is False
+    assert "still forwards host input" in " ".join(payload["reasons"])
 
 
 def test_stale_agent_descriptor_cannot_authorize_host_capture(monkeypatch) -> None:

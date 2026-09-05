@@ -27,6 +27,11 @@ from .bedrock_x11 import (
     request_window_close,
     require_isolated_display,
 )
+from .weston_seat import (
+    HeadlessSeatArtifact,
+    build_headless_seat_module,
+    require_loaded_headless_seat,
+)
 
 
 RUNTIME_DIR = Path(user_runtime_dir("minecraft-ai"))
@@ -34,6 +39,7 @@ BEDROCK_SESSION_FILE = RUNTIME_DIR / "bedrock-session.json"
 BEDROCK_LIFECYCLE_LOCK = RUNTIME_DIR / "bedrock-session.lock"
 DEFAULT_BEDROCK_WIDTH = 1920
 DEFAULT_BEDROCK_HEIGHT = 1080
+HEADLESS_INPUT_ISOLATION = "headless-virtual-seat-v1"
 _IS_LINUX = sys.platform.startswith("linux")
 
 
@@ -147,6 +153,10 @@ class BedrockSession:
     host_monitor_height: int | None = None
     host_monitor_window_id: int | None = None
     host_monitor_bound_ns: int | None = None
+    input_isolation: str = "unverified"
+    input_isolation_module: str | None = None
+    input_isolation_module_sha256: str | None = None
+    input_isolation_source_sha256: str | None = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> BedrockSession:
@@ -187,6 +197,19 @@ class BedrockSession:
                 else str(raw["launcher_command_sha256"])
             ),
             mode=str(raw.get("mode", "xephyr")),
+            input_isolation=str(raw.get("input_isolation", "unverified")),
+            input_isolation_module=(
+                None if raw.get("input_isolation_module") is None
+                else str(raw["input_isolation_module"])
+            ),
+            input_isolation_module_sha256=(
+                None if raw.get("input_isolation_module_sha256") is None
+                else str(raw["input_isolation_module_sha256"])
+            ),
+            input_isolation_source_sha256=(
+                None if raw.get("input_isolation_source_sha256") is None
+                else str(raw["input_isolation_source_sha256"])
+            ),
             compositor_fullscreen=bool(raw.get("compositor_fullscreen", False)),
             wayland_socket=None
             if raw.get("wayland_socket") is None
@@ -391,6 +414,106 @@ def bedrock_session_alive(session: BedrockSession | None = None) -> bool:
     )
 
 
+def bedrock_session_resources_absent(session: BedrockSession) -> bool:
+    """Prove there are no recorded resources before permitting a fresh launch.
+
+    Failed combined liveness does not imply an empty session: the launcher may
+    have died while its compositor or descendants still own the game. Only
+    kernel-confirmed missing leaders/groups and a missing private X socket
+    establish absence. Permission failures and reused PIDs remain a hold.
+    """
+    if not _IS_LINUX or session.mode not in {"weston", "xephyr", "direct", "host-monitor"}:
+        return False
+    private_display = session.mode in {"weston", "xephyr"}
+    pids = (
+        (session.launcher_pid, session.xserver_pid)
+        if private_display else (session.launcher_pid,)
+    )
+    for pid in pids:
+        if pid < 0:
+            return False
+        if pid == 0:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            return False
+        else:
+            return False
+        try:
+            _signal_process_group(pid, 0)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            return False
+        else:
+            return False
+    if private_display:
+        try:
+            require_isolated_display(session.display, session.host_display)
+            _x_socket(session.display).lstat()
+        except FileNotFoundError:
+            return True
+        except (OSError, IsolationError):
+            return False
+        return False
+    return True
+
+
+def require_autonomous_input_isolation(session: BedrockSession) -> None:
+    """Verify the live compositor cannot import a host keyboard/pointer seat.
+
+    A separate X display prevents outgoing XTEST from reaching the host, but
+    nested Wayland/Xephyr still forward host input into that display.  Legacy
+    sessions remain inspectable/stoppable; they cannot acquire motor authority
+    by adopting a new descriptor label.  This is a read-only readiness check.
+    """
+    if session.mode != "weston" or session.input_isolation != HEADLESS_INPUT_ISOLATION:
+        raise IsolationError(
+            "autonomous input requires a verified headless Weston session without a host "
+            "input seat; the existing session is preserved for observation"
+        )
+    require_isolated_display(session.display, session.host_display)
+    if (
+        not session.wayland_socket
+        or not session.compositor_log
+        or not session.input_isolation_module
+        or not session.input_isolation_module_sha256
+        or not session.input_isolation_source_sha256
+        or session.compositor_fullscreen
+        or _session_process_state(session, launcher=False) != "verified-live"
+    ):
+        raise IsolationError("headless compositor input isolation identity is unverifiable")
+    identity = _linux_process_identity(session.xserver_pid)
+    if identity is None:
+        raise IsolationError("headless compositor input isolation identity is unavailable")
+    ticks, command = identity
+    if not command:
+        raise IsolationError("headless compositor command is unavailable")
+    expected = tuple(_weston_command(
+        weston=command[0],
+        wayland_socket=session.wayland_socket,
+        width=session.width,
+        height=session.height,
+        fullscreen=False,
+        compositor_log=Path(session.compositor_log),
+        seat_module=Path(session.input_isolation_module),
+    ))
+    if (
+        ticks != session.xserver_proc_start_ticks
+        or _command_sha256(command) != session.xserver_command_sha256
+        or command != expected
+    ):
+        raise IsolationError("live compositor command does not prove headless input isolation")
+    require_loaded_headless_seat(session.xserver_pid, HeadlessSeatArtifact(
+        session.input_isolation_module,
+        session.input_isolation_module_sha256,
+        session.input_isolation_source_sha256,
+    ))
+
+
 def _display_number(display: str) -> int:
     identity = display.split(".", 1)[0]
     if not identity.startswith(":") or not identity[1:].isdigit():
@@ -555,14 +678,13 @@ def launch_weston_bedrock_session(
     fullscreen: bool = True,
     launcher_command: tuple[str, ...] | None = None,
 ) -> BedrockSession:
-    """Launch Bedrock in a GPU-accelerated nested Weston/Xwayland compositor."""
+    """Launch Bedrock in headless GPU Weston with no host input transport."""
     if os.name != "posix" or not Path("/proc").is_dir():
         raise IsolationError("managed Bedrock isolation is currently Linux-only")
     host_display = os.environ.get("DISPLAY", "").strip()
-    host_wayland = os.environ.get("WAYLAND_DISPLAY", "").strip()
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "").strip()
-    if not host_display or not host_wayland or not runtime_dir:
-        raise IsolationError("a host Wayland session with DISPLAY is required")
+    if not runtime_dir:
+        raise IsolationError("XDG_RUNTIME_DIR is required for the private Wayland socket")
     weston = shutil.which("weston")
     if weston is None:
         raise IsolationError("Weston is not installed")
@@ -576,11 +698,13 @@ def launch_weston_bedrock_session(
             raise IsolationError("bedrock-on-linux launcher was not found")
         launcher_command = (command, "play")
 
+    seat_artifact = build_headless_seat_module()
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     nonce = f"{os.getpid()}-{time.monotonic_ns()}"
     wayland_socket = f"minecraft-ai-{nonce}"
     compositor_log = RUNTIME_DIR / f"weston-{nonce}.log"
     launcher_log = RUNTIME_DIR / f"bedrock-launcher-{nonce}.log"
+    compositor_env = _headless_compositor_environment()
     compositor = subprocess.Popen(
         _weston_command(
             weston=weston,
@@ -589,7 +713,9 @@ def launch_weston_bedrock_session(
             height=height,
             fullscreen=fullscreen,
             compositor_log=compositor_log,
+            seat_module=Path(seat_artifact.module_path),
         ),
+        env=compositor_env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -600,7 +726,7 @@ def launch_weston_bedrock_session(
     try:
         display = _wait_for_weston_xwayland(compositor, compositor_log)
         require_isolated_display(display, host_display)
-        env = dict(os.environ)
+        env = dict(compositor_env)
         env["DISPLAY"] = display
         env["WAYLAND_DISPLAY"] = wayland_socket
         env["XDG_SESSION_TYPE"] = "wayland"
@@ -640,11 +766,16 @@ def launch_weston_bedrock_session(
             launcher_proc_start_ticks=launcher_start,
             launcher_command_sha256=launcher_digest,
             mode="weston",
-            compositor_fullscreen=fullscreen,
+            compositor_fullscreen=False,
+            input_isolation=HEADLESS_INPUT_ISOLATION,
+            input_isolation_module=seat_artifact.module_path,
+            input_isolation_module_sha256=seat_artifact.module_sha256,
+            input_isolation_source_sha256=seat_artifact.source_sha256,
             wayland_socket=wayland_socket,
             compositor_log=str(compositor_log),
             launcher_log=str(launcher_log),
         )
+        require_autonomous_input_isolation(session)
         _prepare_new_isolated_bedrock_geometry(session)
         session.persist()
         return session
@@ -668,18 +799,16 @@ def _weston_command(
     height: int,
     fullscreen: bool,
     compositor_log: Path,
+    seat_module: Path,
 ) -> list[str]:
-    """Build the nested compositor command without losing the host HUD surface.
+    """Keep the complete fixed-size HUD surface without a host input seat.
 
-    A nominal 1920x1080 window is smaller than 1920x1080 after the host shell,
-    decorations, and dock reserve their space. Bedrock still allocates its
-    fullscreen backbuffer at the requested size, which clips the hotbar before
-    capture. Host-fullscreen Weston removes that mismatch while retaining the
-    isolated Wayland/Xwayland input namespace.
+    ``fullscreen`` remains accepted for launcher API compatibility. A headless
+    output always has the requested dimensions and never creates a host window.
     """
-    command = [
+    return [
         weston,
-        "--backend=wayland",
+        "--backend=headless",
         f"--socket={wayland_socket}",
         f"--width={width}",
         f"--height={height}",
@@ -687,11 +816,18 @@ def _weston_command(
         "--xwayland",
         "--shell=kiosk",
         "--no-config",
+        "--idle-time=0",
+        f"--modules={seat_module}",
         f"--log={compositor_log}",
     ]
-    if fullscreen:
-        command.append("--fullscreen")
-    return command
+
+
+def _headless_compositor_environment() -> dict[str, str]:
+    """Remove inherited host display handles before creating the private server."""
+    env = dict(os.environ)
+    for name in ("DISPLAY", "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "XAUTHORITY", "BOL_DISPLAY"):
+        env.pop(name, None)
+    return env
 
 
 def _wait_for_weston_xwayland(
@@ -724,17 +860,11 @@ def launch_isolated_bedrock_session(
     fullscreen: bool = True,
     launcher_command: tuple[str, ...] | None = None,
 ) -> BedrockSession:
-    """Prefer the accelerated compositor, retaining Xephyr as a compatibility fallback."""
-    if shutil.which("weston") and os.environ.get("WAYLAND_DISPLAY"):
-        return launch_weston_bedrock_session(
-            width=width,
-            height=height,
-            fullscreen=fullscreen,
-            launcher_command=launcher_command,
-        )
-    return launch_xephyr_bedrock_session(
+    """Require headless Weston; never fall back to a host-fed input namespace."""
+    return launch_weston_bedrock_session(
         width=width,
         height=height,
+        fullscreen=fullscreen,
         launcher_command=launcher_command,
     )
 

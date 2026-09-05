@@ -162,6 +162,7 @@ def test_gui_cursor_rejects_clipped_content_without_warping() -> None:
         warp_pointer=lambda x, y: warps.append((x, y)),
     ))
     backend = object.__new__(IsolatedX11InputBackend)
+    backend._require_input_isolation = lambda: None  # type: ignore[method-assign]
     backend._display = display
     backend._targeted = False
     backend.target_window_id = 2

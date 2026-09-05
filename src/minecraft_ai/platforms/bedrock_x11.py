@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import sys
 import os
 import re
 import shutil
@@ -618,6 +619,9 @@ class IsolatedX11InputBackend:
         input_permitted: Callable[[], bool] = lambda: True,
     ) -> None:
         require_isolated_display(display_name, host_display, allow_host=allow_host)
+        self.display_name = display_name
+        self._targeted = allow_host
+        self._require_input_isolation()
         if host_monitor_binding is not None:
             if not allow_host:
                 raise IsolationError("host-monitor binding requires explicit host-display access")
@@ -686,6 +690,7 @@ class IsolatedX11InputBackend:
         return self._input_window_id
 
     def bind_lease(self, lease: MotorLease) -> None:
+        self._require_input_isolation()
         if lease.backend_id != self.backend_id:
             raise MotorRejected("motor lease backend identity mismatch")
         self._lease = lease
@@ -810,11 +815,32 @@ class IsolatedX11InputBackend:
 
     def _send_key(self, keycode: int, down: bool) -> None:
         """Route keys through private-display XTEST or host-only XSendEvent."""
+        if down:
+            self._require_positive_input_permitted()
         if self._targeted:
             self._targeted_key(keycode, down)
             return
         event_type = self._x.KeyPress if down else self._x.KeyRelease
         self._xtest.fake_input(self._display, event_type, keycode)
+
+    def _require_input_isolation(self) -> None:
+        """Revalidate the managed compositor before granting positive input.
+
+        A private DISPLAY scopes outgoing XTEST but says nothing about host
+        seat ingress. Keep this check independent of the motor lease.
+        """
+        if self._targeted:
+            return
+        # Session launch imports capture helpers from this module.
+        from .bedrock_session import BedrockSession, require_autonomous_input_isolation
+
+        try:
+            session = BedrockSession.load()
+            if _display_identity(session.display) != _display_identity(self.display_name):
+                raise IsolationError("input display does not match the managed Bedrock session")
+            require_autonomous_input_isolation(session)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise IsolationError("managed input isolation could not be verified") from exc
 
     def _require_positive_input_permitted(self) -> None:
         """Fail closed at the final actuator boundary for positive input."""
@@ -825,6 +851,7 @@ class IsolatedX11InputBackend:
             raise MotorRejected("actuation interlock could not be verified") from exc
         if not permitted:
             raise MotorRejected("actuation interlock is not clear")
+        self._require_input_isolation()
 
     def probe_target(self) -> bool:
         if self.target_window_id is None:
@@ -899,7 +926,11 @@ class IsolatedX11InputBackend:
         if not self.probe_target():
             self.release_all()
             raise IsolationError("Bedrock target window disappeared")
-        self._ensure_input_focus()
+        if (
+            action.keys_down or action.buttons_down or action.mouse_dx or action.mouse_dy
+            or (action.cursor_x is not None and action.cursor_y is not None)
+        ):
+            self._ensure_input_focus()
         if (
             not self._targeted
             and self._host_monitor_binding is not None
@@ -1073,19 +1104,45 @@ class IsolatedX11InputBackend:
                     pass
             raise
         finally:
+            pending_error = sys.exception()
+            restore_holds = False
             if input_permitted():
-                for key in sorted(previous_keys):
-                    self._send_key(self._keycode(key), down=True)
-                for button in sorted(previous_buttons):
-                    button_id = _BUTTONS.get(button)
-                    if button_id is not None:
-                        self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
-                self._held_keys = previous_keys
-                self._held_buttons = previous_buttons
+                try:
+                    self._require_positive_input_permitted()
+                    restore_holds = True
+                except (IsolationError, MotorRejected):
+                    pass
+            if restore_holds:
+                try:
+                    for key in sorted(previous_keys):
+                        self._send_key(self._keycode(key), down=True)
+                        self._held_keys.add(key)
+                    for button in sorted(previous_buttons):
+                        button_id = _BUTTONS.get(button)
+                        if button_id is not None:
+                            self._require_positive_input_permitted()
+                            self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
+                            self._held_buttons.add(button)
+                    self._display.sync()
+                except Exception:
+                    try:
+                        self.release_all()
+                    except Exception:
+                        pass
+                    if pending_error is None:
+                        raise
             else:
                 self._held_keys.clear()
                 self._held_buttons.clear()
-            self._display.sync()
+            try:
+                self._display.sync()
+            except Exception:
+                try:
+                    self.release_all()
+                except Exception:
+                    pass
+                if pending_error is None:
+                    raise
 
     def _type_ascii(self, char: str) -> None:
         if char == " ":

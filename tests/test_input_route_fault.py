@@ -8,6 +8,7 @@ import minecraft_ai.cli as cli_module
 import minecraft_ai.supervisor as supervisor_module
 from minecraft_ai.safety import FakeInputBackend, InputRouteUnavailable, MotorAction, MotorRejected
 from minecraft_ai.supervisor import Supervisor
+from minecraft_ai.platforms.bedrock_x11 import IsolationError
 
 
 class _RouteFaultBackend(FakeInputBackend):
@@ -69,6 +70,33 @@ def test_generic_rejection_is_not_reclassified_as_input_route_failure() -> None:
     with pytest.raises(MotorRejected):
         supervisor.apply_motor_action(lease["lease_id"], MotorAction(sequence=0).model_dump())
     assert supervisor.status()["fault_code"] is None
+
+
+def test_live_legacy_session_reports_isolation_failure_without_changing_liveness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = object()
+    monkeypatch.setattr(cli_module.BedrockSession, "load", lambda: session)
+    monkeypatch.setattr(cli_module, "bedrock_session_alive", lambda _session: True)
+    monkeypatch.setattr(cli_module, "bedrock_session_resources_absent", lambda _session: False)
+
+    def unverified(_session: object) -> None:
+        assert _session is session
+        raise IsolationError("host seat remains reachable")
+
+    monkeypatch.setattr(cli_module, "require_autonomous_input_isolation", unverified)
+    result = cli_module._input_isolation_status()
+    assert result == {"verified": False, "reason": "host seat remains reachable"}
+
+
+def test_missing_session_does_not_latch_existing_game_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing() -> None:
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(cli_module.BedrockSession, "load", missing)
+    assert cli_module._input_isolation_status()["verified"] is None
 
 
 def test_calibration_route_fault_is_contained_before_fallible_status_publication(

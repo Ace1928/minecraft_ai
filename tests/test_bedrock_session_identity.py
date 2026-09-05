@@ -11,6 +11,7 @@ import pytest
 import minecraft_ai.platforms.bedrock_session as sessions
 from minecraft_ai.platforms.bedrock_session import BedrockSession
 from minecraft_ai.platforms.bedrock_x11 import IsolationError
+from minecraft_ai.platforms.weston_seat import HeadlessSeatArtifact
 
 
 @pytest.fixture(autouse=True)
@@ -230,6 +231,10 @@ def test_fresh_preparation_precedes_persist_and_failure_cleans_owned_processes(
     monkeypatch.setattr(sessions.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(sessions.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(sessions, "_wait_for_weston_xwayland", lambda *_args: ":71")
+    monkeypatch.setattr(sessions, "build_headless_seat_module", lambda: HeadlessSeatArtifact(
+        str(tmp_path / "seat.so"), "module-digest", "source-digest",
+    ))
+    monkeypatch.setattr(sessions, "require_autonomous_input_isolation", lambda _session: None)
     monkeypatch.setattr(sessions, "choose_free_display", lambda: ":71")
     monkeypatch.setattr(sessions, "_x_socket", lambda _display: tmp_path)
     monkeypatch.setattr(sessions, "require_isolated_display", lambda *_args: None)

@@ -26,6 +26,7 @@ def _backend(*, focus_id: int = 4, child_mask: int = 32768) -> tuple[Any, Any]:
         )
     state.windows = windows
     backend = object.__new__(IsolatedX11InputBackend)
+    backend._require_input_isolation = lambda: None  # type: ignore[method-assign]
     backend._targeted = False
     backend.target_window_id = 2
     backend._input_window_id = 3

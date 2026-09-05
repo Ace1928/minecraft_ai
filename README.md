@@ -22,7 +22,7 @@ Java Edition remains an optional compatibility target. It must not determine def
 - **Archetypes:** configurable roles such as farmer, trader, builder, redstone engineer, fighter, mob farmer, explorer, speedrunner, boss hunter, Nether specialist, shopkeeper, or custom roles.
 - **One-command operation:** install/doctor/run/pause/resume/stop/status from one CLI with automatic model/runtime setup where licensing and platform permissions allow it.
 - **Concurrent desktop use:** the operator must be able to use other Linux applications while the Bedrock agent plays whenever the selected backend passes isolation tests.
-- **Scoped control:** prefer control isolated to the Bedrock Wine/container/session boundary. Host-global input is a compatibility fallback, never the preferred backend.
+- **Scoped control:** headless Weston with a verified virtual seat keeps ordinary desktop input outside the Bedrock input path. Host-fed nested sessions cannot arm autonomous input; there is no automatic host-global fallback.
 - **Fail-safe stopping:** a separate supervisor, heartbeat watchdog, key-release on failure, and operator-owned stop paths that the agent cannot intercept.
 
 ## Target architecture

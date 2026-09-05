@@ -240,6 +240,47 @@ def test_existing_live_session_launch_is_a_noop_for_geometry(
     cli._bedrock_launch_locked(width=1920, height=1080, fullscreen=True, direct=False)
 
 
+def test_dead_launcher_does_not_authorize_replacing_a_remaining_legacy_game(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import typer
+    from minecraft_ai import cli
+
+    existing = SimpleNamespace(mode="weston", input_isolation="unverified")
+    monkeypatch.setattr(cli.BedrockSession, "load", lambda: existing)
+    monkeypatch.setattr(cli, "bedrock_session_alive", lambda _session: False)
+    monkeypatch.setattr(cli, "bedrock_session_resources_absent", lambda _session: False)
+    monkeypatch.setattr(cli, "stop_bedrock_session", lambda _session: (
+        pytest.fail("remaining legacy game must be preserved")
+    ))
+    monkeypatch.setattr(cli, "launch_isolated_bedrock_session", lambda **_kwargs: (
+        pytest.fail("legacy game must not be replaced")
+    ))
+
+    with pytest.raises(typer.BadParameter, match="preserved for observation"):
+        cli._bedrock_launch_locked(width=1920, height=1080, fullscreen=True, direct=False)
+
+
+def test_proven_absent_session_can_be_cleaned_up_before_new_headless_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from minecraft_ai import cli
+
+    existing = SimpleNamespace(mode="weston", input_isolation="unverified")
+    calls: list[str] = []
+    monkeypatch.setattr(cli.BedrockSession, "load", lambda: existing)
+    monkeypatch.setattr(cli, "bedrock_session_alive", lambda _session: False)
+    monkeypatch.setattr(cli, "bedrock_session_resources_absent", lambda _session: True)
+    monkeypatch.setattr(cli, "stop_bedrock_session", lambda _session: calls.append("cleanup"))
+    monkeypatch.setattr(cli, "launch_isolated_bedrock_session", lambda **_kwargs: (
+        calls.append("launch") or object()
+    ))
+    monkeypatch.setattr(cli, "_session_payload", lambda _session: {})
+
+    cli._bedrock_launch_locked(width=1920, height=1080, fullscreen=True, direct=False)
+    assert calls == ["cleanup", "launch"]
+
+
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux launch path")
 def test_direct_debug_launch_never_enters_isolated_geometry_preparation(
     monkeypatch: pytest.MonkeyPatch,

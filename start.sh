@@ -117,7 +117,9 @@ except (ValueError, TypeError):
 if not isinstance(payload, dict):
     raise SystemExit(1)
 generation = payload.get("session_id")
-if payload.get("fault_code") == "input-route-unverified":
+isolation = payload.get("input_isolation")
+isolation_failed = isinstance(isolation, dict) and isolation.get("verified") is False
+if payload.get("fault_code") == "input-route-unverified" or isolation_failed:
     print("hold:" + (generation if isinstance(generation, str) and generation else "unknown"))
 elif (
     isinstance(generation, str) and generation
@@ -135,7 +137,7 @@ elif (
 ' 2>/dev/null)" || observation=""
     if [[ "$observation" == hold:* ]]; then
         if [ -z "$input_route_hold_generation" ]; then
-            echo "Input routing is unverified; holding automatic recovery and preserving Bedrock." \
+            echo "Input routing or host input isolation is unverified; holding automatic recovery and preserving Bedrock." \
                 "A deliberately recovered healthy supervisor generation is required." >&2
         fi
         input_route_hold_generation="${observation#hold:}"

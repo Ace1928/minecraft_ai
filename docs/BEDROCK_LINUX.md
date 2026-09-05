@@ -8,21 +8,25 @@ Minecraft AI discovers BedrockOnLinux through its managed data layout, including
 
 ## Why a separate display exists
 
-The agent must not compete with the operator for the Linux desktop keyboard and pointer. The reference implementation therefore launches BedrockOnLinux inside a dedicated nested X server (Xephyr). The host desktop and Minecraft live on different X servers:
+The agent must not compete with the operator for the Linux desktop keyboard and pointer. The production launch uses headless Weston with a dedicated virtual seat and private Xwayland. There is no host window or connection to the host compositor's input seat:
 
 ```text
 host desktop DISPLAY=:0
   operator keyboard/mouse
 
-nested Bedrock DISPLAY=:70 (example)
+headless Weston + virtual seat, Bedrock DISPLAY=:70 (example)
   Minecraft.Windows.exe under WineGDK
   AI XTEST keyboard/mouse
   window-scoped capture
 ```
 
-`IsolatedX11InputBackend` refuses to open if its display resolves to the same X server as the operator's `$DISPLAY`. There is no silent host-global input fallback.
+`IsolatedX11InputBackend` requires a different display and a verified live headless compositor, exact virtual-seat module, and matching managed session. It rechecks that provenance before lease binding and positive input. Releases remain available when isolation checks fail. There is no silent host-input fallback.
 
-Xephyr is the conservative reference backend because the isolation boundary is explicit and testable. A nested Gamescope/Xwayland backend can replace it for lower-copy GPU capture after it passes the same isolation and failure tests.
+The earlier nested Wayland/Xephyr design scoped outgoing AI input but still forwarded the operator's physical input into the private display. Those sessions remain inspectable and stoppable; autonomous input now refuses them. The persistent launcher holds an existing unqualified session instead of using failed startup attempts to restart it.
+
+Bare headless Weston has no keyboard seat and did not retain Xwayland focus in qualification. The small packaged virtual-seat module supplies keyboard/pointer capabilities without physical devices or parent input transport. It is pinned to Weston 13.0.0. Its source, binary and loaded mapping are checked; `xwayland-*` device names alone do not establish the source of input.
+
+This prevents ordinary host desktop mouse, keyboard and focus changes from entering the game through the compositor. It is not a security boundary against programs running as the same Linux user or root. Separate OS credentials and access controls are required for that threat model. Operator pause/stop remains outside the game input path.
 
 ## Installation
 
@@ -35,8 +39,9 @@ python -m pip install -e '.[bedrock-linux,vision,knowledge]'
 The host also needs:
 
 - BedrockOnLinux with a licensed Bedrock installation;
-- Xephyr (`Xephyr` executable) for the reference isolated display;
-- a working X11/Xwayland host environment capable of displaying Xephyr;
+- Weston 13.0.0 and Xwayland, with headless EGL/OpenGL support;
+- a C compiler and `libweston-13-dev`, `libwayland-dev`, `libxkbcommon-dev`, and `libpixman-1-dev` to build the packaged virtual-seat module;
+- a private `XDG_RUNTIME_DIR` for the session sockets;
 - Vulkan/graphics support required by BedrockOnLinux.
 
 Run:
@@ -46,7 +51,9 @@ minecraft-ai install
 minecraft-ai doctor
 ```
 
-`doctor` reports the selected Bedrock version, Wine prefix, running game processes, Xephyr availability, optional Python modules, emergency-stop state and managed agent/session state.
+Build the module once with `python -m minecraft_ai.platforms.weston_seat`. Artifacts are kept outside the repository in the application's private data directory. Source/version changes require rebuilding and qualification before a replacement game session is used.
+
+`doctor` reports the selected Bedrock version, Wine prefix, running game processes, optional Python modules, emergency-stop state and managed agent/session state. `status` separately reports verified input isolation; a running process is not proof of isolation.
 
 ## Starting a session
 
@@ -56,19 +63,18 @@ Launch Bedrock in an isolated namespace:
 minecraft-ai bedrock launch
 ```
 
-The default nested resolution is 1920x1080 and Weston is presented fullscreen
-on its host output. Fullscreen presentation is important: a nominal 1920x1080
-host window loses drawable pixels to shell chrome and Bedrock then clips the
-bottom of its 1920x1080 backbuffer, including part of the hotbar. It can be
-changed explicitly:
+The default virtual output is exactly 1920x1080. Host decorations and focus do
+not change its size. View the game through the existing captured-frame dashboard.
+The virtual resolution can be changed explicitly:
 
 ```bash
 minecraft-ai bedrock launch --width 1920 --height 1080
 ```
 
-Use `--windowed` only for manual debugging where a reduced and potentially
-clipped observation surface is acceptable. Autonomous play and trajectory
-recording should use the fullscreen default.
+The retained `--fullscreen/--windowed` option does not create a host window in
+headless mode. A previously running nested session is preserved by `launch`;
+changing its compositor requires a deliberate stop and replacement after any
+state-preservation experiment is complete.
 
 Before arming live control, confirm that the dashboard frame includes all
 hearts, hunger icons, and all nine hotbar slots. A partially clipped HUD is not

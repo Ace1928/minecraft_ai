@@ -12,6 +12,7 @@ This project must never assume that a software agent which controls keyboard/mou
 6. If per-instance scoping is lost, the motor backend fails closed.
 7. Global desktop injection is never the default backend.
 8. Live control is disabled until the backend's stop/focus-isolation tests pass.
+9. A different X display is insufficient: autonomous Bedrock input requires a verified headless compositor and virtual-only seat. Host-fed nested sessions are held for observation, not automatically restarted when admission fails.
 
 ## Stop paths
 

@@ -338,12 +338,17 @@ def _fault_status(**changes: object) -> str:
 
 
 @pytest.mark.parametrize("retired", [False, True])
+@pytest.mark.parametrize("host_isolation_failed", [False, True])
 def test_existing_route_fault_holds_without_starting_or_stopping_game(
-    tmp_path: Path, retired: bool
+    tmp_path: Path, retired: bool, host_isolation_failed: bool
 ) -> None:
     root, env, state = _launcher_harness(tmp_path)
     (state / "status-override").write_text(
-        _fault_status(state="STOPPED" if retired else "FAILSAFE", supervisor_reachable=not retired),
+        _fault_status(
+            state="STOPPED" if retired else "FAILSAFE", supervisor_reachable=not retired,
+            fault_code=None if host_isolation_failed else "input-route-unverified",
+            input_isolation={"verified": not host_isolation_failed},
+        ),
         encoding="utf-8",
     )
     env.update(

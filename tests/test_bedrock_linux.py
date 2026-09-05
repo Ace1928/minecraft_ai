@@ -65,7 +65,7 @@ def test_managed_session_defaults_preserve_full_hd_hud_surface() -> None:
     assert signature.parameters["fullscreen"].default is True
 
 
-def test_weston_defaults_to_host_fullscreen_for_complete_bedrock_hud(
+def test_weston_defaults_to_headless_surface_with_only_virtual_seat(
     tmp_path: Path,
 ) -> None:
     command = _weston_command(
@@ -75,14 +75,19 @@ def test_weston_defaults_to_host_fullscreen_for_complete_bedrock_hud(
         height=1080,
         fullscreen=True,
         compositor_log=tmp_path / "weston.log",
+        seat_module=tmp_path / "seat.so",
     )
 
-    assert "--fullscreen" in command
+    assert "--backend=headless" in command
+    assert "--renderer=gl" in command
+    assert "--idle-time=0" in command
+    assert f"--modules={tmp_path / 'seat.so'}" in command
+    assert "--fullscreen" not in command
     assert "--width=1920" in command
     assert "--height=1080" in command
 
 
-def test_weston_windowed_escape_hatch_is_explicit(tmp_path: Path) -> None:
+def test_old_windowed_option_cannot_restore_host_input_transport(tmp_path: Path) -> None:
     command = _weston_command(
         weston="/usr/bin/weston",
         wayland_socket="minecraft-ai-test",
@@ -90,9 +95,11 @@ def test_weston_windowed_escape_hatch_is_explicit(tmp_path: Path) -> None:
         height=720,
         fullscreen=False,
         compositor_log=tmp_path / "weston.log",
+        seat_module=tmp_path / "seat.so",
     )
 
     assert "--fullscreen" not in command
+    assert "--backend=headless" in command
 
 
 def test_isolated_backend_refuses_host_x_server() -> None:
@@ -192,12 +199,12 @@ def test_autonomous_live_cli_rejects_host_display_sessions(mode: str) -> None:
         mode=mode,
     )
 
-    with pytest.raises(typer.BadParameter, match="requires a nested Weston/Xephyr"):
+    with pytest.raises(typer.BadParameter, match="requires a verified headless"):
         _require_autonomous_isolated_session(session)
 
 
 @pytest.mark.parametrize("mode", ("weston", "xephyr"))
-def test_autonomous_live_cli_accepts_nested_sessions(mode: str) -> None:
+def test_autonomous_live_cli_rejects_legacy_nested_host_input_sessions(mode: str) -> None:
     session = BedrockSession(
         display=":71",
         host_display=":0",
@@ -210,7 +217,8 @@ def test_autonomous_live_cli_accepts_nested_sessions(mode: str) -> None:
         mode=mode,
     )
 
-    _require_autonomous_isolated_session(session)
+    with pytest.raises(typer.BadParameter, match="requires a verified headless"):
+        _require_autonomous_isolated_session(session)
 
 
 def test_nested_session_is_not_alive_when_launcher_exited(tmp_path: Path, monkeypatch) -> None:
