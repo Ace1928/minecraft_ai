@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import threading
 import time
+import json
 from pathlib import Path
 
 import pytest
 
 import minecraft_ai.supervisor as supervisor_module
+from minecraft_ai.emergency import engage_emergency_stop
 from minecraft_ai.safety import MotorAction, MotorLease, SupervisorState
 from minecraft_ai.supervisor import (
     ControlEndpoint,
@@ -316,6 +318,127 @@ def test_camera_calibration_homes_then_establishes_measured_horizon(monkeypatch)
         "pitch_counts_per_degree": 47.9638888889,
         "calibration_id": "calibration-sha256",
     }
+
+
+def _established_camera_supervisor(backend: _PhysicalFakeBackend) -> Supervisor:
+    supervisor = Supervisor()
+    supervisor.start()
+    supervisor.replace_backend(backend)
+    supervisor.world_camera_pitch_units = 117
+    supervisor.world_camera_updates = 9
+    supervisor.world_camera_origin_calibrated = True
+    supervisor.world_camera_pitch_counts_per_degree = 47.96
+    supervisor.world_camera_calibration_id = "previous-measured-profile"
+    supervisor._persist_status()
+    return supervisor
+
+
+@pytest.mark.parametrize(
+    "interruption",
+    ["return-pause", "backend-failure", "settle-pause", "settle-stop", "cleanup-pause"],
+)
+def test_recalibration_interruption_invalidates_origin_but_preserves_measured_profile(
+    monkeypatch: pytest.MonkeyPatch, interruption: str
+) -> None:
+    class _InterruptedBackend(_PhysicalFakeBackend):
+        def apply(self, action: MotorAction) -> None:
+            # Both in-memory and persisted status must become invalid before
+            # any calibration input, not only after a failure is handled.
+            assert not supervisor.world_camera_origin_calibrated
+            persisted = json.loads(supervisor_module.STATUS_FILE.read_text())
+            assert persisted["world_camera"]["origin_calibrated"] is False
+            super().apply(action)
+            if interruption == "return-pause" and action.mouse_dy > 0:
+                supervisor_module.latch_operator_pause()
+            if interruption == "backend-failure" and len(self.actions) == 2:
+                raise RuntimeError("synthetic camera backend failure")
+
+    backend = _InterruptedBackend(":2", 42)
+    supervisor = _established_camera_supervisor(backend)
+    # Conftest isolates every runtime path; opt this fake instance into writing
+    # only that temporary status artifact without creating a control server.
+    monkeypatch.setattr(supervisor, "_owns_control_file", lambda: True)
+    settles = 0
+
+    def sleep(seconds: float) -> None:
+        nonlocal settles
+        if seconds == 0.1:
+            settles += 1
+            if settles == 2 and interruption == "settle-pause":
+                supervisor_module.latch_operator_pause()
+            if settles == 2 and interruption == "settle-stop":
+                engage_emergency_stop("test-final-settle")
+
+    monkeypatch.setattr(supervisor_module.time, "sleep", sleep)
+    original_revoke = supervisor.motor.revoke
+
+    def revoke(reason: str) -> None:
+        original_revoke(reason)
+        if reason == "camera-calibration-complete" and interruption == "cleanup-pause":
+            supervisor_module.latch_operator_pause()
+
+    monkeypatch.setattr(supervisor.motor, "revoke", revoke)
+    with pytest.raises(RuntimeError):
+        supervisor.calibrate_world_camera(
+            pitch_counts_per_degree=1.0, calibration_id="replacement-profile"
+        )
+
+    assert backend.actions
+    assert supervisor.motor.lease is None
+    assert supervisor.status()["world_camera"] == {
+        "estimated_pitch_units": 117,
+        "accepted_updates": 9,
+        "origin_calibrated": False,
+        "pitch_counts_per_degree": 47.96,
+        "calibration_id": "previous-measured-profile",
+    }
+    persisted = json.loads(supervisor_module.STATUS_FILE.read_text())
+    assert persisted["world_camera"]["origin_calibrated"] is False
+    if interruption == "settle-stop":
+        assert supervisor.state == SupervisorState.FAILSAFE
+        assert supervisor.last_fault == "emergency-stop-latched"
+    elif interruption.endswith("pause"):
+        assert supervisor.motor.revocation_reason == "operator-pause"
+
+
+@pytest.mark.parametrize(
+    ("pitch", "identity"),
+    [(0.0, "valid"), (101.0, "valid"), (float("nan"), "valid"), (1.0, ""), (1.0, "x" * 129)],
+)
+def test_invalid_recalibration_request_preserves_established_origin(pitch, identity) -> None:
+    backend = _PhysicalFakeBackend(":2", 42)
+    supervisor = _established_camera_supervisor(backend)
+    before = supervisor.status()["world_camera"]
+
+    with pytest.raises(ValueError):
+        supervisor.calibrate_world_camera(pitch_counts_per_degree=pitch, calibration_id=identity)
+
+    assert not backend.actions
+    assert supervisor.motor.lease is None
+    assert supervisor.status()["world_camera"] == before
+
+
+@pytest.mark.parametrize("blocked_at", ["lease", "interlock"])
+def test_recalibration_denied_before_motion_preserves_established_origin(
+    monkeypatch: pytest.MonkeyPatch, blocked_at: str
+) -> None:
+    backend = _PhysicalFakeBackend(":2", 42)
+    supervisor = _established_camera_supervisor(backend)
+    before = supervisor.status()["world_camera"]
+    if blocked_at == "lease":
+        def deny_lease(**_kwargs):
+            raise RuntimeError("synthetic lease refusal")
+
+        monkeypatch.setattr(supervisor.motor, "issue", deny_lease)
+    else:
+        supervisor_module.latch_operator_pause()
+
+    with pytest.raises(RuntimeError):
+        supervisor.calibrate_world_camera(pitch_counts_per_degree=1.0, calibration_id="new")
+
+    assert not backend.actions
+    assert supervisor.motor.lease is None
+    assert supervisor.status()["world_camera"] == before
 
 
 def test_stop_from_failsafe_reaches_stopped() -> None:

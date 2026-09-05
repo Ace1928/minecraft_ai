@@ -438,6 +438,14 @@ class Supervisor:
                 max_action_duration_ms=50,
             )
             try:
+                if not self._actuation_permitted():
+                    raise RuntimeError("actuation interlock was latched during calibration")
+                # The measured sensitivity remains useful, but the old origin
+                # ceases to be trustworthy as soon as calibration can move.
+                # Persist this before motion so an interrupted run cannot
+                # leave its previous valid origin in the status artifact.
+                self.world_camera_origin_calibrated = False
+                self._persist_status()
                 return_phase = False
                 for sequence, mouse_dy in enumerate(deltas):
                     if not self._actuation_permitted():
@@ -485,6 +493,14 @@ class Supervisor:
                     if operator_pause_latched()
                     else "camera-calibration-complete"
                 )
+            # The final settle and lease cleanup are still interruptible;
+            # never publish a valid origin after either latches operator intent.
+            if not self._actuation_permitted():
+                if emergency_stop_latched():
+                    self.fail("emergency-stop-latched")
+                elif operator_pause_latched():
+                    self.motor.revoke("operator-pause")
+                raise RuntimeError("actuation interlock was latched during calibration")
             self.world_camera_pitch_units = 0
             self.world_camera_updates = 0
             self.world_camera_origin_calibrated = True

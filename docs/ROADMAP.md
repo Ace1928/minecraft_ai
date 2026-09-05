@@ -9,7 +9,7 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Guarded private-LAN operator viewing and commands; game input remains isolated.
 - [x] Repair local hostname advertisement collisions without restarting the game; verify the dashboard, live frame, message history, and readiness over the physical LAN interface. Access from a second physical device remains unverified.
 - [x] Deterministic inventory open/close: live transitions verified without restarting Minecraft.
-- [x] Recognize the lower-center AFK notice with narrowly cropped OCR and implement one screenshot-bound menu click followed by fresh normal-HUD verification. The live overlay was dismissed through that same existing click backend; subsequent navigation and runtime readiness passed without a game/GPU restart. The complete new autonomous AFK branch awaits its next natural occurrence. Failed wake-key attempts were retained, not shipped as fallback inputs.
+- [x] Recognize the lower-center AFK notice with narrowly cropped OCR and implement one screenshot-bound menu click followed by fresh normal-HUD verification. The complete new autonomous branch passed its next natural occurrence: after 12 missing-HUD checks, one AWAY-to-IN_WORLD click restored navigation and agent readiness without a game/GPU restart. Failed wake-key attempts were retained, not shipped as fallback inputs.
 - [x] Keep machine-local adapters, settings, runtime artifacts and model payloads excluded from public Git; existing CI tests reject tracked files in those categories while preserving generic adapter code and public model metadata. This complements source review, not a guarantee that arbitrary source text contains no private material.
 - [x] Agent-only reload: live game, GPU server, input calibration and supervisor preserved.
 - [x] Exact traversal-stall recovery transaction implemented and tested. Live reorientation/query ran, but the initial VLM answer abstained; escape is not yet demonstrated.
@@ -29,6 +29,7 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Implement an observation-only visible-surface survey for body-clearance investigation: one nullable underside/riser/side-face point, exact WORLD provenance, and no motor tracks or action permissions. Retained-image probing is executable; this is not a measured body collision or a local 3D map. See [body-clearance scope and qualification](BODY_CLEARANCE.md).
 - [ ] Qualify correct overhead, footstep and mirrored side-edge obstruction selection, with open/high-ceiling/occluded controls, before promoting survey targeting into live recovery.
 - [ ] Qualify camera-origin delivery before using the pitch accumulator as body-relative pose. Retained upright trunk edges indicate upward viewing despite a downward estimate; a later ordinary homing sequence again reported zero while the image remained upward-looking. Accepted mouse counts and a completed open-loop calibration are not measured physical orientation.
+- [x] Invalidate an established camera origin before recalibration motion and recheck pause/emergency after final settling and lease cleanup, before publishing success. Interrupted return, backend failure, final-settle and cleanup regressions preserve the measured sensitivity/profile but leave origin validity false; invalid requests preserve the prior origin. This corrects state publication, not physical horizon delivery.
 - [x] Distinguish controller starvation from action-backed collision stalls. The existing bounded no-input startup guard now reports `controller.starvation`, retains its actual cause, and does not nominate a physical obstacle recovery or count toward the two-stall observation fallback. Regression coverage includes release, memory attribution and fallback exclusion; live movement remains a separate gate.
 - [x] Preserve run-lifetime startup movement evidence across progress-window resets, and exclude typed controller starvation from failure-derived canonical perception questions. Explicit operator/model requests remain independent; regression cases retain later genuine stalls and new-run starvation.
 - [x] Qualify the optional external raw-motion adapter through the actual temporal client without actuators, including matching replies, retired-request drainage and fresh option context after reset. Private deployment configuration and measurements remain outside this repository. This is delivery/reset qualification, not live movement, survival competence, online learning or a universal latency guarantee.
@@ -65,7 +66,12 @@ capture ID separately from the blackboard ID. Legacy records remain unknown;
 lookups must stay within their capture/recording generation. Missing source
 images are not retained by this metadata patch, and compact trajectory JPEGs
 are not pixel-exact worker inputs. Do not use an adjacent frame as invented
-training truth. Live source-lineage and translation gates remain open.
+training truth. A subsequent fixed 303-step baseline prefix verified immutable
+source metadata on all 48 predictions and 91 holds, with eight resets remaining
+null and no recording drops. Its first directional prediction retained the
+same request/source through the hold and key release, then cleared them on
+terminal reset. This passes accepted-input attribution, not original-pixel
+retention, physical translation or a successful learning example.
 
 Historical live observation (`b5a551c`): the user approved returning to autonomous
 play; prior operator directives were archived without deleting their history.
