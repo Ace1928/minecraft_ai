@@ -751,22 +751,25 @@ def launch_weston_bedrock_session(
     compositor_log = RUNTIME_DIR / f"weston-{nonce}.log"
     launcher_log = RUNTIME_DIR / f"bedrock-launcher-{nonce}.log"
     compositor_env = _headless_compositor_environment()
-    compositor = subprocess.Popen(
-        _weston_command(
-            weston=weston,
-            wayland_socket=wayland_socket,
-            width=width,
-            height=height,
-            fullscreen=fullscreen,
-            compositor_log=compositor_log,
-            seat_module=Path(seat_artifact.module_path),
-        ),
-        env=compositor_env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    # Weston writes its own log separately; retain inherited Xwayland stderr
+    # too, otherwise a display-server assertion disappears during startup.
+    with compositor_log.with_suffix(".stderr.log").open("ab", buffering=0) as log:
+        compositor = subprocess.Popen(
+            _weston_command(
+                weston=weston,
+                wayland_socket=wayland_socket,
+                width=width,
+                height=height,
+                fullscreen=fullscreen,
+                compositor_log=compositor_log,
+                seat_module=Path(seat_artifact.module_path),
+            ),
+            env=compositor_env,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
     launcher: subprocess.Popen[bytes] | None = None
     session: BedrockSession | None = None
     try:

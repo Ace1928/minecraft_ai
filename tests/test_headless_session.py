@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
+from io import FileIO
 from pathlib import Path
 
 import pytest
@@ -158,6 +159,12 @@ def test_launch_without_host_display_drops_inherited_host_handles_and_verifies_b
 
     def popen(command: list[str], **kwargs: object) -> Child:
         calls.append((command, kwargs))
+        if len(calls) == 1:
+            compositor_output = kwargs["stdout"]
+            assert isinstance(compositor_output, FileIO)
+            assert not compositor_output.closed
+            assert kwargs["stderr"] == sessions.subprocess.STDOUT
+            compositor_output.write(b"synthetic Xwayland startup diagnostic\n")
         return Child(300 + len(calls))
 
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
@@ -209,6 +216,13 @@ def test_launch_without_host_display_drops_inherited_host_handles_and_verifies_b
     assert session.xwayland_pid == 303
     assert session.xwayland_proc_start_ticks == 2
     assert session.xwayland_command_sha256 == "xwayland-hash"
+    compositor_output = calls[0][1]["stdout"]
+    assert isinstance(compositor_output, FileIO)
+    assert compositor_output.closed  # Popen keeps the child copy, not a parent leak.
+    assert session.compositor_log is not None
+    stderr_log = Path(session.compositor_log).with_suffix(".stderr.log")
+    assert Path(compositor_output.name) == stderr_log
+    assert stderr_log.read_bytes() == b"synthetic Xwayland startup diagnostic\n"
     compositor_env = calls[0][1]["env"]
     launcher_env = calls[1][1]["env"]
     assert isinstance(compositor_env, dict) and isinstance(launcher_env, dict)
