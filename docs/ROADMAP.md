@@ -6,6 +6,10 @@ The roadmap is ordered by dependency and release gates. Later phases must not by
 
 This is the immediate gameplay critical path, not a claim that whole phases below are complete.
 
+- [x] Confirm the preserved Win32 ownership/clip/cursor mismatch with a window-free, registration-free probe: all 50 samples retained Minecraft foreground/focus/capture and a point clip at `(565,376)`, while Win32/X cursor state remained `(0,83)`. Sampled X focus, geometry and hit-chain were unchanged. This localizes the state disagreement without proving the camera accumulation mechanism.
+- [x] Replace the production host-fed nested compositor default with headless Weston and a verified virtual-only seat. Disposable production-path qualification passed keyboard holds/releases, exact relative raw/core mouse input, confinement and accelerated capture; source/binary/process/mapping checks gate positive input and legacy sessions remain held for observation. See [input isolation evidence and limits](INPUT_ISOLATION.md).
+- [ ] Deliberately migrate the preserved game to the headless session, then qualify Win32 clipping, camera response and actual gameplay movement. Display-level tests do not close this live gate.
+
 - [x] Guarded private-LAN operator viewing and commands; agent output uses the private game display. Excluding host-origin input from that display is a separate, still-open qualification below.
 - [x] Repair local hostname advertisement collisions without restarting the game; verify the dashboard, live frame, message history, and readiness over the physical LAN interface. Access from a second physical device remains unverified.
 - [x] Deterministic inventory open/close: live transitions verified without restarting Minecraft.
@@ -141,6 +145,15 @@ mouse usage changes the private game pointer/camera: the nested Wayland
 backend still forwards its parent seat. A separate X display therefore does
 not by itself prove host-to-game input exclusion. That correction is now an
 explicit open gate, independent of Wine clipping and motor-policy quality.
+
+A subsequent read-only XRes client-PID query proves that the focused Wine
+Desktop X window belongs to Wine's `explorer.exe /desktop` process, while both
+the game's input parent and render child belong to the Minecraft process.
+Focus and pointer remained unchanged during that query. This supports the
+pinned Wine `grab_clipping_window()` foreign-X-focus early-return hypothesis:
+Windows foreground/capture ownership and the driver's process-local X focus
+test are distinct. It is not direct instrumentation of the game's Xlib context
+or evidence that a source-level correction has been installed.
 
 At the next natural AFK episode the existing launcher performed one
 AWAY-to-IN_WORLD UI action and started the updated runtime, retaining the
