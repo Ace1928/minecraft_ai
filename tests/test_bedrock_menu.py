@@ -14,6 +14,7 @@ from minecraft_ai.bedrock_menu import (
     MenuStage,
     NestedXTestMenuInput,
     OcrLine,
+    TesseractMenuTextReader,
     _parse_tesseract_tsv,
     classify_menu_stage,
     load_configured_local_server,
@@ -98,6 +99,207 @@ class _RecordingClicks:
 
     def click(self, frame: CapturedFrame, x: int, y: int) -> None:
         self.clicks.append((frame.frame_id, x, y))
+
+
+def _away_lines() -> tuple[OcrLine, ...]:
+    return tuple(
+        OcrLine(text, left=410, top=400 + index * 36, width=300, height=20)
+        for index, text in enumerate(
+            ("You've been away for a bit.", "Press any button to jump back", "into the game.")
+        )
+    )
+
+
+def test_away_overlay_takes_priority_over_background_world_hud() -> None:
+    assert classify_menu_stage(
+        _frame(1),
+        _away_lines(),
+        lan_name="BedrockConnect",
+        server_name="Eidos Local Bedrock",
+        hud_detector=lambda _frame: True,
+    ) == MenuStage.AWAY
+
+
+@pytest.mark.parametrize("missing_index", [0, 1, 2])
+def test_partial_away_text_does_not_authorize_wake(missing_index: int) -> None:
+    assert classify_menu_stage(
+        _frame(1),
+        tuple(line for index, line in enumerate(_away_lines()) if index != missing_index),
+        lan_name="BedrockConnect",
+        server_name="Eidos Local Bedrock",
+        hud_detector=lambda _frame: False,
+    ) == MenuStage.UNKNOWN
+
+
+def test_away_phrases_in_upper_left_chat_do_not_authorize_wake() -> None:
+    lines = tuple(
+        OcrLine(line.text, 10, 30 + index * 25, 300, 20)
+        for index, line in enumerate(_away_lines())
+    )
+    assert classify_menu_stage(
+        _frame(1),
+        lines,
+        lan_name="BedrockConnect",
+        server_name="Eidos Local Bedrock",
+        hud_detector=lambda _frame: True,
+    ) == MenuStage.IN_WORLD
+
+
+def test_low_confidence_away_anchor_does_not_authorize_wake() -> None:
+    lines = list(_away_lines())
+    line = lines[1]
+    lines[1] = OcrLine(line.text, line.left, line.top, line.width, line.height, 59.9)
+    assert classify_menu_stage(
+        _frame(1),
+        tuple(lines),
+        lan_name="BedrockConnect",
+        server_name="Eidos Local Bedrock",
+        hud_detector=lambda _frame: False,
+    ) == MenuStage.UNKNOWN
+
+
+@pytest.mark.parametrize("complete_crop", [False, True])
+def test_away_ocr_crop_maps_original_coordinates_and_requires_complete_anchors(
+    monkeypatch: pytest.MonkeyPatch, complete_crop: bool,
+) -> None:
+    image_sizes: list[tuple[int, int]] = []
+    crop_lines = tuple(
+        OcrLine(line.text, 10, 5 + index * 30, 300, 20)
+        for index, line in enumerate(_away_lines())
+        if complete_crop or index != 1
+    )
+    full_lines = _lines("Minecraft", "Play", "Settings")
+    reader = TesseractMenuTextReader(executable="unused-test-tesseract")
+
+    def read_image(image: Any) -> tuple[OcrLine, ...]:
+        image_sizes.append(image.size)
+        return crop_lines if len(image_sizes) == 1 else full_lines
+
+    monkeypatch.setattr(reader, "_read_image", read_image)
+    result = reader.read(_pixel_frame(1, width=1000, height=600))
+
+    assert image_sizes[0] == (320, 102)
+    if complete_crop:
+        assert image_sizes == [(320, 102)]
+        assert result == tuple(
+            OcrLine(line.text, line.left + 400, line.top + 402, line.width, line.height)
+            for line in crop_lines
+        )
+    else:
+        assert image_sizes == [(320, 102), (1000, 600)]
+        assert result == full_lines
+
+
+def test_away_wakes_once_and_observes_through_away_and_unknown_until_hud() -> None:
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([_frame(index) for index in range(1, 5)]),
+        text_reader=_MappedTextReader({1: _away_lines(), 2: _away_lines()}),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        max_retries=5,
+        poll_interval_s=0.0,
+        sleep=lambda _seconds: None,
+        hud_detector=lambda frame: frame.frame_id in {1, 2, 4},
+    )
+
+    result = navigator.run()
+
+    assert result.actions == 1
+    assert result.visited[0] == MenuStage.AWAY
+    assert result.visited[-1] == MenuStage.IN_WORLD
+    assert clicks.clicks == [(1, *_away_lines()[1].center)]
+
+
+def test_away_timeout_does_not_repeat_wake_even_with_multiple_retries() -> None:
+    now = 0.0
+
+    def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    frames = [_frame(index) for index in range(1, 11)]
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture(frames),
+        text_reader=_MappedTextReader({frame.frame_id: _away_lines() for frame in frames}),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        max_retries=5,
+        timeout_s=1.0,
+        response_timeout_s=0.25,
+        poll_interval_s=0.1,
+        clock=lambda: now,
+        sleep=advance,
+        hud_detector=lambda _frame: True,
+    )
+
+    with pytest.raises(MenuNavigationError):
+        navigator.run()
+
+    assert 0.25 <= now <= 1.0
+    assert clicks.clicks == [(1, *_away_lines()[1].center)]
+
+
+@pytest.mark.parametrize("initially_permitted", [False, True])
+def test_away_recovery_honors_interlock_before_wake_and_while_waiting(
+    initially_permitted: bool,
+) -> None:
+    permitted = initially_permitted
+
+    def latch(_seconds: float) -> None:
+        nonlocal permitted
+        permitted = False
+
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([_frame(1), _frame(2)]),
+        text_reader=_MappedTextReader({1: _away_lines()}),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        sleep=latch,
+        hud_detector=lambda _frame: True,
+        input_permitted=lambda: permitted,
+    )
+
+    with pytest.raises(MenuNavigationError, match="interlock is not clear"):
+        navigator.run()
+
+    assert clicks.clicks == (
+        [(1, *_away_lines()[1].center)] if initially_permitted else []
+    )
+
+
+def test_away_requires_fresh_post_wake_hud_not_replayed_capture() -> None:
+    class _SequenceReader:
+        def __init__(self) -> None:
+            self.read_count = 0
+
+        def read(self, frame: CapturedFrame) -> tuple[OcrLine, ...]:
+            self.read_count += 1
+            return _away_lines() if self.read_count == 1 else ()
+
+    reader = _SequenceReader()
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([_frame(1), _frame(1), _frame(2)]),
+        text_reader=reader,
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        poll_interval_s=0.0,
+        sleep=lambda _seconds: None,
+        hud_detector=lambda _frame: True,
+    )
+
+    result = navigator.run()
+
+    assert result.actions == 1
+    assert reader.read_count == 3
+    assert clicks.clicks == [(1, *_away_lines()[1].center)]
 
 
 def test_menu_navigator_follows_only_screenshot_confirmed_transitions() -> None:

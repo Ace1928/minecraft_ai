@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from enum import StrEnum
 from pathlib import Path
@@ -33,6 +33,7 @@ class MenuNavigationError(RuntimeError):
 
 
 class MenuStage(StrEnum):
+    AWAY = "away"
     STARTUP_POPUP = "startup-popup"
     TITLE = "title"
     PLAY = "play"
@@ -145,6 +146,21 @@ class TesseractMenuTextReader:
             "raw",
             "BGRX",
         )
+        # The lower-center away notice can be missed completely when sparse
+        # OCR segments a busy forest behind it. Read only its text area first;
+        # use it only when all independent notice anchors are recognizable.
+        if frame.width >= 320 and frame.height >= 180:
+            left, top = int(frame.width * 0.40), int(frame.height * 0.67)
+            crop = image.crop((left, top, int(frame.width * 0.72), int(frame.height * 0.84)))
+            away_lines = tuple(
+                replace(line, left=line.left + left, top=line.top + top)
+                for line in self._read_image(crop)
+            )
+            if _away_overlay_visible(frame, away_lines):
+                return away_lines
+        return self._read_image(image)
+
+    def _read_image(self, image: Image.Image) -> tuple[OcrLine, ...]:
         # Bedrock's pixel font is substantially more reliable in Tesseract at
         # enlarged nearest-neighbour scale (notably title anchors and
         # configured server names). Keep click geometry in original screenshot
@@ -328,6 +344,11 @@ class BedrockMenuNavigator:
             visited.append(observation.stage)
 
         while observation.stage != MenuStage.IN_WORLD:
+            if observation.stage == MenuStage.AWAY:
+                observation = self._wake_away(observation, deadline=deadline)
+                actions += 1
+                visited.append(observation.stage)
+                continue
             if observation.stage == MenuStage.ERROR:
                 raise MenuNavigationError(
                     f"Bedrock reported an error screen: {observation.summary()}"
@@ -439,6 +460,32 @@ class BedrockMenuNavigator:
                 "menu input interlock is not clear; stopped before further input"
             )
 
+    def _wake_away(self, observation: MenuObservation, *, deadline: float) -> MenuObservation:
+        self._require_input_permitted()
+        if self.clock() >= deadline:
+            raise MenuNavigationError("Bedrock menu navigation timed out")
+        line = _find_click_target(
+            observation,
+            ("press any button to jump back",),
+            region=(0.35, 0.65, 0.75, 0.86),
+        )
+        self.click_backend.click(observation.frame, *line.center)
+        response_deadline = min(deadline, self.clock() + self.response_timeout_s)
+        while self.clock() < response_deadline:
+            self.sleep(self.poll_interval_s)
+            self._require_input_permitted()
+            current = self._observe()
+            if (
+                current.frame.frame_id <= observation.frame.frame_id
+                or current.frame.captured_ns <= observation.frame.captured_ns
+            ):
+                continue
+            if current.stage == MenuStage.IN_WORLD:
+                return current
+            if current.stage not in {MenuStage.AWAY, MenuStage.UNKNOWN}:
+                self._raise_unexpected(MenuStage.AWAY, MenuStage.IN_WORLD, current)
+        raise MenuNavigationError("away wake did not reveal a playable HUD; no repeat click sent")
+
     def _wait_loading(self, deadline: float) -> MenuObservation:
         while self.clock() < deadline:
             self.sleep(self.poll_interval_s)
@@ -505,6 +552,9 @@ def classify_menu_stage(
     )
     if any(_normalized_text(phrase) in text for phrase in error_phrases):
         return MenuStage.ERROR
+
+    if _away_overlay_visible(frame, lines):
+        return MenuStage.AWAY
 
     # Tesseract commonly renders Bedrock's block-font "YOU" as "TOU". Keep
     # the heading constrained to the upper screen so a chat message containing
@@ -594,6 +644,18 @@ def classify_menu_stage(
     if hud_detector(frame):
         return MenuStage.IN_WORLD
     return MenuStage.UNKNOWN
+
+
+def _away_overlay_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
+    text = _normalized_text(" ".join(
+        line.text for line in lines
+        if line.confidence >= 60
+        and frame.width * 0.35 <= line.left < line.left + line.width <= frame.width * 0.75
+        and frame.height * 0.65 <= line.top < line.top + line.height <= frame.height * 0.86
+    ))
+    return all(phrase in text for phrase in (
+        "been away for a bit", "any button to jump back", "into the game",
+    ))
 
 
 def load_configured_local_server(
