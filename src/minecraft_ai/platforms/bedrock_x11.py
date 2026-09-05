@@ -556,6 +556,28 @@ def _focus_belongs_to_minecraft_session(
     return _window_is_descendant_or_same(window, input_window_id)
 
 
+def _private_focus_routes_keyboard(
+    window: Any,
+    *,
+    capture_window_id: int | None,
+    input_window_id: int,
+    key_event_mask: int,
+) -> bool:
+    """A render-only descendant is not sufficient evidence of a key route."""
+    if not _focus_belongs_to_minecraft_session(
+        window, capture_window_id=capture_window_id, input_window_id=input_window_id,
+    ):
+        return False
+    attributes = window.get_attributes()
+    if int(attributes.map_state) != 2:
+        return False
+    if int(window.id) == capture_window_id:
+        # Wine's virtual desktop is a known routing owner even when its own
+        # mask does not resemble the nested Win32 application's key mask.
+        return True
+    return int(attributes.all_event_masks) & key_event_mask == key_event_mask
+
+
 def require_isolated_display(
     display_name: str,
     host_display: str | None = None,
@@ -819,8 +841,9 @@ class IsolatedX11InputBackend:
 
         Isolated Wine virtual desktops retain X focus on the capture desktop,
         not their override-redirect Minecraft child.  Accept either that
-        stable owner or a focus already inside the game subtree. Host-display
-        play is target-oriented and never touches the operator's focus.
+        stable owner or a keyboard-interested focus inside the game subtree.
+        A drawable selecting only Exposure cannot establish a keyboard route.
+        Host-display play never touches the operator's focus.
         """
         if self._targeted:
             return
@@ -829,22 +852,43 @@ class IsolatedX11InputBackend:
             return
         try:
             current = self._display.get_input_focus().focus
-            if _focus_belongs_to_minecraft_session(
+            key_event_mask = self._x.KeyPressMask | self._x.KeyReleaseMask
+            if _private_focus_routes_keyboard(
                 current,
                 capture_window_id=self.target_window_id,
                 input_window_id=input_window_id,
+                key_event_mask=key_event_mask,
             ):
                 return
+            keyless_descendant = _window_is_descendant_or_same(current, input_window_id)
             # Restore the stable Wine desktop owner when one exists.  Direct
-            # sessions naturally use the same ID for capture and input.
-            focus_window_id = self.target_window_id or input_window_id
+            # sessions naturally use the same ID for capture and input. A
+            # focused render-only child instead needs its verified key parent.
+            focus_window_id = (
+                input_window_id if keyless_descendant
+                else self.target_window_id or input_window_id
+            )
             focus_window = self._display.create_resource_object(
                 "window",
                 focus_window_id,
             )
-            focus_window.get_attributes()
+            if not _private_focus_routes_keyboard(
+                focus_window,
+                capture_window_id=self.target_window_id,
+                input_window_id=input_window_id,
+                key_event_mask=key_event_mask,
+            ):
+                raise IsolationError("isolated Minecraft focus owner has no verified key route")
+            self._require_positive_input_permitted()
             focus_window.set_input_focus(self._x.RevertToParent, self._x.CurrentTime)
             self._display.sync()
+            if not _private_focus_routes_keyboard(
+                self._display.get_input_focus().focus,
+                capture_window_id=self.target_window_id,
+                input_window_id=input_window_id,
+                key_event_mask=key_event_mask,
+            ):
+                raise IsolationError("isolated Minecraft keyboard focus was not established")
         except Exception as exc:
             raise IsolationError(
                 "cannot focus the isolated Minecraft input window"

@@ -42,6 +42,7 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Reconcile acknowledged external input release with policy, mining and outcome bookkeeping without resetting worker memory or crafting phase. Unknown acknowledgements block positive actions; retired predictions are drained without replay, the next fresh desired hold emits a new press, and traversal waits for a post-release image. Pure regressions pass; live interruption-to-resumed-key delivery remains unqualified.
 - [x] Authenticated malformed actions revoke previous held input; pause/disarm/fault/stop state and every owned shutdown cleanup progress even if physical release raises. The first error remains attributable. These are fault-injection results, not a claim that an unavailable input server physically released a key.
 - [x] Make capture/GUI geometry resolution read-only and reject changed, clipped or incomplete frame geometry. Confine measured window fitting to a new isolated launch before publishing its session, with existing-session/host paths excluded. Regression coverage and live capture pass; a fresh game launch has deliberately not been exercised on the running world.
+- [x] Reject render-only keyboard focus inside the game subtree and restore the verified private input parent, with interlock and focus readback. Live recovery then opened the pause menu with one Escape tap and returned to normal HUD with one screenshot-bound Resume Game click. This verifies that UI sequence, not sustained locomotion or universal key delivery.
 - [ ] Complete the end-to-end input audit and retained-image qualification: camera response, held-key continuity after stale frames, geometry/capture consistency, authenticated malformed actions and supervisor cleanup faults. Do not promote accepted input into physical translation or flawless delivery.
 - [ ] Demonstrate a fresh accepted movement prediction after a retired worker response is drained by its owner, then verify actual translation rather than infer it from accepted keys.
 - [ ] Demonstrate autonomous soft-block clearance and escape from the observed dirt pocket.
@@ -77,6 +78,17 @@ Future core observation must not introduce a new event-propagation endpoint.
 No reverse pulse, key/button press, calibration change or game restart followed.
 Preceding non-actuating trials rejected ambiguous tracking or insufficient
 scene features; their receipts remain failures, not successful experiments.
+
+The corrected parent-only observer subsequently recorded exactly one raw/core
+`(8,0)` motion, no extra X warp or focus/crossing event, while the retained view
+changed sharply from downward ground to the tree canopy/horizon. All four
+pre-action controls retained 200 stationary terrain features (maximum drift
+below 0.077 pixels). This narrows the remaining camera fault below the observed
+X event path, without proving a particular Wine/game mechanism. A later
+autonomous pointer-routing rejection and failed startup homing required guarded
+recovery. The keyboard-focus fix and observed menu sequence restored normal
+startup/readiness with Minecraft and the GPU process unchanged. Camera
+qualification remains open; homing completion is still not physical pose truth.
 
 At the next natural AFK episode the existing launcher performed one
 AWAY-to-IN_WORLD UI action and started the updated runtime, retaining the
