@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from test_policy_service import _policy_config
 
+import minecraft_ai.policy_service as policy_service_module
 from minecraft_ai.motor import MotorIntent
 from minecraft_ai.perception import PerceptionBlackboard
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
@@ -109,8 +110,94 @@ def test_response_reader_rejects_eof_including_unterminated_record(pipe_client, 
     client, process, *_ = pipe_client
     process.reply_writer.write(partial)
     process.reply_writer.close()
+    if partial:
+        assert client._read_response(0) is None
     with pytest.raises(RuntimeError):
         client._read_response(0)
+
+
+def test_zero_timeout_reads_at_most_one_chunk_then_next_poll_continues(pipe_client):
+    client, process, *_ = pipe_client
+    payload = {"marker": "x" * 6000}
+    encoded = json.dumps(payload).encode() + b"\n"
+    # This payload fits a Linux pipe but requires two parent 4096-byte reads.
+    assert process.reply_writer.write(encoded) == len(encoded)
+
+    assert client._read_response(0) is None
+    assert bytes(client._response_bytes) == encoded[:4096]
+    assert select.select([process.stdout], [], [], 0)[0]
+    assert client._read_response(0) == payload
+    assert client._read_response(0) is None
+
+
+def test_always_readable_fragments_do_not_extend_positive_call_deadline(pipe_client, monkeypatch):
+    client, process, *_ = pipe_client
+    clock = [100.0]
+    selections, reads = [], []
+    client._pending_request_id = "owned-request"
+    client._pending_deadline_ns = 12345
+
+    def readable(sources, _write, _error, timeout):
+        selections.append(timeout)
+        return sources, [], []
+
+    def slow_fragment(fd, size):
+        assert fd == process.stdout.fileno() and size == 4096
+        reads.append(size)
+        clock[0] += 0.006
+        return b" " * size
+
+    monkeypatch.setattr(policy_service_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(policy_service_module.select, "select", readable)
+    monkeypatch.setattr(policy_service_module.os, "read", slow_fragment)
+
+    assert client._read_response(0.010) is None
+    assert reads == [4096, 4096]
+    assert selections == pytest.approx([0.010, 0.004])
+    assert client._response_bytes == bytearray(b" " * 8192)
+    assert client._pending_request_id == "owned-request"
+    assert client._pending_deadline_ns == 12345
+
+
+def test_positive_deadline_rechecked_after_select_before_read(pipe_client, monkeypatch):
+    client, process, *_ = pipe_client
+    clock = [100.0]
+
+    def readiness_at_deadline(sources, _write, _error, timeout):
+        assert timeout == pytest.approx(0.01)
+        clock[0] += 0.011
+        return sources, [], []
+
+    def forbidden_read(*_args):
+        pytest.fail("read started after this call's absolute deadline")
+
+    monkeypatch.setattr(policy_service_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(policy_service_module.select, "select", readiness_at_deadline)
+    monkeypatch.setattr(policy_service_module.os, "read", forbidden_read)
+
+    assert client._read_response(0.01) is None
+    assert client._response_bytes == bytearray()
+    assert client._process is process
+
+
+@pytest.mark.parametrize("timeout_s", [0.0, 0.01])
+def test_complete_buffered_reply_has_priority_over_elapsed_call_budget(
+    pipe_client,
+    monkeypatch,
+    timeout_s,
+):
+    client, _process, *_ = pipe_client
+    client._response_bytes.extend(b'{"type":"prediction"}\npartial')
+    clock = iter((100.0, 101.0))
+    monkeypatch.setattr(policy_service_module.time, "monotonic", lambda: next(clock))
+
+    def forbidden_select(*_args):
+        pytest.fail("buffered complete reply must not wait for new pipe readiness")
+
+    monkeypatch.setattr(policy_service_module.select, "select", forbidden_select)
+
+    assert client._read_response(timeout_s) == {"type": "prediction"}
+    assert client._response_bytes == bytearray(b"partial")
 
 
 def test_response_reader_reports_exited_worker_without_pipe_bytes(pipe_client):

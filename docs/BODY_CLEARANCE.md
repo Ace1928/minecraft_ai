@@ -96,6 +96,47 @@ include model-input dimensions/hash and retain malformed raw replies as explicit
 validation errors instead of silently dropping submitted failures. The live
 recovery path is unchanged; the useful body-clearance gate remains open.
 
+## Retained-motion qualification — 2026-09-05
+
+Before trying depth/pose inference, a read-only audit selected the first clean
+forward-input interval in recorded run `2c2f07287ebf43efb167b16b3b698641`.
+The first earlier forward press included a
+camera delta and was excluded. Steps 42–46 contain accepted forward input,
+no recorded camera delta and no dropped steps; the two captures are 1,175.39 ms
+apart. Selection and the two controls below were fixed before scoring; no
+alternate pair was sought after the negative result.
+
+Only three retained 256×141 JPEGs were decoded and visually reviewed. Analysis
+used the top 119 WORLD rows, excluded the crosshair/hand, and tracked up to 150
+Shi–Tomasi points with forward/backward Lucas–Kanade consistency ≤0.5 pixels.
+It did not assume camera intrinsics, metric scale or pose.
+
+| Fixed pair | Valid tracks | Median displacement | 95th percentile |
+| --- | ---: | ---: | ---: |
+| Identical frame 42→42 | 150 | 0 px | 0 px |
+| Camera-only command control 36→42 | 116 | 11.152 px | 14.616 px |
+| Forward-input interval 42→46 | 150 | 0.021 px | 0.089 px |
+
+Every forward-interval track moved less than 0.448 pixels. The scene is
+effectively stationary at this retained resolution: accepted forward input did
+not supply usable measured parallax. This does **not** identify the obstruction,
+prove input effectiveness or establish metric collision geometry. A homography
+also fits the camera-control pair closely, but planar-scene translation can fit
+a homography too; it is not independent proof of pure rotation.
+
+Retained JPEG SHA-256 values:
+
+```text
+36  83b37b6f7153612c5b0d021bb781c5f6c8e4a34d46313661ab3d759798fa286e
+42  c465a9c10a540b8c9c96a3e7fba5ce1f58ba0914dcbda9ac107727f72019f950
+46  0475a87edc0f544ad391dfdcf5dbfaca70cdb54392cc90665863df55cf0b66a1
+```
+
+This one-thread analysis loaded no model and emitted no game input. The pairs
+are stationary/rotation negative controls, not geometry training truth. A later
+naturally occurring interval with independently visible translation is needed
+before a meaningful two-view reconstruction. The body/local-map gate stays open.
+
 ## What this does not establish
 
 - An underside is not automatically a head collision; a distant ceiling is a

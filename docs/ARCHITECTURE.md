@@ -48,6 +48,14 @@ must drain through its owning client before shared pixels are reused; it cannot
 restore the former skill's permissions, camera delta or target. A complete
 matching prediction must arrive inside the parent's absolute deadline, not just
 report a short compute duration. Responses are limited to 64 KiB per line.
+Startup admission belongs to a verified process generation, not merely an alive
+process: failed warmup retires that generation and its shared memory before a
+later inference can retry. Ordinary option reset does not revoke a successful
+handshake. Raw external predictions may not publish target/scene facts or GUI
+cursor actions, including negative scene claims; those need separate admission.
+The sole reply reader checks its positive call deadline before waiting/reading;
+a zero-budget poll reads at most one 4 KiB chunk. Partial bytes and request
+ownership survive until subsequent polls, without replacing the shared frame.
 
 `transport_pending` distinguishes an outstanding retired reply from an active
 option; `retired_responses` and `last_response_age_ms` expose owner-side delivery.

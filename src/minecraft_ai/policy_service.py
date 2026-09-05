@@ -127,6 +127,7 @@ class TemporalPolicyClient:
     policy_id: str = field(init=False)
     metrics: PolicyServiceMetrics = field(default_factory=PolicyServiceMetrics, init=False)
     _process: subprocess.Popen[str] | None = field(default=None, init=False)
+    _startup_verified: bool = field(default=False, init=False)
     _response_bytes: bytearray = field(default_factory=bytearray, init=False)
     _memory: shared_memory.SharedMemory | None = field(default=None, init=False)
     _memory_size: int = field(default=0, init=False)
@@ -448,6 +449,7 @@ class TemporalPolicyClient:
         }
 
     def close(self) -> None:
+        self._startup_verified = False
         process = self._process
         if process is not None:
             if process.poll() is None and process.stdin is not None:
@@ -504,13 +506,24 @@ class TemporalPolicyClient:
 
     def _ensure_started(self, required_size: int) -> None:
         if (
-            self._process is not None
+            self._startup_verified
+            and self._process is not None
             and self._process.poll() is None
             and self._memory is not None
             and required_size <= self._memory_size
         ):
             return
         self.close()
+        try:
+            self._start_worker(required_size)
+        except BaseException:
+            # warmup callers may handle startup failure without closing us.
+            # A rejected generation must never become eligible on a later act.
+            self.close()
+            raise
+        self._startup_verified = True
+
+    def _start_worker(self, required_size: int) -> None:
         self._memory_size = required_size
         self._memory = shared_memory.SharedMemory(create=True, size=required_size)
         command = [
@@ -669,7 +682,9 @@ class TemporalPolicyClient:
         process = self._process
         if process is None or process.stdout is None:
             raise RuntimeError("learned policy process is not running")
-        deadline = time.monotonic() + max(0.0, timeout_s)
+        budget_s = max(0.0, timeout_s)
+        deadline = time.monotonic() + budget_s
+        read_once = False
         maximum_line_bytes = 64 * 1024
         while True:
             newline = self._response_bytes.find(b"\n")
@@ -684,12 +699,17 @@ class TemporalPolicyClient:
                 if not isinstance(payload, dict):
                     raise RuntimeError("learned policy returned a non-object response")
                 return payload
+            remaining_s = deadline - time.monotonic()
+            if (budget_s == 0.0 and read_once) or (budget_s > 0.0 and remaining_s <= 0.0):
+                return None
             readable, _, _ = select.select(
-                [process.stdout], [], [], max(0.0, deadline - time.monotonic()),
+                [process.stdout], [], [], max(0.0, remaining_s),
             )
             if not readable:
                 if process.poll() is not None:
                     raise RuntimeError(f"learned policy exited with code {process.returncode}")
+                return None
+            if budget_s > 0.0 and time.monotonic() >= deadline:
                 return None
             # This is the sole reader. TextIOWrapper.readline can block past
             # the deadline on a partial record, or hide a second complete line
@@ -698,6 +718,7 @@ class TemporalPolicyClient:
             if not chunk:
                 raise RuntimeError("learned policy closed its response stream")
             self._response_bytes.extend(chunk)
+            read_once = True
 
     def _output_action(
         self,
@@ -706,6 +727,8 @@ class TemporalPolicyClient:
         *,
         request_context: _PolicyRequestContext | None = None,
     ) -> MotorAction:
+        if self.config.provider == "external":
+            _validate_external_raw_output(output)
         self._action_hold.observe(output.inference_ns)
         self._record_learned_action(output)
         self._last_prediction = output
@@ -1690,6 +1713,23 @@ def _external_worker_command(config: PolicyConfig, memory_name: str) -> list[str
         *config.external_args,
         *(item for name, value in controlled.items() for item in ("--" + name, value)),
     ]
+
+
+def _validate_external_raw_output(output: LearnedPolicyOutput) -> None:
+    """Raw-motion admission grants no scene, target or GUI authority."""
+    semantic_values = (
+        output.target_exists_probability,
+        output.target_point_yx,
+        output.target_bbox_xyxy,
+        output.scene_mode,
+        output.scene_playable,
+        output.scene_confidence,
+        output.scene_model_version,
+    )
+    if any(value is not None for value in semantic_values) or output.scene_class_probabilities:
+        raise RuntimeError("external raw-motion worker cannot publish semantic observations")
+    if output.camera_semantics != "world":
+        raise RuntimeError("external raw-motion worker requires world camera semantics")
 
 
 def _validate_external_ready(config: PolicyConfig, ready: dict[str, Any]) -> None:
