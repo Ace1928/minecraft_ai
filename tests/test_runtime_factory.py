@@ -194,15 +194,32 @@ def test_absolute_deadline_rejects_returned_runtime(environment, monkeypatch) ->
     runtime.close_constructed_runtime.assert_called_once()
 
 
-@pytest.mark.parametrize("name", ["executor", "perception", "blackboard", "state_db", "lease_id"])
+@pytest.mark.parametrize("name", [
+    "executor", "perception", "blackboard", "state_db", "lease_id", "trajectory",
+])
 def test_factory_cannot_replace_protected_runtime_fields(environment, name) -> None:
     runtime = FakeRuntime(**environment.kwargs)
     setattr(runtime, name, object())
     environment.factory.side_effect = lambda **_: runtime
-    with pytest.raises(ValueError, match=f"protected field: {name}"):
+    with pytest.raises(startup.RuntimeStartupCleanupIncomplete, match=f"protected field: {name}"):
         startup.run_agent_runtime(environment.kwargs, factory_config=environment.config)
     runtime.run_forever.assert_not_called()
-    runtime.close_constructed_runtime.assert_called_once()
+    runtime.close_constructed_runtime.assert_not_called()
+    for owned in ("perception", "executor", "trajectory", "state_db"):
+        environment.kwargs[owned].close.assert_not_called()
+    assert [command for command, _ in environment.commands] == ["renew"]
+
+
+def test_deleted_protected_field_also_retains_ownership(environment) -> None:
+    runtime = FakeRuntime(**environment.kwargs)
+    del runtime.trajectory
+    environment.factory.side_effect = lambda **_: runtime
+    with pytest.raises(
+        startup.RuntimeStartupCleanupIncomplete, match="protected field: trajectory",
+    ):
+        startup.run_agent_runtime(environment.kwargs, factory_config=environment.config)
+    runtime.close_constructed_runtime.assert_not_called()
+    environment.kwargs["trajectory"].close.assert_not_called()
 
 
 def test_factory_cannot_swap_policy_inside_the_supplied_executor(environment) -> None:
@@ -213,21 +230,27 @@ def test_factory_cannot_swap_policy_inside_the_supplied_executor(environment) ->
         return runtime
 
     environment.factory.side_effect = factory
-    with pytest.raises(ValueError, match="protected executor policy"):
+    with pytest.raises(startup.RuntimeStartupCleanupIncomplete, match="protected executor policy"):
         startup.run_agent_runtime(environment.kwargs, factory_config=environment.config)
     runtime.run_forever.assert_not_called()
-    runtime.close_constructed_runtime.assert_called_once()
+    runtime.close_constructed_runtime.assert_not_called()
+    environment.kwargs["executor"].close.assert_not_called()
+    environment.kwargs["state_db"].close.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", [False, None, 1, RuntimeError("incomplete native drain")])
 def test_incomplete_private_cleanup_forbids_public_fallback(environment, failure) -> None:
     runtime = FakeRuntime(**environment.kwargs)
-    runtime.executor = object()  # Forces pre-run rejection.
     if isinstance(failure, Exception):
         runtime.close_constructed_runtime.side_effect = failure
     else:
         runtime.close_constructed_runtime.return_value = failure
-    environment.factory.side_effect = lambda **_: runtime
+
+    def factory(**_kwargs):
+        environment.handlers[signal.SIGTERM](signal.SIGTERM, None)
+        return runtime
+
+    environment.factory.side_effect = factory
     with pytest.raises(startup.RuntimeStartupCleanupIncomplete):
         startup.run_agent_runtime(environment.kwargs, factory_config=environment.config)
     runtime.run_forever.assert_not_called()

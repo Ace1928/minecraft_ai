@@ -168,7 +168,9 @@ The result must supply `close_constructed_runtime() -> bool`: drain private
 owners, then call `close_before_run(timeout_s=remaining_budget)`. Neither cleanup
 path may change supervisor state. Return exactly `True` only after cleanup;
 otherwise borrowed resources and the database remain retained until process
-exit. A factory whose partial construction cannot safely close must raise
+exit. A protected ownership mismatch takes that same retention path without
+trusting the candidate's cleanup hook to close displaced original resources.
+A factory whose partial construction cannot safely close must raise
 `RuntimeStartupCleanupIncomplete` from `minecraft_ai.runtime_factory` instead
 of an ordinary exception. Normal runtime shutdown remains its own responsibility.
 Import, native constructors and arbitrary close callbacks are cooperatively

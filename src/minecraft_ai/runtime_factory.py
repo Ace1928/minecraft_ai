@@ -158,10 +158,16 @@ def run_agent_runtime(
                     raise TypeError("runtime factory must return AgentRuntime with cleanup hook")
                 runtime = result
                 for name, supplied in runtime_kwargs.items():
-                    if name != "high_level" and getattr(runtime, name) is not supplied:
-                        raise ValueError(f"runtime factory replaced protected field: {name}")
-                if runtime.executor.policy is not supplied_policy:
-                    raise ValueError("runtime factory replaced protected executor policy")
+                    if name != "high_level" and getattr(runtime, name, object()) is not supplied:
+                        # Candidate cleanup cannot certify a displaced original
+                        # owner. Retain both; never guess or restore ownership.
+                        raise RuntimeStartupCleanupIncomplete(
+                            f"runtime factory replaced protected field: {name}"
+                        )
+                if getattr(runtime.executor, "policy", object()) is not supplied_policy:
+                    raise RuntimeStartupCleanupIncomplete(
+                        "runtime factory replaced protected executor policy"
+                    )
             finally:
                 # No simultaneous construction/runtime renewal owners at handoff.
                 guard.close()
