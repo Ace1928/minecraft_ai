@@ -3203,6 +3203,333 @@ def test_request_replan_rearms_cognition_with_bounded_backoff() -> None:
     assert runtime._cognition_retry_not_before_ns == retry_deadline
 
 
+class _IdleStallPerception:
+    def __init__(self) -> None:
+        self.completed = 0
+        self.available = True
+        self.queries: list[object] = []
+        self.last_capture: CapturedFrame | None = None
+        self.instance_id = "bedrock:idle-stall"
+        self.active_vlm = SimpleNamespace(status=lambda: {
+            "completed": self.completed, "failures": 0, "thread_alive": True,
+        })
+
+    def semantic_available(self) -> bool:
+        return self.available
+
+    def request_semantics(self, query: object, frame: CapturedFrame | None = None) -> bool:
+        assert frame is self.last_capture
+        self.queries.append(query)
+        self.available = False
+        return True
+
+
+def _publish_idle_stall_frame(runtime: AgentRuntime, now_ns: int, frame_id: int) -> None:
+    runtime.perception.last_capture = CapturedFrame(1, now_ns, 1280, 720, b"")
+    runtime.blackboard.publish(FrameState(
+        frame_id=frame_id, captured_ns=now_ns, instance_id="bedrock:idle-stall",
+        width=1280, height=720,
+        facts=tuple(PerceptionFact(
+            key=key, value=value, confidence=0.995, observed_ns=now_ns,
+            source=BEDROCK_HUD_SAFETY_SOURCE, expires_after_ms=500,
+        ) for key, value in (
+            ("scene.playable", True), ("scene.mode", "world"),
+            ("scene.ui_overlay", False), ("environment.underwater", False),
+        )) + (PerceptionFact(
+            key="frame.dhash", value="0123456789abcdef", confidence=1.0,
+            observed_ns=now_ns, source="bootstrap:test", expires_after_ms=500,
+        ),),
+    ))
+
+
+def _runtime_with_idle_stalls(
+    monkeypatch: pytest.MonkeyPatch, clock_ns: list[int],
+    *, database: StateDatabase | None = None,
+) -> tuple[AgentRuntime, _IdleStallPerception, CognitionDecision]:
+    monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock_ns[0])
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+    monkeypatch.setattr("minecraft_ai.runtime.emergency_stop_latched", lambda: False)
+    monkeypatch.setattr("minecraft_ai.runtime.local_model_inference_available", lambda: True)
+    decision = CognitionDecision(
+        chosen_goal_id="autonomous:explore", skill_parameters={"allow_attack": False},
+    )
+    runtime = _runtime_with_completed_decision(decision, database=database)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime.role = get_role("generalist")
+    runtime.memories = MemoryStore()
+    runtime.social = SocialState()
+    runtime.custom_goals = []
+    runtime._stop = threading.Event()
+    runtime._plan_goal_id = decision.chosen_goal_id
+    runtime._plan_steps = ("explore open ground", "collect wood")
+    runtime._plan_index = 0
+    runtime._plan_started_ns = clock_ns[0] - 5_000_000_000
+    runtime._traversal_escalation_pending = True
+    runtime._idle_stall_probe_used_for_run_id = None
+    runtime._recent_skill_runs = deque(SkillRun(
+        run_id=f"stall-{index}", skill_id=skill_id, context_key="autonomous:explore",
+        started_ns=clock_ns[0] - index * 1_000_000_000,
+        ended_ns=clock_ns[0] - index * 1_000_000_000 + 500_000_000,
+        outcome=SkillOutcome.FAILED, failure_code=SkillFailureCode.LOCOMOTION_STALLED,
+    ) for index, skill_id in (
+        (1, "traverse_visible_obstacle"), (2, "traverse_level_ground"),
+    ))
+    perception = _IdleStallPerception()
+    runtime.perception = perception  # type: ignore[assignment]
+    _publish_idle_stall_frame(runtime, clock_ns[0], 1)
+    return runtime, perception, decision
+
+
+def _consume_repeated_idle(runtime: AgentRuntime, decision: CognitionDecision) -> None:
+    future: Future[CognitionDecision] = Future()
+    future.set_result(decision)
+    runtime._pending_decision = future
+    runtime._pending_execution_revision = runtime._execution_revision
+    runtime._consume_cognition()
+
+
+def test_idle_stall_probe_is_one_shot_after_unknown_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_ns = [10_000_000_000]
+    runtime, perception, decision = _runtime_with_idle_stalls(monkeypatch, clock_ns)
+    assert runtime._idle_stall_probe_run_id(decision) == "stall-1"
+
+    runtime._consume_cognition()
+
+    assert runtime._last_decision is not None
+    assert runtime._last_decision.ask_perception == ("obstacle.ahead",)
+    assert runtime._last_decision.request_replan is True
+    assert runtime._last_decision.skill_id is None
+    assert runtime._last_decision.chosen_goal_id == decision.chosen_goal_id
+    assert runtime._last_decision.skill_parameters == {"allow_attack": False}
+    assert runtime._idle_stall_probe_used_for_run_id == "stall-1"
+    assert runtime._cognition_perception_probe is not None
+    assert runtime._cognition_perception_probe.trigger_run_id == "stall-1"
+    assert runtime._cognition_perception_probe.trigger_decision == decision
+    assert runtime._plan_index == 0
+    assert runtime.executor.run is None
+
+    for frame_id in (2, 3):
+        clock_ns[0] += 50_000_000
+        _publish_idle_stall_frame(runtime, clock_ns[0], frame_id)
+        runtime._reconcile_cognition_perception_probe()
+    assert len(perception.queries) == 1
+    assert perception.queries[0].output_keys == ("obstacle.ahead",)  # type: ignore[attr-defined]
+
+    # Unknown/rejected output publishes no obstacle fact and must not buy retries.
+    perception.completed += 1
+    perception.available = True
+    runtime._reconcile_cognition_perception_probe()
+    assert runtime._cognition_perception_probe is None
+    for frame_id in (4, 5, 6):
+        clock_ns[0] += 50_000_000
+        _publish_idle_stall_frame(runtime, clock_ns[0], frame_id)
+        _consume_repeated_idle(runtime, decision)
+    assert len(perception.queries) == 1
+    assert runtime._cognition_perception_probe is None
+    assert runtime._idle_stall_probe_used_for_run_id == "stall-1"
+    assert runtime._traversal_escalation_pending is True
+    assert runtime.executor.run is None
+    assert runtime._plan_index == 0
+    assert runtime.metrics.operator_responses == 0
+
+
+def test_idle_stall_probe_marker_survives_settle_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_ns = [10_000_000_000]
+    runtime, perception, decision = _runtime_with_idle_stalls(monkeypatch, clock_ns)
+    runtime._consume_cognition()
+    clock_ns[0] += 3_000_000_000
+    _publish_idle_stall_frame(runtime, clock_ns[0], 2)
+    runtime._reconcile_cognition_perception_probe()
+    _consume_repeated_idle(runtime, decision)
+    assert runtime._cognition_perception_probe is None
+    assert runtime._idle_stall_probe_used_for_run_id == "stall-1"
+    assert perception.queries == []
+
+
+@pytest.mark.parametrize("blocked_lane", ("perception", "inference"))
+def test_idle_stall_probe_unavailable_admission_does_not_consume_marker(
+    monkeypatch: pytest.MonkeyPatch, blocked_lane: str,
+) -> None:
+    runtime, perception, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
+    perception.available = blocked_lane != "perception"
+    monkeypatch.setattr(
+        "minecraft_ai.runtime.local_model_inference_available",
+        lambda: blocked_lane != "inference",
+    )
+    runtime._consume_cognition()
+    assert runtime._cognition_perception_probe is None
+    assert runtime._idle_stall_probe_used_for_run_id is None
+    perception.available = True
+    monkeypatch.setattr("minecraft_ai.runtime.local_model_inference_available", lambda: True)
+    _consume_repeated_idle(runtime, decision)
+    assert runtime._cognition_perception_probe is not None
+    assert runtime._idle_stall_probe_used_for_run_id == "stall-1"
+
+
+def test_idle_stall_probe_new_qualifying_failure_is_a_new_opportunity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
+    runtime._idle_stall_probe_used_for_run_id = "stall-1"
+    assert runtime._idle_stall_probe_run_id(decision) is None
+    runtime._recent_skill_runs.appendleft(runtime._recent_skill_runs[0].model_copy(update={
+        "run_id": "stall-new", "started_ns": 9_600_000_000, "ended_ns": 9_900_000_000,
+    }))
+    assert runtime._idle_stall_probe_run_id(decision) == "stall-new"
+
+
+@pytest.mark.parametrize("operator_owned", (False, True))
+def test_idle_stall_probe_ineligible_idle_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, operator_owned: bool,
+) -> None:
+    runtime, perception, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
+    if operator_owned:
+        decision = decision.model_copy(update={"chosen_goal_id": "operator:wait"})
+    else:
+        runtime._recent_skill_runs.clear()
+    _consume_repeated_idle(runtime, decision)
+    assert runtime._last_decision == decision
+    assert runtime._cognition_perception_probe is None
+    assert runtime._idle_stall_probe_used_for_run_id is None
+    assert perception.queries == []
+    assert runtime.executor.run is None
+    assert runtime._plan_index == 0
+
+
+@pytest.mark.parametrize("case", (
+    "no-history", "one-failure", "duplicate-id", "different-context", "older-task",
+    "intervening-success", "wrong-failure", "timeout", "non-locomotion",
+    "operator-decision", "operator-plan", "operator-history", "exhausted-plan",
+))
+def test_idle_stall_probe_rejects_unrelated_or_ineligible_history(
+    monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
+    newest, older = runtime._recent_skill_runs
+    if case == "no-history":
+        runtime._recent_skill_runs.clear()
+    elif case == "one-failure":
+        runtime._recent_skill_runs.pop()
+    elif case == "duplicate-id":
+        runtime._recent_skill_runs[1] = older.model_copy(update={"run_id": newest.run_id})
+    elif case == "different-context":
+        runtime._recent_skill_runs[1] = older.model_copy(update={"context_key": "other-task"})
+    elif case == "older-task":
+        runtime._plan_started_ns = newest.ended_ns + 1  # type: ignore[operator]
+    elif case == "intervening-success":
+        runtime._recent_skill_runs.insert(1, older.model_copy(update={
+            "run_id": "progress", "outcome": SkillOutcome.SUCCEEDED, "failure_code": None,
+        }))
+    elif case == "wrong-failure":
+        runtime._recent_skill_runs[0] = newest.model_copy(update={
+            "failure_code": None, "failure_reason": "locomotion.stalled",
+        })
+    elif case == "timeout":
+        runtime._recent_skill_runs[0] = newest.model_copy(update={
+            "outcome": SkillOutcome.TIMED_OUT,
+        })
+    elif case == "non-locomotion":
+        runtime._recent_skill_runs[0] = newest.model_copy(update={"skill_id": "open_inventory"})
+    elif case == "operator-decision":
+        decision = decision.model_copy(update={"chosen_goal_id": "operator:wait"})
+    elif case == "operator-plan":
+        runtime._plan_goal_id = "operator:wait"
+    elif case == "operator-history":
+        runtime._recent_skill_runs = deque(run.model_copy(update={
+            "context_key": "operator:wait",
+        }) for run in runtime._recent_skill_runs)
+    else:
+        runtime._plan_index = len(runtime._plan_steps)
+    assert runtime._idle_stall_probe_run_id(decision) is None
+
+
+@pytest.mark.parametrize("update", (
+    {"skill_id": "explore_forward"}, {"ask_perception": ("obstacle.ahead",)},
+    {"request_replan": True}, {"research_query": "Minecraft stone mining time"},
+    {"say": "Waiting here."}, {"game_chat": "Hello!"},
+))
+def test_idle_stall_probe_requires_pure_idle_decision(
+    monkeypatch: pytest.MonkeyPatch, update: dict[str, object],
+) -> None:
+    runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
+    assert runtime._idle_stall_probe_run_id(decision.model_copy(update=update)) is None
+
+
+@pytest.mark.parametrize("owner", (
+    "_headroom_recovery", "_gather_acquisition_continuation",
+    "_craft_semantic_probe", "_cognition_perception_probe",
+))
+def test_idle_stall_probe_never_competes_with_existing_owner(
+    monkeypatch: pytest.MonkeyPatch, owner: str,
+) -> None:
+    runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
+    setattr(runtime, owner, object())
+    assert runtime._idle_stall_probe_run_id(decision) is None
+
+
+@pytest.mark.parametrize("guard", ("stop", "pause", "emergency", "underwater", "latch"))
+def test_idle_stall_probe_preserves_runtime_safety_guards(
+    monkeypatch: pytest.MonkeyPatch, guard: str,
+) -> None:
+    runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
+    if guard == "stop":
+        runtime._stop.set()
+    elif guard == "pause":
+        monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: True)
+    elif guard == "emergency":
+        monkeypatch.setattr("minecraft_ai.runtime.emergency_stop_latched", lambda: True)
+    elif guard == "latch":
+        runtime._traversal_escalation_pending = False
+    else:
+        runtime.blackboard.merge_semantics(instance_id="bedrock:idle-stall", facts=(
+            PerceptionFact(
+                key="environment.underwater", value=True, confidence=0.995,
+                observed_ns=10_000_000_000, source=BEDROCK_HUD_SAFETY_SOURCE,
+            ),
+        ))
+    assert runtime._idle_stall_probe_run_id(decision) is None
+
+
+@pytest.mark.parametrize("value", (True, False))
+def test_idle_stall_probe_respects_scene_matched_obstacle_answer(
+    monkeypatch: pytest.MonkeyPatch, value: bool,
+) -> None:
+    clock_ns = [10_000_000_000]
+    runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, clock_ns)
+    runtime.blackboard.merge_semantics(instance_id="bedrock:idle-stall", facts=tuple(
+        PerceptionFact(
+            key=key, value=answer, confidence=1.0, observed_ns=clock_ns[0],
+            source="vlm:test:already-observed", expires_after_ms=10_000,
+        ) for key, answer in (
+            ("obstacle.ahead", value), ("scene.observation_dhash", "0123456789abcdef"),
+        )
+    ))
+    assert runtime._idle_stall_probe_run_id(decision) is None
+
+
+@pytest.mark.parametrize("status", (
+    OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+    OperatorMessageStatus.ACKNOWLEDGED,
+))
+def test_idle_stall_probe_never_overrides_operator_instruction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: OperatorMessageStatus,
+) -> None:
+    with StateDatabase(tmp_path / "idle-stall.sqlite3") as database:
+        runtime, _, decision = _runtime_with_idle_stalls(
+            monkeypatch, [10_000_000_000], database=database,
+        )
+        database.save_operator_message(OperatorMessage(
+            message_id="explicit-wait", created_ns=1, text="Wait here, do not move.",
+            kind=OperatorMessageKind.INSTRUCTION, status=status,
+        ))
+        assert runtime._idle_stall_probe_run_id(decision) is None
+
+
 def test_perception_only_replan_combines_questions_and_waits_for_one_fresh_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

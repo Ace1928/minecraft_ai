@@ -23,6 +23,7 @@ from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_
 from .crafting_control import PlankCraftPhase
 from .daemon_executor import SingleWorkerDaemonExecutor
 from .episodes import RuntimeEvent, RuntimeEventKind
+from .emergency import emergency_stop_latched
 from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
 from .grounded_perception import (
     CROSSHAIR_BLOCK_FAST_SOURCE,
@@ -146,6 +147,8 @@ class _CognitionPerceptionProbe:
     query_source: str | None = None
     retained_facts: tuple[PerceptionFact, ...] = ()
     cognition_future: concurrent.futures.Future[CognitionDecision] | None = None
+    trigger_run_id: str | None = None
+    trigger_decision: CognitionDecision | None = None
 
 
 @dataclass
@@ -1341,6 +1344,7 @@ class AgentRuntime:
         default=None,
         init=False,
     )
+    _idle_stall_probe_used_for_run_id: str | None = field(default=None, init=False)
     _cognition_requested: bool = field(default=True, init=False)
     _cognition_retry_count: int = field(default=0, init=False)
     _cognition_retry_not_before_ns: int = field(default=0, init=False)
@@ -3416,6 +3420,107 @@ class AgentRuntime:
             )
             self._clear_cognition_perception_probe(probe, action_grace=accepted_action)
 
+    def _idle_stall_probe_run_id(self, decision: CognitionDecision) -> str | None:
+        """Buy one observation, never an action, after two autonomous stalls."""
+        if (
+            decision.skill_id is not None
+            or decision.ask_perception
+            or decision.request_replan
+            or (decision.research_query or "").strip()
+            or (decision.say or "").strip()
+            or (decision.game_chat or "").strip()
+            or not self._traversal_escalation_pending
+        ):
+            return None
+        if any(
+            getattr(self, owner, None) is not None
+            for owner in (
+                "_headroom_recovery", "_gather_acquisition_continuation",
+                "_craft_semantic_probe", "_cognition_perception_probe",
+            )
+        ):
+            return None
+        executor = getattr(self, "executor", None)
+        if executor is None or (
+            executor.run is not None and executor.run.outcome == SkillOutcome.RUNNING
+        ):
+            return None
+        stop = getattr(self, "_stop", None)
+        if (
+            (stop is not None and stop.is_set())
+            or operator_pause_latched()
+            or emergency_stop_latched()
+            or not self._headroom_scene_is_safe()
+        ):
+            return None
+        underwater = self.blackboard.fact("environment.underwater", min_confidence=0.7)
+        if underwater is not None and underwater.value is True:
+            return None
+        if self._pending_operator_message_ids or self._pending_operator_status_updates:
+            return None
+        if self.state_db is not None:
+            # Durable acknowledged instructions still own intent even when no
+            # new message is queued. Corrections retain their existing tombstone.
+            messages = self.state_db.load_operator_messages(
+                statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED},
+                limit=20,
+            )
+            if messages or _active_operator_messages(self.state_db.load_operator_messages(
+                statuses={OperatorMessageStatus.ACKNOWLEDGED}, limit=20,
+            )):
+                return None
+        goal = self._plan_goal_id
+        if (
+            not goal
+            or goal.startswith("operator:")
+            or decision.chosen_goal_id != goal
+            or not self._plan_steps[self._plan_index:]
+            or self._plan_started_ns <= 0
+        ):
+            return None
+        # Inspect attempts BEFORE filtering outcomes. A newer success, timeout,
+        # cancellation or unrelated task must not expose older failures.
+        attempts = tuple(
+            run for run in self._recent_skill_runs
+            if run.skill_id in _BOUNDED_KEEPALIVE_SKILL_IDS
+            or run.skill_id == "gather_nearby_wood"
+        )[:2]
+        if len(attempts) != 2:
+            return None
+        newest, older = attempts
+        if (
+            newest.run_id == older.run_id
+            or newest.run_id == self._idle_stall_probe_used_for_run_id
+            or newest.context_key != older.context_key
+            or newest.context_key not in {goal, _EXPLORE_KEEPALIVE_CONTEXT}
+            or any(
+                run.outcome != SkillOutcome.FAILED
+                or run.failure_code != SkillFailureCode.LOCOMOTION_STALLED
+                or run.ended_ns is None
+                or run.started_ns < self._plan_started_ns
+                for run in attempts
+            )
+        ):
+            return None
+        obstacle = self.blackboard.fact("obstacle.ahead", min_confidence=0.7)
+        observation = self.blackboard.fact("scene.observation_dhash", min_confidence=1.0)
+        current = self.blackboard.fact("frame.dhash", min_confidence=1.0)
+        latest = self.blackboard.raw_latest()
+        if (
+            obstacle is not None and isinstance(obstacle.value, bool)
+            and observation is not None and current is not None and latest is not None
+            and obstacle.source == observation.source
+            and obstacle.observed_ns == observation.observed_ns
+            and current.observed_ns >= latest.captured_ns
+            and isinstance(observation.value, str) and isinstance(current.value, str)
+        ):
+            try:
+                if perceptual_hash_distance(observation.value, current.value) <= 2:
+                    return None  # A trustworthy False answers the question too.
+            except ValueError:
+                pass
+        return newest.run_id
+
     def _consume_cognition_decision(self) -> None:
         if getattr(self, "_headroom_recovery", None) is not None:
             # A decision completed against pre-recovery pixels cannot take the
@@ -3494,6 +3599,13 @@ class AgentRuntime:
             # The accepted skill still executes under its operator context, but
             # model-generated plan text cannot keep replaying it afterward.
             decision = decision.model_copy(update={"plan_steps": ()})
+        idle_stall_run_id = self._idle_stall_probe_run_id(decision)
+        idle_stall_decision = decision if idle_stall_run_id is not None else None
+        if idle_stall_run_id is not None:
+            decision = decision.model_copy(update={
+                "ask_perception": ("obstacle.ahead",),
+                "request_replan": True,
+            })
         perception_output_keys = tuple(
             dict.fromkeys(
                 key
@@ -3513,7 +3625,8 @@ class AgentRuntime:
                 }
             )
         self._last_decision = decision
-        self._adopt_plan_if_revised(decision)
+        if idle_stall_run_id is None:
+            self._adopt_plan_if_revised(decision)
         operator_acknowledged = False
         if self.state_db is not None and self._pending_operator_message_ids:
             if selected_message_id is not None and not decision.request_replan:
@@ -3561,7 +3674,13 @@ class AgentRuntime:
                     settle_deadline_ns=(
                         time.monotonic_ns() + _COGNITION_PERCEPTION_SETTLE_TIMEOUT_NS
                     ),
+                    trigger_run_id=idle_stall_run_id,
+                    trigger_decision=idle_stall_decision,
                 )
+                if idle_stall_run_id is not None:
+                    # Consume only on transaction creation, and never refund
+                    # for unknown/stale answers, timeout or a new camera frame.
+                    self._idle_stall_probe_used_for_run_id = idle_stall_run_id
                 perception_probe_started = True
         game_chat = _authorized_game_chat(
             decision,
@@ -4256,7 +4375,19 @@ class AgentRuntime:
                 "requested_keys": list(cognition_probe.requested_keys),
                 "frame_id": cognition_probe.frame_id,
                 "execution_revision": cognition_probe.execution_revision,
+                "origin": (
+                    "runtime:failure-triggered-observation"
+                    if cognition_probe.trigger_run_id is not None else "model:requested"
+                ),
+                "trigger_run_id": cognition_probe.trigger_run_id,
+                "trigger_decision": (
+                    None if cognition_probe.trigger_decision is None
+                    else cognition_probe.trigger_decision.model_dump(mode="json")
+                ),
             }
+        )
+        perception_status["idle_stall_probe_used_for_run_id"] = (
+            self._idle_stall_probe_used_for_run_id
         )
         cognition_status: dict[str, object] | None = None
         if self.high_level is not None:
