@@ -69,6 +69,23 @@ reliable or treat command integration as observed camera orientation. The
 planned small camera-pulse comparison never reached actuation; its failed
 dependency preflight was retained, not counted as a physical experiment.
 
+The private-X pointer route now avoids absolute recentering when fresh pointer
+queries reach the exact game client inside its bounds. A single no-action
+lease-issue/revoke bracket retained the same attached supervisor and game:
+200 selected static terrain features had zero median displacement across both
+boundaries, with less than 0.005 pixels maximum across the retained comparison
+frames. Pointer coordinates and commanded-camera accounting were unchanged.
+This is a stationary observed bracket, not a measured warp count, a controlled
+before/after comparison, physical-horizon qualification or gameplay success.
+A subsequent agent stopped after 119 accepted records on pointer-routing
+rejection. Synthetic reproduction exposed an overly strict requirement that
+coordinates stay identical across separate X queries; in-client recentering
+now remains admissible, while each sample must still satisfy same-screen,
+client bounds and the actual bounded hit chain. The exact live rejection
+branch was not instrumented, so its cause is not asserted. Scoped recovery
+replaced the faulted supervisor and agent, preserving Minecraft, the GPU and
+the measured sensitivity profile; fresh readiness and recording passed.
+
 The trace also exposed a training-data limitation: the retained trajectory frame
 is the observation at action acceptance, not necessarily the asynchronous
 prediction's original input. The new generic annotation now carries source

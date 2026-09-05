@@ -406,6 +406,43 @@ def test_pointer_already_in_exact_game_client_does_not_warp() -> None:
     assert state["warps"] == []
 
 
+def test_in_client_recentering_between_pointer_queries_does_not_warp_or_reject() -> None:
+    backend, state = _pointer_parking_backend()
+    path = state["hit_path"]
+    for index, window in enumerate(path):
+        window.query_pointer = lambda index=index: SimpleNamespace(
+            same_screen=True,
+            root_x=1012 if index == 0 else 960,
+            root_y=748 if index == 0 else 553,
+            child=path[index + 1] if index + 1 < len(path) else 0,
+        )
+
+    backend.apply(MotorAction(sequence=0, mouse_dx=7, mouse_dy=-9))
+
+    assert state["relative"] == [(7, -9)]
+    assert state["warps"] == []
+
+
+@pytest.mark.parametrize("uncertainty", ["outside", "other_screen", "wrong_subtree"])
+def test_pointer_change_during_chain_does_not_preserve_stale_client_routing(
+    uncertainty: str,
+) -> None:
+    backend, state = _pointer_parking_backend()
+    desktop = state["desktop"]
+    desktop.query_pointer = lambda: SimpleNamespace(
+        same_screen=uncertainty != "other_screen",
+        root_x=1920 if uncertainty == "outside" else 960,
+        root_y=553,
+        child=state["overlay"] if uncertainty == "wrong_subtree" else state["wrapper"],
+    )
+
+    with pytest.raises(MotorRejected, match="pointer routing could not be verified"):
+        backend.apply(MotorAction(sequence=0, mouse_dx=7, mouse_dy=-9))
+
+    assert state["relative"] == []
+    assert state["warps"] == [(960, 553)]
+
+
 def test_pointer_outside_game_parks_at_client_not_decorated_wrapper_center() -> None:
     backend, state = _pointer_parking_backend()
     state["point"] = (10, 5)

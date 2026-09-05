@@ -562,7 +562,6 @@ def _pointer_hits_client(root: Any, client_id: int, rect: ScreenRect) -> bool:
     """Require both client bounds and a bounded root-to-pointer-hit chain."""
     current = root
     visited: set[int] = set()
-    point: tuple[int, int] | None = None
     for _ in range(32):
         window_id = int(getattr(current, "id", 0))
         if window_id <= 0 or window_id in visited:
@@ -571,10 +570,11 @@ def _pointer_hits_client(root: Any, client_id: int, rect: ScreenRect) -> bool:
         pointer = current.query_pointer()
         if not pointer.same_screen:
             return False
-        current_point = (int(pointer.root_x), int(pointer.root_y))
-        if point is not None and point != current_point:
-            return False
-        point = current_point
+        # QueryPointer calls are separate samples, not an atomic snapshot.
+        # Wine can recenter its relative pointer between requests while it
+        # remains in this client. Require each fresh point to stay inside,
+        # and still follow the actual child chain to the exact client.
+        point = (int(pointer.root_x), int(pointer.root_y))
         if not (rect.x <= point[0] < rect.x + rect.width
                 and rect.y <= point[1] < rect.y + rect.height):
             return False
