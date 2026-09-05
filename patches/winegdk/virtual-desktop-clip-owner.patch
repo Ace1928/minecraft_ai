@@ -1,0 +1,43 @@
+diff --git a/dlls/winex11.drv/mouse.c b/dlls/winex11.drv/mouse.c
+--- a/dlls/winex11.drv/mouse.c
++++ b/dlls/winex11.drv/mouse.c
+@@ -359,6 +359,27 @@
+ #endif /* HAVE_X11_EXTENSIONS_XINPUT2_H */
+ 
++#ifdef HAVE_X11_EXTENSIONS_XINPUT2_H
++/* The virtual desktop belongs to another process, but may hold X focus
++ * while the foreground application is still responsible for clipping. */
++static BOOL clipping_focus_allows_grab( struct x11drv_thread_data *data )
++{
++    Window focus;
++    int revert;
++    DWORD foreground_pid = 0;
++    HWND foreground, hwnd;
++
++    if (!data || !data->display) return FALSE;
++    if (!XGetInputFocus( data->display, &focus, &revert )) return FALSE;
++    if (focus && !XFindContext( data->display, focus, winContext, (char **)&hwnd )) return TRUE;
++    if (!is_virtual_desktop() || focus != root_window) return FALSE;
++
++    foreground = NtUserGetForegroundWindow();
++    if (!foreground || !NtUserGetWindowThread( foreground, &foreground_pid )) return FALSE;
++    return foreground_pid == GetCurrentProcessId();
++}
++#endif
++
+ /***********************************************************************
+  *		grab_clipping_window
+  *
+  * Start a pointer grab on the clip window.
+@@ -373,8 +394,8 @@ static BOOL grab_clipping_window( const RECT *clip )
+ 
+     /* don't clip in the desktop process */
+     if (NtUserGetWindowThread( NtUserGetDesktopWindow(), NULL ) == GetCurrentThreadId()) return TRUE;
++    if (!data) return FALSE;
+-    /* don't clip the cursor if the X input focus is on another process window */
+-    if (!is_current_process_focused()) return TRUE;
++    /* only the foreground owner may clip when the virtual desktop holds X focus */
++    if (!clipping_focus_allows_grab( data )) return TRUE;
+ 
+-    if (!data) return FALSE;
+     if (!(clip_window = init_clip_window())) return TRUE;

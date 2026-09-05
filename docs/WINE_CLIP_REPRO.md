@@ -71,6 +71,37 @@ test the wrong boundary.
 
 ## Retained local evidence
 
+### Built candidate, not installed
+
+The [generic source patch](../patches/winegdk/README.md) now builds as the
+actual native x86-64 X11 driver, not merely a stub. Both matched builds retain
+the installed native5 client-surface patch and reuse the unchanged installed
+`ntdll.so` and `win32u.so`; no core, server, or Windows module was rebuilt.
+The candidate incremental build recompiles only `mouse.c` and relinks.
+Its source is byte-identical to the pinned source plus the published patch.
+
+Both CPU-only, device-isolated build services completed successfully. The
+baseline consumed 34.486 CPU seconds with a 219.8 MiB reported peak; the
+candidate consumed 1.906 CPU seconds. Both use configuration hash
+`ab0f2db5d89255dee084faea2ee746b18b6a50fb1dc69500742b4fdc1b928083`, retaining
+XI2, Xi, OpenGL, Vulkan and the detected X extensions. Neither ELF contains
+RPATH/RUNPATH, and their direct dependency lists match each other. The older
+installed ELF additionally lists `libpthread` and `libdl`; these rebuilt
+binaries are matched local controls, not bitwise copies of that installed build.
+
+| Local artifact | SHA-256 |
+| --- | --- |
+| Rebuilt baseline `winex11.so` | `fb41e3ff89429fa2c6abf952dec646cb5b264cd5b3dd636403c4b975d33ff3de` |
+| Candidate `winex11.so` | `5cba094bc5fc8114771923c3b10b049a28068b74e282e41dd4dfeb95e1304621` |
+| Published source patch | `5f6b18a3c9bb3b49e9db002a81586789ad817abaa5ada2099de16826055a8b2a` |
+
+The build fixture is `/tmp/minecraft-wine-driver-build-svfZwN/`. The resulting
+ELF requires GLIBC 2.38, so it is not a portable Bullseye release. The exact
+extracted predicate passes 15 native stub checks, including rejection when
+another process owns foreground. These tests model the call-site boundary;
+they do not establish the full driver's physical behavior. Matched disposable
+driver execution and live Bedrock qualification remain separate open gates.
+
 Artifacts remain under `/tmp/minecraft-wine-clip-repro-wppvRA/`; they are not
 portable public fixtures. These hashes identify the original measurements:
 
