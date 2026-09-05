@@ -69,6 +69,23 @@ def _display_number(display: str) -> str:
     return match.group(1)
 
 
+def _require_safe_command(command: tuple[str, ...]) -> None:
+    """Do not enroll a weakened initial command merely because it stays unchanged.
+
+    Weston 13 uses Xwayland's deprecated ``-listen <fd>`` spelling. Numeric
+    inherited descriptors are not the generic X server ``-listen tcp`` option.
+    Listener ownership is checked separately; this is not a live ACL query.
+    """
+    for index, argument in enumerate(command[2:], start=2):
+        if argument in {"-ac", "-query", "-broadcast", "-indirect"}:
+            raise IsolationError("Xwayland command weakens private display access")
+        if argument in {"-listen", "-listenfd"} and (
+            index + 1 >= len(command)
+            or re.fullmatch(r"[0-9]+", command[index + 1]) is None
+        ):
+            raise IsolationError("Xwayland listener must be an inherited descriptor")
+
+
 def _socket_inodes(pid: int) -> set[int]:
     result: set[int] = set()
     with os.scandir(PROC_ROOT / str(pid) / "fd") as entries:
@@ -122,6 +139,7 @@ def _validate(
         or before.command[1] != f":{number}"
     ):
         raise IsolationError("claimed X display does not match its managed Xwayland child")
+    _require_safe_command(before.command)
     listeners = _listener_inodes(number)
     if not listeners.issubset(_socket_inodes(identity.pid)):
         raise IsolationError("claimed X display has a listener outside the managed Xwayland child")

@@ -71,6 +71,29 @@ def test_binds_exact_child_and_both_listener_aliases(namespace: Path) -> None:
     _require(identity)
 
 
+@pytest.mark.parametrize("arguments", [
+    ("-ac",), ("-query", "remote"), ("-broadcast",), ("-indirect", "remote"),
+    ("-listen", "tcp"), ("-listen",), ("-listenfd", "invalid"),
+])
+def test_unsafe_initial_command_cannot_be_enrolled(
+    namespace: Path, arguments: tuple[str, ...],
+) -> None:
+    _process(namespace, 301, 300, 200, ("/usr/bin/Xwayland", ":71", "-rootless", *arguments))
+    with pytest.raises(IsolationError, match="private display access|inherited descriptor"):
+        _capture()
+
+
+@pytest.mark.parametrize("listen_option", ["-listen", "-listenfd"])
+def test_weston_inherited_listener_spelling_remains_supported(
+    namespace: Path, listen_option: str,
+) -> None:
+    _process(namespace, 301, 300, 200, (
+        "/usr/bin/Xwayland", ":71", "-rootless", listen_option, "23",
+        listen_option, "24", "-displayfd", "31", "-wm", "29", "-terminate",
+    ))
+    _require(_capture())
+
+
 @pytest.mark.parametrize("display", [":72", ":0", "localhost:71", "host:71", ":071"])
 def test_descriptor_display_substitution_cannot_retarget_valid_child(
     namespace: Path, display: str,

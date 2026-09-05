@@ -22,8 +22,8 @@ and a held-key interval, release, stable focus, exact relative raw/core motion,
 button hold/release, pointer confinement, captured drawable updates, accelerated
 rendering, changing GPU animation, restricted access and process cleanup, plus
 live environment validation, exact Xwayland listener ownership and 30 read-only
-production admission calls. A
-separate interrupted run verified cleanup during a held-key phase. These are
+production admission calls. A separate interrupted run verified cleanup during a
+held-key phase. These are
 display/input boundary results, not proof of correct Bedrock camera processing.
 
 Bare headless Weston failed keyboard focus qualification. The virtual seat is
@@ -33,8 +33,13 @@ The loaded module, executable command, process identity, source and binary
 provenance are verified before admitting autonomous input. Admission also binds
 the exact Xwayland child and process start time to every observed pathname and
 abstract Unix listener for the selected display. A substituted display, reused
-PID or listener owned by another server fails closed. Inherited parent-display
-handles and Weston/dynamic-loader overrides are stripped at launch and rejected
+PID or listener owned by another server fails closed. Initial enrollment also
+rejects disabled access control (`-ac`), remote query flags and non-descriptor
+listening options. It preserves Weston's numeric `-listen <fd>` compatibility
+syntax; a stable command hash alone would otherwise accept an unsafe initial
+command. This command policy is not a query of dynamically changed X access rules.
+Inherited parent-display handles and Weston/dynamic-loader overrides are stripped
+at launch and rejected
 when observed in the live compositor environment; this includes
 `WAYLAND_SERVER_SOCKET` and `WESTON_MODULE_MAP`.
 
