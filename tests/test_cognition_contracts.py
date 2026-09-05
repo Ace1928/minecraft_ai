@@ -1264,15 +1264,17 @@ def test_operator_null_action_cannot_acknowledge_instruction_as_executed() -> No
 
 
 @pytest.mark.parametrize(
-    ("instruction", "failed_skill", "provided_keys", "expected_keys"),
+    ("instruction", "failed_skill", "provided_keys", "expected_keys", "request_replan"),
     (
-        ("break the blocks in front of you", None, (), ("target.visible", "target.mineable")),
-        (None, "mine_visible_block", (), ("target.visible", "target.mineable")),
-        (None, "collect_recent_drop", (), ("obstacle.ahead",)),
-        (None, None, (), ()),
-        ("Explore", None, ("scene.horizon_visible",), ("obstacle.ahead",)),
-        (None, "explore_forward", ("scene.horizon_visible",), ("obstacle.ahead",)),
-        (None, "mine_visible_block", ("target.visible",), ("target.visible",)),
+        ("break the blocks in front of you", None, (), ("target.visible", "target.mineable"), True),
+        (None, "mine_visible_block", (), ("target.visible", "target.mineable"), True),
+        (None, "collect_recent_drop", (), ("obstacle.ahead",), True),
+        (None, None, (), (), True),
+        (None, None, (), (), False),
+        ("Explore", None, ("scene.horizon_visible",), ("obstacle.ahead",), True),
+        (None, "explore_forward", ("fresh_facts.target_block_type",), ("obstacle.ahead",), False),
+        (None, "explore_forward", ("scene.horizon_visible",), ("obstacle.ahead",), False),
+        (None, "mine_visible_block", ("target.visible",), ("target.visible",), True),
     ),
 )
 def test_top_level_empty_replan_requests_visual_evidence_without_another_model_call(
@@ -1281,6 +1283,7 @@ def test_top_level_empty_replan_requests_visual_evidence_without_another_model_c
     failed_skill: str | None,
     provided_keys: tuple[str, ...],
     expected_keys: tuple[str, ...],
+    request_replan: bool,
 ) -> None:
     context = _context()
     if instruction is not None:
@@ -1298,14 +1301,14 @@ def test_top_level_empty_replan_requests_visual_evidence_without_another_model_c
 
     def complete(messages: object, **_kwargs: object) -> CognitionDecision:
         calls.append(messages)
-        return CognitionDecision(request_replan=True, ask_perception=provided_keys)
+        return CognitionDecision(request_replan=request_replan, ask_perception=provided_keys)
 
     monkeypatch.setattr(controller, "_complete", complete)
     decision = controller.decide(_board(), context)
 
     assert len(calls) == 1
     assert decision.skill_id is None
-    assert decision.request_replan is True
+    assert decision.request_replan is (request_replan or provided_keys != expected_keys)
     assert decision.ask_perception == expected_keys
     if instruction is not None:
         assert decision.chosen_goal_id == "operator:current"

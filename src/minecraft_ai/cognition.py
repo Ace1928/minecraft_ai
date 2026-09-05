@@ -1027,7 +1027,7 @@ class HighLevelController:
                     )
             if (
                 decision.skill_id is None
-                and decision.request_replan
+                and (decision.request_replan or decision.ask_perception)
                 and not any(
                     resolve_grounded_output_keys((), question)
                     for question in decision.ask_perception
@@ -1037,6 +1037,8 @@ class HighLevelController:
                 # A valid top-level abstention bypasses the repair path. It
                 # still needs new evidence before another slow model call;
                 # empty or entirely invented fact keys otherwise repeat forever.
+                # Runtime treats any question as a replan, even when the model
+                # omitted x=true. Apply the same rule before resolving its keys.
                 candidates = repair_bounds.requested_skill_ids or tuple(
                     run.skill_id
                     for run in context.recent_skill_runs
@@ -1045,6 +1047,7 @@ class HighLevelController:
                 if candidates:
                     decision = decision.model_copy(update={
                         "ask_perception": self._prerequisite_perception_keys(candidates[0]),
+                        "request_replan": True,
                     })
             self.metrics.last_error = None
             return decision
