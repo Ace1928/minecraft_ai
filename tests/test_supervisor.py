@@ -232,6 +232,55 @@ def test_cleanup_failure_cannot_leave_supervisor_running(
     assert supervisor._stop.is_set() is (operation != "fault")
 
 
+@pytest.mark.parametrize("prior_failure", [False, True])
+def test_owned_shutdown_attempts_every_cleanup_after_backend_failure(
+    monkeypatch: pytest.MonkeyPatch, prior_failure: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    supervisor = Supervisor()
+    supervisor.start()
+    supervisor.arm("fake-instance")
+    supervisor.activate()
+    attempted = []
+    error = OSError("synthetic release failure")
+
+    def release() -> None:
+        attempted.append("release")
+        assert supervisor.state == SupervisorState.STOPPED and supervisor._stop.is_set()
+        raise error
+
+    def close_backend() -> None:
+        attempted.append("backend")
+        raise ValueError("synthetic close failure")
+
+    def publish() -> None:
+        attempted.append("status")
+        raise RuntimeError("synthetic status failure")
+
+    monkeypatch.setattr(supervisor.backend, "release_all", release)
+    monkeypatch.setattr(supervisor.backend, "close", close_backend, raising=False)
+    monkeypatch.setattr(supervisor, "_persist_status", publish)
+    monkeypatch.setattr(
+        supervisor, "_remove_control_file_if_owned", lambda: attempted.append("endpoint"),
+    )
+    server = SimpleNamespace(close=lambda: attempted.append("socket"))
+    if prior_failure:
+        original = RuntimeError("synthetic serving failure")
+        supervisor._close_owned_runtime(server, prior_error=original)
+        assert original.__notes__ == [
+            "supervisor cleanup also failed: OSError",
+            "supervisor cleanup also failed: ValueError",
+            "supervisor cleanup also failed: RuntimeError",
+        ]
+    else:
+        with pytest.raises(OSError) as caught:
+            supervisor._close_owned_runtime(server)
+        assert caught.value is error
+    assert attempted == ["release", "socket", "backend", "status", "endpoint"]
+    assert supervisor.motor.lease is None and supervisor.backend.lease_id is None
+
+
 def test_supervisor_tracks_only_accepted_world_camera_motion() -> None:
     supervisor = Supervisor()
     supervisor.start()

@@ -811,17 +811,34 @@ class Supervisor:
                     daemon=True,
                 ).start()
         finally:
-            self.motor.revoke("supervisor-exit")
-            try:
-                server.close()
-            finally:
-                close = getattr(self.backend, "close", None)
-                if callable(close):
-                    close()
-                if self.state != SupervisorState.STOPPED:
-                    self.state = SupervisorState.STOPPED
-                self._persist_status()
-                self._remove_control_file_if_owned()
+            self._close_owned_runtime(server, prior_error=sys.exception())
+
+    def _close_owned_runtime(
+        self, server: socket.socket, *, prior_error: BaseException | None = None,
+    ) -> None:
+        """Attempt every owned cleanup even when physical release fails."""
+        with self._lock:
+            self.state = SupervisorState.STOPPED
+            self._stop.set()
+            failure = prior_error
+            close_backend = getattr(self.backend, "close", None)
+            cleanups = [
+                lambda: self.motor.revoke("supervisor-exit"),
+                server.close,
+            ]
+            if callable(close_backend):
+                cleanups.append(close_backend)
+            cleanups.extend((self._persist_status, self._remove_control_file_if_owned))
+            for cleanup in cleanups:
+                try:
+                    cleanup()
+                except BaseException as exc:
+                    if failure is None:
+                        failure = exc
+                    else:
+                        failure.add_note(f"supervisor cleanup also failed: {type(exc).__name__}")
+            if failure is not None and prior_error is None:
+                raise failure
 
     def _handle_connection(self, conn: socket.socket) -> None:
         try:
