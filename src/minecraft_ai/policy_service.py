@@ -293,18 +293,32 @@ class TemporalPolicyClient:
             self.close()
             return self._release(sequence, reason="policy-error")
 
-    def reset(self) -> MotorAction:
-        sequence = self._last_sequence + 1
+    def _retire_pending_action(self) -> None:
         if self._pending_request_id is not None:
             # The worker is single-threaded, so an in-flight inference cannot
             # be cancelled until it returns.  Keep only its transport id long
-            # enough to drain the matching stdout record; retire the option
-            # context immediately so status and every future action cease to
-            # belong to the terminated skill run.
+            # enough to drain the matching stdout record; retire its action
+            # context immediately so it cannot actuate after an option ends
+            # or an external release interrupts its physical assumptions.
             if not self._discard_pending_response:
                 self.metrics.invalidated_requests += 1
             self._discard_pending_response = True
         self._pending_request_context = None
+
+    def notify_inputs_released(self) -> None:
+        """Forget physical holds and stale actions while preserving the worker.
+
+        An outstanding record still has to be drained by transport identity.
+        Its predicted keys/camera must never reappear after the release. This
+        notification sends nothing to the worker and does not reset its memory,
+        the option identity, camera calibration or local sequence counter.
+        """
+        self._retire_pending_action()
+        self._clear_input_state(reason="external-input-release")
+
+    def reset(self) -> MotorAction:
+        sequence = self._last_sequence + 1
+        self._retire_pending_action()
         process = self._process
         if process is not None and process.poll() is None and process.stdin is not None:
             try:
@@ -955,13 +969,17 @@ class TemporalPolicyClient:
         return action
 
     def _release(self, sequence: int, *, reason: str) -> MotorAction:
-        if self._held_keys or self._held_buttons:
-            self._action_hold.invalidate(reason)
         action = MotorAction(
             sequence=sequence,
             keys_up=tuple(sorted(self._held_keys)),
             buttons_up=tuple(sorted(self._held_buttons)),
         )
+        self._clear_input_state(reason=reason)
+        return action
+
+    def _clear_input_state(self, *, reason: str) -> None:
+        if self._held_keys or self._held_buttons:
+            self._action_hold.invalidate(reason)
         self._held_keys.clear()
         self._held_buttons.clear()
         self._held_until_ns = 0
@@ -974,7 +992,6 @@ class TemporalPolicyClient:
             policy_id=self.policy_id,
             action_kind="release",
         )
-        return action
 
 
 @dataclass
@@ -1180,6 +1197,16 @@ class GroundedPolicyRouter:
             release = _merge_policy_release(release, policy.reset())
         self._last_sequence = sequence
         return release
+
+    def notify_inputs_released(self) -> None:
+        """Reconcile body experts without changing the option or observer."""
+        callbacks = [getattr(policy, "notify_inputs_released", None)
+                     for policy in self._body_policies()]
+        if any(not callable(callback) for callback in callbacks):
+            raise RuntimeError("body policy cannot reconcile an external input release")
+        for callback in callbacks:
+            assert callable(callback)  # Narrow the fully prevalidated callback list.
+            callback()
 
     def poll_perception(
         self,

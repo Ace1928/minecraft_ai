@@ -1330,6 +1330,7 @@ class AgentRuntime:
     _last_semantic_ns: int = field(default=0, init=False)
     _lease_thread: threading.Thread | None = field(default=None, init=False)
     _lease_fault: str | None = field(default=None, init=False)
+    _input_release_pending_ns: int | None = field(default=None, init=False)
     _pending_decision: concurrent.futures.Future[CognitionDecision] | None = field(
         default=None,
         init=False,
@@ -1519,10 +1520,7 @@ class AgentRuntime:
             # never take down the whole agent while it is already degraded on a
             # stale capture, so a command failure here is tolerated — the lease
             # revocation path and release_all remain the authoritative release.
-            try:
-                send_command("release-inputs", lease_id=self.lease_id)
-            except Exception:
-                pass
+            self._release_and_reconcile_inputs()
             self.telemetry.publish(self._telemetry_payload(state="capture-stalled"))
             if self.metrics.consecutive_stale_frames >= self.stale_frame_consecutive_limit:
                 raise RuntimeError(
@@ -1531,6 +1529,13 @@ class AgentRuntime:
                 )
             return
         self.metrics.consecutive_stale_frames = 0
+        if self._input_release_pending_ns is not None:
+            self._release_and_reconcile_inputs()
+            self.telemetry.publish(self._telemetry_payload(state="input-release-pending"))
+            # Even an acknowledged retry happened after this tick's capture.
+            # The next tick must observe the released body before selecting
+            # another action; never replay the pre-release image or command.
+            return
         self._flush_pending_skill_stats()
         self._flush_pending_learning_records()
         self._flush_pending_operator_status_updates()
@@ -1963,12 +1968,25 @@ class AgentRuntime:
 
     def _quiesce_headroom_inputs(self) -> bool:
         """Release every held input while preserving this runtime's live lease."""
+        return self._release_and_reconcile_inputs()
 
+    def _release_and_reconcile_inputs(self) -> bool:
+        """Require a physical acknowledgement before clearing controller holds."""
+        if self._input_release_pending_ns is None:
+            self._input_release_pending_ns = time.monotonic_ns()
         try:
             result = send_command("release-inputs", lease_id=self.lease_id)
         except Exception:
             return False
-        return result.get("released") is True and result.get("lease_active") is True
+        if (not isinstance(result, dict) or result.get("released") is not True
+                or result.get("lease_active") is not True):
+            return False
+        # The protocol has no exact physical release timestamp. The first
+        # request is a conservative action-duration cutoff, not sensor time.
+        # Keep pending on notification failure; no positive action may escape.
+        self.executor.notify_inputs_released(now_ns=self._input_release_pending_ns)
+        self._input_release_pending_ns = None
+        return True
 
     def _authoritative_world_camera_pitch_units(self) -> int | None:
         """Read the calibrated physical pitch accumulator from the supervisor."""
@@ -2560,6 +2578,8 @@ class AgentRuntime:
             self._gather_acquisition_continuation = None
             self._stop.set()
             return
+        if self._input_release_pending_ns is not None:
+            raise RuntimeError("input release acknowledgement is pending")
         # The supervisor lease has one global replay counter, while learned
         # policy bodies and synthetic controllers maintain independent local
         # counters. Runtime rebases a lagging route onto the wire counter, but
@@ -4486,6 +4506,7 @@ class AgentRuntime:
             "last_motor_ms": round(self.metrics.last_motor_ms, 3),
             "stale_frame_skips": self.metrics.stale_frame_skips,
             "consecutive_stale_frames": self.metrics.consecutive_stale_frames,
+            "input_release_pending": self._input_release_pending_ns is not None,
             "storage_contentions": self.metrics.storage_contentions,
             "storage_backlog": (
                 len(self._pending_skill_stats)

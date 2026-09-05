@@ -39,6 +39,8 @@ This is the immediate gameplay critical path, not a claim that whole phases belo
 - [x] Use one private X connection for ordered relative camera motion, key/button events and final synchronization. Chat settle delays now follow flushed events; unconditional releases never park or warp the pointer. Wire-level relative-motion and cleanup regressions pass; physical camera delivery remains the separate open gate above.
 - [x] Remove implicit private-pointer parking from WORLD motion/button admission: unknown/outside routing now rejects without an absolute warp. Explicit screenshot-bound GUI cursor placement remains separate. This removes an uncommanded motion source; it does not establish which input boundary caused the retained camera failure below.
 - [x] Revoke motor authority when lease binding, renewal, accepted-action refresh or input release fails; attempt backend capability clearing even after release failure without masking the original fault. Successful renewal preserves held input. Fault-injection tests prove logical containment, not physical release after an X-server failure.
+- [x] Reconcile acknowledged external input release with policy, mining and outcome bookkeeping without resetting worker memory or crafting phase. Unknown acknowledgements block positive actions; retired predictions are drained without replay, the next fresh desired hold emits a new press, and traversal waits for a post-release image. Pure regressions pass; live interruption-to-resumed-key delivery remains unqualified.
+- [x] Authenticated malformed actions revoke previous held input; fault/stop state and every owned shutdown cleanup progress even if physical release raises. The first error remains attributable. These are fault-injection results, not a claim that an unavailable input server physically released a key.
 - [ ] Complete the end-to-end input audit and retained-image qualification: camera response, held-key continuity after stale frames, geometry/capture consistency, authenticated malformed actions and supervisor cleanup faults. Do not promote accepted input into physical translation or flawless delivery.
 - [ ] Demonstrate a fresh accepted movement prediction after a retired worker response is drained by its owner, then verify actual translation rather than infer it from accepted keys.
 - [ ] Demonstrate autonomous soft-block clearance and escape from the observed dirt pocket.
@@ -60,6 +62,13 @@ individually observed. The accepted pitch counter is not physical pose truth.
 The preceding non-actuating attempt was rejected by a colour-drift gate;
 retained-image tracking later showed its geometry was effectively stationary.
 Neither failed attempt is discarded or counted as camera qualification.
+
+At the next natural AFK episode the existing launcher performed one
+AWAY-to-IN_WORLD UI action and started the updated runtime, retaining the
+same Minecraft/GPU processes and measured sensitivity profile. No manual
+movement or native-model switch was used for that recovery. Startup now
+describes homing as command completion with an unverified physical horizon;
+the operator dashboard no longer labels the counter as verified physical pose.
 
 Diagnostic handoff defects are also retained: releasing an older outer
 watchdog before replacement readiness caused a warm-up replacement, and a

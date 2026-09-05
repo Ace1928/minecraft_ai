@@ -174,6 +174,7 @@ class _TraversalState:
     progress_samples: int = 0
     static_samples: int = 0
     last_camera_ns: int = -1
+    release_luma_after_ns: int | None = None
 
 
 @dataclass
@@ -282,6 +283,41 @@ class TemporalOutcomeVerifier:
         self._kind = None
         self._started_ns = 0
         self._state = None
+        self._held_keys.clear()
+        self._held_buttons.clear()
+
+    def notify_inputs_released(self, *, now_ns: int | None = None) -> None:
+        """Reconcile an acknowledged all-input release without observing pixels.
+
+        The caller may supply the conservative local release-request time when
+        the physical acknowledgement has no exact timestamp. This closes input
+        intervals once; it does not establish an outcome or restart the option.
+        """
+        now = time.monotonic_ns() if now_ns is None else now_ns
+        if isinstance(now, bool) or not isinstance(now, int) or now < 0:
+            raise ValueError("release time must be a nonnegative integer")
+        state = self._state
+        if (
+            isinstance(state, _MiningState)
+            and state.attack_started_ns is not None
+            and state.attack_released_ns is None
+        ):
+            state.attack_released_ns = max(state.attack_started_ns, now)
+            state.candidate_hash = None
+            state.candidate_samples = 0
+            state.luma_candidate = None
+            state.luma_candidate_samples = 0
+            state.target_loss_samples = 0
+            state.target_loss_source = None
+        elif isinstance(state, _TraversalState) and self._held_keys & _MOVEMENT_KEYS:
+            elapsed_ns = max(0, now - state.last_observe_ns)
+            state.commanded_movement_ns += elapsed_ns
+            state.lifetime_commanded_movement_ns += elapsed_ns
+            state.commanded_since_luma_ns += elapsed_ns
+            state.last_observe_ns = max(state.last_observe_ns, now)
+            # Preserve observed evidence, but do not attribute pixels across an
+            # unobserved release gap to movement. A fresh image closes the gap.
+            state.release_luma_after_ns = now
         self._held_keys.clear()
         self._held_buttons.clear()
 
@@ -557,6 +593,11 @@ class TemporalOutcomeVerifier:
             if fresh_luma:
                 assert luma is not None
                 _rebaseline_traversal_luma(state, luma)
+                if (
+                    state.release_luma_after_ns is not None
+                    and luma[1] > state.release_luma_after_ns
+                ):
+                    state.release_luma_after_ns = None
             return self._pending(now_ns, "camera motion currently confounds translation")
 
         if not fresh_luma:
@@ -564,6 +605,13 @@ class TemporalOutcomeVerifier:
         assert luma is not None
         current_luma, observed_ns = luma
         state.last_luma_ns = observed_ns
+        if state.release_luma_after_ns is not None:
+            if observed_ns <= state.release_luma_after_ns:
+                return self._pending(now_ns, "waiting for traversal pixels after input release")
+            state.luma_grid = current_luma
+            state.commanded_since_luma_ns = 0
+            state.release_luma_after_ns = None
+            return self._pending(now_ns, "reestablishing traversal pixels after input release")
         if state.luma_grid is None:
             state.luma_grid = current_luma
             return self._pending(now_ns, "establishing traversal luma baseline")

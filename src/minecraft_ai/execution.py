@@ -162,6 +162,21 @@ class SkillExecutor:
     def run(self) -> SkillRun | None:
         return self._run
 
+    def notify_inputs_released(self, *, now_ns: int) -> None:
+        """Reconcile a confirmed external release without restarting the skill.
+
+        Crafting phases contain already sent atomic toggles/clicks. Preserve
+        them, their deadlines, the current instruction and the wire sequence.
+        Outcome bookkeeping receives only the release boundary, not stale
+        visual observations or an invented successful action.
+        """
+        notify = getattr(self.policy, "notify_inputs_released", None)
+        if not callable(notify):
+            raise RuntimeError("motor policy cannot reconcile an external input release")
+        notify()
+        self._mining_guard.notify_inputs_released(now_ns=now_ns)
+        self._outcome_verifier.notify_inputs_released(now_ns=now_ns)
+
     @property
     def instruction(self) -> str | None:
         if self._spec is None or self._run is None:

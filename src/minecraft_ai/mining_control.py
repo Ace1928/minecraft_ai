@@ -241,6 +241,13 @@ class MiningLeaseGuard:
         self._last_targeting_change_ns = 0
         return held
 
+    def notify_inputs_released(self, *, now_ns: int) -> None:
+        """End the physical attack lease; require fresh evidence to reacquire."""
+        if not (self._held_keys or self._held_buttons or self._lease or self._pending):
+            return
+        self.reset()
+        self._last_targeting_change_ns = now_ns
+
     def inspect(
         self,
         action: MotorAction,

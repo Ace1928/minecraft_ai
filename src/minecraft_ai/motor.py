@@ -37,6 +37,8 @@ class MotorPolicy(Protocol):
 
     def reset(self) -> MotorAction: ...
 
+    def notify_inputs_released(self) -> None: ...
+
 
 def _number(
     blackboard: PerceptionBlackboard,
@@ -191,12 +193,16 @@ class BootstrapMotorPolicy:
             keys_up=tuple(sorted(self._held_keys)),
             buttons_up=tuple(sorted(self._held_buttons)),
         )
+        self.notify_inputs_released()
+        self._last_sequence = sequence
+        return action
+
+    def notify_inputs_released(self) -> None:
+        """Reconcile an acknowledged physical release without restarting intent."""
         self._held_keys.clear()
         self._held_buttons.clear()
         self._last_mouse_dx = 0
         self._last_mouse_dy = 0
-        self._last_sequence = sequence
-        return action
 
 
 def _bounded_round(value: float, limit: int) -> int:
