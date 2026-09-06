@@ -394,6 +394,36 @@ def test_verified_death_scene_routes_to_learned_respawn_option() -> None:
     assert recovery.policy_instruction == "respawn"
 
 
+def test_verified_away_overlay_routes_to_dismiss_option() -> None:
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:away",
+            width=1280,
+            height=720,
+            facts=(
+                PerceptionFact(
+                    key="scene.away",
+                    value=True,
+                    confidence=0.995,
+                    observed_ns=now,
+                    source="safety:bedrock-hud-v1:not-training-label",
+                ),
+            ),
+        )
+    )
+
+    recovery = _observed_scene_recovery(build_bootstrap_skill_library(), board)
+
+    assert recovery is not None
+    assert recovery.skill_id == "dismiss_away_overlay"
+    assert recovery.policy_ref == "away_gui"
+    assert recovery.policy_instruction == "press any button"
+
+
 def test_learned_inventory_scene_routes_to_learned_inventory_toggle() -> None:
     now = time.monotonic_ns()
     board = PerceptionBlackboard()

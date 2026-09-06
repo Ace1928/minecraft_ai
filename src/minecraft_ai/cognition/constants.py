@@ -38,6 +38,7 @@ _URGENT_FACT_KEYS = frozenset(
         "environment.underwater",
         "player.critical_health",
         "scene.death",
+        "scene.away",
         "scene.playable",
     }
 )

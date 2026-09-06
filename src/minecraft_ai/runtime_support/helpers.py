@@ -76,6 +76,7 @@ _ATOMIC_SKILL_IDS = frozenset(
         "close_open_inventory",
         "collect_recent_drop",
         "respawn_after_death",
+        "dismiss_away_overlay",
     }
 )
 
@@ -986,33 +987,37 @@ def _observed_scene_recovery(
     if death is not None and bool(death.value):
         skill_id = "respawn_after_death"
     else:
-        inventory_overlay = blackboard.fact(
-            "scene.inventory_overlay",
-            min_confidence=0.9,
-        )
-        playable = blackboard.fact("scene.playable", min_confidence=0.9)
-        fast_inventory_interlock = bool(
-            inventory_overlay is not None
-            and inventory_overlay.value is True
-            and playable is not None
-            and playable.value is False
-            and inventory_overlay.observed_ns == playable.observed_ns
-            and inventory_overlay.source.startswith("safety:")
-            and playable.source.startswith("safety:")
-        )
-        if fast_inventory_interlock:
-            skill_id = "close_open_inventory"
+        away = blackboard.fact("scene.away", min_confidence=0.9)
+        if away is not None and bool(away.value):
+            skill_id = "dismiss_away_overlay"
         else:
-            mode = blackboard.fact("scene.mode", min_confidence=0.9)
-            if mode is None or mode.value != "inventory":
-                return None
-            if not _scene_claim_is_fresh(blackboard):
-                # The mode belief may be a stale VLM hint. Without a matching
-                # current frame hash we must not preempt world play over it;
-                # an inventory recovery would otherwise freeze the agent in
-                # close/open loops while the world sits fully playable.
-                return None
-            skill_id = "close_open_inventory"
+            inventory_overlay = blackboard.fact(
+                "scene.inventory_overlay",
+                min_confidence=0.9,
+            )
+            playable = blackboard.fact("scene.playable", min_confidence=0.9)
+            fast_inventory_interlock = bool(
+                inventory_overlay is not None
+                and inventory_overlay.value is True
+                and playable is not None
+                and playable.value is False
+                and inventory_overlay.observed_ns == playable.observed_ns
+                and inventory_overlay.source.startswith("safety:")
+                and playable.source.startswith("safety:")
+            )
+            if fast_inventory_interlock:
+                skill_id = "close_open_inventory"
+            else:
+                mode = blackboard.fact("scene.mode", min_confidence=0.9)
+                if mode is None or mode.value != "inventory":
+                    return None
+                if not _scene_claim_is_fresh(blackboard):
+                    # The mode belief may be a stale VLM hint. Without a matching
+                    # current frame hash we must not preempt world play over it;
+                    # an inventory recovery would otherwise freeze the agent in
+                    # close/open loops while the world sits fully playable.
+                    return None
+                skill_id = "close_open_inventory"
     if skill_id not in skills.specs:
         return None
     candidate = skills.get(skill_id)

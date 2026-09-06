@@ -32,6 +32,7 @@ from minecraft_ai.perception_service import (
     SemanticJob,
     SemanticObservation,
     bedrock_air_bubbles,
+    away_overlay_click_center,
     bedrock_away_overlay_present,
     bedrock_creative_hud_present,
     bedrock_death_screen_present,
@@ -44,6 +45,7 @@ from minecraft_ai.perception_service import (
     crosshair_block_dhash,
     death_respawn_control_center,
     frame_dhash,
+    live_control_arm_reason,
     perceptual_hash_distance,
 )
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
@@ -664,6 +666,7 @@ def test_complete_survival_hud_is_required_for_camera_calibration() -> None:
     assert facts["scene.mode"].value == "world"
     assert facts["scene.playable"].value is True
     assert facts["scene.playable"].source.startswith("safety:")
+    assert live_control_arm_reason(world_frame) == "hud"
     assert not bedrock_survival_hud_present(
         _frame(bytes((20, 20, 20, 255)) * width * height, width=width, height=height)
     )
@@ -723,8 +726,15 @@ def test_away_notice_blocks_playable_hud_without_authorizing_wake(
     assert facts["scene.playable"].value is False
     assert facts["scene.ui_overlay"].value is True
     assert facts["scene.ui_overlay"].source.endswith(":not-training-label")
-    assert "scene.mode" not in facts
+    assert facts["scene.away"].value is True
+    assert facts["scene.away"].source.startswith("safety:")
+    assert facts["scene.mode"].value == "away"
     assert "scene.inventory_overlay" not in facts
+    center = away_overlay_click_center(frame)
+    assert center is not None
+    assert 0.42 <= center[0] <= 0.69
+    assert 0.71 <= center[1] <= 0.85
+    assert live_control_arm_reason(frame) == "away"
 
 
 @pytest.mark.parametrize("missing", ["rim", "inset", "text-0", "text-1", "text-2", "panel"])
@@ -1036,6 +1046,7 @@ def test_bedrock_death_screen_detects_isolated_1080p_session() -> None:
     assert facts["scene.death"].value is True
     assert facts["scene.playable"].value is False
     assert facts["scene.mode"].value == "death"
+    assert live_control_arm_reason(frame) == "death"
 
 
 def test_active_vlm_prefers_strict_structured_vision_contract() -> None:

@@ -22,6 +22,7 @@ from minecraft_ai.outcome_verifier import (
 from minecraft_ai.perception import PerceptionBlackboard, PerceptionFact
 from minecraft_ai.perception_service import (
     BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+    away_overlay_click_center,
     death_respawn_control_center,
 )
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
@@ -74,6 +75,7 @@ _GATHER_ACQUISITIONS_REQUIRED = 3
 # stack layout to the executor.
 _GATHER_MAX_VERIFIED_HOTBAR_TOTAL = 16
 _DEATH_RESPAWN_CLICK_MS = 75
+_AWAY_DISMISS_CLICK_MS = 75
 _MINING_SUCCESS_OVERRIDABLE_FAILURES = frozenset(
     {
         SkillFailureCode.MINING_TARGET_CHANGED,
@@ -153,6 +155,7 @@ class SkillExecutor:
         self._inventory_open_sent = False
         self._inventory_close_sent = False
         self._death_respawn_sent = False
+        self._away_dismiss_sent = False
         self._collection_possession = _CollectionPossessionState()
         self._mining_hotbar_log_baseline: PerceptionFact | None = None
         self._mining_attack_started = False
@@ -295,6 +298,7 @@ class SkillExecutor:
         self._inventory_open_sent = False
         self._inventory_close_sent = False
         self._death_respawn_sent = False
+        self._away_dismiss_sent = False
         self._collection_possession = _CollectionPossessionState()
         if (
             spec.skill_id == "collect_recent_drop"
@@ -423,6 +427,8 @@ class SkillExecutor:
             return self._tick_inventory_close(sequence=sequence)
         if self._spec.skill_id == "respawn_after_death":
             return self._tick_death_respawn(sequence=sequence, capture=capture)
+        if self._spec.skill_id == "dismiss_away_overlay":
+            return self._tick_away_dismiss(sequence=sequence, capture=capture)
 
         if self._spec.skill_id == "collect_recent_drop":
             verification = self._observe_collection_possession(
@@ -914,6 +920,71 @@ class SkillExecutor:
                 cursor_y=cursor_y,
                 camera_semantics="cursor",
                 duration_ms=_DEATH_RESPAWN_CLICK_MS,
+            ),
+            motor_intent=intent,
+            policy_status=_policy_status_snapshot(self.policy),
+            action_origin=ActionOrigin.SYNTHETIC,
+        )
+
+    def _tick_away_dismiss(
+        self,
+        *,
+        sequence: int,
+        capture: CapturedFrame | None,
+    ) -> ExecutionTick:
+        """Click the away notice once and tap space, then wait for a playable HUD.
+
+        The overlay copy is "Press any button". The click is screenshot-bound
+        to the same panel the detector used; space is the matching key wake.
+        The success contract above still requires fresh ``scene.playable``.
+        """
+        if self._spec is None or self._run is None:
+            raise RuntimeError("no skill is running")
+        intent = MotorIntent(
+            skill_id=self._spec.skill_id,
+            mode=self._spec.policy_ref or self._spec.skill_id,
+            episode_id=self._run.run_id,
+            action_level=self._spec.action_level,
+            instruction=self._instruction_override or _policy_instruction(self._spec),
+            parameters=self.policy_parameters,
+        )
+        self._last_intent = intent
+        if self._away_dismiss_sent:
+            return ExecutionTick(
+                run=self._run,
+                action=None,
+                motor_intent=intent,
+                policy_status=_policy_status_snapshot(self.policy),
+                action_origin=ActionOrigin.SYNTHETIC,
+            )
+        point = away_overlay_click_center(capture) if capture is not None else None
+        self._away_dismiss_sent = True
+        if point is None:
+            return ExecutionTick(
+                run=self._run,
+                action=MotorAction(
+                    sequence=sequence,
+                    keys_down=("space",),
+                    keys_up=("space",),
+                    duration_ms=_AWAY_DISMISS_CLICK_MS,
+                ),
+                motor_intent=intent,
+                policy_status=_policy_status_snapshot(self.policy),
+                action_origin=ActionOrigin.SYNTHETIC,
+            )
+        cursor_x, cursor_y = point
+        return ExecutionTick(
+            run=self._run,
+            action=MotorAction(
+                sequence=sequence,
+                keys_down=("space",),
+                keys_up=("space",),
+                buttons_down=("left",),
+                buttons_up=("left",),
+                cursor_x=cursor_x,
+                cursor_y=cursor_y,
+                camera_semantics="cursor",
+                duration_ms=_AWAY_DISMISS_CLICK_MS,
             ),
             motor_intent=intent,
             policy_status=_policy_status_snapshot(self.policy),

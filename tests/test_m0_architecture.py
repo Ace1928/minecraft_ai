@@ -270,6 +270,12 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert respawn.policy_ref == "death_gui"
     assert respawn.action_level == ActionLevel.GUI
     assert respawn.policy_instruction == "respawn"
+    dismiss_away = skills.get("dismiss_away_overlay")
+    assert dismiss_away.preconditions[0].key == "scene.away"
+    assert dismiss_away.success_conditions[0].key == "scene.playable"
+    assert dismiss_away.policy_ref == "away_gui"
+    assert dismiss_away.action_level == ActionLevel.GUI
+    assert dismiss_away.policy_instruction == "press any button"
     assert retreat.preconditions[0].operator == "truthy"
     assert escape.preconditions[0].key == "environment.underwater"
     assert escape.success_conditions[0].operator == "falsy"

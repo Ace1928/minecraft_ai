@@ -368,6 +368,24 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             policy_instruction="respawn",
         ),
         SkillSpec(
+            skill_id="dismiss_away_overlay",
+            version=1,
+            name="Dismiss away overlay",
+            description=(
+                "Wake Bedrock's away-from-keyboard overlay with one screenshot-bound "
+                "click on the visible notice, then verify that a playable world frame "
+                "returns before resuming any project"
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            preconditions=(SkillCondition(key="scene.away", operator="truthy"),),
+            success_conditions=(SkillCondition(key="scene.playable", operator="truthy"),),
+            expected_effects=("away_dismissed", "playable_scene_restored"),
+            max_duration_ms=10_000,
+            action_level=ActionLevel.GUI,
+            policy_ref="away_gui",
+            policy_instruction="press any button",
+        ),
+        SkillSpec(
             skill_id="open_inventory",
             version=3,
             name="Open inventory",

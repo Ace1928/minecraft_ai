@@ -638,9 +638,10 @@ class BootstrapFastPerception:
             return ()
         now = time.monotonic_ns()
         inventory_overlay = bedrock_inventory_overlay_present(frame)
+        away_overlay = bedrock_away_overlay_present(frame)
         ui_overlay = (
             inventory_overlay
-            or bedrock_away_overlay_present(frame)
+            or away_overlay
             or _bedrock_top_ui_chrome_present(frame)
         )
         bootstrap_source = (
@@ -710,6 +711,13 @@ class BootstrapFastPerception:
                 ("scene.ui_overlay", True),
                 ("scene.mode", "death"),
                 ("scene.death", True),
+            )
+        elif away_overlay:
+            safety_values = (
+                ("scene.playable", False),
+                ("scene.ui_overlay", True),
+                ("scene.mode", "away"),
+                ("scene.away", True),
             )
         elif ui_overlay:
             # This is a deterministic, negative-only actuator interlock. It
@@ -1858,10 +1866,11 @@ def bedrock_away_overlay_present(frame: CapturedFrame) -> bool:
 
     Require its quiet gray inset, lighter bottom rim, and three separate
     light-on-gray text rows together. A hotbar, gray world, or one text row
-    alone is insufficient. These bounded pixel checks are negative-only:
-    they do not read the notice, identify a clickable point, or authorize a
-    wake action. Exact text recognition remains owned by the menu navigator.
-    Unknown UI scales/layouts are not certified by this detector.
+    alone is insufficient. These bounded pixel checks are a negative-only
+    scene interlock: they do not read the notice or emit an action. Click
+    geometry for the wake option is derived separately by
+    ``away_overlay_click_center``. Unknown UI scales/layouts are not
+    certified by this detector.
     """
     if (
         frame.width < 320 or frame.height < 180
@@ -1891,6 +1900,45 @@ def bedrock_away_overlay_present(frame: CapturedFrame) -> bool:
         if neutral(bounds, 75, 110) < 0.50 or not 0.08 <= neutral(bounds, 210, 255) <= 0.40:
             return False
     return True
+
+
+# Interior of the calibrated away panel, between the top inset and the
+# lighter bottom rim. The wake click uses this rectangle's center.
+_AWAY_PANEL_CLICK_BOUNDS: tuple[float, float, float, float] = (
+    0.42,
+    0.712,
+    0.69,
+    0.844,
+)
+
+
+def away_overlay_click_center(frame: CapturedFrame) -> tuple[float, float] | None:
+    """Return a screenshot-bound point on the away panel, if present.
+
+    The point is the interior of the same gray panel used by
+    ``bedrock_away_overlay_present``. It is not OCR and not a training label.
+    """
+    if not bedrock_away_overlay_present(frame):
+        return None
+    x0, y0, x1, y1 = _AWAY_PANEL_CLICK_BOUNDS
+    return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+
+
+def live_control_arm_reason(
+    frame: CapturedFrame,
+) -> Literal["hud", "death", "away"] | None:
+    """Classify whether a live capture may arm the isolated agent.
+
+    A complete in-world HUD, a detected death screen, and the away overlay
+    are recoverable start states. Unknown menus still refuse arming.
+    """
+    if bedrock_in_world_hud_present(frame):
+        return "hud"
+    if bedrock_death_screen_present(frame):
+        return "death"
+    if bedrock_away_overlay_present(frame):
+        return "away"
+    return None
 
 
 def _bedrock_hud_present(frame: CapturedFrame, *, require_hearts: bool) -> bool:

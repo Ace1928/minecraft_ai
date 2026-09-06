@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from PIL import Image, ImageDraw
+
 import pytest
 
 from minecraft_ai.action_levels import ActionLevel
@@ -316,6 +318,97 @@ def test_respawn_after_death_succeeds_when_world_is_playable() -> None:
     assert tick.run.outcome == SkillOutcome.SUCCEEDED
     assert tick.action is not None
     assert "left" not in tick.action.buttons_down
+    assert policy.intent is None
+
+
+def _away_frame() -> CapturedFrame:
+    width, height = 640, 360
+    image = Image.new("RGB", (width, height), (28, 50, 38))
+    draw = ImageDraw.Draw(image)
+
+    def box(
+        bounds: tuple[float, float, float, float],
+        color: tuple[int, int, int],
+    ) -> None:
+        left, top, right, bottom = bounds
+        draw.rectangle(
+            (
+                int(left * width),
+                int(top * height),
+                int(right * width) - 1,
+                int(bottom * height) - 1,
+            ),
+            fill=color,
+        )
+
+    box((0.28, 0.92, 0.72, 1.0), (140, 140, 140))
+    box((0.30, 0.87, 0.47, 0.90), (120, 20, 20))
+    box((0.288, 0.684, 0.712, 0.854), (139, 139, 139))
+    box((0.294, 0.692, 0.707, 0.843), (93, 93, 93))
+    for left, top, right, bottom in (
+        (0.43, 0.716, 0.68, 0.744),
+        (0.43, 0.755, 0.69, 0.783),
+        (0.43, 0.791, 0.56, 0.820),
+    ):
+        for x in range(int(left * width) + 1, int(right * width) - 3, 8):
+            draw.rectangle(
+                (x, int(top * height) + 1, x + 2, int(bottom * height) - 3),
+                fill=(255, 255, 255),
+            )
+    return CapturedFrame(
+        frame_id=1,
+        captured_ns=100,
+        width=width,
+        height=height,
+        bgra=image.convert("RGBA").tobytes("raw", "BGRA"),
+    )
+
+
+def test_dismiss_away_overlay_clicks_visible_notice_once_then_waits() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("dismiss_away_overlay")
+    board = _board(_fact("scene.away", True, confidence=0.995))
+    frame = _away_frame()
+    executor.start(spec, run_id="away", now_ns=100)
+
+    first = executor.tick(board, sequence=7, now_ns=200, capture=frame)
+    waiting = executor.tick(board, sequence=8, now_ns=300, capture=frame)
+
+    assert first.run.outcome == SkillOutcome.RUNNING
+    assert first.action is not None
+    assert first.action.buttons_down == ("left",)
+    assert first.action.buttons_up == ("left",)
+    assert first.action.keys_down == ("space",)
+    assert first.action.keys_up == ("space",)
+    assert first.action.camera_semantics == "cursor"
+    assert first.action.cursor_x is not None and first.action.cursor_y is not None
+    assert 0.42 <= first.action.cursor_x <= 0.69
+    assert 0.71 <= first.action.cursor_y <= 0.85
+    assert first.action.duration_ms == 75
+    assert first.action_origin == ActionOrigin.SYNTHETIC
+    assert waiting.run.outcome == SkillOutcome.RUNNING
+    assert waiting.action is None
+    assert policy.intent is None
+
+
+def test_dismiss_away_overlay_succeeds_when_world_is_playable() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("dismiss_away_overlay")
+    executor.start(spec, run_id="already-awake", now_ns=100)
+
+    tick = executor.tick(
+        _board(_fact("scene.playable", True, confidence=0.995)),
+        sequence=9,
+        now_ns=200,
+        capture=_away_frame(),
+    )
+
+    assert tick.run.outcome == SkillOutcome.SUCCEEDED
+    assert tick.action is not None
+    assert "left" not in tick.action.buttons_down
+    assert "space" not in tick.action.keys_down
     assert policy.intent is None
 
 

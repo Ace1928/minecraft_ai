@@ -54,10 +54,7 @@ from .eval import (
     load_evidence,
 )
 from .operator_server import serve_operator_dashboard
-from .perception_service import (
-    bedrock_death_screen_present,
-    bedrock_in_world_hud_present,
-)
+from .perception_service import live_control_arm_reason
 from .platforms import (
     IsolatedX11Capture,
     IsolationError,
@@ -559,8 +556,7 @@ def run(
     import time as _time
 
     launch_frame = None
-    hud_verified = False
-    death_verified = False
+    arm_reason: str | None = None
     last_capture_error: Exception | None = None
     for _attempt in range(12):
         capture = None
@@ -574,29 +570,31 @@ def run(
             )
             for _ in range(2):
                 launch_frame = capture.capture()
-                if bedrock_in_world_hud_present(launch_frame):
-                    hud_verified = True
+                arm_reason = live_control_arm_reason(launch_frame)
+                if arm_reason is not None:
                     break
-                if bedrock_death_screen_present(launch_frame):
-                    death_verified = True
-                    break
-        except Exception as exc:
-            last_capture_error = exc
+        except Exception as inner_exc:
+            last_capture_error = inner_exc
         finally:
             if capture is not None:
                 capture.close()
-        if hud_verified or death_verified:
+        if arm_reason is not None:
             break
         _time.sleep(2.0)
-    if launch_frame is None or not (hud_verified or death_verified):
+    if launch_frame is None or arm_reason is None:
         raise typer.BadParameter(
-            "Live control requires a complete in-world HUD or a detected death "
-            "screen before arming. "
+            "Live control requires a complete in-world HUD, a detected death "
+            "screen, or the away overlay before arming. "
             f"last capture error: {last_capture_error}"
         )
-    if death_verified:
+    if arm_reason == "death":
         print(
             "[yellow]Death screen verified; agent will click Respawn before world play[/yellow] "
+            f"capture={launch_frame.width}x{launch_frame.height}"
+        )
+    elif arm_reason == "away":
+        print(
+            "[yellow]Away overlay verified; agent will dismiss it before world play[/yellow] "
             f"capture={launch_frame.width}x{launch_frame.height}"
         )
     else:

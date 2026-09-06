@@ -373,6 +373,8 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
 
     if re.search(r"\b(?:respawn|come back to life)\b", normalized):
         add("respawn_after_death")
+    if re.search(r"\b(?:away|afk|jump back)\b", normalized):
+        add("dismiss_away_overlay")
     if re.search(r"\b(?:close|exit|leave) (?:the )?(?:inventory|menu)\b", normalized):
         add("close_open_inventory")
     elif re.search(
@@ -428,7 +430,12 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
     return tuple(requested)
 
 def _urgent_safety_required(blackboard: CognitionReadView) -> bool:
-    for key in ("danger.immediate", "environment.underwater", "scene.death"):
+    for key in (
+        "danger.immediate",
+        "environment.underwater",
+        "scene.death",
+        "scene.away",
+    ):
         fact = blackboard.fact(key, min_confidence=0.7)
         if fact is not None and bool(fact.value):
             return True

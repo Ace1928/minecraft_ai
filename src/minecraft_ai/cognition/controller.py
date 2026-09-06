@@ -592,6 +592,7 @@ class HighLevelController:
         query_tokens = planning_tokens(query_text)
         requested_skill_ids = set(_operator_requested_skill_ids(query_text))
         safety_skills = {
+            "dismiss_away_overlay",
             "escape_submersion",
             "respawn_after_death",
             "retreat_from_danger",
