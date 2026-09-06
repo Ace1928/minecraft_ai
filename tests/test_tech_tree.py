@@ -38,3 +38,24 @@ def test_tech_tree_progression_by_inventory() -> None:
     stone_m = tracker.next_priority_milestone()
     assert stone_m is not None
     assert stone_m.milestone_id == "mine_cobblestone"
+
+
+def test_keepalive_skill_follows_next_open_milestone() -> None:
+    from minecraft_ai.tech_tree import keepalive_skill_for_inventory
+
+    available = {
+        "gather_nearby_wood",
+        "craft_wood_planks",
+        "craft_crafting_table",
+        "mine_visible_block",
+        "explore_forward",
+    }
+    assert (
+        keepalive_skill_for_inventory({}, available_skill_ids=available)
+        == "gather_nearby_wood"
+    )
+    assert (
+        keepalive_skill_for_inventory({"oak_log": 4}, available_skill_ids=available)
+        == "craft_wood_planks"
+    )
+    assert keepalive_skill_for_inventory({}, available_skill_ids={"explore_forward"}) is None

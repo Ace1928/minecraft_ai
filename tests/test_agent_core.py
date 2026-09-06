@@ -3110,6 +3110,19 @@ def test_obstacle_recovery_timeout_requests_cognition_but_keeps_keepalive() -> N
     assert keepalive.skill_id == "explore_forward"
 
 
+def test_stall_keepalive_prefers_next_tech_tree_skill() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime._traversal_escalation_pending = True
+    runtime._headroom_recovery = None
+    runtime.blackboard = PerceptionBlackboard()
+
+    skill = runtime._explore_keep_alive()
+
+    assert skill is not None
+    assert skill.skill_id == "gather_nearby_wood"
+
+
 def test_active_headroom_recovery_still_blocks_keepalive() -> None:
     runtime = object.__new__(AgentRuntime)
     runtime.skills = build_bootstrap_skill_library()

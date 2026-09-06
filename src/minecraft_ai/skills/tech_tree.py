@@ -241,3 +241,32 @@ class TechTreeTracker:
             return None
         ready.sort(key=lambda m: m.priority, reverse=True)
         return ready[0]
+
+
+_MILESTONE_KEEPALIVE_SKILLS: dict[str, str] = {
+    "gather_logs": "gather_nearby_wood",
+    "craft_planks": "craft_wood_planks",
+    "craft_crafting_table": "craft_crafting_table",
+    "mine_cobblestone": "mine_visible_block",
+}
+
+
+def keepalive_skill_for_inventory(
+    inventory: dict[str, int],
+    *,
+    available_skill_ids: set[str] | frozenset[str],
+) -> str | None:
+    """Return the next tech-tree skill the body may try while exploring.
+
+    This is a closed-loop hint from observed inventory counts, not a world
+    oracle and not a cognition plan. Unknown or unstartable skills stay unused.
+    """
+    tracker = TechTreeTracker()
+    tracker.update_with_inventory(inventory)
+    milestone = tracker.next_priority_milestone()
+    if milestone is None:
+        return None
+    skill_id = _MILESTONE_KEEPALIVE_SKILLS.get(milestone.milestone_id, milestone.skill_hint)
+    if skill_id not in available_skill_ids:
+        return None
+    return skill_id

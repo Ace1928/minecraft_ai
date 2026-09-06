@@ -57,6 +57,7 @@ from .perception_service import (
 )
 from .planning import Goal
 from .roles import RoleProfile
+from .tech_tree import keepalive_skill_for_inventory
 from .safety import MotorAction
 from .skills import (
     SkillLibrary,
@@ -1445,6 +1446,26 @@ class AgentRuntime:
         """
         if getattr(self, "_headroom_recovery", None) is not None:
             return None
+        blackboard = getattr(self, "blackboard", None)
+        if getattr(self, "_traversal_escalation_pending", False) and blackboard is not None:
+            inventory: dict[str, int] = {}
+            logs = blackboard.fact("inventory.hotbar.logs", min_confidence=0.9)
+            if (
+                logs is not None
+                and isinstance(logs.value, int)
+                and not isinstance(logs.value, bool)
+                and logs.value >= 0
+            ):
+                inventory["oak_log"] = logs.value
+                inventory["minecraft:oak_log"] = logs.value
+            skill_id = keepalive_skill_for_inventory(
+                inventory,
+                available_skill_ids=set(self.skills.specs),
+            )
+            if skill_id is not None:
+                candidate = self.skills.get(skill_id)
+                if initiation_satisfied(candidate, blackboard):
+                    return candidate
         candidates: list[tuple[int, SkillSpec, SkillStats | None]] = []
         # After an obstacle stall, prefer looking/strafing around instead of
         # walking into the same wall again. Escalation still requests a new

@@ -1082,7 +1082,7 @@ def test_hard_or_unknown_answer_gives_cognition_a_turn_after_one_query(kind: str
     for _ in range(3):
         keepalive = runtime._explore_keep_alive()
         assert keepalive is not None
-        assert keepalive.skill_id == "explore_forward"
+        assert keepalive.skill_id == "gather_nearby_wood"
         runtime._advance_headroom_recovery()
     assert runtime._execution_revision == revision
 
