@@ -387,6 +387,41 @@ def test_headroom_reorientation_targets_absolute_calibrated_pitch() -> None:
     assert _headroom_reorient_mouse_dy(128) == 0
 
 
+def test_keepalive_horizon_reorient_looks_toward_calibrated_pitch() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime._headroom_recovery = None
+    runtime._sequence = 0
+    sent: list[MotorAction] = []
+    restored: list[int] = []
+
+    class _Policy:
+        def restore_world_camera_state(self, *, estimated_pitch_units: int) -> None:
+            restored.append(estimated_pitch_units)
+
+    runtime.executor = type("Executor", (), {"policy": _Policy()})()
+    runtime._authoritative_world_camera_pitch_units = lambda: 348  # type: ignore[method-assign]
+    runtime._send_motor = lambda action, **_kwargs: sent.append(action)  # type: ignore[method-assign]
+
+    assert runtime._keepalive_horizon_reorient() is True
+    assert len(sent) == 1
+    assert sent[0].mouse_dy == -96
+    assert sent[0].camera_semantics == "world"
+    assert restored == [252]
+
+
+def test_keepalive_horizon_reorient_skips_near_horizon_or_unknown_pitch() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime._headroom_recovery = None
+    sent: list[MotorAction] = []
+    runtime._send_motor = lambda action, **_kwargs: sent.append(action)  # type: ignore[method-assign]
+
+    runtime._authoritative_world_camera_pitch_units = lambda: 96  # type: ignore[method-assign]
+    assert runtime._keepalive_horizon_reorient() is False
+    runtime._authoritative_world_camera_pitch_units = lambda: None  # type: ignore[method-assign]
+    assert runtime._keepalive_horizon_reorient() is False
+    assert sent == []
+
+
 def test_headroom_authoritative_pitch_requires_calibrated_supervisor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

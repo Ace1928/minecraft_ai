@@ -4428,6 +4428,7 @@ def test_expired_perception_probe_settle_keeps_exploration_keepalive(
     ):
         monkeypatch.setattr(runtime, method, lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runtime, "_telemetry_payload", lambda **_kwargs: {})
+    monkeypatch.setattr(runtime, "_authoritative_world_camera_pitch_units", lambda: 96)
     monkeypatch.setattr(
         runtime,
         "_explore_keep_alive",
@@ -4437,6 +4438,64 @@ def test_expired_perception_probe_settle_keeps_exploration_keepalive(
     runtime.tick()
 
     assert keepalive_calls == ["called"]
+    assert runtime.executor.run is None
+
+
+def test_idle_tick_reorients_extreme_pitch_before_keepalive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.metrics = RuntimeMetrics()
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime._cognition_perception_probe = None
+    runtime._headroom_recovery = None
+    runtime._input_release_pending_ns = None
+    runtime._sequence = 0
+    captured_ns = time.monotonic_ns()
+    frame = FrameState(
+        frame_id=5,
+        captured_ns=captured_ns,
+        instance_id="bedrock:test",
+        width=1280,
+        height=720,
+    )
+    runtime.perception = SimpleNamespace(  # type: ignore[assignment]
+        capture_once=lambda: frame,
+        stale=lambda: False,
+    )
+    runtime.telemetry = SimpleNamespace(publish=lambda _payload: None)  # type: ignore[assignment]
+    sent: list[MotorAction] = []
+    for method in (
+        "_merge_operator_target",
+        "_merge_policy_perception",
+        "_flush_pending_skill_stats",
+        "_flush_pending_learning_records",
+        "_flush_pending_operator_status_updates",
+        "_publish_player_chat_facts",
+        "_planks_retry_requires_wood",
+        "_consume_cognition",
+        "_reconcile_cognition_perception_probe",
+        "_start_cognition_if_due",
+        "_request_semantics_if_due",
+        "_route_observed_scene_recovery",
+        "_advance_headroom_recovery",
+    ):
+        monkeypatch.setattr(runtime, method, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_telemetry_payload", lambda **_kwargs: {})
+    monkeypatch.setattr(runtime, "_authoritative_world_camera_pitch_units", lambda: 348)
+    monkeypatch.setattr(runtime, "_send_motor", lambda action, **_kwargs: sent.append(action))
+    monkeypatch.setattr(
+        runtime,
+        "_explore_keep_alive",
+        lambda: pytest.fail("extreme pitch must reorient before keepalive locomotion"),
+    )
+
+    runtime.tick()
+
+    assert len(sent) == 1
+    assert sent[0].mouse_dy == -96
+    assert sent[0].camera_semantics == "world"
     assert runtime.executor.run is None
 
 
@@ -4522,6 +4581,49 @@ def test_cognition_context_skips_repeatedly_failed_tech_tree_skill() -> None:
         consecutive_failures=2,
     )
     runtime._recent_skill_runs = deque(maxlen=8)
+    runtime._plan_steps = ()
+    runtime._plan_goal_id = None
+    runtime._plan_index = 0
+    runtime._plan_started_ns = 0
+    runtime._planks_retry_requires_wood = lambda **_kwargs: False  # type: ignore[method-assign]
+
+    context = runtime._cognition_context()
+
+    assert all(goal.source != GoalSource.PROGRESSION for goal in context.goals)
+
+
+def test_cognition_context_skips_tech_tree_skill_after_split_context_failures() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.role = get_role("generalist")
+    runtime.custom_goals = ()
+    runtime.memories = SimpleNamespace(retrieve=lambda limit=20: ())
+    runtime.social = SimpleNamespace(active_promises=lambda: ())
+    runtime.state_db = None
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.blackboard = PerceptionBlackboard()
+    runtime._recent_skill_runs = deque(
+        (
+            SkillRun(
+                run_id="gather-a",
+                skill_id="gather_nearby_wood",
+                context_key="operator:aaa",
+                started_ns=1,
+                ended_ns=2,
+                outcome=SkillOutcome.FAILED,
+                failure_code=SkillFailureCode.LOCOMOTION_STALLED,
+            ),
+            SkillRun(
+                run_id="gather-b",
+                skill_id="gather_nearby_wood",
+                context_key="operator:bbb",
+                started_ns=3,
+                ended_ns=4,
+                outcome=SkillOutcome.FAILED,
+                failure_code=SkillFailureCode.LOCOMOTION_STALLED,
+            ),
+        ),
+        maxlen=8,
+    )
     runtime._plan_steps = ()
     runtime._plan_goal_id = None
     runtime._plan_index = 0

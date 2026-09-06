@@ -576,6 +576,12 @@ class AgentRuntime:
                 # overlay and the player looks frozen.
                 self._flush_pending_skill_stats()
                 return
+            # Extreme leftover pitch from mining/gather makes learned motion
+            # stare at feet or sky. One bounded look toward the horizon, then
+            # the disposable walk can start on a later idle tick.
+            if self._keepalive_horizon_reorient():
+                self._flush_pending_skill_stats()
+                return
             # Never idle the player while cognition is in flight: keep a
             # precondition-free exploration option running so motor keeps
             # emitting movement. Cognition switches skills when it returns.
@@ -1434,6 +1440,34 @@ class AgentRuntime:
             )
         if getattr(self, "_headroom_recovery", None) is recovery:
             self._headroom_recovery = None
+
+    def _keepalive_horizon_reorient(self) -> bool:
+        """Look toward the calibrated near-ground pose before disposable walking.
+
+        Headroom recovery already owns this camera step during a stall
+        transaction. Idle keepalive must not inherit an extreme leftover pitch
+        and walk into the same wall. One bounded mouse_dy per idle tick; a
+        missing supervisor pitch must not freeze the body.
+        """
+        if getattr(self, "_headroom_recovery", None) is not None:
+            return False
+        current_pitch = self._authoritative_world_camera_pitch_units()
+        if current_pitch is None:
+            return False
+        mouse_dy = _headroom_reorient_mouse_dy(current_pitch)
+        if not mouse_dy:
+            return False
+        self._send_motor(
+            MotorAction(
+                sequence=getattr(self, "_sequence", 0),
+                mouse_dy=mouse_dy,
+                camera_semantics="world",
+            )
+        )
+        executor = getattr(self, "executor", None)
+        policy = None if executor is None else getattr(executor, "policy", None)
+        _restore_policy_world_camera(policy, pitch_units=current_pitch + mouse_dy)
+        return True
 
     def _explore_keep_alive(self) -> SkillSpec | None:
         """Pick a precondition-free option to keep motor busy while cognition decides.
@@ -3702,18 +3736,33 @@ class AgentRuntime:
             return {}
         return {"oak_log": logs.value, "minecraft:oak_log": logs.value}
 
-    def _recently_failed_skill_ids(self, context_key: str) -> set[str]:
+    def _recently_failed_skill_ids(self, context_key: str | None = None) -> set[str]:
+        """Skills that recently failed enough to skip as the next plan hint.
+
+        Cognition starts operator/plan skills under changing context keys, so
+        counting only ``default`` would keep suggesting gather after it just
+        stalled. Union consecutive-failure stats with recent terminal runs.
+        """
+        failed: set[str] = set()
         skills = getattr(self, "skills", None)
-        if skills is None:
-            return set()
-        return {
-            skill_id
-            for skill_id in skills.specs
-            if (
-                stats := skills.stats.get((skill_id, context_key))
-            ) is not None
-            and stats.consecutive_failures >= 2
-        }
+        if skills is not None:
+            for (skill_id, key), stats in skills.stats.items():
+                if context_key is not None and key != context_key:
+                    continue
+                if stats.consecutive_failures >= 2:
+                    failed.add(skill_id)
+        recent = getattr(self, "_recent_skill_runs", ())
+        counts: dict[str, int] = {}
+        for run in recent:
+            if run.outcome not in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
+                continue
+            if context_key is not None and run.context_key != context_key:
+                continue
+            counts[run.skill_id] = counts.get(run.skill_id, 0) + 1
+        for skill_id, n in counts.items():
+            if n >= 2:
+                failed.add(skill_id)
+        return failed
 
     def _progression_goal(self) -> Goal | None:
         """Surface the next inventory-backed milestone as a planning goal.
@@ -3728,7 +3777,7 @@ class AgentRuntime:
         skill_id = keepalive_skill_for_inventory(
             self._observed_hotbar_inventory(),
             available_skill_ids=set(skills.specs),
-            recently_failed_skill_ids=self._recently_failed_skill_ids("default"),
+            recently_failed_skill_ids=self._recently_failed_skill_ids(),
         )
         if skill_id is None:
             return None
