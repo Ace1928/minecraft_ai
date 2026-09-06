@@ -33,7 +33,7 @@ from minecraft_ai.perception import (
     ScreenRegion,
     Track,
 )
-from minecraft_ai.planning import Goal, GoalScorer
+from minecraft_ai.planning import Goal, GoalScorer, GoalSource
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.perception_service import (
@@ -3110,7 +3110,7 @@ def test_obstacle_recovery_timeout_requests_cognition_but_keeps_keepalive() -> N
     assert keepalive.skill_id == "explore_forward"
 
 
-def test_stall_keepalive_prefers_next_tech_tree_skill() -> None:
+def test_stall_keepalive_stays_on_locomotion_not_tech_tree() -> None:
     runtime = object.__new__(AgentRuntime)
     runtime.skills = build_bootstrap_skill_library()
     runtime._traversal_escalation_pending = True
@@ -3120,7 +3120,8 @@ def test_stall_keepalive_prefers_next_tech_tree_skill() -> None:
     skill = runtime._explore_keep_alive()
 
     assert skill is not None
-    assert skill.skill_id == "gather_nearby_wood"
+    assert skill.skill_id == "explore_forward"
+    assert skill.skill_id != "gather_nearby_wood"
 
 
 def test_stall_keepalive_skips_repeatedly_failed_tech_tree_skill() -> None:
@@ -4337,7 +4338,11 @@ def test_pending_cognition_perception_probe_suppresses_exploration_keepalive(
     runtime.metrics = RuntimeMetrics()
     runtime.skills = build_bootstrap_skill_library()
     runtime.executor = SkillExecutor(BootstrapMotorPolicy())
-    runtime._cognition_perception_probe = SimpleNamespace(query_id="q-stable")
+    runtime._cognition_perception_probe = SimpleNamespace(
+        query_id="q-stable",
+        settle_deadline_ns=time.monotonic_ns() + 2_000_000_000,
+    )
+    runtime._input_release_pending_ns = None
     captured_ns = time.monotonic_ns()
     frame = FrameState(
         frame_id=4,
@@ -4378,6 +4383,154 @@ def test_pending_cognition_perception_probe_suppresses_exploration_keepalive(
 
     assert runtime.executor.run is None
     assert runtime.metrics.motor_actions == 0
+
+
+def test_expired_perception_probe_settle_keeps_exploration_keepalive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.metrics = RuntimeMetrics()
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+    runtime._cognition_perception_probe = SimpleNamespace(
+        query_id="q-stable",
+        settle_deadline_ns=time.monotonic_ns() - 1,
+    )
+    runtime._input_release_pending_ns = None
+    captured_ns = time.monotonic_ns()
+    frame = FrameState(
+        frame_id=4,
+        captured_ns=captured_ns,
+        instance_id="bedrock:test",
+        width=1280,
+        height=720,
+    )
+    runtime.perception = SimpleNamespace(  # type: ignore[assignment]
+        capture_once=lambda: frame,
+        stale=lambda: False,
+    )
+    runtime.telemetry = SimpleNamespace(publish=lambda _payload: None)  # type: ignore[assignment]
+    keepalive_calls: list[str] = []
+    for method in (
+        "_merge_operator_target",
+        "_merge_policy_perception",
+        "_flush_pending_skill_stats",
+        "_flush_pending_learning_records",
+        "_flush_pending_operator_status_updates",
+        "_publish_player_chat_facts",
+        "_planks_retry_requires_wood",
+        "_consume_cognition",
+        "_reconcile_cognition_perception_probe",
+        "_start_cognition_if_due",
+        "_request_semantics_if_due",
+        "_route_observed_scene_recovery",
+        "_advance_headroom_recovery",
+    ):
+        monkeypatch.setattr(runtime, method, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_telemetry_payload", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        runtime,
+        "_explore_keep_alive",
+        lambda: keepalive_calls.append("called") or None,
+    )
+
+    runtime.tick()
+
+    assert keepalive_calls == ["called"]
+    assert runtime.executor.run is None
+
+
+def test_controller_starvation_does_not_exile_keepalive_locomotion() -> None:
+    library = build_bootstrap_skill_library()
+    stats = library.record(
+        SkillRun(
+            run_id="starve-1",
+            skill_id="traverse_level_ground",
+            context_key="explore-keepalive",
+            started_ns=1,
+            ended_ns=2,
+            outcome=SkillOutcome.FAILED,
+            failure_code=SkillFailureCode.CONTROLLER_STARVATION,
+            failure_reason="controller emitted no sustained locomotion",
+        )
+    )
+    stats = library.record(
+        SkillRun(
+            run_id="starve-2",
+            skill_id="traverse_level_ground",
+            context_key="explore-keepalive",
+            started_ns=3,
+            ended_ns=4,
+            outcome=SkillOutcome.FAILED,
+            failure_code=SkillFailureCode.CONTROLLER_STARVATION,
+            failure_reason="controller emitted no sustained locomotion",
+        )
+    )
+
+    assert stats.failures == 2
+    assert stats.consecutive_failures == 0
+    library.stats[("explore_forward", "explore-keepalive")] = SkillStats(
+        failures=1,
+        consecutive_failures=1,
+    )
+
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = library
+    runtime._traversal_escalation_pending = False
+    runtime._headroom_recovery = None
+
+    skill = runtime._explore_keep_alive()
+
+    assert skill is not None
+    assert skill.skill_id == "traverse_level_ground"
+
+
+def test_cognition_context_surfaces_next_tech_tree_goal() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.role = get_role("generalist")
+    runtime.custom_goals = ()
+    runtime.memories = SimpleNamespace(retrieve=lambda limit=20: ())
+    runtime.social = SimpleNamespace(active_promises=lambda: ())
+    runtime.state_db = None
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.blackboard = PerceptionBlackboard()
+    runtime._recent_skill_runs = deque(maxlen=8)
+    runtime._plan_steps = ()
+    runtime._plan_goal_id = None
+    runtime._plan_index = 0
+    runtime._plan_started_ns = 0
+    runtime._planks_retry_requires_wood = lambda **_kwargs: False  # type: ignore[method-assign]
+
+    context = runtime._cognition_context()
+
+    progression = [goal for goal in context.goals if goal.source == GoalSource.PROGRESSION]
+    assert len(progression) == 1
+    assert progression[0].goal_id == "progression:gather_nearby_wood"
+
+
+def test_cognition_context_skips_repeatedly_failed_tech_tree_skill() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.role = get_role("generalist")
+    runtime.custom_goals = ()
+    runtime.memories = SimpleNamespace(retrieve=lambda limit=20: ())
+    runtime.social = SimpleNamespace(active_promises=lambda: ())
+    runtime.state_db = None
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.blackboard = PerceptionBlackboard()
+    runtime.skills.stats[("gather_nearby_wood", "default")] = SkillStats(
+        failures=2,
+        consecutive_failures=2,
+    )
+    runtime._recent_skill_runs = deque(maxlen=8)
+    runtime._plan_steps = ()
+    runtime._plan_goal_id = None
+    runtime._plan_index = 0
+    runtime._plan_started_ns = 0
+    runtime._planks_retry_requires_wood = lambda **_kwargs: False  # type: ignore[method-assign]
+
+    context = runtime._cognition_context()
+
+    assert all(goal.source != GoalSource.PROGRESSION for goal in context.goals)
 
 
 def test_invalid_perception_question_stays_fail_closed_and_does_not_open_query() -> None:

@@ -162,7 +162,11 @@ class SkillLibrary:
             stats.consecutive_failures = 0
         elif run.outcome == SkillOutcome.FAILED:
             stats.failures += 1
-            stats.consecutive_failures += 1
+            # Startup/warmup starvation is not evidence the option is the
+            # wrong work. Counting it as a competence failure exiles VPT
+            # locomotion keepalive after two cold starts.
+            if run.failure_code != SkillFailureCode.CONTROLLER_STARVATION:
+                stats.consecutive_failures += 1
         elif run.outcome == SkillOutcome.TIMED_OUT:
             stats.timeouts += 1
             stats.consecutive_failures += 1

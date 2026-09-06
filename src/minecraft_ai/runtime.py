@@ -55,7 +55,7 @@ from .perception_service import (
     frame_dhash,
     perceptual_hash_distance,
 )
-from .planning import Goal
+from .planning import Goal, GoalSource
 from .roles import RoleProfile
 from .tech_tree import keepalive_skill_for_inventory
 from .safety import MotorAction
@@ -566,9 +566,10 @@ class AgentRuntime:
             settle_deadline_ns = (
                 getattr(probe, "settle_deadline_ns", None) if probe is not None else None
             )
-            if probe is not None and (
-                not isinstance(settle_deadline_ns, int)
-                or time.monotonic_ns() < settle_deadline_ns
+            if (
+                probe is not None
+                and isinstance(settle_deadline_ns, int)
+                and time.monotonic_ns() < settle_deadline_ns
             ):
                 # Hold still only through the short settle window. A long
                 # grounding wait with no motor is how Bedrock shows the away
@@ -1446,38 +1447,6 @@ class AgentRuntime:
         """
         if getattr(self, "_headroom_recovery", None) is not None:
             return None
-        blackboard = getattr(self, "blackboard", None)
-        if getattr(self, "_traversal_escalation_pending", False) and blackboard is not None:
-            inventory: dict[str, int] = {}
-            logs = blackboard.fact("inventory.hotbar.logs", min_confidence=0.9)
-            if (
-                logs is not None
-                and isinstance(logs.value, int)
-                and not isinstance(logs.value, bool)
-                and logs.value >= 0
-            ):
-                inventory["oak_log"] = logs.value
-                inventory["minecraft:oak_log"] = logs.value
-            recently_failed = {
-                skill_id
-                for skill_id in self.skills.specs
-                if (
-                    stats := self.skills.stats.get(
-                        (skill_id, _EXPLORE_KEEPALIVE_CONTEXT)
-                    )
-                )
-                is not None
-                and stats.consecutive_failures >= 2
-            }
-            skill_id = keepalive_skill_for_inventory(
-                inventory,
-                available_skill_ids=set(self.skills.specs),
-                recently_failed_skill_ids=recently_failed,
-            )
-            if skill_id is not None:
-                candidate = self.skills.get(skill_id)
-                if initiation_satisfied(candidate, blackboard):
-                    return candidate
         candidates: list[tuple[int, SkillSpec, SkillStats | None]] = []
         # After an obstacle stall, prefer looking/strafing around instead of
         # walking into the same wall again. Escalation still requests a new
@@ -3719,11 +3688,67 @@ class AgentRuntime:
         )
         return any(message.message_id not in pending_delivery for message in queued)
 
+    def _observed_hotbar_inventory(self) -> dict[str, int]:
+        blackboard = getattr(self, "blackboard", None)
+        if blackboard is None:
+            return {}
+        logs = blackboard.fact("inventory.hotbar.logs", min_confidence=0.9)
+        if (
+            logs is None
+            or not isinstance(logs.value, int)
+            or isinstance(logs.value, bool)
+            or logs.value < 0
+        ):
+            return {}
+        return {"oak_log": logs.value, "minecraft:oak_log": logs.value}
+
+    def _recently_failed_skill_ids(self, context_key: str) -> set[str]:
+        skills = getattr(self, "skills", None)
+        if skills is None:
+            return set()
+        return {
+            skill_id
+            for skill_id in skills.specs
+            if (
+                stats := skills.stats.get((skill_id, context_key))
+            ) is not None
+            and stats.consecutive_failures >= 2
+        }
+
+    def _progression_goal(self) -> Goal | None:
+        """Surface the next inventory-backed milestone as a planning goal.
+
+        Keepalive stays locomotion-only. This hint is for cognition so a stall
+        can still change the long-horizon plan without starting a 90s gather
+        under the disposable explore context.
+        """
+        skills = getattr(self, "skills", None)
+        if skills is None:
+            return None
+        skill_id = keepalive_skill_for_inventory(
+            self._observed_hotbar_inventory(),
+            available_skill_ids=set(skills.specs),
+            recently_failed_skill_ids=self._recently_failed_skill_ids("default"),
+        )
+        if skill_id is None:
+            return None
+        spec = skills.get(skill_id)
+        return Goal(
+            goal_id=f"progression:{skill_id}",
+            description=spec.description[:120],
+            source=GoalSource.PROGRESSION,
+            priority=0.8,
+            domain="progression",
+        )
+
     def _cognition_context(
         self, operator_context: OperatorContextSnapshot | None = None,
         *, requires_wood: bool | None = None,
     ) -> CognitionContext:
         goals = tuple((*role_standing_goals(self.role), *self.custom_goals))
+        progression = self._progression_goal()
+        if progression is not None:
+            goals = (progression, *goals)
         memories = tuple(self.memories.retrieve(limit=20))
         operator_messages: tuple[OperatorMessage, ...] = ()
         if operator_context is not None:

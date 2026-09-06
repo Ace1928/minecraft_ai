@@ -257,11 +257,12 @@ def keepalive_skill_for_inventory(
     available_skill_ids: set[str] | frozenset[str],
     recently_failed_skill_ids: set[str] | frozenset[str] = frozenset(),
 ) -> str | None:
-    """Return the next tech-tree skill the body may try while exploring.
+    """Return the next inventory-backed milestone skill for planning.
 
     This is a closed-loop hint from observed inventory counts, not a world
-    oracle and not a cognition plan. Unknown, unstartable, or just-failed
-    skills stay unused so a stalled gather cannot loop forever.
+    oracle and not a motor keepalive. Keepalive must stay on locomotion;
+    unknown, unstartable, or just-failed skills stay unused so a stalled
+    gather cannot loop as the next plan.
     """
     tracker = TechTreeTracker()
     tracker.update_with_inventory(inventory)
