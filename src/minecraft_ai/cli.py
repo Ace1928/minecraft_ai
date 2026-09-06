@@ -584,7 +584,7 @@ def run(
     if launch_frame is None or arm_reason is None:
         raise typer.BadParameter(
             "Live control requires a complete in-world HUD, a detected death "
-            "screen, or the away overlay before arming. "
+            "screen, the away overlay, or an open inventory before arming. "
             f"last capture error: {last_capture_error}"
         )
     if arm_reason == "death":
@@ -595,6 +595,11 @@ def run(
     elif arm_reason == "away":
         print(
             "[yellow]Away overlay verified; agent will dismiss it before world play[/yellow] "
+            f"capture={launch_frame.width}x{launch_frame.height}"
+        )
+    elif arm_reason == "inventory":
+        print(
+            "[yellow]Inventory overlay verified; agent will close it before world play[/yellow] "
             f"capture={launch_frame.width}x{launch_frame.height}"
         )
     else:

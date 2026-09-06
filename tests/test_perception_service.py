@@ -532,6 +532,7 @@ def test_bedrock_inventory_chrome_is_a_negative_only_motor_interlock() -> None:
     assert facts["scene.ui_overlay"].source.startswith("safety:")
     assert facts["scene.inventory_overlay"].source.endswith(":not-training-label")
     assert "scene.mode" not in facts
+    assert live_control_arm_reason(frame) == "inventory"
 
 
 def test_bedrock_inventory_chrome_requires_both_calibrated_regions() -> None:
@@ -573,6 +574,7 @@ def test_bedrock_wide_survival_inventory_uses_asymmetric_panel_palettes() -> Non
     facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
     assert facts["scene.playable"].value is False
     assert facts["scene.inventory_overlay"].value is True
+    assert live_control_arm_reason(frame) == "inventory"
 
 
 def test_classic_inventory_empty_grid_publishes_deterministic_wood_zeros() -> None:

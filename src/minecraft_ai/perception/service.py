@@ -1926,11 +1926,13 @@ def away_overlay_click_center(frame: CapturedFrame) -> tuple[float, float] | Non
 
 def live_control_arm_reason(
     frame: CapturedFrame,
-) -> Literal["hud", "death", "away"] | None:
+) -> Literal["hud", "death", "away", "inventory"] | None:
     """Classify whether a live capture may arm the isolated agent.
 
-    A complete in-world HUD, a detected death screen, and the away overlay
-    are recoverable start states. Unknown menus still refuse arming.
+    A complete in-world HUD, a detected death screen, the away overlay, and
+    an open inventory are recoverable start states. Unknown menus still
+    refuse arming. Inventory recovery is the existing close_open_inventory
+    scene router, not a new actuator sequence.
     """
     if bedrock_in_world_hud_present(frame):
         return "hud"
@@ -1938,6 +1940,8 @@ def live_control_arm_reason(
         return "death"
     if bedrock_away_overlay_present(frame):
         return "away"
+    if bedrock_inventory_overlay_present(frame):
+        return "inventory"
     return None
 
 
