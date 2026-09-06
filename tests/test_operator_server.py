@@ -500,6 +500,22 @@ def test_operator_http_message_roundtrip(tmp_path: Path, monkeypatch) -> None:
             assert "img-src 'self' blob:" in response.headers["Content-Security-Policy"]
             assert len(response.read()) > 0
 
+        with urllib.request.urlopen(
+            f"http://{host}:{port}/api/frame.png?size=public", timeout=2
+        ) as response:
+            assert response.status == 200
+            assert response.headers["Content-Type"] == "image/jpeg"
+            assert response.headers["X-Minecraft-Frame-Size"] == "public"
+            assert response.headers["X-Minecraft-Frame-Token"]
+            assert response.headers["X-Minecraft-HUD-Complete"] == "false"
+            assert len(response.read()) > 0
+        oversized_size = urllib.request.Request(
+            f"http://{host}:{port}/api/frame.png?size=huge", method="GET"
+        )
+        with pytest.raises(urllib.error.HTTPError) as oversized_error:
+            urllib.request.urlopen(oversized_size, timeout=2)
+        assert oversized_error.value.code == HTTPStatus.BAD_REQUEST
+
         target_request = urllib.request.Request(
             f"http://{host}:{port}/api/target",
             method="POST",

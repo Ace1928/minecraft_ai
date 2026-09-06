@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from PIL import Image
 
@@ -41,6 +41,7 @@ from minecraft_ai.platforms import (
     discover_bedrock_linux_install,
     find_bedrock_linux_instances,
 )
+from minecraft_ai.platforms.bedrock_linux import BedrockLinuxInstall, BedrockLinuxInstance
 from minecraft_ai.platforms.bedrock_session import (
     BedrockSession,
     bedrock_session_alive,
@@ -71,6 +72,14 @@ MAX_BODY_BYTES = 16 * 1024
 FRAME_REFERENCE_TTL_NS = 120 * 1_000_000_000
 MAX_FRAME_REFERENCES = 8
 READINESS_TELEMETRY_MAX_AGE_NS = 5 * 1_000_000_000
+
+FRAME_SERVICE_TARGET_INTERVAL_S = 1.0 / 13.0
+FRAME_SERVICE_WAIT_TIMEOUT_S = 1.5
+FRAME_SERVICE_STALE_NS = 2 * 1_000_000_000
+FULL_JPEG_QUALITY = 88
+PUBLIC_FRAME_SIZE = (960, 540)
+PUBLIC_JPEG_QUALITY = 65
+DISCOVERY_TTL_S = 5.0
 
 _RFC1918_NETWORKS = (
     ipaddress.ip_network("10.0.0.0/8"),
@@ -219,6 +228,39 @@ def _agent_status() -> dict[str, object]:
     }
 
 
+_discovery_mutex = threading.Lock()
+_discovery_cached_at_s: float | None = None
+_discovery_cache: tuple[BedrockLinuxInstall | None, list[BedrockLinuxInstance]] = (None, [])
+
+
+def _bedrock_discovery_view() -> tuple[BedrockLinuxInstall | None, list[BedrockLinuxInstance]]:
+    """Return the Bedrock install/instances with a short TTL.
+
+    Install discovery walks the filesystem and instance discovery scans running
+    processes. Both are stable over seconds yet rerun on every operator status
+    poll, which dominated dashboard latency under fast streaming.
+    """
+    global _discovery_cached_at_s, _discovery_cache
+    now_s = time.monotonic()
+    with _discovery_mutex:
+        if _discovery_cached_at_s is not None and now_s - _discovery_cached_at_s < DISCOVERY_TTL_S:
+            return _discovery_cache
+    install: BedrockLinuxInstall | None = None
+    try:
+        install = discover_bedrock_linux_install()
+    except BaseException:  # noqa: BLE001 - operator status must never crash on discovery
+        install = None
+    instances: list[BedrockLinuxInstance] = []
+    try:
+        instances = list(find_bedrock_linux_instances())
+    except BaseException:  # noqa: BLE001
+        instances = []
+    with _discovery_mutex:
+        _discovery_cached_at_s = now_s
+        _discovery_cache = (install, instances)
+        return _discovery_cache
+
+
 def operator_status() -> dict[str, object]:
     reachable = supervisor_alive()
     if reachable:
@@ -229,7 +271,8 @@ def operator_status() -> dict[str, object]:
             supervisor = _read_json_file(STATUS_FILE) or {"state": "UNKNOWN"}
     else:
         supervisor = _read_json_file(STATUS_FILE) or {"state": "STOPPED"}
-    install = discover_bedrock_linux_install()
+    install_raw, instances = _bedrock_discovery_view()
+    install = install_raw if install_raw is not None else None
     build = None if install is None else install.selected_build
     return {
         "server_time_ns": time.time_ns(),
@@ -240,7 +283,7 @@ def operator_status() -> dict[str, object]:
         "bedrock": {
             "launcher": None if install is None else install.launcher_command,
             "version": None if build is None else build.version,
-            "instances": [instance.instance_id for instance in find_bedrock_linux_instances()],
+            "instances": [instance.instance_id for instance in instances],
         },
         "emergency_stop": {
             "latched": emergency_stop_latched(),
@@ -305,12 +348,15 @@ def operator_readiness(
     if isolated_session and window_id is None:
         reasons.append("Minecraft window is not available in the private display")
 
-    frame = _capture_live_bedrock_frame() if window_id is not None else None
+    frame = None
+    in_world_hud = False
+    if window_id is not None:
+        frame, in_world_hud = _readiness_capture()
     live_capture = frame is not None
     checks["live_capture"] = live_capture
     if window_id is not None and not live_capture:
         reasons.append("private Bedrock capture is unavailable")
-    playable_frame = frame is not None and bedrock_in_world_hud_present(frame)
+    playable_frame = frame is not None and in_world_hud
     checks["playable_capture"] = playable_frame
     if require_playable_capture and window_id is not None and not playable_frame:
         reasons.append("private capture does not show a complete in-world HUD")
@@ -492,6 +538,140 @@ def _close_live_bedrock_capture() -> None:
             _live_capture.close()
         _live_capture = None
         _live_capture_key = None
+
+
+@dataclass(frozen=True)
+class _FrameSnapshot:
+    """One captured frame already encoded for every served stream size."""
+
+    frame: CapturedFrame | None
+    dhash: str
+    hud_complete: bool
+    survival_hud: bool
+    full_jpeg: bytes
+    public_jpeg: bytes
+    captured_ns: int
+    width: int
+    height: int
+
+    @property
+    def available(self) -> bool:
+        return self.frame is not None
+
+
+_frame_snapshot_mutex = threading.RLock()
+_frame_snapshot_ready = threading.Condition(_frame_snapshot_mutex)
+_latest_frame_snapshot: _FrameSnapshot | None = None
+_frame_snapshot_service_running = False
+_frame_snapshot_thread: threading.Thread | None = None
+
+
+def _frame_to_rgb_image(bgra: bytes, width: int, height: int) -> Image.Image:
+    return Image.frombytes("RGBA", (width, height), bgra, "raw", "BGRA").convert("RGB")
+
+
+def _save_jpeg(image: Image.Image, *, quality: int, public: bool = False) -> bytes:
+    if public:
+        image.thumbnail(PUBLIC_FRAME_SIZE, resample=Image.Resampling.BOX)
+    output = BytesIO()
+    image.save(output, format="JPEG", quality=quality, optimize=False)
+    return output.getvalue()
+
+
+def _build_frame_snapshot(frame: CapturedFrame) -> _FrameSnapshot:
+    rgb = _frame_to_rgb_image(frame.bgra, frame.width, frame.height)
+    return _FrameSnapshot(
+        frame=frame,
+        dhash=frame_dhash(frame),
+        hud_complete=bedrock_in_world_hud_present(frame),
+        survival_hud=bedrock_survival_hud_present(frame),
+        full_jpeg=_save_jpeg(rgb, quality=FULL_JPEG_QUALITY),
+        public_jpeg=_save_jpeg(rgb, quality=PUBLIC_JPEG_QUALITY, public=True),
+        captured_ns=frame.captured_ns,
+        width=frame.width,
+        height=frame.height,
+    )
+
+
+def _frame_snapshot_loop() -> None:
+    while True:
+        with _frame_snapshot_mutex:
+            if not _frame_snapshot_service_running:
+                return
+        started_ns = time.monotonic_ns()
+        try:
+            frame = _capture_live_bedrock_frame()
+        except BaseException:  # noqa: BLE001 - the loop must never exit on capture errors
+            frame = None
+        with _frame_snapshot_ready:
+            global _latest_frame_snapshot
+            if frame is not None:
+                _latest_frame_snapshot = _build_frame_snapshot(frame)
+            _frame_snapshot_ready.notify_all()
+        elapsed_s = (time.monotonic_ns() - started_ns) / 1_000_000_000
+        remaining_s = FRAME_SERVICE_TARGET_INTERVAL_S - elapsed_s
+        if remaining_s > 0:
+            time.sleep(remaining_s)
+
+
+def _start_frame_snapshot_service() -> None:
+    global _frame_snapshot_service_running, _frame_snapshot_thread
+    with _frame_snapshot_mutex:
+        if _frame_snapshot_thread is not None and _frame_snapshot_thread.is_alive():
+            _frame_snapshot_service_running = True
+            return
+        _frame_snapshot_service_running = True
+        thread = threading.Thread(
+            target=_frame_snapshot_loop,
+            name="operator-frame-snapshot",
+            daemon=True,
+        )
+        _frame_snapshot_thread = thread
+        thread.start()
+
+
+def _stop_frame_snapshot_service() -> None:
+    global _frame_snapshot_service_running
+    thread = _frame_snapshot_thread
+    with _frame_snapshot_mutex:
+        _frame_snapshot_service_running = False
+    if thread is not None:
+        thread.join(timeout=2.0)
+
+
+def _latest_frame_snapshot_or_none(timeout_s: float) -> _FrameSnapshot | None:
+    """Return the freshest encoded snapshot once one has been produced."""
+    with _frame_snapshot_mutex:
+        if not _frame_snapshot_service_running:
+            return None
+        if _latest_frame_snapshot is not None:
+            return _latest_frame_snapshot
+        deadline = time.monotonic() + timeout_s
+        while _latest_frame_snapshot is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            _frame_snapshot_ready.wait(remaining)
+    return _latest_frame_snapshot
+
+
+def _readiness_capture() -> tuple[CapturedFrame | None, bool]:
+    """Reuse the encoded background snapshot when it is fresh, else capture inline.
+
+    The inline path keeps embedded/single-shot use (and tests) working exactly as
+    before; the running dashboard always has a background snapshot to serve.
+    """
+    snapshot = _latest_frame_snapshot_or_none(FRAME_SERVICE_WAIT_TIMEOUT_S)
+    if snapshot is not None and snapshot.available:
+        if (
+            snapshot.captured_ns > 0
+            and time.monotonic_ns() - snapshot.captured_ns <= FRAME_SERVICE_STALE_NS
+        ):
+            return snapshot.frame, snapshot.hud_complete
+    frame = _capture_live_bedrock_frame()
+    if frame is None:
+        return None, False
+    return frame, bedrock_in_world_hud_present(frame)
 
 
 def _persist_operator_reference(track_id: str, frame: CapturedFrame) -> tuple[Path, str]:
@@ -720,36 +900,54 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.CREATED, message.model_dump(mode="json"))
 
     def _get_frame(self) -> None:
-        frame = _capture_live_bedrock_frame()
-        if frame is None:
+        query = parse_qs(urlparse(self.path).query)
+        size = (query.get("size", ["full"])[0] or "full").casefold()
+        if size not in {"full", "public"}:
             self._send_json(
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                {"error": "isolated Bedrock capture is not available"},
+                HTTPStatus.BAD_REQUEST,
+                {"error": "frame size must be 'full' or 'public'"},
             )
             return
-        image = Image.frombytes(
-            "RGBA",
-            (frame.width, frame.height),
-            frame.bgra,
-            "raw",
-            "BGRA",
-        ).convert("RGB")
-        output = BytesIO()
-        image.save(output, format="JPEG", quality=86, optimize=True)
-        frame_token = _cache_frame_reference(frame, frame_dhash(frame))
-        self._send_bytes(
-            HTTPStatus.OK,
-            output.getvalue(),
-            "image/jpeg",
-            extra_headers={
-                "X-Minecraft-Frame-Token": frame_token,
-                "X-Minecraft-Frame-Width": str(frame.width),
-                "X-Minecraft-Frame-Height": str(frame.height),
-                "X-Minecraft-HUD-Complete": (
-                    "true" if bedrock_survival_hud_present(frame) else "false"
-                ),
-            },
-        )
+        snapshot = _latest_frame_snapshot_or_none(FRAME_SERVICE_WAIT_TIMEOUT_S)
+        if snapshot is not None and snapshot.available:
+            frame = snapshot.frame
+            assert frame is not None
+            if time.monotonic_ns() - snapshot.captured_ns > FRAME_SERVICE_STALE_NS:
+                self._send_json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "isolated Bedrock capture is stale"},
+                )
+                return
+            body = snapshot.public_jpeg if size == "public" else snapshot.full_jpeg
+            width, height = snapshot.width, snapshot.height
+            survival_hud = snapshot.survival_hud
+            frame_token_hash = snapshot.dhash
+        else:
+            frame = _capture_live_bedrock_frame()
+            if frame is None:
+                self._send_json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "isolated Bedrock capture is not available"},
+                )
+                return
+            rgb = _frame_to_rgb_image(frame.bgra, frame.width, frame.height)
+            body = _save_jpeg(rgb, quality=FULL_JPEG_QUALITY, public=(size == "public"))
+            width, height = frame.width, frame.height
+            survival_hud = bedrock_survival_hud_present(frame)
+            frame_token_hash = frame_dhash(frame)
+        frame_token = _cache_frame_reference(frame, frame_token_hash)
+        extra_headers = {
+            "X-Minecraft-Frame-Token": frame_token,
+            "X-Minecraft-Frame-Width": str(width),
+            "X-Minecraft-Frame-Height": str(height),
+            "X-Minecraft-HUD-Complete": "true" if survival_hud else "false",
+            "X-Minecraft-Frame-Size": size,
+        }
+        if snapshot is not None:
+            extra_headers["X-Minecraft-Frame-Age-Ms"] = str(
+                max(0, (time.monotonic_ns() - snapshot.captured_ns) // 1_000_000)
+            )
+        self._send_bytes(HTTPStatus.OK, body, "image/jpeg", extra_headers=extra_headers)
 
     def _post_target(self, payload: dict[str, Any]) -> None:
         allowed = {"label", "x", "y", "width", "height", "frame_token"}
@@ -966,10 +1164,12 @@ def serve_operator_dashboard(
     configured_hostnames = set(_default_operator_hostnames())
     configured_hostnames.update(_normalize_operator_hostname(name) for name in allowed_hosts)
     server.operator_allowed_hostnames = frozenset(configured_hostnames)  # type: ignore[attr-defined]
+    _start_frame_snapshot_service()
     try:
         server.serve_forever(poll_interval=0.25)
     finally:
         server.server_close()
+        _stop_frame_snapshot_service()
         _close_live_bedrock_capture()
 
 
@@ -1065,5 +1265,5 @@ $('setTarget').onclick=async()=>{if(!targetBox||targetBox.width<.005||targetBox.
 $('clearTarget').onclick=async()=>{try{await api('/api/target/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;$('targetNotice').textContent='Grounded target cleared.';refreshFrame()}catch(e){$('targetNotice').textContent=e.message}};
 $('pause').onclick=async()=>{try{await api('/api/control/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('notice').textContent='Agent paused; motor capability revoked.';refresh()}catch(e){$('notice').textContent=e.message}};
 $('resume').onclick=async()=>{try{await api('/api/control/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('notice').textContent='Supervisor returned to safe idle. Live control was not armed.';refresh()}catch(e){$('notice').textContent=e.message}};
-refresh();messages();refreshFrame();setInterval(refresh,500);setInterval(messages,2000);setInterval(refreshFrame,1000);
+refresh();messages();refreshFrame();setInterval(refresh,250);setInterval(messages,2000);setInterval(refreshFrame,120);
 </script></body></html>"""
