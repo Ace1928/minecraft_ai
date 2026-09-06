@@ -3123,6 +3123,23 @@ def test_stall_keepalive_prefers_next_tech_tree_skill() -> None:
     assert skill.skill_id == "gather_nearby_wood"
 
 
+def test_stall_keepalive_skips_repeatedly_failed_tech_tree_skill() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime._traversal_escalation_pending = True
+    runtime._headroom_recovery = None
+    runtime.blackboard = PerceptionBlackboard()
+    runtime.skills.stats[("gather_nearby_wood", "explore-keepalive")] = SkillStats(
+        failures=2,
+        consecutive_failures=2,
+    )
+
+    skill = runtime._explore_keep_alive()
+
+    assert skill is not None
+    assert skill.skill_id == "explore_forward"
+
+
 def test_active_headroom_recovery_still_blocks_keepalive() -> None:
     runtime = object.__new__(AgentRuntime)
     runtime.skills = build_bootstrap_skill_library()

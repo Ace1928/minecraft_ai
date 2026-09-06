@@ -1458,9 +1458,21 @@ class AgentRuntime:
             ):
                 inventory["oak_log"] = logs.value
                 inventory["minecraft:oak_log"] = logs.value
+            recently_failed = {
+                skill_id
+                for skill_id in self.skills.specs
+                if (
+                    stats := self.skills.stats.get(
+                        (skill_id, _EXPLORE_KEEPALIVE_CONTEXT)
+                    )
+                )
+                is not None
+                and stats.consecutive_failures >= 2
+            }
             skill_id = keepalive_skill_for_inventory(
                 inventory,
                 available_skill_ids=set(self.skills.specs),
+                recently_failed_skill_ids=recently_failed,
             )
             if skill_id is not None:
                 candidate = self.skills.get(skill_id)

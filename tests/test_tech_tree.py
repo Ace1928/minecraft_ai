@@ -59,3 +59,11 @@ def test_keepalive_skill_follows_next_open_milestone() -> None:
         == "craft_wood_planks"
     )
     assert keepalive_skill_for_inventory({}, available_skill_ids={"explore_forward"}) is None
+    assert (
+        keepalive_skill_for_inventory(
+            {},
+            available_skill_ids=available,
+            recently_failed_skill_ids={"gather_nearby_wood"},
+        )
+        is None
+    )
