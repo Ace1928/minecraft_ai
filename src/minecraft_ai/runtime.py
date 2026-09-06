@@ -561,10 +561,17 @@ class AgentRuntime:
             if getattr(self, "_headroom_recovery", None) is not None:
                 self._flush_pending_skill_stats()
                 return
-            if getattr(self, "_cognition_perception_probe", None) is not None:
-                # A perception-only decision deliberately bought one stable
-                # visual snapshot. Do not make that evidence stale by starting
-                # the disposable exploration keepalive underneath it.
+            probe = getattr(self, "_cognition_perception_probe", None)
+            settle_deadline_ns = (
+                getattr(probe, "settle_deadline_ns", None) if probe is not None else None
+            )
+            if probe is not None and (
+                not isinstance(settle_deadline_ns, int)
+                or time.monotonic_ns() < settle_deadline_ns
+            ):
+                # Hold still only through the short settle window. A long
+                # grounding wait with no motor is how Bedrock shows the away
+                # overlay and the player looks frozen.
                 self._flush_pending_skill_stats()
                 return
             # Never idle the player while cognition is in flight: keep a
@@ -1436,10 +1443,18 @@ class AgentRuntime:
         idle freeze that the latent STEVE body produces while cognition is in
         flight.
         """
-        if getattr(self, "_traversal_escalation_pending", False):
+        if getattr(self, "_headroom_recovery", None) is not None:
             return None
         candidates: list[tuple[int, SkillSpec, SkillStats | None]] = []
-        for order, skill_id in enumerate(("traverse_level_ground", "explore_forward")):
+        # After an obstacle stall, prefer looking/strafing around instead of
+        # walking into the same wall again. Escalation still requests a new
+        # cognition turn; it must not freeze the body until that turn returns.
+        skill_ids = (
+            ("explore_forward", "traverse_level_ground")
+            if getattr(self, "_traversal_escalation_pending", False)
+            else ("traverse_level_ground", "explore_forward")
+        )
+        for order, skill_id in enumerate(skill_ids):
             skill = self.skills.specs.get(skill_id)
             if skill is None:
                 continue

@@ -3055,7 +3055,7 @@ def test_ordinary_traversal_stall_routes_one_obstacle_recovery() -> None:
     assert selected.skill_id == "traverse_visible_obstacle"
 
 
-def test_obstacle_stall_blocks_keepalive_and_invalidates_pending_cognition() -> None:
+def test_obstacle_stall_requests_cognition_but_keeps_a_different_keepalive() -> None:
     runtime = object.__new__(AgentRuntime)
     runtime.skills = build_bootstrap_skill_library()
     runtime._execution_revision = 7
@@ -3078,10 +3078,12 @@ def test_obstacle_stall_blocks_keepalive_and_invalidates_pending_cognition() -> 
     assert runtime._execution_revision == 8
     assert runtime._cognition_requested is True
     assert runtime._traversal_escalation_pending is True
-    assert runtime._explore_keep_alive() is None
+    keepalive = runtime._explore_keep_alive()
+    assert keepalive is not None
+    assert keepalive.skill_id == "explore_forward"
 
 
-def test_obstacle_recovery_timeout_blocks_keepalive_and_requests_cognition() -> None:
+def test_obstacle_recovery_timeout_requests_cognition_but_keeps_keepalive() -> None:
     runtime = object.__new__(AgentRuntime)
     runtime.skills = build_bootstrap_skill_library()
     runtime._execution_revision = 11
@@ -3103,6 +3105,21 @@ def test_obstacle_recovery_timeout_blocks_keepalive_and_requests_cognition() -> 
     assert runtime._execution_revision == 12
     assert runtime._cognition_requested is True
     assert runtime._traversal_escalation_pending is True
+    keepalive = runtime._explore_keep_alive()
+    assert keepalive is not None
+    assert keepalive.skill_id == "explore_forward"
+
+
+def test_active_headroom_recovery_still_blocks_keepalive() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime._traversal_escalation_pending = True
+    runtime._headroom_recovery = _HeadroomRecovery(
+        context_key="explore-keepalive",
+        traversal_parameters={},
+        deadline_ns=time.monotonic_ns() + 60_000_000_000,
+    )
+
     assert runtime._explore_keep_alive() is None
 
 
