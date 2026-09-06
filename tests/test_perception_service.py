@@ -42,6 +42,7 @@ from minecraft_ai.perception_service import (
     bedrock_survival_hud_present,
     bedrock_ui_chrome_present,
     crosshair_block_dhash,
+    death_respawn_control_center,
     frame_dhash,
     perceptual_hash_distance,
 )
@@ -1011,6 +1012,30 @@ def test_bedrock_death_screen_blocks_world_control_without_emitting_action() -> 
     assert facts["scene.mode"].value == "death"
     assert facts["scene.death"].value is True
     assert facts["scene.death"].source.startswith("safety:")
+
+
+def test_bedrock_death_screen_detects_isolated_1080p_session() -> None:
+    width, height = 1920, 1080
+    pixels = bytearray(bytes((20, 20, 20, 255)) * width * height)
+    for x_start, x_end, y_start, y_end, color in (
+        (0.34, 0.66, 0.66, 0.73, bytes((60, 150, 70, 255))),
+        (0.34, 0.66, 0.75, 0.82, bytes((205, 202, 201, 255))),
+    ):
+        for y in range(int(height * y_start), int(height * y_end)):
+            for x in range(int(width * x_start), int(width * x_end)):
+                offset = (y * width + x) * 4
+                pixels[offset : offset + 4] = color
+    frame = _frame(bytes(pixels), width=width, height=height)
+
+    assert bedrock_death_screen_present(frame)
+    center = death_respawn_control_center(frame)
+    assert center is not None
+    assert 0.40 <= center[0] <= 0.60
+    assert 0.66 <= center[1] <= 0.73
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["scene.death"].value is True
+    assert facts["scene.playable"].value is False
+    assert facts["scene.mode"].value == "death"
 
 
 def test_active_vlm_prefers_strict_structured_vision_contract() -> None:

@@ -1,19 +1,8 @@
+"""Compatibility shim. Implementation lives in `minecraft_ai.control.action_levels`."""
 from __future__ import annotations
 
-from enum import StrEnum
+import sys
 
+from minecraft_ai.control import action_levels as _impl
 
-class ActionLevel(StrEnum):
-    """Explicit controller abstraction requested by an executable option.
-
-    This is a routing contract, not a prediction made from a skill name or a
-    mode string.  Keeping it shared by runtime intents and trajectory records
-    makes expert selection observable and replayable.
-    """
-
-    RAW = "raw"
-    MOTION = "motion"
-    LATENT = "latent"
-    GROUNDED = "grounded"
-    GUI = "gui"
-    SKILL = "skill"
+sys.modules[__name__] = _impl

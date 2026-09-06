@@ -16,6 +16,7 @@ from minecraft_ai.perception import (
 )
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.perception_service import BEDROCK_HOTBAR_LOG_COUNT_SOURCE
+from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.skills import (
     SkillActionPermissions,
     SkillCondition,
@@ -246,6 +247,75 @@ def test_open_inventory_emits_one_bounded_toggle_then_waits_for_proof() -> None:
     assert first.action_origin == ActionOrigin.SYNTHETIC
     assert waiting.run.outcome == SkillOutcome.RUNNING
     assert waiting.action is None
+    assert policy.intent is None
+
+
+def _death_frame() -> CapturedFrame:
+    width, height = 1920, 1080
+    pixels = bytearray(bytes((20, 20, 20, 255)) * width * height)
+    for x_start, x_end, y_start, y_end, color in (
+        (0.34, 0.66, 0.66, 0.73, bytes((60, 150, 70, 255))),
+        (0.34, 0.66, 0.75, 0.82, bytes((205, 202, 201, 255))),
+    ):
+        for y in range(int(height * y_start), int(height * y_end)):
+            for x in range(int(width * x_start), int(width * x_end)):
+                offset = (y * width + x) * 4
+                pixels[offset : offset + 4] = color
+    return CapturedFrame(
+        frame_id=1,
+        captured_ns=100,
+        width=width,
+        height=height,
+        bgra=bytes(pixels),
+    )
+
+
+def test_respawn_after_death_clicks_visible_control_once_then_waits() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("respawn_after_death")
+    board = _board(_fact("scene.death", True, confidence=0.995))
+    frame = _death_frame()
+    executor.start(spec, run_id="respawn", now_ns=100)
+
+    first = executor.tick(board, sequence=7, now_ns=200, capture=frame)
+    waiting = executor.tick(board, sequence=8, now_ns=300, capture=frame)
+
+    assert first.run.outcome == SkillOutcome.RUNNING
+    assert first.action is not None
+    assert first.action.buttons_down == ("left",)
+    assert first.action.buttons_up == ("left",)
+    assert first.action.camera_semantics == "cursor"
+    assert first.action.cursor_x is not None and first.action.cursor_y is not None
+    assert 0.40 <= first.action.cursor_x <= 0.60
+    assert 0.66 <= first.action.cursor_y <= 0.73
+    assert first.action.duration_ms == 75
+    assert first.action_origin == ActionOrigin.SYNTHETIC
+    assert waiting.run.outcome == SkillOutcome.RUNNING
+    assert waiting.action is None
+    assert policy.intent is None
+
+
+def test_respawn_after_death_succeeds_when_world_is_playable() -> None:
+    policy = _IntentCapturePolicy()
+    executor = SkillExecutor(policy)
+    spec = build_bootstrap_skill_library().get("respawn_after_death")
+    executor.start(
+        spec,
+        run_id="already-alive",
+        now_ns=100,
+    )
+
+    tick = executor.tick(
+        _board(_fact("scene.playable", True, confidence=0.995)),
+        sequence=9,
+        now_ns=200,
+        capture=_death_frame(),
+    )
+
+    assert tick.run.outcome == SkillOutcome.SUCCEEDED
+    assert tick.action is not None
+    assert "left" not in tick.action.buttons_down
     assert policy.intent is None
 
 

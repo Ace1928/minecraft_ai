@@ -6,6 +6,36 @@ Minecraft AI is a layered embodied-agent system. Its central invariant is that s
 
 The architecture is deliberately model-agnostic. Local VLMs, language models, learned motor policies and future model families are adapters behind stable protocols.
 
+## 1a. Source layout
+
+The Python package is grouped by domain. Historical import paths remain valid
+through compatibility shims, so existing tests and operators keep working.
+
+```text
+minecraft_ai/
+  perception/     types, blackboard, HUD/VLM service, grounded claims, camera
+  cognition/      decisions, prompts, repair, high-level controller
+  control/        motor, skill execution, mining/crafting, outcomes
+  policy_service  learned visuomotor workers (temporal client + backends)
+  runtime.py      agent tick loop
+  runtime_support extracted runtime types and pure helpers
+  skills/         skill library, bootstrap skills, roles, curriculum
+  memory/         stores, spatial, social, trajectories, sqlite
+  safety.py       motor lease / input contract (control-plane)
+  supervisor.py   independent process supervisor
+  emergency.py    operator emergency stop
+  agent/          process entry, lifecycle, runtime factory
+  operator/       dashboard, telemetry, Bedrock menu navigator
+  platforms/      BedrockOnLinux, isolated X11, Weston seat
+  knowledge/      versioned game graph
+  eval/           evidence-gated tasks
+  cli.py          one-command lifecycle
+```
+
+Top-level modules such as `minecraft_ai.motor` and `minecraft_ai.perception_service`
+are shims over the domain packages. New code should import from the domain
+package; shims exist so callers and monkeypatches keep a stable surface.
+
 ## 2. Runtime processes
 
 ```text

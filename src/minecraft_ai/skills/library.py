@@ -5,7 +5,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .action_levels import ActionLevel
+from minecraft_ai.action_levels import ActionLevel
 
 
 class SkillStage(StrEnum):

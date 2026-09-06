@@ -54,7 +54,10 @@ from .eval import (
     load_evidence,
 )
 from .operator_server import serve_operator_dashboard
-from .perception_service import bedrock_in_world_hud_present
+from .perception_service import (
+    bedrock_death_screen_present,
+    bedrock_in_world_hud_present,
+)
 from .platforms import (
     IsolatedX11Capture,
     IsolationError,
@@ -557,6 +560,7 @@ def run(
 
     launch_frame = None
     hud_verified = False
+    death_verified = False
     last_capture_error: Exception | None = None
     for _attempt in range(12):
         capture = None
@@ -573,23 +577,33 @@ def run(
                 if bedrock_in_world_hud_present(launch_frame):
                     hud_verified = True
                     break
+                if bedrock_death_screen_present(launch_frame):
+                    death_verified = True
+                    break
         except Exception as exc:
             last_capture_error = exc
         finally:
             if capture is not None:
                 capture.close()
-        if hud_verified:
+        if hud_verified or death_verified:
             break
         _time.sleep(2.0)
-    if not hud_verified or launch_frame is None:
+    if launch_frame is None or not (hud_verified or death_verified):
         raise typer.BadParameter(
-            "Live control requires a complete in-world survival HUD before arming. "
+            "Live control requires a complete in-world HUD or a detected death "
+            "screen before arming. "
             f"last capture error: {last_capture_error}"
         )
-    print(
-        "[green]Complete survival HUD verified[/green] "
-        f"capture={launch_frame.width}x{launch_frame.height}"
-    )
+    if death_verified:
+        print(
+            "[yellow]Death screen verified; agent will click Respawn before world play[/yellow] "
+            f"capture={launch_frame.width}x{launch_frame.height}"
+        )
+    else:
+        print(
+            "[green]Complete survival HUD verified[/green] "
+            f"capture={launch_frame.width}x{launch_frame.height}"
+        )
 
     attached = _command(
         "attach-bedrock-x11",
