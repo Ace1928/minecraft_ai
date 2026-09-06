@@ -547,6 +547,24 @@ class AgentRuntime:
         self.telemetry.publish(self._telemetry_payload(state="running"))
         self._publish_player_chat_facts()
         self._planks_retry_requires_wood()
+        running = self.executor.run
+        if (
+            (running is None or running.outcome != SkillOutcome.RUNNING)
+            and getattr(self, "_headroom_recovery", None) is None
+        ):
+            probe = getattr(self, "_cognition_perception_probe", None)
+            settle_deadline_ns = (
+                getattr(probe, "settle_deadline_ns", None) if probe is not None else None
+            )
+            in_settle = (
+                probe is not None
+                and isinstance(settle_deadline_ns, int)
+                and time.monotonic_ns() < settle_deadline_ns
+            )
+            # Reorient before cognition can start VPT/STEVE looking at feet.
+            if not in_settle and self._keepalive_horizon_reorient():
+                self._flush_pending_skill_stats()
+                return
         self._consume_cognition()
         self._reconcile_cognition_perception_probe()
         self._start_cognition_if_due()
@@ -574,12 +592,6 @@ class AgentRuntime:
                 # Hold still only through the short settle window. A long
                 # grounding wait with no motor is how Bedrock shows the away
                 # overlay and the player looks frozen.
-                self._flush_pending_skill_stats()
-                return
-            # Extreme leftover pitch from mining/gather makes learned motion
-            # stare at feet or sky. One bounded look toward the horizon, then
-            # the disposable walk can start on a later idle tick.
-            if self._keepalive_horizon_reorient():
                 self._flush_pending_skill_stats()
                 return
             # Never idle the player while cognition is in flight: keep a

@@ -4474,7 +4474,6 @@ def test_idle_tick_reorients_extreme_pitch_before_keepalive(
         "_flush_pending_operator_status_updates",
         "_publish_player_chat_facts",
         "_planks_retry_requires_wood",
-        "_consume_cognition",
         "_reconcile_cognition_perception_probe",
         "_start_cognition_if_due",
         "_request_semantics_if_due",
@@ -4485,6 +4484,11 @@ def test_idle_tick_reorients_extreme_pitch_before_keepalive(
     monkeypatch.setattr(runtime, "_telemetry_payload", lambda **_kwargs: {})
     monkeypatch.setattr(runtime, "_authoritative_world_camera_pitch_units", lambda: 348)
     monkeypatch.setattr(runtime, "_send_motor", lambda action, **_kwargs: sent.append(action))
+    monkeypatch.setattr(
+        runtime,
+        "_consume_cognition",
+        lambda: pytest.fail("extreme pitch must reorient before cognition starts locomotion"),
+    )
     monkeypatch.setattr(
         runtime,
         "_explore_keep_alive",
