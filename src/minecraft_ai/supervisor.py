@@ -891,6 +891,12 @@ class Supervisor:
                     self.resume()
                     clear_operator_pause()
                     result = self.status()
+                    if self._stop.is_set():
+                        # FAILSAFE resume retires this generation. Deliver its
+                        # acknowledgement before owned teardown can exit the
+                        # process and abandon this daemon request thread.
+                        _send_json_line(conn, {"ok": True, "result": result})
+                        return
             elif command == "resume-for-agent-reload":
                 # Cleanup pause is not renewed operator permission. Admit only
                 # this unarmed generation, under the same lock as durable intent.
@@ -930,10 +936,16 @@ class Supervisor:
                     # supervisor itself retires only after that bounded wait.
                     self.pause()
                     stop_agent_process(timeout_s=GRACEFUL_AGENT_STOP_TIMEOUT_S)
-                    self.stop()
-                    result = self.status()
-                    result["operator_pause_persisted"] = pause_persisted
-                    result["agent_containment_confirmed"] = not AGENT_FILE.exists()
+                    # Teardown takes this same lock. Revoke first, then deliver
+                    # the bounded socket reply before allowing the serving
+                    # process to exit and abandon its daemon request thread.
+                    with self._lock:
+                        self.stop()
+                        result = self.status()
+                        result["operator_pause_persisted"] = pause_persisted
+                        result["agent_containment_confirmed"] = not AGENT_FILE.exists()
+                        _send_json_line(conn, {"ok": True, "result": result})
+                    return
             elif command == "attach-bedrock-x11":
                 display = str(payload.get("display", ""))
                 window_id = int(payload.get("window_id", 0))

@@ -758,3 +758,94 @@ def test_controlled_shutdown_allows_agent_cleanup_to_disarm(
     assert supervisor.state == expected_state
     assert marker.exists()
     assert responses[-1]["ok"] is True
+
+
+@pytest.mark.parametrize("command", ["stop", "resume"])
+@pytest.mark.parametrize("reply_disconnects", [False, True])
+def test_retiring_command_acknowledgement_precedes_owned_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    reply_disconnects: bool,
+) -> None:
+    # conftest isolates all descriptors and safety latches from the live runtime.
+    supervisor = Supervisor()
+    supervisor.start()
+    lease_info = supervisor.arm("fake-instance")
+    supervisor.motor.apply(
+        str(lease_info["lease_id"]), MotorAction(sequence=0, keys_down=("w",)),
+    )
+    if command == "resume":
+        supervisor.fail("test-fault")
+    supervisor._endpoint = ControlEndpoint(
+        host="127.0.0.1", port=1, token="secret", pid=1, session_id="stop-ack-test",
+    )
+    reply_started = threading.Event()
+    allow_reply = threading.Event()
+    teardown_started = threading.Event()
+    server_closed = threading.Event()
+    connection_closed = threading.Event()
+    responses: list[dict[str, object]] = []
+    order: list[str] = []
+    failures: list[BaseException] = []
+
+    class _Connection:
+        def close(self) -> None:
+            connection_closed.set()
+
+    class _Server:
+        def close(self) -> None:
+            order.append("teardown")
+            server_closed.set()
+
+    def send_reply(_connection: object, payload: dict[str, object]) -> None:
+        if payload["ok"]:
+            responses.append(payload)
+            reply_started.set()
+            if not allow_reply.wait(timeout=2.0):
+                failures.append(AssertionError("reply was not released"))
+            order.append("reply-attempt-complete")
+        if reply_disconnects:
+            raise BrokenPipeError("test client disconnected")
+
+    def teardown() -> None:
+        teardown_started.set()
+        try:
+            supervisor._close_owned_runtime(_Server())  # type: ignore[arg-type]
+        except BaseException as exc:
+            failures.append(exc)
+
+    monkeypatch.setattr(supervisor_module, "stop_agent_process", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        supervisor_module, "_recv_json_line", lambda _connection: {
+            "token": "secret", "command": command,
+        },
+    )
+    monkeypatch.setattr(supervisor_module, "_send_json_line", send_reply)
+    handler = threading.Thread(target=supervisor._handle_connection, args=(_Connection(),))
+    closer = threading.Thread(target=teardown)
+    try:
+        handler.start()
+        assert reply_started.wait(timeout=2.0)
+        assert supervisor._stop.is_set()
+        assert supervisor.motor.lease is None
+        assert not supervisor.backend.held_keys
+        closer.start()
+        assert teardown_started.wait(timeout=2.0)
+        # The accept loop must not retire the process while its daemon command
+        # thread still owes the caller an acknowledgement, even after stop is set.
+        assert not server_closed.wait(timeout=0.1)
+    finally:
+        allow_reply.set()
+        handler.join(timeout=2.0)
+        if closer.ident is not None:
+            closer.join(timeout=2.0)
+
+    assert not handler.is_alive()
+    assert not closer.is_alive()
+    assert not failures
+    assert connection_closed.is_set()
+    assert server_closed.is_set()
+    assert order == ["reply-attempt-complete", "teardown"]
+    assert len(responses) == 1
+    assert responses[0]["ok"] is True
+    assert responses[0]["result"]["state"] == "STOPPED"  # type: ignore[index]
