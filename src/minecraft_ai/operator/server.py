@@ -564,6 +564,7 @@ _frame_snapshot_ready = threading.Condition(_frame_snapshot_mutex)
 _latest_frame_snapshot: _FrameSnapshot | None = None
 _frame_snapshot_service_running = False
 _frame_snapshot_thread: threading.Thread | None = None
+_frame_snapshot_stop: threading.Event | None = None
 
 
 def _frame_to_rgb_image(bgra: bytes, width: int, height: int) -> Image.Image:
@@ -593,36 +594,41 @@ def _build_frame_snapshot(frame: CapturedFrame) -> _FrameSnapshot:
     )
 
 
-def _frame_snapshot_loop() -> None:
-    while True:
-        with _frame_snapshot_mutex:
-            if not _frame_snapshot_service_running:
-                return
+def _frame_snapshot_loop(stop: threading.Event) -> None:
+    global _latest_frame_snapshot
+    while not stop.is_set():
         started_ns = time.monotonic_ns()
         try:
             frame = _capture_live_bedrock_frame()
-        except BaseException:  # noqa: BLE001 - the loop must never exit on capture errors
-            frame = None
+            # Capture, HUD analysis and JPEG encoding must not hold the reader lock.
+            snapshot = _build_frame_snapshot(frame) if frame is not None else None
+        except Exception:  # A bad capture/encoding must not kill the producer.
+            snapshot = None
         with _frame_snapshot_ready:
-            global _latest_frame_snapshot
-            if frame is not None:
-                _latest_frame_snapshot = _build_frame_snapshot(frame)
+            if stop.is_set():
+                return
+            _latest_frame_snapshot = snapshot
             _frame_snapshot_ready.notify_all()
         elapsed_s = (time.monotonic_ns() - started_ns) / 1_000_000_000
         remaining_s = FRAME_SERVICE_TARGET_INTERVAL_S - elapsed_s
         if remaining_s > 0:
-            time.sleep(remaining_s)
+            stop.wait(remaining_s)
 
 
 def _start_frame_snapshot_service() -> None:
     global _frame_snapshot_service_running, _frame_snapshot_thread
+    global _frame_snapshot_stop, _latest_frame_snapshot
     with _frame_snapshot_mutex:
-        if _frame_snapshot_thread is not None and _frame_snapshot_thread.is_alive():
-            _frame_snapshot_service_running = True
+        if _frame_snapshot_service_running:
             return
+        # A timed-out old producer retains its own cancelled generation.
+        stop = threading.Event()
+        _frame_snapshot_stop = stop
+        _latest_frame_snapshot = None
         _frame_snapshot_service_running = True
         thread = threading.Thread(
             target=_frame_snapshot_loop,
+            args=(stop,),
             name="operator-frame-snapshot",
             daemon=True,
         )
@@ -631,10 +637,14 @@ def _start_frame_snapshot_service() -> None:
 
 
 def _stop_frame_snapshot_service() -> None:
-    global _frame_snapshot_service_running
-    thread = _frame_snapshot_thread
-    with _frame_snapshot_mutex:
+    global _frame_snapshot_service_running, _latest_frame_snapshot
+    with _frame_snapshot_ready:
+        thread = _frame_snapshot_thread
         _frame_snapshot_service_running = False
+        if _frame_snapshot_stop is not None:
+            _frame_snapshot_stop.set()
+        _latest_frame_snapshot = None
+        _frame_snapshot_ready.notify_all()
     if thread is not None:
         thread.join(timeout=2.0)
 
@@ -647,19 +657,19 @@ def _latest_frame_snapshot_or_none(timeout_s: float) -> _FrameSnapshot | None:
         if _latest_frame_snapshot is not None:
             return _latest_frame_snapshot
         deadline = time.monotonic() + timeout_s
-        while _latest_frame_snapshot is None:
+        while _latest_frame_snapshot is None and _frame_snapshot_service_running:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
             _frame_snapshot_ready.wait(remaining)
-    return _latest_frame_snapshot
+        return _latest_frame_snapshot
 
 
 def _readiness_capture() -> tuple[CapturedFrame | None, bool]:
-    """Reuse the encoded background snapshot when it is fresh, else capture inline.
+    """Read the producer cache; only embedded/single-shot callers capture inline.
 
     The inline path keeps embedded/single-shot use (and tests) working exactly as
-    before; the running dashboard always has a background snapshot to serve.
+    before. HTTP readers must never queue behind a slow or unavailable capture.
     """
     snapshot = _latest_frame_snapshot_or_none(FRAME_SERVICE_WAIT_TIMEOUT_S)
     if snapshot is not None and snapshot.available:
@@ -668,6 +678,8 @@ def _readiness_capture() -> tuple[CapturedFrame | None, bool]:
             and time.monotonic_ns() - snapshot.captured_ns <= FRAME_SERVICE_STALE_NS
         ):
             return snapshot.frame, snapshot.hud_complete
+    if _frame_snapshot_service_running:
+        return None, False
     frame = _capture_live_bedrock_frame()
     if frame is None:
         return None, False
@@ -923,7 +935,7 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             survival_hud = snapshot.survival_hud
             frame_token_hash = snapshot.dhash
         else:
-            frame = _capture_live_bedrock_frame()
+            frame = None if _frame_snapshot_service_running else _capture_live_bedrock_frame()
             if frame is None:
                 self._send_json(
                     HTTPStatus.SERVICE_UNAVAILABLE,
@@ -1144,8 +1156,12 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             "script-src 'self' 'unsafe-inline'; connect-src 'self'; "
             "img-src 'self' blob:; frame-ancestors 'none'",
         )
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Viewers routinely cancel in-flight images when navigating away.
+            self.close_connection = True
 
     def log_message(self, format: str, *args: object) -> None:
         del format, args
@@ -1232,7 +1248,8 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 <div class="card"><h2>Operator conversation</h2><div class="feed" id="feed"><div class="label">No messages yet</div></div></div></section></main>
 <script>
 const $=id=>document.getElementById(id);const esc=v=>v??'—';
-async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);return d}
+async function api(path,options){const r=await fetch(path,options||{signal:AbortSignal.timeout(5000)});const d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);return d}
+let statusLoading=false,messagesLoading=false;
 function cls(el,good){el.className='value '+(good?'ok':'bad')}
 let dragging=false,startX=0,startY=0,targetBox=null,displayedFrameToken=null,frameObjectUrl=null,frameLoading=false;const viewer=$('viewer'),selection=$('selection'),prediction=$('prediction'),worldFrame=$('worldFrame'),targetReview=$('targetReview'),targetPreview=$('targetPreview');
 function imageRect(){const r=worldFrame.getBoundingClientRect(),nw=worldFrame.naturalWidth,nh=worldFrame.naturalHeight;if(!nw||!nh)return{left:r.left,top:r.top,width:r.width,height:r.height};const imageRatio=nw/nh,boxRatio=r.width/r.height;let width=r.width,height=r.height,left=r.left,top=r.top;if(boxRatio>imageRatio){width=r.height*imageRatio;left+=(r.width-width)/2}else if(boxRatio<imageRatio){height=r.width/imageRatio;top+=(r.height-height)/2}return{left,top,width,height}}
@@ -1246,7 +1263,7 @@ viewer.onpointermove=e=>{if(!dragging)return;const p=point(e),x=Math.min(startX,
 viewer.onpointerup=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId);drawTargetPreview();$('targetNotice').textContent='Review the frozen crop, then arm it only if the pixels match the label.'};
 viewer.onpointercancel=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId);drawTargetPreview()};
 async function refreshFrame(){if(dragging||targetBox||frameLoading)return;frameLoading=true;try{const r=await fetch('/api/frame.png?t='+Date.now());if(!r.ok)throw Error('live frame unavailable');const token=r.headers.get('X-Minecraft-Frame-Token');if(!token)throw Error('live frame has no reference token');const fw=r.headers.get('X-Minecraft-Frame-Width'),fh=r.headers.get('X-Minecraft-Frame-Height'),hud=r.headers.get('X-Minecraft-HUD-Complete')==='true';$('surface').textContent=(fw&&fh?fw+'×'+fh:'unknown geometry')+' · '+(hud?'FULL SURVIVAL HUD':'HUD INCOMPLETE / NOT IN WORLD');$('surface').className='label '+(hud?'ok':'bad');const blob=await r.blob(),url=URL.createObjectURL(blob),old=frameObjectUrl;displayedFrameToken=null;await new Promise((resolve,reject)=>{worldFrame.onload=resolve;worldFrame.onerror=reject;worldFrame.src=url});frameObjectUrl=url;displayedFrameToken=token;if(old)URL.revokeObjectURL(old)}catch(e){$('surface').textContent='Isolated capture unavailable';$('surface').className='label bad'}finally{frameLoading=false}}
-async function refresh(){try{const s=await api('/api/status');$('dot').style.background='var(--green)';$('connection').textContent='Live telemetry';
+async function refresh(){if(statusLoading)return;statusLoading=true;try{const s=await api('/api/status');$('dot').style.background='var(--green)';$('connection').textContent='Live telemetry';
 const bi=s.bedrock.instances.length>0; $('bedrock').textContent=bi?'RUNNING':'STOPPED';cls($('bedrock'),bi);$('version').textContent=esc(s.bedrock.version);
 const sup=esc(s.supervisor.state);$('supervisor').textContent=sup;cls($('supervisor'),s.supervisor_reachable&&sup!=='FAILSAFE');
 const alive=s.agent.alive;$('agent').textContent=alive?'RUNNING':'DISARMED';cls($('agent'),alive);const t=s.telemetry||{};
@@ -1257,13 +1274,13 @@ const wc=s.supervisor.world_camera||{};$('camera').textContent=esc(active.estima
 const pf=((t.perception||{}).fresh_facts)||{};$('facts').textContent=Object.keys(pf).length?JSON.stringify(pf,null,2):'No fresh semantic facts yet.';
 $('frames').textContent=esc(t.frames||0);$('actions').textContent=esc(t.motor_actions||0);$('capture').textContent=t.last_capture_ms==null?'—':t.last_capture_ms+' ms';
 const tr=t.trajectory_recording||{},recording=tr.enabled===true;$('recording').textContent=recording?'ON':'PAUSED';$('recording').className=recording?'ok':'amber';$('recordingDetail').textContent=recording?(esc(tr.written_steps||0)+' saved · '+esc(tr.queued_samples||0)+' queued'):esc(tr.disabled_reason||'not configured');
-}catch(e){$('dot').style.background='var(--red)';$('connection').textContent='Disconnected'}}
-async function messages(){try{const d=await api('/api/messages');const feed=$('feed');feed.replaceChildren();if(!d.messages.length){const x=document.createElement('div');x.className='label';x.textContent='No messages yet';feed.append(x);return}
-d.messages.forEach(m=>{const box=document.createElement('div');box.className='msg';const meta=document.createElement('div');meta.className='meta';const k=document.createElement('span');k.className='kind';k.textContent=m.kind;const when=document.createElement('span');when.textContent=new Date(m.created_ns/1e6).toLocaleTimeString();const status=document.createElement('span');status.textContent=m.status;meta.append(k,when,status);const text=document.createElement('div');text.className='text';text.textContent=m.text;box.append(meta,text);if(m.response_text){const reply=document.createElement('div');reply.className='text ok';reply.textContent='Agent: '+m.response_text;box.append(reply)}feed.append(box)})}catch(e){}}
+}catch(e){$('dot').style.background='var(--red)';$('connection').textContent='Disconnected'}finally{statusLoading=false}}
+async function messages(){if(messagesLoading)return;messagesLoading=true;try{const d=await api('/api/messages');const feed=$('feed');feed.replaceChildren();if(!d.messages.length){const x=document.createElement('div');x.className='label';x.textContent='No messages yet';feed.append(x);return}
+d.messages.forEach(m=>{const box=document.createElement('div');box.className='msg';const meta=document.createElement('div');meta.className='meta';const k=document.createElement('span');k.className='kind';k.textContent=m.kind;const when=document.createElement('span');when.textContent=new Date(m.created_ns/1e6).toLocaleTimeString();const status=document.createElement('span');status.textContent=m.status;meta.append(k,when,status);const text=document.createElement('div');text.className='text';text.textContent=m.text;box.append(meta,text);if(m.response_text){const reply=document.createElement('div');reply.className='text ok';reply.textContent='Agent: '+m.response_text;box.append(reply)}feed.append(box)})}catch(e){}finally{messagesLoading=false}}
 $('send').onclick=async()=>{const text=$('text').value.trim();if(!text)return;try{await api('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,kind:$('kind').value,priority:Number($('priority').value)})});$('text').value='';$('notice').textContent='Delivered to the durable cognition inbox.';messages()}catch(e){$('notice').textContent=e.message}};
 $('setTarget').onclick=async()=>{if(!targetBox||targetBox.width<.005||targetBox.height<.005){$('targetNotice').textContent='Drag a non-empty target region first.';return}if(!displayedFrameToken){$('targetNotice').textContent='The reference frame expired; wait for a fresh frame and select again.';targetBox=null;selection.style.display='none';targetReview.hidden=true;refreshFrame();return}try{const t=await api('/api/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...targetBox,frame_token:displayedFrameToken,label:$('targetLabel').value.trim()||'target'})});targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;$('targetNotice').textContent='ROCKET-2 target armed from exact frozen pixels: '+t.label+' · '+t.track_id;refreshFrame()}catch(e){$('targetNotice').textContent=e.message;targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;refreshFrame()}};
 $('clearTarget').onclick=async()=>{try{await api('/api/target/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;$('targetNotice').textContent='Grounded target cleared.';refreshFrame()}catch(e){$('targetNotice').textContent=e.message}};
 $('pause').onclick=async()=>{try{await api('/api/control/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('notice').textContent='Agent paused; motor capability revoked.';refresh()}catch(e){$('notice').textContent=e.message}};
 $('resume').onclick=async()=>{try{await api('/api/control/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('notice').textContent='Supervisor returned to safe idle. Live control was not armed.';refresh()}catch(e){$('notice').textContent=e.message}};
-refresh();messages();refreshFrame();setInterval(refresh,250);setInterval(messages,2000);setInterval(refreshFrame,120);
+refresh();messages();refreshFrame();setInterval(refresh,500);setInterval(messages,2000);setInterval(refreshFrame,80);
 </script></body></html>"""

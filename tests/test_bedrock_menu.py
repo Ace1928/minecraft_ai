@@ -357,6 +357,120 @@ def test_menu_navigator_sends_nothing_on_unknown_initial_screen() -> None:
     assert clicks.clicks == []
 
 
+def _play_tab_lines() -> tuple[OcrLine, ...]:
+    return (
+        OcrLine("PLAT", 470, 12, 60, 20),
+        OcrLine("M Worlds (8)", 120, 75, 150, 30),
+        OcrLine("Realms", 460, 75, 80, 30),
+        OcrLine("Servers", 800, 75, 90, 30),
+        OcrLine("Create new world", 420, 135, 260, 30),
+        OcrLine("Import world", 720, 135, 200, 30),
+        OcrLine("No worlds here... yet!", 380, 205, 240, 30),
+    )
+
+
+@pytest.mark.parametrize("start_at_title", [False, True])
+def test_menu_navigator_waits_for_lan_discovery_from_empty_worlds(start_at_title: bool) -> None:
+    frames = [_frame(index) for index in range(1 if start_at_title else 2, 6)]
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture(frames),
+        text_reader=_MappedTextReader({
+            1: _lines("Minecraft", "Play", "Settings"),
+            2: _play_tab_lines(),
+            3: _lines("Play", "Worlds", "LAN Games", "BedrockConnect"),
+            4: _lines("ServerList", "Eidos Local Bedrock"),
+        }),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        poll_interval_s=0,
+        sleep=lambda _seconds: None,
+        hud_detector=lambda frame: frame.frame_id == 5,
+    )
+
+    result = navigator.run()
+
+    assert result.actions == (3 if start_at_title else 2)
+    assert not any(click[0] == 2 for click in clicks.clicks)
+    assert MenuStage.PLAY_TABS in result.visited
+    assert result.visited[-1] == MenuStage.IN_WORLD
+
+
+def test_menu_navigator_leaves_featured_servers_for_configured_lan() -> None:
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([_frame(index) for index in range(1, 6)]),
+        text_reader=_MappedTextReader({
+            1: _play_tab_lines()[:4] + _lines("Add server", "Featured experiences (7)"),
+            2: _play_tab_lines(),
+            3: _lines("Play", "Worlds", "LAN Games", "BedrockConnect"),
+            4: _lines("ServerList", "Eidos Local Bedrock"),
+        }),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        poll_interval_s=0,
+        sleep=lambda _seconds: None,
+        hud_detector=lambda frame: frame.frame_id == 5,
+    )
+    result = navigator.run()
+    assert result.visited == (
+        MenuStage.PLAY_SERVERS, MenuStage.PLAY_TABS, MenuStage.PLAY,
+        MenuStage.BEDROCK_CONNECT, MenuStage.IN_WORLD,
+    )
+    assert clicks.clicks == [(1, *_play_tab_lines()[1].center), (3, 500, 320), (4, 500, 200)]
+
+
+@pytest.mark.parametrize("changed", ["missing", "low_confidence", "misplaced"])
+def test_empty_worlds_tab_switch_requires_all_three_upper_tabs(changed: str) -> None:
+    lines = list(_play_tab_lines())
+    if changed == "missing":
+        lines.pop(2)
+    elif changed == "low_confidence":
+        lines[2] = OcrLine("Realms", 460, 75, 80, 30, 59)
+    else:
+        lines[2] = OcrLine("Realms", 460, 400, 80, 30)
+    assert classify_menu_stage(
+        _frame(1), tuple(lines), lan_name="BedrockConnect",
+        server_name="Eidos Local Bedrock", hud_detector=lambda _frame: False,
+    ) == MenuStage.UNKNOWN
+
+
+def test_empty_worlds_with_noisy_servers_label_only_authorizes_waiting() -> None:
+    lines = list(_play_tab_lines())
+    lines[3] = OcrLine("a Jervers", 800, 75, 90, 30, 58.6)
+    assert classify_menu_stage(
+        _frame(1), tuple(lines), lan_name="BedrockConnect",
+        server_name="Eidos Local Bedrock", hud_detector=lambda _frame: False,
+    ) == MenuStage.PLAY_TABS
+
+
+def test_empty_worlds_without_configured_lan_times_out_without_clicks() -> None:
+    now = 0.0
+
+    def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([_frame(index) for index in range(1, 5)]),
+        text_reader=_MappedTextReader({index: _play_tab_lines() for index in range(1, 5)}),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        timeout_s=0.3,
+        poll_interval_s=0.1,
+        clock=lambda: now,
+        sleep=advance,
+        hud_detector=lambda _frame: False,
+    )
+    with pytest.raises(MenuNavigationError, match="play-tabs screen until timeout"):
+        navigator.run()
+    assert clicks.clicks == []
+
+
 def test_menu_navigator_rechecks_emergency_interlock_between_transitions() -> None:
     permitted = True
 

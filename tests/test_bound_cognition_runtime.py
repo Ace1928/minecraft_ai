@@ -246,7 +246,7 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     runtime._plan_index = 0
     runtime._plan_started_ns = 0
     runtime._pending_decision = None
-    runtime.skills = SimpleNamespace(specs={"walk": object()}, get=lambda name: name)
+    runtime.skills = SimpleNamespace(specs={"walk": object()}, stats={}, get=lambda name: name)
     adopted: list[CognitionDecision] = []
     runtime._adopt_plan_if_revised = adopted.append
     monkeypatch.setattr(runtime_module, "operator_intent_lock", intent.lock)

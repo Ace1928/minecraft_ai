@@ -36,6 +36,8 @@ class MenuStage(StrEnum):
     AWAY = "away"
     STARTUP_POPUP = "startup-popup"
     TITLE = "title"
+    PLAY_TABS = "play-tabs"
+    PLAY_SERVERS = "play-servers"
     PLAY = "play"
     BEDROCK_CONNECT = "bedrock-connect"
     DEATH = "death"
@@ -353,6 +355,12 @@ class BedrockMenuNavigator:
             visited.append(observation.stage)
 
         while observation.stage != MenuStage.IN_WORLD:
+            if observation.stage == MenuStage.PLAY_TABS:
+                # LAN discovery can finish after the Worlds tab first renders.
+                # Wait for the configured entry, never create another world.
+                observation = self._wait_loading(deadline, waiting_stage=MenuStage.PLAY_TABS)
+                visited.append(observation.stage)
+                continue
             if observation.stage == MenuStage.AWAY:
                 observation = self._wake_away(observation, deadline=deadline)
                 actions += 1
@@ -401,6 +409,12 @@ class BedrockMenuNavigator:
                 destination=MenuStage.BEDROCK_CONNECT,
                 region=(0.02, 0.10, 0.98, 0.98),
             )
+        if observation.stage == MenuStage.PLAY_SERVERS:
+            return _Transition(
+                target_text=("worlds",),
+                destination=MenuStage.PLAY,
+                region=(0.02, 0.08, 0.35, 0.25),
+            )
         if observation.stage == MenuStage.BEDROCK_CONNECT:
             return _Transition(
                 target_text=(self.server.name,),
@@ -437,7 +451,11 @@ class BedrockMenuNavigator:
                 self.sleep(self.poll_interval_s)
                 self._require_input_permitted()
                 current = self._observe()
-                if current.stage == transition.destination:
+                if current.stage == transition.destination or (
+                    source in {MenuStage.TITLE, MenuStage.PLAY_SERVERS}
+                    and transition.destination == MenuStage.PLAY
+                    and current.stage == MenuStage.PLAY_TABS
+                ):
                     return current, attempt
                 if current.stage == MenuStage.LOADING:
                     current = self._wait_loading(deadline)
@@ -495,14 +513,18 @@ class BedrockMenuNavigator:
                 self._raise_unexpected(MenuStage.AWAY, MenuStage.IN_WORLD, current)
         raise MenuNavigationError("away wake did not reveal a playable HUD; no repeat click sent")
 
-    def _wait_loading(self, deadline: float) -> MenuObservation:
+    def _wait_loading(
+        self, deadline: float, *, waiting_stage: MenuStage = MenuStage.LOADING,
+    ) -> MenuObservation:
         while self.clock() < deadline:
             self.sleep(self.poll_interval_s)
             self._require_input_permitted()
             observation = self._observe()
-            if observation.stage != MenuStage.LOADING:
+            if observation.stage != waiting_stage:
                 return observation
-        raise MenuNavigationError("Bedrock remained on a loading screen until timeout")
+        raise MenuNavigationError(
+            f"Bedrock remained on a {waiting_stage.value} screen until timeout"
+        )
 
     @staticmethod
     def _raise_unexpected(
@@ -616,6 +638,34 @@ def classify_menu_stage(
         or len(play_tabs) >= 2
     ):
         return MenuStage.PLAY
+
+    # Newer Bedrock first renders an empty Worlds tab while LAN discovery is
+    # pending. Recognize its three separately positioned tabs to wait safely.
+    # On the featured Servers browser, return to Worlds for the configured LAN
+    # entry instead of ever selecting a featured server or creating a world.
+    positioned_tabs = {
+        label
+        for label, left, right in (
+            ("worlds", 0.02, 0.35),
+            ("realms", 0.35, 0.65),
+            ("servers", 0.65, 0.98),
+        )
+        if any(
+            line.confidence >= 60
+            and left <= line.center[0] / frame.width <= right
+            and 0.08 <= line.center[1] / frame.height <= 0.25
+            and _text_match_score(line.text, label) >= 0.86
+            for line in lines
+        )
+    }
+    if positioned_tabs == {"worlds", "realms", "servers"}:
+        if "featured experiences" in text and "add server" in text:
+            return MenuStage.PLAY_SERVERS
+        return MenuStage.PLAY_TABS
+    if {"worlds", "realms"} <= positioned_tabs and "worlds here" in text:
+        # Retained empty-Worlds OCR can corrupt the third tab to "Jervers".
+        # Two positioned tabs plus the empty-state text authorize waiting only.
+        return MenuStage.PLAY_TABS
 
     if "minecraft" in text and "play" in text and any(
         anchor in text for anchor in ("settings", "marketplace", "dressing room")
