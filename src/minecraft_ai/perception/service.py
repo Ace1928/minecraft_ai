@@ -1797,13 +1797,13 @@ def _classic_inventory_dirt_matches(
 def bedrock_inventory_overlay_present(frame: CapturedFrame) -> bool:
     """Detect Bedrock's survival or recipe-book inventory chrome.
 
-    Survival inventory uses a wide split layout: its recipe pane is dominated
-    by dark neutral slot fill while the player/crafting pane independently has
-    mid and light neutral chrome. That asymmetric three-palette conjunction is
-    much harder for a textured world frame to satisfy than a whole-screen gray
-    ratio. The retained compact recipe-book layout is covered by the original
-    upper/header conjunction below. This remains a negative-only safety signal:
-    it does not assert which inventory, tab, recipe, or item is visible.
+    Survival inventory uses a wide split layout: its recipe pane has either
+    dark neutral slot fill or fixed header/search/border chrome when colorful
+    recipes cover the slots. The player/crafting pane must independently have
+    both mid and light neutral chrome. The retained compact recipe-book layout
+    is covered by the original upper/header conjunction below. This remains a
+    negative-only safety signal: it does not assert which inventory, tab,
+    recipe, or item is visible.
     """
     if not frame.bgra or frame.width < 320 or frame.height < 180:
         return False
@@ -1818,7 +1818,44 @@ def bedrock_inventory_overlay_present(frame: CapturedFrame) -> bool:
         luma_max=110,
         pixels=pixels,
     )
-    if left_slot_ratio >= 0.55:
+    left_pane_present = left_slot_ratio >= 0.55
+    if not left_pane_present:
+        # These fixed regions do not depend on recipe availability or color.
+        # Require all three; a light panel or a dark search-like strip alone
+        # is not inventory evidence. Keep the independent right-pane gate.
+        left_pane_present = (
+            _sampled_neutral_ratio(
+                frame,
+                x_start=0.177,
+                x_end=0.448,
+                y_start=0.208,
+                y_end=0.256,
+                luma_min=175,
+                luma_max=220,
+                pixels=pixels,
+            ) >= 0.75
+            and _sampled_neutral_ratio(
+                frame,
+                x_start=0.184,
+                x_end=0.38,
+                y_start=0.277,
+                y_end=0.312,
+                luma_min=70,
+                luma_max=110,
+                pixels=pixels,
+            ) >= 0.80
+            and _sampled_neutral_ratio(
+                frame,
+                x_start=0.167,
+                x_end=0.172,
+                y_start=0.345,
+                y_end=0.75,
+                luma_min=175,
+                luma_max=220,
+                pixels=pixels,
+            ) >= 0.90
+        )
+    if left_pane_present:
         right_mid_ratio = _sampled_neutral_ratio(
             frame,
             x_start=0.47,
