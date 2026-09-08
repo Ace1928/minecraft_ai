@@ -673,6 +673,10 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
         "must be addressed before any conflicting standing goal"
         in model.initial_messages[0].content
     )
+    assert "When q includes target.* keys, d must name the specific target" in (
+        model.initial_messages[0].content
+    )
+    assert "even when s=null" in model.initial_messages[0].content
     assert sum(len(message.content) for message in model.initial_messages) < 8_000
     assert decision.chosen_goal_id == "operator:correction"
     assert decision.say == "I am climbing the hill now."

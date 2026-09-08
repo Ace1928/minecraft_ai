@@ -56,6 +56,8 @@ class _CognitionPerceptionProbe:
     cognition_future: concurrent.futures.Future[CognitionDecision] | None = None
     trigger_run_id: str | None = None
     trigger_decision: CognitionDecision | None = None
+    # Explicit decision description only; never inferred target evidence or authority.
+    target_description: str | None = None
 
 @dataclass
 class _GatherAcquisitionContinuation:

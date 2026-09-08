@@ -46,7 +46,10 @@ class CognitionDecision(BaseModel):
     instruction: str | None = Field(
         default=None,
         max_length=280,
-        description="Concrete direction handed to the visuomotor policy as its goal condition.",
+        description=(
+            "Concrete skill direction, or explicit target description for target.* perception "
+            "questions even when no skill is selected."
+        ),
     )
     plan_steps: tuple[str, ...] = Field(
         default=(),
@@ -91,7 +94,10 @@ class _CognitionWireDecision(BaseModel):
     d: str | None = Field(
         default=None,
         max_length=280,
-        description="Specific one-line direction for the current skill (goal condition).",
+        description=(
+            "Specific skill direction, or the target referent for target.* questions "
+            "even when s is null."
+        ),
     )
     n: tuple[str, ...] = Field(
         default=(),

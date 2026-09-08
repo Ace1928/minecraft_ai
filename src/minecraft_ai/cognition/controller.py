@@ -304,6 +304,9 @@ class HighLevelController:
                         "question or invented key: "
                         + ", ".join(_cognition_perception_keys())
                         + ". q=[] and s=null remain valid; an observation may be unknown. "
+                        "When q includes target.* keys, d must name the specific target to "
+                        "inspect (for example, an oak-log trunk), even when s=null. "
+                        "This describes a referent, not evidence it exists or an action to take. "
                         "A fresh operator correction permits one evidence-producing retry."
                     ),
                 ),
