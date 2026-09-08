@@ -116,7 +116,10 @@ def _publish_headroom_answer(
 ) -> None:
     assert recovery.query_id is not None and recovery.query_source is not None
     assert recovery.query_frame_id is not None
-    now = observed_ns or max(time.monotonic_ns(), recovery.query_started_ns + 1)
+    # Publication may share a coarse clock tick with request admission. Do not
+    # fabricate a future timestamp that the production freshness guard rejects.
+    now = (max(time.monotonic_ns(), recovery.query_started_ns)
+           if observed_ns is None else observed_ns)
     source = recovery.query_source
     evidence_id = f"frame-{recovery.query_frame_id}:crosshair-block"
     crop_width, crop_height = crosshair_block_crop_dimensions(frame.width, frame.height)
@@ -1155,10 +1158,18 @@ def _runtime_with_inspection_feedback() -> tuple[AgentRuntime, _Perception, list
     return runtime, perception, sent
 
 
-def test_completed_inspection_reaches_next_cognition_once_without_action() -> None:
+@pytest.mark.parametrize("clock_repeats", (False, True))
+def test_completed_inspection_reaches_next_cognition_once_without_action(
+    monkeypatch: pytest.MonkeyPatch, clock_repeats: bool,
+) -> None:
+    if clock_repeats:
+        # Coarse clocks can return the same tick at request and publication.
+        now_ns = time.monotonic_ns()
+        monkeypatch.setattr(time, "monotonic_ns", lambda: now_ns)
     runtime, perception, sent = _runtime_with_inspection_feedback()
     recovery = runtime._headroom_recovery
     assert recovery is not None
+    assert runtime.blackboard.fact("recovery.crosshair.frame_dhash") is not None
     runtime._advance_headroom_recovery()
     memory = runtime._headroom_inspection_memory
     assert memory is not None
