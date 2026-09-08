@@ -1675,6 +1675,16 @@ class AgentRuntime:
             run_id=uuid.uuid4().hex,
             context_key=context_key,
         )
+        death = self.blackboard.fact("scene.death", min_confidence=0.9)
+        if (
+            recovery_run.skill_id == "respawn_after_death"
+            and death is not None
+            and death.value is True
+        ):
+            # A genuinely observed death invalidates the old collision scene.
+            # Respawn still owns execution; this permits no WORLD input until
+            # the existing GUI recovery has verified a playable return.
+            self._traversal_escalation_pending = False
         if incomplete_gather:
             self._plan_neutral_recovery_runs = {
                 *getattr(self, "_plan_neutral_recovery_runs", ()),

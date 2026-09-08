@@ -1758,8 +1758,149 @@ def test_operator_authority_cancels_running_headroom_child() -> None:
     assert sent
 
 
+@pytest.mark.parametrize("death_value,confidence", ((False, 1.0), (True, 0.8)))
+def test_unverified_death_does_not_clear_traversal_escalation(
+    death_value: bool, confidence: float,
+) -> None:
+    runtime, _, sent = _runtime_for_probe()
+    runtime._traversal_escalation_pending = True
+    runtime.blackboard.merge_semantics(
+        instance_id="bedrock:headroom",
+        facts=(PerceptionFact(
+            key="scene.death", value=death_value, confidence=confidence,
+            observed_ns=time.monotonic_ns(), source="safety:test", expires_after_ms=5_000,
+        ),),
+    )
+
+    runtime._route_observed_scene_recovery()
+
+    assert runtime._traversal_escalation_pending is True
+    assert runtime.executor.run is None
+    assert sent == []
+
+
+def test_away_recovery_does_not_clear_traversal_escalation() -> None:
+    runtime, _, sent = _runtime_for_probe()
+    runtime._traversal_escalation_pending = True
+    runtime.blackboard.merge_semantics(
+        instance_id="bedrock:headroom",
+        facts=(PerceptionFact(
+            key="scene.away", value=True, confidence=1.0,
+            observed_ns=time.monotonic_ns(), source="safety:test", expires_after_ms=5_000,
+        ),),
+    )
+
+    runtime._route_observed_scene_recovery()
+
+    assert runtime._traversal_escalation_pending is True
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.skill_id == "dismiss_away_overlay"
+    assert sent == []
+
+
+def test_respawn_label_without_death_evidence_cannot_clear_escalation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _, sent = _runtime_for_probe()
+    runtime._traversal_escalation_pending = True
+    monkeypatch.setattr(
+        "minecraft_ai.runtime._observed_scene_recovery",
+        lambda *_args: runtime.skills.get("respawn_after_death"),
+    )
+
+    runtime._route_observed_scene_recovery()
+
+    assert runtime._traversal_escalation_pending is True
+    assert sent == []
+
+
+def test_failed_respawn_ownership_does_not_clear_escalation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _, sent = _runtime_for_probe()
+    runtime._traversal_escalation_pending = True
+    runtime.blackboard.merge_semantics(
+        instance_id="bedrock:headroom",
+        facts=(PerceptionFact(
+            key="scene.death", value=True, confidence=1.0,
+            observed_ns=time.monotonic_ns(), source="safety:test", expires_after_ms=5_000,
+        ),),
+    )
+
+    def fail_start(*_args: object, **_kwargs: object) -> SkillRun:
+        raise RuntimeError("respawn ownership rejected")
+
+    monkeypatch.setattr(runtime, "_start_skill", fail_start)
+    with pytest.raises(RuntimeError, match="ownership rejected"):
+        runtime._route_observed_scene_recovery()
+
+    assert runtime._traversal_escalation_pending is True
+    assert sent == []
+
+
+@pytest.mark.parametrize("returned_scene", ("world", "unknown", "inventory", "death"))
+def test_death_latch_clear_leaves_gui_owner_until_playable_return(
+    returned_scene: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, perception, sent = _runtime_for_probe()
+    runtime._traversal_escalation_pending = True
+    runtime._pending_decision = Future()
+    now = time.monotonic_ns()
+    runtime.blackboard.merge_semantics(
+        instance_id="bedrock:headroom",
+        facts=tuple(PerceptionFact(
+            key=key, value=value, confidence=0.995, observed_ns=now,
+            source="safety:bedrock-hud-v1:not-training-label", expires_after_ms=5_000,
+        ) for key, value in (
+            ("scene.death", True), ("scene.playable", False), ("scene.mode", "death"),
+        )),
+    )
+    runtime._route_observed_scene_recovery()
+    assert runtime._traversal_escalation_pending is False
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.skill_id == "respawn_after_death"
+    assert sent == []
+    # Simulate only the existing screenshot-bound GUI proposal and waiting
+    # phase; this is not a supervisor-accepted interaction receipt.
+    monkeypatch.setattr(
+        "minecraft_ai.control.execution.death_respawn_control_center",
+        lambda _capture: (0.5, 0.5),
+    )
+    click = runtime.executor.tick(
+        runtime.blackboard, sequence=0, capture=perception.last_capture,
+    )
+    assert click.action is not None
+    assert click.action.buttons_down == ("left",)
+    assert not click.action.keys_down
+
+    now = time.monotonic_ns()
+    runtime.blackboard.merge_semantics(
+        instance_id="bedrock:headroom",
+        facts=tuple(PerceptionFact(
+            key=key, value=value, confidence=0.995, observed_ns=now,
+            source="safety:bedrock-hud-v1:not-training-label", expires_after_ms=5_000,
+        ) for key, value in (
+            ("scene.death", returned_scene == "death"),
+            ("scene.playable", returned_scene == "world"),
+            ("scene.mode", returned_scene),
+        )),
+    )
+    result = runtime.executor.tick(runtime.blackboard, sequence=1)
+    assert result.action is None or not result.action.keys_down
+    assert not runtime._pending_decision.done()
+    if returned_scene == "world":
+        assert result.run.outcome == SkillOutcome.SUCCEEDED
+        # Existing keepalive is eligible while the planner remains pending;
+        # this is not an automatic new movement or a native world reset.
+        assert runtime._explore_keep_alive() is not None
+    else:
+        assert result.run.outcome == SkillOutcome.RUNNING
+        assert result.run.skill_id == "respawn_after_death"
+
+
 def test_death_scene_preempts_running_headroom_child() -> None:
     runtime, perception, _ = _runtime_for_probe()
+    runtime._traversal_escalation_pending = True
     assert perception.last_capture is not None
     recovery = _recovery_for_frame(perception.last_capture, query_id="death-query")
     runtime._headroom_recovery = recovery
@@ -1813,6 +1954,11 @@ def test_death_scene_preempts_running_headroom_child() -> None:
     assert sent
     assert runtime.executor.run is not None
     assert runtime.executor.run.skill_id == "respawn_after_death"
+    assert runtime._traversal_escalation_pending is False
+    assert runtime.executor.run.outcome == SkillOutcome.RUNNING
+    # Death recovery owns the GUI; clearing obsolete terrain context does not
+    # itself send any positive world input.
+    assert all(not action.keys_down and not action.buttons_down for action in sent)
     assert all(track.track_id != track_id for track in runtime.blackboard.latest().tracks)
     for key in (
         "recovery.crosshair.block",
