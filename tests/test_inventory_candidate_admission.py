@@ -10,7 +10,9 @@ from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.cognition import (
     CognitionContext, CognitionDecision, HighLevelController, planks_retry_requires_wood,
 )
-from minecraft_ai.cognition.prompts import _operator_requested_skill_ids
+from minecraft_ai.cognition.prompts import (
+    _explicit_action_constraints, _operator_requested_skill_ids,
+)
 from minecraft_ai.execution import SkillExecutor
 from minecraft_ai.models import ModelResponse
 from minecraft_ai.motor import BootstrapMotorPolicy
@@ -53,6 +55,8 @@ def _context(text=REQUEST, *, kind=OperatorMessageKind.INSTRUCTION,
     "Do not attack. Open inventory once.",
     "Inventory task: open the inventory once. Do not move or attack.",
     "One-time command-following check: open inventory once. Do not attack.",
+    "Open inventory once. Don't do that again.",
+    "Open inventory once. Do not do it again.",
 ))
 def test_unrelated_prohibition_allows_only_inventory_candidate(text):
     context = _context(text)
@@ -71,6 +75,11 @@ def test_unrelated_prohibition_allows_only_inventory_candidate(text):
     "Open inventory. Do not open inventory after all.",
     "Open inventory, but don't open it after all.",
     "Open inventory, but do not open my inventory.",
+    "Open inventory. Don't do that.",
+    "Open inventory. Do not do it.",
+    "Open inventory. Don't do this.",
+    "Open inventory. Actually, don't.",
+    "Open inventory. Actually, do not.",
     "Could you open inventory?",
     "How to open inventory: explain the procedure.",
     "Tell me this command: open inventory.",
@@ -94,6 +103,33 @@ def test_no_exception_for_negated_quoted_conditional_or_query_only_requests(text
     context = _context(text + " Do not attack.")
     assert _operator_requested_skill_ids(context.operator_messages[0].text) == ()
     assert planks_retry_requires_wood(context, skill_id="open_inventory")
+
+
+@pytest.mark.parametrize("text", (
+    "Open inventory. Don't do that.",
+    "Open inventory. Do not do it.",
+    "Open inventory. Actually, don't.",
+    "Open inventory. Don’t do that.",
+    "Open inventory. Actually, don’t.",
+))
+def test_cancellation_without_extra_prohibition_blocks_both_admission_paths(text):
+    context = _context(text)
+    assert _operator_requested_skill_ids(text) == ()
+    assert planks_retry_requires_wood(context, skill_id="open_inventory")
+    assert planks_retry_requires_wood(context, skill_id="craft_wood_planks")
+    assert planks_retry_requires_wood(context)
+    controller = HighLevelController(_Model(CognitionDecision()), build_bootstrap_skill_library())
+    assert controller._operator_fast_path_decision(PerceptionBlackboard(), context) is None
+
+
+def test_smart_apostrophe_keeps_literal_actuator_prohibitions():
+    text = "Open inventory. Don’t attack, interact or jump."
+    assert _operator_requested_skill_ids(text) == ()
+    assert _explicit_action_constraints(text) == {
+        "allow_attack": False, "allow_use": False, "allow_jump": False,
+    }
+    assert not planks_retry_requires_wood(_context(text), skill_id="open_inventory")
+    assert planks_retry_requires_wood(_context(text), skill_id="craft_wood_planks")
 
 
 @pytest.mark.parametrize("kind", tuple(OperatorMessageKind))

@@ -322,7 +322,7 @@ def _explicit_action_constraints(text: str) -> dict[str, bool]:
     strategic model still chooses the skill and every remaining learned action.
     """
     constraints: dict[str, bool] = {}
-    normalized = text.casefold()
+    normalized = text.casefold().replace("’", "'")
     for match in re.finditer(
         r"\b(?:do\s+not|don't|never|without)\b(?P<scope>[^.!?;]{0,160})",
         normalized,
@@ -349,7 +349,7 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
     # directive takes the same zero-latency path as "explore forward" instead
     # of falling through to a slow model call that may alter its constraints.
     normalized = " ".join(
-        text.casefold().replace("_", " ").replace("-", " ").split()
+        text.casefold().replace("’", "'").replace("_", " ").replace("-", " ").split()
     )
     # A terminal "then stop and reassess" clause describes what to do after
     # the requested skill succeeds; it must not negate the affirmative action.
@@ -473,6 +473,13 @@ def _affirmative_inventory_inspection(text: str) -> bool:
         r"\b(?:avoid|do\s+not|don't|never|no\s+longer|refrain|stop|without)\b[^.!?;:]*",
         normalized,
     ):
+        if re.fullmatch(
+            r"(?:don't|do\s+not)(?:\s+do\s+(?:it|this|that))?\s*",
+            prohibition.group(),
+        ):
+            # A bare cancellation revokes the imperative. Do not conflate
+            # "don't do that again" with cancelling the first requested look.
+            return False
         if re.search(
             r"\b(?:open(?:ing)?|inspect(?:ing)?|check(?:ing)?|audit(?:ing)?|view(?:ing)?|"
             r"access(?:ing)?|touch(?:ing)?)"
