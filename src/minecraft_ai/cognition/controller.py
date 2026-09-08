@@ -25,6 +25,7 @@ from .bootstrap import BootstrapCognitionPolicy
 from .constants import _MAX_OPERATOR_FAST_PATH_INSTRUCTION_CHARS
 from .prompts import (
     _cognition_decision_grammar,
+    _cognition_perception_keys,
     _compact_prompt_scalar,
     _explicit_action_constraints,
     _high_level_fact_payload,
@@ -299,7 +300,10 @@ class HighLevelController:
                         "Treat recent_skill_runs and evaluation as empirical evidence. Avoid a "
                         "skill after two consecutive failures; choose another listed skill or "
                         "return s null with x true and request needed perception. Every q item "
-                        "must be a literal missing fresh_facts key, never a prose question. "
+                        "must be one of these supported literal perception keys, never a prose "
+                        "question or invented key: "
+                        + ", ".join(_cognition_perception_keys())
+                        + ". q=[] and s=null remain valid; an observation may be unknown. "
                         "A fresh operator correction permits one evidence-producing retry."
                     ),
                 ),
@@ -874,6 +878,8 @@ class HighLevelController:
             _CognitionWireDecision.model_json_schema()
             if use_bound or callable(constrained) or callable(structured) else {}
         )
+        if schema:
+            schema["properties"]["q"]["items"]["enum"] = list(_cognition_perception_keys())
         grammar = (
             _cognition_decision_grammar(repair_bounds)
             if use_bound or callable(constrained) else ""
@@ -970,4 +976,3 @@ class HighLevelController:
                 "ask_perception": tuple(dict.fromkeys((*decision.ask_perception, *missing))),
             }
         ))
-

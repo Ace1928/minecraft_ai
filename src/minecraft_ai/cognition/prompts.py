@@ -5,7 +5,8 @@ import re
 from typing import Any
 
 
-from minecraft_ai.perception import CognitionReadView
+from minecraft_ai.grounded_perception import _grounded_claim_keys
+from minecraft_ai.perception import CognitionReadView, EvidenceRegion
 from minecraft_ai.planning import Goal, GoalSource
 from minecraft_ai.social import (
     OperatorMessage,
@@ -30,6 +31,13 @@ from .types import (
     _DecisionRepairBounds,
     _WOOD_INVENTORY_AUDIT_SKILLS,
 )
+
+
+def _cognition_perception_keys() -> tuple[str, ...]:
+    """Use the existing grounding contract, not a second planner vocabulary."""
+    return _grounded_claim_keys((), set(EvidenceRegion))
+
+
 def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
     """Build a compact sampler-enforced grammar for one decision boundary.
 
@@ -55,6 +63,7 @@ def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
     # possible even when the only requested option has repeatedly failed.
     skill_alternatives = (*tuple(literal(skill_id) for skill_id in skill_ids), '"null"')
     skill_rule = " | ".join(skill_alternatives)
+    question_rule = " | ".join(literal(key) for key in _cognition_perception_keys())
     parameter_names = tuple(
         dict.fromkeys(
             (
@@ -106,7 +115,8 @@ def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
             f"params ::= {params_rule}",
             *parameter_rules,
             *authority_rule,
-            'questions ::= "[" (medium-string ("," medium-string){0,1})? "]"',
+            'questions ::= "[" (perception-key ("," perception-key){0,1})? "]"',
+            f"perception-key ::= {question_rule}",
             'plan ::= "[" (medium-string ("," medium-string){0,4})? "]"',
             'nullable-id ::= "null" | id-string',
             'nullable-medium ::= "null" | medium-string',
@@ -461,4 +471,3 @@ def planks_retry_requires_wood(context: CognitionContext) -> bool:
     ):
         return False
     return True
-

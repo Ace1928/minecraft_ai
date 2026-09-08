@@ -7,9 +7,11 @@ import pytest
 
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.cognition import CognitionContext, CognitionDecision, HighLevelController
+from minecraft_ai.grounded_perception import _grounded_claim_keys, resolve_grounded_output_keys
 from minecraft_ai.models import ModelMessage, ModelResponse
 from minecraft_ai.planning import Goal, GoalSource
 from minecraft_ai.perception import (
+    EvidenceRegion,
     FrameState,
     PerceptionBlackboard,
     PerceptionFact,
@@ -161,6 +163,7 @@ class _GrammarCapturingModel:
         chosen_goal_id: str = "operator:move-now",
     ) -> None:
         self.grammar = ""
+        self.schema: dict[str, object] = {}
         self.messages: tuple[ModelMessage, ...] = ()
         self.skill_id = skill_id
         self.chosen_goal_id = chosen_goal_id
@@ -173,9 +176,10 @@ class _GrammarCapturingModel:
         schema: dict[str, object],
         grammar: str,
     ) -> ModelResponse:
-        del name, schema
+        del name
         self.messages = messages
         self.grammar = grammar
+        self.schema = schema
         return ModelResponse(
             text=json.dumps(
                 {
@@ -500,6 +504,69 @@ def test_high_level_uses_lossless_compact_structured_wire_schema() -> None:
     assert "required" not in model.schema
     assert decision.skill_id == "explore_forward"
     assert decision.reasoning_summary == "Explore while gathering evidence"
+    assert model.schema["properties"]["q"]["items"]["enum"] == list(
+        _grounded_claim_keys((), set(EvidenceRegion)),
+    )
+
+
+def _grammar_perception_keys(grammar: str) -> set[str]:
+    rule = next(line for line in grammar.splitlines() if line.startswith("perception-key ::="))
+    return {json.loads(json.loads(literal)) for literal in rule.split("::=", 1)[1].split(" | ")}
+
+
+def test_cognition_sampler_questions_use_exact_existing_grounding_vocabulary() -> None:
+    model = _GrammarCapturingModel(skill_id=None)
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    decision = controller.decide(_board(), _context())
+
+    expected = set(_grounded_claim_keys((), set(EvidenceRegion)))
+    assert _grammar_perception_keys(model.grammar) == expected
+    question_schema = model.schema["properties"]["q"]
+    assert set(question_schema["items"]["enum"]) == expected
+    assert question_schema["maxItems"] == 2
+    assert question_schema["default"] == []
+    assert 'questions ::= "[" (perception-key ("," perception-key){0,1})? "]"' in model.grammar
+    assert "obstacle.ahead" in expected
+    assert {"player.position", "environment.nearby_exit"}.isdisjoint(expected)
+    assert all(resolve_grounded_output_keys((), key) == (key,) for key in expected)
+    prompt = model.messages[0].content
+    assert all(key in prompt for key in expected)
+    assert "player.position" not in prompt and "environment.nearby_exit" not in prompt
+    assert decision.skill_id is None and decision.ask_perception == ()
+
+
+def test_json_repair_reuses_constrained_perception_vocabulary() -> None:
+    class CapturingRepair(_MalformedThenRepairingModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.contracts: list[tuple[dict[str, object], str]] = []
+
+        def complete_constrained(
+            self, messages: tuple[ModelMessage, ...], *, name: str,
+            schema: dict[str, object], grammar: str,
+        ) -> ModelResponse:
+            self.contracts.append((schema, grammar))
+            return super().complete_structured(messages, name=name, schema=schema)
+
+    model = CapturingRepair()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    controller.decide(_board(), _context())
+
+    assert [name for _messages, name in model.calls] == [
+        "cognition_decision", "cognition_decision_json_repair",
+    ]
+    expected = set(_grounded_claim_keys((), set(EvidenceRegion)))
+    assert len(model.contracts) == 2
+    for schema, grammar in model.contracts:
+        assert set(schema["properties"]["q"]["items"]["enum"]) == expected
+        assert _grammar_perception_keys(grammar) == expected
+
+
+def test_legacy_cognition_decision_perception_parser_remains_unchanged() -> None:
+    decision = CognitionDecision(ask_perception=("player.position", "environment.nearby_exit"))
+    assert decision.ask_perception == ("player.position", "environment.nearby_exit")
 
 
 def test_high_level_repairs_truncated_json_once_with_compact_bounded_context() -> None:
