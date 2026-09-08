@@ -551,18 +551,14 @@ class AgentRuntime:
         if (
             (running is None or running.outcome != SkillOutcome.RUNNING)
             and getattr(self, "_headroom_recovery", None) is None
+            and getattr(self, "_cognition_perception_probe", None) is None
+            and not getattr(self, "_traversal_escalation_pending", False)
+            and self._headroom_scene_is_safe()
         ):
-            probe = getattr(self, "_cognition_perception_probe", None)
-            settle_deadline_ns = (
-                getattr(probe, "settle_deadline_ns", None) if probe is not None else None
-            )
-            in_settle = (
-                probe is not None
-                and isinstance(settle_deadline_ns, int)
-                and time.monotonic_ns() < settle_deadline_ns
-            )
-            # Reorient before cognition can start VPT/STEVE looking at feet.
-            if not in_settle and self._keepalive_horizon_reorient():
+            # Reorient only in a freshly verified world scene. The entire
+            # perception transaction owns its view, not just its settle phase;
+            # modal/death recovery must never inherit a WORLD cursor move.
+            if self._keepalive_horizon_reorient():
                 self._flush_pending_skill_stats()
                 return
         self._consume_cognition()
@@ -580,18 +576,10 @@ class AgentRuntime:
             if getattr(self, "_headroom_recovery", None) is not None:
                 self._flush_pending_skill_stats()
                 return
-            probe = getattr(self, "_cognition_perception_probe", None)
-            settle_deadline_ns = (
-                getattr(probe, "settle_deadline_ns", None) if probe is not None else None
-            )
-            if (
-                probe is not None
-                and isinstance(settle_deadline_ns, int)
-                and time.monotonic_ns() < settle_deadline_ns
-            ):
-                # Hold still only through the short settle window. A long
-                # grounding wait with no motor is how Bedrock shows the away
-                # overlay and the player looks frozen.
+            if getattr(self, "_cognition_perception_probe", None) is not None:
+                # Preserve the admitted query and its bounded follow-up view.
+                # The reconciler above owns completion, timeout and safety/UI
+                # preemption; elapsed settling alone does not end ownership.
                 self._flush_pending_skill_stats()
                 return
             # Never idle the player while cognition is in flight: keep a
@@ -1491,18 +1479,15 @@ class AgentRuntime:
         idle freeze that the latent STEVE body produces while cognition is in
         flight.
         """
-        if getattr(self, "_headroom_recovery", None) is not None:
+        if (
+            getattr(self, "_headroom_recovery", None) is not None
+            or getattr(self, "_traversal_escalation_pending", False)
+        ):
             return None
         candidates: list[tuple[int, SkillSpec, SkillStats | None]] = []
-        # After an obstacle stall, prefer looking/strafing around instead of
-        # walking into the same wall again. Escalation still requests a new
-        # cognition turn; it must not freeze the body until that turn returns.
-        skill_ids = (
-            ("explore_forward", "traverse_level_ground")
-            if getattr(self, "_traversal_escalation_pending", False)
-            else ("traverse_level_ground", "explore_forward")
-        )
-        for order, skill_id in enumerate(skill_ids):
+        # Exhausted traversal recovery must reach cognition before another
+        # disposable walk can stall and invalidate that decision again.
+        for order, skill_id in enumerate(("traverse_level_ground", "explore_forward")):
             skill = self.skills.specs.get(skill_id)
             if skill is None:
                 continue
@@ -4142,4 +4127,3 @@ class AgentRuntime:
             send_command("fault", reason=reason)
         except Exception:
             pass
-

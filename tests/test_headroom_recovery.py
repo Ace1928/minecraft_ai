@@ -1111,13 +1111,11 @@ def test_hard_or_unknown_answer_gives_cognition_a_turn_after_one_query(kind: str
     assert sent == []
     assert runtime._traversal_escalation_pending is True
     assert runtime._cognition_requested is True
-    # Headroom has ended. Keep the body moving with a different option while
-    # the slow cognition turn is still in flight.
+    # Headroom has ended without a grounded remedy. Preserve the failure for
+    # cognition instead of invalidating its view with another disposable walk.
     revision = runtime._execution_revision
     for _ in range(3):
-        keepalive = runtime._explore_keep_alive()
-        assert keepalive is not None
-        assert keepalive.skill_id == "explore_forward"
+        assert runtime._explore_keep_alive() is None
         runtime._advance_headroom_recovery()
     assert runtime._execution_revision == revision
 

@@ -3055,7 +3055,7 @@ def test_ordinary_traversal_stall_routes_one_obstacle_recovery() -> None:
     assert selected.skill_id == "traverse_visible_obstacle"
 
 
-def test_obstacle_stall_requests_cognition_but_keeps_a_different_keepalive() -> None:
+def test_obstacle_stall_requests_cognition_and_blocks_disposable_keepalive() -> None:
     runtime = object.__new__(AgentRuntime)
     runtime.skills = build_bootstrap_skill_library()
     runtime._execution_revision = 7
@@ -3078,12 +3078,10 @@ def test_obstacle_stall_requests_cognition_but_keeps_a_different_keepalive() -> 
     assert runtime._execution_revision == 8
     assert runtime._cognition_requested is True
     assert runtime._traversal_escalation_pending is True
-    keepalive = runtime._explore_keep_alive()
-    assert keepalive is not None
-    assert keepalive.skill_id == "explore_forward"
+    assert runtime._explore_keep_alive() is None
 
 
-def test_obstacle_recovery_timeout_requests_cognition_but_keeps_keepalive() -> None:
+def test_obstacle_recovery_timeout_requests_cognition_and_blocks_keepalive() -> None:
     runtime = object.__new__(AgentRuntime)
     runtime.skills = build_bootstrap_skill_library()
     runtime._execution_revision = 11
@@ -3105,12 +3103,10 @@ def test_obstacle_recovery_timeout_requests_cognition_but_keeps_keepalive() -> N
     assert runtime._execution_revision == 12
     assert runtime._cognition_requested is True
     assert runtime._traversal_escalation_pending is True
-    keepalive = runtime._explore_keep_alive()
-    assert keepalive is not None
-    assert keepalive.skill_id == "explore_forward"
+    assert runtime._explore_keep_alive() is None
 
 
-def test_stall_keepalive_stays_on_locomotion_not_tech_tree() -> None:
+def test_stall_latch_blocks_locomotion_and_tech_tree_keepalive() -> None:
     runtime = object.__new__(AgentRuntime)
     runtime.skills = build_bootstrap_skill_library()
     runtime._traversal_escalation_pending = True
@@ -3119,12 +3115,10 @@ def test_stall_keepalive_stays_on_locomotion_not_tech_tree() -> None:
 
     skill = runtime._explore_keep_alive()
 
-    assert skill is not None
-    assert skill.skill_id == "explore_forward"
-    assert skill.skill_id != "gather_nearby_wood"
+    assert skill is None
 
 
-def test_stall_keepalive_skips_repeatedly_failed_tech_tree_skill() -> None:
+def test_stall_latch_cannot_substitute_exploration_for_failed_gather() -> None:
     runtime = object.__new__(AgentRuntime)
     runtime.skills = build_bootstrap_skill_library()
     runtime._traversal_escalation_pending = True
@@ -3137,8 +3131,7 @@ def test_stall_keepalive_skips_repeatedly_failed_tech_tree_skill() -> None:
 
     skill = runtime._explore_keep_alive()
 
-    assert skill is not None
-    assert skill.skill_id == "explore_forward"
+    assert skill is None
 
 
 def test_active_headroom_recovery_still_blocks_keepalive() -> None:
@@ -3307,12 +3300,14 @@ def test_fresh_executable_cognition_unblocks_traversal_after_obstacle_stall() ->
     runtime.executor = SkillExecutor(BootstrapMotorPolicy())
     runtime._traversal_escalation_pending = True
 
+    assert runtime._explore_keep_alive() is None
     runtime._consume_cognition()
 
     assert runtime._traversal_escalation_pending is False
     assert runtime.executor.run is not None
     assert runtime.executor.run.skill_id == "explore_forward"
     assert runtime.executor.instruction == "Find another visible route."
+    assert runtime._explore_keep_alive() is not None
 
 
 def test_request_replan_rearms_cognition_with_bounded_backoff() -> None:
@@ -3431,6 +3426,7 @@ def test_idle_stall_probe_is_one_shot_after_unknown_completion(
     clock_ns = [10_000_000_000]
     runtime, perception, decision = _runtime_with_idle_stalls(monkeypatch, clock_ns)
     assert runtime._idle_stall_probe_run_id(decision) == "stall-1"
+    assert runtime._explore_keep_alive() is None
 
     runtime._consume_cognition()
 
@@ -3446,6 +3442,7 @@ def test_idle_stall_probe_is_one_shot_after_unknown_completion(
     assert runtime._cognition_perception_probe.trigger_decision == decision
     assert runtime._plan_index == 0
     assert runtime.executor.run is None
+    assert runtime._explore_keep_alive() is None
 
     for frame_id in (2, 3):
         clock_ns[0] += 50_000_000
@@ -3470,6 +3467,7 @@ def test_idle_stall_probe_is_one_shot_after_unknown_completion(
     assert runtime.executor.run is None
     assert runtime._plan_index == 0
     assert runtime.metrics.operator_responses == 0
+    assert runtime._explore_keep_alive() is None
 
 
 def test_idle_stall_probe_marker_survives_settle_timeout(
@@ -4385,30 +4383,34 @@ def test_pending_cognition_perception_probe_suppresses_exploration_keepalive(
     assert runtime.metrics.motor_actions == 0
 
 
-def test_expired_perception_probe_settle_keeps_exploration_keepalive(
+@pytest.mark.parametrize("phase", ("grounding", "handoff", "timeout", "unknown"))
+def test_expired_settle_does_not_end_perception_scene_ownership(
     monkeypatch: pytest.MonkeyPatch,
+    phase: str,
 ) -> None:
-    runtime = object.__new__(AgentRuntime)
-    runtime.metrics = RuntimeMetrics()
-    runtime.skills = build_bootstrap_skill_library()
-    runtime.executor = SkillExecutor(BootstrapMotorPolicy())
-    runtime._cognition_perception_probe = SimpleNamespace(
-        query_id="q-stable",
-        settle_deadline_ns=time.monotonic_ns() - 1,
-    )
+    clock_ns = [10_000_000_000]
+    monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock_ns[0])
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+    if phase == "handoff":
+        runtime, _observed = _runtime_with_published_cognition_probe(monkeypatch, clock_ns)
+    else:
+        runtime = _runtime_with_waiting_cognition_perception(now_ns=clock_ns[0])
+    probe = runtime._cognition_perception_probe
+    assert probe is not None
+    clock_ns[0] += 3_000_000_000
+    assert clock_ns[0] > probe.settle_deadline_ns
+    if phase == "timeout":
+        assert probe.grounding_deadline_ns is not None
+        clock_ns[0] = probe.grounding_deadline_ns
+    elif phase == "unknown":
+        runtime.perception.active_vlm.status = lambda: {  # type: ignore[union-attr,method-assign]
+            "completed": 1, "failures": 0, "thread_alive": True,
+        }
+        runtime.perception.semantic_available = lambda: True  # type: ignore[method-assign]
+    _publish_probe_world_frame(runtime, clock_ns[0])
     runtime._input_release_pending_ns = None
-    captured_ns = time.monotonic_ns()
-    frame = FrameState(
-        frame_id=4,
-        captured_ns=captured_ns,
-        instance_id="bedrock:test",
-        width=1280,
-        height=720,
-    )
-    runtime.perception = SimpleNamespace(  # type: ignore[assignment]
-        capture_once=lambda: frame,
-        stale=lambda: False,
-    )
+    runtime.perception.capture_once = runtime.blackboard.raw_latest  # type: ignore[method-assign,assignment]
+    runtime.perception.stale = lambda: False  # type: ignore[method-assign]
     runtime.telemetry = SimpleNamespace(publish=lambda _payload: None)  # type: ignore[assignment]
     keepalive_calls: list[str] = []
     for method in (
@@ -4420,7 +4422,6 @@ def test_expired_perception_probe_settle_keeps_exploration_keepalive(
         "_publish_player_chat_facts",
         "_planks_retry_requires_wood",
         "_consume_cognition",
-        "_reconcile_cognition_perception_probe",
         "_start_cognition_if_due",
         "_request_semantics_if_due",
         "_route_observed_scene_recovery",
@@ -4428,7 +4429,11 @@ def test_expired_perception_probe_settle_keeps_exploration_keepalive(
     ):
         monkeypatch.setattr(runtime, method, lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runtime, "_telemetry_payload", lambda **_kwargs: {})
-    monkeypatch.setattr(runtime, "_authoritative_world_camera_pitch_units", lambda: 96)
+    monkeypatch.setattr(runtime, "_authoritative_world_camera_pitch_units", lambda: 348)
+    monkeypatch.setattr(
+        runtime, "_send_motor",
+        lambda *_args, **_kwargs: pytest.fail("probe-owned pixels must not move"),
+    )
     monkeypatch.setattr(
         runtime,
         "_explore_keep_alive",
@@ -4437,12 +4442,27 @@ def test_expired_perception_probe_settle_keeps_exploration_keepalive(
 
     runtime.tick()
 
-    assert keepalive_calls == ["called"]
+    if phase in {"grounding", "handoff"}:
+        assert runtime._cognition_perception_probe is probe
+        assert runtime._cognition_perception_probe.query_id == "pending-grounding"
+        assert keepalive_calls == []
+        runtime.tick()
+        assert runtime._cognition_perception_probe is probe
+        assert keepalive_calls == []
+    else:
+        assert runtime._cognition_perception_probe is None
+        assert runtime._cognition_requested is True
+        assert keepalive_calls == ["called"]
     assert runtime.executor.run is None
+    assert runtime.metrics.motor_actions == 0
 
 
-def test_idle_tick_reorients_extreme_pitch_before_keepalive(
+@pytest.mark.parametrize("scene", (
+    "world", "inventory", "death", "storage", "unknown", "stalled-world",
+))
+def test_idle_tick_reorients_extreme_pitch_only_in_verified_world(
     monkeypatch: pytest.MonkeyPatch,
+    scene: str,
 ) -> None:
     runtime = object.__new__(AgentRuntime)
     runtime.metrics = RuntimeMetrics()
@@ -4450,6 +4470,7 @@ def test_idle_tick_reorients_extreme_pitch_before_keepalive(
     runtime.executor = SkillExecutor(BootstrapMotorPolicy())
     runtime._cognition_perception_probe = None
     runtime._headroom_recovery = None
+    runtime._traversal_escalation_pending = scene == "stalled-world"
     runtime._input_release_pending_ns = None
     runtime._sequence = 0
     captured_ns = time.monotonic_ns()
@@ -4459,13 +4480,28 @@ def test_idle_tick_reorients_extreme_pitch_before_keepalive(
         instance_id="bedrock:test",
         width=1280,
         height=720,
+        facts=tuple(
+            PerceptionFact(
+                key=key, value=value, confidence=1.0,
+                observed_ns=captured_ns, source=BEDROCK_HUD_SAFETY_SOURCE,
+            )
+            for key, value in (
+                ("scene.playable", scene in {"world", "stalled-world"}),
+                ("scene.mode", "world" if scene in {"world", "stalled-world"} else "unknown"),
+                ("scene.ui_overlay", scene in {"inventory", "storage"}),
+                ("scene.death", scene == "death"),
+            )
+        ) if scene != "unknown" else (),
     )
+    runtime.blackboard = PerceptionBlackboard()
+    runtime.blackboard.publish(frame)
     runtime.perception = SimpleNamespace(  # type: ignore[assignment]
         capture_once=lambda: frame,
         stale=lambda: False,
     )
     runtime.telemetry = SimpleNamespace(publish=lambda _payload: None)  # type: ignore[assignment]
     sent: list[MotorAction] = []
+    reached: list[str] = []
     for method in (
         "_merge_operator_target",
         "_merge_policy_perception",
@@ -4487,19 +4523,29 @@ def test_idle_tick_reorients_extreme_pitch_before_keepalive(
     monkeypatch.setattr(
         runtime,
         "_consume_cognition",
-        lambda: pytest.fail("extreme pitch must reorient before cognition starts locomotion"),
+        lambda: reached.append("cognition"),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_route_observed_scene_recovery",
+        lambda: reached.append("scene-recovery"),
     )
     monkeypatch.setattr(
         runtime,
         "_explore_keep_alive",
-        lambda: pytest.fail("extreme pitch must reorient before keepalive locomotion"),
+        lambda: reached.append("keepalive"),
     )
 
     runtime.tick()
 
-    assert len(sent) == 1
-    assert sent[0].mouse_dy == -96
-    assert sent[0].camera_semantics == "world"
+    if scene == "world":
+        assert len(sent) == 1
+        assert sent[0].mouse_dy == -96
+        assert sent[0].camera_semantics == "world"
+        assert reached == []
+    else:
+        assert sent == []
+        assert reached == ["cognition", "scene-recovery", "keepalive"]
     assert runtime.executor.run is None
 
 
