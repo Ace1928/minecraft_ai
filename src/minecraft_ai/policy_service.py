@@ -657,20 +657,25 @@ class TemporalPolicyClient:
             raise RuntimeError(f"unexpected policy response: {response_type}")
         if response_type == "error" and not isinstance(response.get("error"), str):
             raise RuntimeError("learned policy returned a malformed error response")
+        deadline_error = (
+            response_type == "error"
+            and self.config.provider == "external"
+            and self._consumed_deadline_ns > 0
+            and time.monotonic_ns() >= self._consumed_deadline_ns
+            and str(response.get("error", "")).startswith("TimeoutError:")
+        )
         if self._discard_pending_response:
             # The owning option has already released its controls. Drain its
             # matched terminal record, including an inference error, without
             # discarding the persistent worker's unrelated world memory.
             # Transport identity and terminal shape are still checked above.
             self.metrics.retired_responses += 1
+            if deadline_error and not self._consumed_miss_recorded:
+                self.metrics.deadline_misses += 1
+                self._consumed_miss_recorded = True
             return response
         if response_type == "error":
-            if (
-                self.config.provider == "external"
-                and self._consumed_deadline_ns > 0
-                and time.monotonic_ns() >= self._consumed_deadline_ns
-                and str(response.get("error", "")).startswith("TimeoutError:")
-            ):
+            if deadline_error:
                 # Perception can advance temporal memory without emitting an
                 # action. Keep that worker alive; release the actuator only.
                 raise _PolicyDeadlineExpired

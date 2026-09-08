@@ -304,9 +304,15 @@ def test_option_handoffs_preserve_capable_worker_memory_until_explicit_world_res
     assert router.status()["episode_id"] is None
 
 
-@pytest.mark.parametrize("reply_kind", ("prediction", "error", "timeout-error"))
+@pytest.mark.parametrize(("reply_kind", "expired", "already_missed"), (
+    ("prediction", False, False),
+    ("error", False, False),
+    ("timeout-error", False, False),
+    ("timeout-error", True, False),
+    ("timeout-error", True, True),
+))
 def test_scoped_action_reset_retires_pending_output_without_restarting_worker(
-    startup_client, reply_kind,
+    startup_client, reply_kind, expired, already_missed,
 ):
     client, ready, replies, workers, _memories = startup_client
     replies.append({**ready, "reset_scopes": ["actions", "world"]})
@@ -333,6 +339,11 @@ def test_scoped_action_reset_retires_pending_output_without_restarting_worker(
             "TimeoutError: old option exceeded its deadline"
             if reply_kind == "timeout-error" else "RuntimeError: old option inference failed"
         )
+    if expired:
+        client._pending_deadline_ns = time.monotonic_ns() - 1
+    if already_missed:
+        client._pending_miss_recorded = True
+        client.metrics.deadline_misses = 1
 
     action = client.act(board, intent.model_copy(update={"episode_id": "new-option"}),
                         sequence=release.sequence + 1)
@@ -340,7 +351,8 @@ def test_scoped_action_reset_retires_pending_output_without_restarting_worker(
     assert not action.keys_down and not action.buttons_down
     assert action.mouse_dx == action.mouse_dy == 0
     assert client.metrics.retired_responses == 1
-    assert client.metrics.failures == client.metrics.deadline_misses == 0
+    assert client.metrics.failures == 0
+    assert client.metrics.deadline_misses == int(expired)
     assert client.metrics.last_error is None
     assert client._accepted_predictions == 0
     assert client._process is workers[0] and client._startup_verified
