@@ -167,7 +167,7 @@ class TesseractMenuTextReader:
         # readable; then isolated caption bands avoid the button borders that
         # Tesseract otherwise treats as empty table cells. Keep all geometry
         # screenshot-relative and require the exact title before using crops.
-        if not any(
+        if frame.width >= 320 and frame.height >= 180 and not any(
             "serverlist" in _normalized_text(line.text).replace(" ", "")
             or any(anchor in _normalized_text(line.text) for anchor in (
                 "minecraft", "worlds", "disconnected from host", "you died", "tou died",
@@ -527,6 +527,16 @@ class BedrockMenuNavigator:
                     current = self._wait_loading(deadline)
                     if current.stage == transition.destination:
                         return current, attempt
+                    if (
+                        source == MenuStage.BEDROCK_CONNECT
+                        and transition.destination == MenuStage.IN_WORLD
+                        and current.stage == MenuStage.UNKNOWN
+                        and self.clock() < response_deadline
+                    ):
+                        # A transfer can briefly lose its loading caption.
+                        # Spend only the original response budget observing;
+                        # no retry click and no new spelling-based authority.
+                        continue
                     self._raise_unexpected(source, transition.destination, current)
                 if current.stage == source:
                     observation = current

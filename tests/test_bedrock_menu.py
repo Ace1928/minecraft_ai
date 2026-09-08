@@ -705,6 +705,81 @@ def test_partial_external_heading_is_not_a_global_loading_anchor(text: str) -> N
     ) == MenuStage.UNKNOWN
 
 
+@pytest.mark.parametrize("loading_first", [False, True])
+@pytest.mark.parametrize("eventual_hud", [False, True])
+def test_configured_server_unknown_transfer_spends_only_original_response_budget(
+    loading_first: bool, eventual_hud: bool,
+) -> None:
+    now = 0.0
+
+    def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    clicks = _RecordingClicks()
+    lines = {index: _lines("a", "to &xternal server", "=", "ee") for index in range(2, 6)}
+    lines[1] = _lines("ServerList", "Eidos Local Bedrock")
+    if loading_first:
+        lines[2] = _lines("Loading resource packs")
+    if eventual_hud:
+        lines[4] = ()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([_frame(index) for index in range(1, 6)]),
+        text_reader=_MappedTextReader(lines),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        timeout_s=3,
+        response_timeout_s=0.5,
+        poll_interval_s=0.125,
+        clock=lambda: now,
+        sleep=advance,
+        hud_detector=lambda frame: eventual_hud and frame.frame_id == 4,
+    )
+    if eventual_hud:
+        assert navigator.run().visited == (MenuStage.BEDROCK_CONNECT, MenuStage.IN_WORLD)
+        assert now == 0.375
+    else:
+        with pytest.raises(MenuNavigationError, match="unknown screen after bedrock-connect"):
+            navigator.run()
+        assert now == navigator.response_timeout_s
+    assert clicks.clicks == [(1, 500, 200)]
+
+
+@pytest.mark.parametrize("blocking_screen", ["Unable to connect to world", "YOU DIED!"])
+def test_configured_server_transfer_does_not_wait_past_explicit_error_or_death(
+    blocking_screen: str,
+) -> None:
+    now = 0.0
+
+    def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([_frame(index) for index in range(1, 4)]),
+        text_reader=_MappedTextReader({
+            1: _lines("ServerList", "Eidos Local Bedrock"),
+            2: _lines("Loading resource packs"),
+            3: _lines(blocking_screen),
+        }),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        timeout_s=3,
+        response_timeout_s=0.5,
+        poll_interval_s=0.125,
+        clock=lambda: now,
+        sleep=advance,
+        hud_detector=lambda _frame: False,
+    )
+    with pytest.raises(MenuNavigationError, match="(?:Bedrock error|unexpected death)"):
+        navigator.run()
+    assert now == 0.25
+    assert clicks.clicks == [(1, 500, 200)]
+
+
 def _disconnected_lines() -> tuple[OcrLine, ...]:
     return (
         OcrLine("Disconnected from host.", 375, 150, 250, 30),

@@ -1891,10 +1891,10 @@ def bedrock_creative_hud_present(frame: CapturedFrame) -> bool:
         or len(frame.bgra) != frame.width * frame.height * 4
     ):
         return False
-    if bedrock_ui_chrome_present(frame) or bedrock_death_screen_present(frame):
-        return False
     pixels = _numpy_bgra(frame)
-    return pixels is not None and _classic_hotbar_geometry(pixels) is not None
+    if pixels is None or _classic_hotbar_geometry(pixels) is None:
+        return False
+    return not bedrock_ui_chrome_present(frame) and not bedrock_death_screen_present(frame)
 
 
 def bedrock_in_world_hud_present(frame: CapturedFrame) -> bool:
