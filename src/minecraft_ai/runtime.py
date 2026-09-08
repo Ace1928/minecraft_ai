@@ -3295,6 +3295,30 @@ class AgentRuntime:
             self._pending_operator_message_ids = ()
             self._cognition_requested = True
             return
+        idle_stall_run_id = self._idle_stall_probe_run_id(decision)
+        idle_stall_decision = decision if idle_stall_run_id is not None else None
+        if idle_stall_run_id is not None:
+            decision = decision.model_copy(update={
+                "ask_perception": ("obstacle.ahead",),
+                "request_replan": True,
+            })
+        perception_output_keys = tuple(
+            dict.fromkeys(
+                key
+                for question in decision.ask_perception
+                for key in resolve_grounded_output_keys((), question)
+            )
+        )
+        missing_target_referent = bool(
+            any(key.startswith("target.") for key in perception_output_keys)
+            and not (decision.instruction or "").strip()
+        )
+        if missing_target_referent:
+            # Reject the whole malformed request, including a mixed obstacle
+            # question. Neither GUI cleanup nor the idle-stall fallback may
+            # turn its missing referent into action or a different observation.
+            decision = decision.model_copy(update={"skill_id": None, "ask_perception": ()})
+            perception_output_keys = ()
         if (
             decision.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
             and self._planks_retry_requires_wood()
@@ -3333,20 +3357,6 @@ class AgentRuntime:
             # The accepted skill still executes under its operator context, but
             # model-generated plan text cannot keep replaying it afterward.
             decision = decision.model_copy(update={"plan_steps": ()})
-        idle_stall_run_id = self._idle_stall_probe_run_id(decision)
-        idle_stall_decision = decision if idle_stall_run_id is not None else None
-        if idle_stall_run_id is not None:
-            decision = decision.model_copy(update={
-                "ask_perception": ("obstacle.ahead",),
-                "request_replan": True,
-            })
-        perception_output_keys = tuple(
-            dict.fromkeys(
-                key
-                for question in decision.ask_perception
-                for key in resolve_grounded_output_keys((), question)
-            )
-        )
         if decision.ask_perception:
             # A question is an explicit admission that the sampled decision is
             # missing current visual evidence. Never execute a simultaneously
@@ -3361,19 +3371,21 @@ class AgentRuntime:
         record = getattr(self, "_bound_cognition_requests", {}).pop(future, None)
         if record is not None:
             if not self._admit_bound_cognition(
-                record, decision, adopt_plan=idle_stall_run_id is None,
+                record, decision,
+                adopt_plan=idle_stall_run_id is None and not missing_target_referent,
             ):
                 self._pending_operator_message_ids = ()
                 self._schedule_cognition_retry(now_ns=now)
                 return
         else:
             self._last_decision = decision
-            if idle_stall_run_id is None:
+            if idle_stall_run_id is None and not missing_target_referent:
                 self._adopt_plan_if_revised(decision)
         skill_origin = self._skill_decision_origin(record, decision)
         operator_acknowledged = False
         if self.state_db is not None and self._pending_operator_message_ids:
-            if selected_message_id is not None and not decision.request_replan:
+            if (selected_message_id is not None and not decision.request_replan
+                    and not missing_target_referent):
                 response = decision.say or decision.reasoning_summary
                 operator_acknowledged = self._persist_operator_message_status(
                     selected_message_id,

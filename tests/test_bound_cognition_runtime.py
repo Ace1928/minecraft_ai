@@ -427,6 +427,50 @@ def test_admission_selects_exact_attempt_and_reports_authority_rewrite(harness: 
     assert request.snapshot().disposition == "accepted" and not harness.adapter.discarded
 
 
+@pytest.mark.parametrize("replan", [False, True])
+def test_full_consume_publishes_exact_missing_referent_rewrite_without_adopting_plan(
+    harness: _Harness, replan: bool,
+) -> None:
+    runtime = harness.runtime
+    request, original = harness.completed_candidate()
+    source = original.model_copy(update={
+        "ask_perception": ("target.visible", "obstacle.ahead"),
+        "instruction": " \n\t ", "request_replan": replan,
+        "chosen_goal_id": "new-goal", "skill_parameters": {"allow_attack": False},
+    })
+    assert original.model_origin is not None
+    source._model_origin = DecisionModelOrigin(
+        original.model_origin.request_id, original.model_origin.attempt_id,
+        cognition_decision_sha256(source),
+    )
+    future: concurrent.futures.Future[CognitionDecision] = concurrent.futures.Future()
+    future.set_result(source)
+    runtime._pending_decision = future
+    runtime._bound_cognition_requests[future] = request, harness.adapter
+    runtime._pending_execution_revision = runtime._execution_revision
+    runtime._pending_operator_message_ids = ()
+    runtime._cognition_requested = False
+    runtime._plan_steps, runtime._plan_goal_id = ("retain old plan",), "old-goal"
+    runtime.executor = SimpleNamespace(run=None)
+    runtime._operator_message_arrived_after_snapshot = Mock(return_value=False)
+    runtime._queued_operator_message_waiting = Mock(return_value=False)
+    runtime._start_skill = Mock(side_effect=AssertionError("no skill authorized"))
+    runtime._consume_cognition_decision()
+
+    expected = source.model_copy(update={"skill_id": None, "ask_perception": ()})
+    receipt, = harness.adapter.published
+    assert receipt["source_decision_sha256"] == cognition_decision_sha256(source)
+    assert receipt["final_decision"] == expected.model_dump(mode="json")
+    assert receipt["final_decision_sha256"] == cognition_decision_sha256(expected)
+    assert receipt["rewritten"] is True
+    assert request.snapshot().disposition == "accepted" and not harness.adapter.discarded
+    assert runtime._last_decision == expected and not harness.adopted
+    assert (runtime._plan_steps, runtime._plan_goal_id) == (("retain old plan",), "old-goal")
+    assert runtime._cognition_perception_probe is None
+    assert runtime._cognition_requested is replan
+    runtime._start_skill.assert_not_called()
+
+
 def test_new_ordinary_frame_does_not_perpetually_invalidate_slow_cognition(
     harness: _Harness,
 ) -> None:
