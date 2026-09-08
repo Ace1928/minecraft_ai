@@ -191,6 +191,12 @@ not perform inference, inputs, resets or resource mutation. This supports a
 local bounded pilot's stop condition, not automatic world-memory reset or a
 claim that the supplied observations are correct training labels.
 
+For a bounded motor pilot, `PolicyConfig.max_worker_starts=1` permits one worker
+spawn attempt for that client, including a failed spawn. Ordinary option resets
+and `close()` do not renew this budget; `None` retains normal restart behavior.
+Status reports the attempt count, configured limit, verified startup and process
+liveness. This limits process starts, not inference time or memory consumption.
+
 ### Skill lifecycle observations
 
 Runtime subclasses can implement `on_skill_run_started` and

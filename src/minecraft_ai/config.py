@@ -68,6 +68,8 @@ class PolicyConfig(BaseModel):
     device: str = "cpu"
     threads: int = Field(default=4, ge=1, le=64)
     startup_timeout_s: float = Field(default=60.0, ge=5.0, le=600.0)
+    # Optional per-client lifetime spawn budget; closing/resetting does not renew it.
+    max_worker_starts: int | None = Field(default=None, ge=1, le=64)
     deadline_ms: int = Field(default=48, ge=10, le=5000)
     # A successful prediction establishes the minimum freshness horizon for its
     # learned key/button state. While the successor prediction is in flight,

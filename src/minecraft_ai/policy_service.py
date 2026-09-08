@@ -130,6 +130,7 @@ class TemporalPolicyClient:
     metrics: PolicyServiceMetrics = field(default_factory=PolicyServiceMetrics, init=False)
     _process: subprocess.Popen[str] | None = field(default=None, init=False)
     _startup_verified: bool = field(default=False, init=False)
+    _worker_start_attempts: int = field(default=0, init=False)
     _reset_scopes: frozenset[str] = field(default_factory=frozenset, init=False)
     _response_bytes: bytearray = field(default_factory=bytearray, init=False)
     _memory: shared_memory.SharedMemory | None = field(default=None, init=False)
@@ -465,6 +466,9 @@ class TemporalPolicyClient:
                 }
             ),
             "learned_action_counts": dict(sorted(self._learned_action_counts.items())),
+            "worker_start_attempts": self._worker_start_attempts,
+            "max_worker_starts": self.config.max_worker_starts,
+            "startup_verified": self._startup_verified,
             "process_alive": bool(process is not None and process.poll() is None),
             "requests": self.metrics.requests,
             "responses": self.metrics.responses,
@@ -556,6 +560,9 @@ class TemporalPolicyClient:
         self._startup_verified = True
 
     def _start_worker(self, required_size: int) -> None:
+        limit = self.config.max_worker_starts
+        if limit is not None and self._worker_start_attempts >= limit:
+            raise RuntimeError(f"learned policy worker-start limit exhausted ({limit})")
         self._memory_size = required_size
         self._memory = shared_memory.SharedMemory(create=True, size=required_size)
         command = [
@@ -610,6 +617,8 @@ class TemporalPolicyClient:
             command.append("--stochastic")
         if self.config.deterministic_condition and self.config.provider != "external":
             command.append("--deterministic-condition")
+        # Count failed spawns too; this lifetime budget survives close and reset.
+        self._worker_start_attempts += 1
         self._process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
