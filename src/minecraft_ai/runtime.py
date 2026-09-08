@@ -320,6 +320,7 @@ class AgentRuntime:
     _last_operator_storage_retry_ns: int = field(default=0, init=False)
     _traversal_escalation_pending: bool = field(default=False, init=False)
     _headroom_recovery: _HeadroomRecovery | None = field(default=None, init=False)
+    _headroom_inspection_memory: MemoryRecord | None = field(default=None, init=False)
     _gather_acquisition_continuation: _GatherAcquisitionContinuation | None = field(
         default=None,
         init=False,
@@ -1304,6 +1305,7 @@ class AgentRuntime:
         # failure. An available worker with no exact accepted answer means this
         # single query abstained; never ask again or improvise another target.
         if self.perception.semantic_available():
+            self._remember_headroom_inspection(recovery)
             self._clear_headroom_recovery(recovery)
             # The completed recovery found no authorized block to clear. Let
             # cognition consume this failure before another disposable walk:
@@ -1311,6 +1313,73 @@ class AgentRuntime:
             # before it can return. Safety and operator work still preempt.
             self._traversal_escalation_pending = True
             self._cognition_requested = True
+
+    def _remember_headroom_inspection(self, recovery: _HeadroomRecovery) -> None:
+        """Retain one historical inspection outcome, never a terrain/action fact."""
+
+        if (
+            self._headroom_recovery is not recovery
+            or recovery.phase != "grounding"
+            or not recovery.origin_run_id
+            or not recovery.query_id
+            or not recovery.query_source
+            or not recovery.query_pixel_sha256
+            or recovery.context_key != (self._plan_goal_id or "explore-keepalive")
+            or self._queued_operator_message_waiting()
+        ):
+            return
+        previous = self._headroom_inspection_memory
+        if previous is not None and previous.metadata.get("query_id") == recovery.query_id:
+            return
+
+        # The receipt precedes publication. Only query-owned publication hashes
+        # allow an explicit model abstention to be attributed to this inspection.
+        worker = self.perception.active_vlm
+        receipt = getattr(getattr(worker, "metrics", None), "last_crosshair_block_receipt", None)
+        hashes = tuple(self.blackboard.fact(key, min_confidence=1.0) for key in (
+            "recovery.crosshair.frame_dhash", "recovery.crosshair.observation_dhash",
+        ))
+        published = bool(
+            hashes[0] is not None and hashes[1] is not None
+            and all(fact is not None and fact.source == recovery.query_source
+                    and fact.observed_ns >= recovery.query_started_ns for fact in hashes)
+            and hashes[0].observed_ns == hashes[1].observed_ns
+            and hashes[0].value == recovery.query_frame_dhash
+            and hashes[1].value == recovery.query_crosshair_dhash
+        )
+        abstained = bool(
+            published and isinstance(receipt, dict)
+            and receipt.get("query_id") == recovery.query_id
+            and receipt.get("source_crop_pixel_sha256") == recovery.query_pixel_sha256
+            and receipt.get("block") == "unknown"
+        )
+        now_ns = time.time_ns()
+        self._headroom_inspection_memory = MemoryRecord(
+            memory_id="runtime:headroom-inspection",
+            kind=MemoryKind.WORKING,
+            text=(
+                "Crosshair inspection: model abstained; no clearable target established. "
+                "No mining action was started."
+                if abstained else
+                "Crosshair inspection completed without an accepted clearable target. "
+                "No mining action was started."
+            ),
+            created_ns=now_ns,
+            updated_ns=now_ns,
+            importance=1.0,
+            source="runtime:headroom-inspection",
+            metadata={
+                "outcome": "model_abstained" if abstained else "no_accepted_clearable_evidence",
+                "query_id": recovery.query_id,
+                "query_source": recovery.query_source,
+                "source_crop_pixel_sha256": recovery.query_pixel_sha256,
+                "origin_run_id": recovery.origin_run_id,
+                "context_key": recovery.context_key,
+                "instance_id": self.perception.instance_id,
+                "plan_started_ns": self._plan_started_ns,
+                "execution_revision": self._execution_revision,
+            },
+        )
 
     def _headroom_scene_is_safe(self) -> bool:
         now_ns = time.monotonic_ns()
@@ -3822,6 +3891,20 @@ class AgentRuntime:
                     limit=20,
                 )
             operator_messages = _active_operator_messages(messages)
+        inspection = self._headroom_inspection_memory
+        if (
+            inspection is not None
+            and self._traversal_escalation_pending
+            and not operator_messages
+            and (self.executor.run is None or self.executor.run.outcome != SkillOutcome.RUNNING)
+            and inspection.metadata.get("context_key")
+            == (self._plan_goal_id or "explore-keepalive")
+            and inspection.metadata.get("instance_id") == self.perception.instance_id
+            and inspection.metadata.get("plan_started_ns") == self._plan_started_ns
+            and inspection.metadata.get("execution_revision") == self._execution_revision
+        ):
+            # First, so the existing bounded model-memory payload retains it.
+            memories = (inspection, *memories[:19])
         return CognitionContext(
             role=self.role,
             goals=goals,

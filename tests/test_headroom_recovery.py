@@ -6,6 +6,7 @@ from collections import deque
 from concurrent.futures import Future
 from dataclasses import replace
 from itertools import count
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,7 @@ from minecraft_ai.grounded_perception import (
     crosshair_block_rgb_grid,
 )
 from minecraft_ai.memory import MemoryStore
+from minecraft_ai.memory.storage import OperatorContextSnapshot
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.outcome_verifier import (
     OutcomeKind,
@@ -51,8 +53,10 @@ from minecraft_ai.runtime import (
     _verified_headroom_retry,
     _verified_obstacle_stall,
 )
+from minecraft_ai.roles import get_role
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.skills import SkillFailureCode, SkillOutcome, SkillRun
+from minecraft_ai.social import OperatorMessage, SocialState
 
 
 _HASH_A = "0000000000000000"
@@ -1118,6 +1122,142 @@ def test_hard_or_unknown_answer_gives_cognition_a_turn_after_one_query(kind: str
         assert runtime._explore_keep_alive() is None
         runtime._advance_headroom_recovery()
     assert runtime._execution_revision == revision
+
+
+def _runtime_with_inspection_feedback() -> tuple[AgentRuntime, _Perception, list[MotorAction]]:
+    runtime, perception, sent = _runtime_for_probe()
+    runtime.memories = MemoryStore()
+    runtime.social = SocialState()
+    runtime.role = get_role("generalist")
+    runtime.custom_goals = []
+    runtime._recent_skill_runs = deque()
+    runtime._progression_goal = lambda: None  # type: ignore[method-assign]
+    assert runtime._route_headroom_terminal(_stall_result("feedback-origin"))
+    recovery = runtime._headroom_recovery
+    assert recovery is not None
+    recovery.phase = "request"
+    runtime._advance_headroom_recovery()
+    assert recovery.phase == "grounding"
+    assert recovery.query_source is not None
+    _publish_headroom_answer(runtime.blackboard, recovery, perception.last_capture, kind="unknown")
+    # The real unknown response publishes hashes, not a block/terrain claim.
+    runtime.blackboard.remove_semantic_facts(
+        ("recovery.crosshair.block",), expected_source=recovery.query_source,
+    )
+    perception.active_vlm.metrics = SimpleNamespace(  # type: ignore[attr-defined]
+        last_crosshair_block_receipt={
+            "query_id": recovery.query_id,
+            "source_crop_pixel_sha256": recovery.query_pixel_sha256,
+            "block": "unknown", "confidence": None,
+        },
+    )
+    perception.available = True
+    return runtime, perception, sent
+
+
+def test_completed_inspection_reaches_next_cognition_once_without_action() -> None:
+    runtime, perception, sent = _runtime_with_inspection_feedback()
+    recovery = runtime._headroom_recovery
+    assert recovery is not None
+    runtime._advance_headroom_recovery()
+    memory = runtime._headroom_inspection_memory
+    assert memory is not None
+    assert memory.metadata["outcome"] == "model_abstained"
+    assert memory.metadata["query_id"] == recovery.query_id
+    assert memory.metadata["query_source"] == recovery.query_source
+    assert memory.metadata["source_crop_pixel_sha256"] == recovery.query_pixel_sha256
+    assert memory.metadata["origin_run_id"] == "feedback-origin"
+    assert runtime._cognition_context(requires_wood=False).memories[0] is memory
+    for _ in range(4):
+        runtime._advance_headroom_recovery()
+    assert runtime._headroom_inspection_memory is memory
+    assert len(perception.requests) == 1
+    assert runtime._headroom_recovery is None
+    assert runtime.executor.run is None and sent == []
+    assert runtime.blackboard.fact("recovery.crosshair.block") is None
+    assert runtime._traversal_escalation_pending
+
+
+@pytest.mark.parametrize(
+    "mismatch", ("query", "crop", "source", "stale", "missing", "null", "positive-null"),
+)
+def test_inspection_does_not_misattribute_receipt_or_unpublished_unknown(mismatch: str) -> None:
+    runtime, perception, sent = _runtime_with_inspection_feedback()
+    recovery = runtime._headroom_recovery
+    assert recovery is not None and recovery.query_source is not None
+    receipt = perception.active_vlm.metrics.last_crosshair_block_receipt  # type: ignore[attr-defined]
+    if mismatch == "query":
+        receipt["query_id"] = "another-query"
+    elif mismatch == "crop":
+        receipt["source_crop_pixel_sha256"] = "0" * 64
+    elif mismatch in {"null", "positive-null"}:
+        receipt["block"] = None if mismatch == "null" else "dirt"
+    else:
+        key = "recovery.crosshair.frame_dhash"
+        fact = runtime.blackboard.fact(key)
+        assert fact is not None
+        runtime.blackboard.remove_semantic_facts((key,), expected_source=recovery.query_source)
+        if mismatch != "missing":
+            updates = ({"source": "vlm:test:other-query"} if mismatch == "source"
+                       else {"observed_ns": recovery.query_started_ns - 1})
+            runtime.blackboard.merge_semantics(
+                instance_id=perception.instance_id,
+                facts=(fact.model_copy(update=updates),),
+            )
+    runtime._advance_headroom_recovery()
+    memory = runtime._headroom_inspection_memory
+    assert memory is not None
+    assert memory.metadata["outcome"] == "no_accepted_clearable_evidence"
+    assert "abstained" not in memory.text and "dirt" not in memory.text
+    assert runtime.executor.run is None and sent == []
+
+
+@pytest.mark.parametrize(
+    "change", ("goal", "plan", "execution", "instance", "operator", "resolved", "running"),
+)
+def test_completed_inspection_is_not_reused_outside_owning_context(change: str) -> None:
+    runtime, perception, _ = _runtime_with_inspection_feedback()
+    runtime._advance_headroom_recovery()
+    operator_context = None
+    if change == "goal":
+        runtime._plan_goal_id = "new-goal"
+    elif change == "plan":
+        runtime._plan_started_ns += 1
+    elif change == "execution":
+        runtime._execution_revision += 1
+    elif change == "instance":
+        perception.instance_id = "another-world"
+    elif change == "resolved":
+        runtime._traversal_escalation_pending = False
+    elif change == "running":
+        runtime.executor.start(
+            runtime.skills.get("explore_forward"), run_id="new-run",
+            context_key="explore-keepalive",
+        )
+    else:
+        operator_context = OperatorContextSnapshot(
+            revision=1, target=None,
+            messages=(OperatorMessage(message_id="new", created_ns=1, text="wait"),),
+        )
+    assert runtime._cognition_context(operator_context, requires_wood=False).memories == ()
+
+
+@pytest.mark.parametrize("preemption", ("operator", "timeout", "context"))
+def test_preempted_inspection_does_not_record_completed_outcome(preemption: str) -> None:
+    runtime, _, _ = _runtime_with_inspection_feedback()
+    recovery = runtime._headroom_recovery
+    assert recovery is not None
+    if preemption == "operator":
+        runtime._queued_operator_message_waiting = lambda: True  # type: ignore[method-assign]
+        runtime._pending_decision = Future()
+        runtime._preempt_pending_cognition_for_operator = lambda: False  # type: ignore[method-assign]
+        runtime._start_cognition_if_due()
+    elif preemption == "timeout":
+        recovery.deadline_ns = time.monotonic_ns() - 1
+    else:
+        runtime._plan_goal_id = "new-goal"
+    runtime._advance_headroom_recovery()
+    assert runtime._headroom_inspection_memory is None
 
 
 @pytest.mark.parametrize(
