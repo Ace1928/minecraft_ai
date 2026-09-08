@@ -40,6 +40,7 @@ class MenuStage(StrEnum):
     PLAY_SERVERS = "play-servers"
     PLAY = "play"
     BEDROCK_CONNECT = "bedrock-connect"
+    DISCONNECTED = "disconnected"
     DEATH = "death"
     LOADING = "loading"
     IN_WORLD = "in-world"
@@ -421,6 +422,12 @@ class BedrockMenuNavigator:
                 destination=MenuStage.IN_WORLD,
                 region=(0.10, 0.10, 0.90, 0.95),
             )
+        if observation.stage == MenuStage.DISCONNECTED:
+            return _Transition(
+                target_text=("back to menu",),
+                destination=MenuStage.TITLE,
+                region=(0.12, 0.64, 0.30, 0.75),
+            )
         if observation.stage == MenuStage.DEATH:
             return _Transition(
                 target_text=("respawn",),
@@ -464,6 +471,11 @@ class BedrockMenuNavigator:
                     # It never permits another click or changes other screens.
                     response_deadline = deadline
                 if current.stage == transition.destination or (
+                    source == MenuStage.DISCONNECTED
+                    and current.stage in {
+                        MenuStage.PLAY, MenuStage.PLAY_TABS, MenuStage.PLAY_SERVERS,
+                    }
+                ) or (
                     source in {MenuStage.TITLE, MenuStage.PLAY_SERVERS}
                     and transition.destination == MenuStage.PLAY
                     and current.stage == MenuStage.PLAY_TABS
@@ -581,6 +593,9 @@ def classify_menu_stage(
 ) -> MenuStage:
     text = _normalized_text(" ".join(line.text for line in lines))
     compact = text.replace(" ", "")
+
+    if _disconnected_dialog_visible(frame, lines):
+        return MenuStage.DISCONNECTED
 
     error_phrases = (
         "unable to connect",
@@ -727,6 +742,24 @@ def _away_overlay_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> b
     return all(phrase in text for phrase in (
         "been away for a bit", "any button to jump back", "into the game",
     ))
+
+
+def _disconnected_dialog_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
+    """Recognize the retained dialog; only its Back to menu action is allowed."""
+    return all(
+        sum(
+            line.confidence >= 60
+            and _normalized_text(line.text) == text
+            and x0 <= line.center[0] / frame.width <= x1
+            and y0 <= line.center[1] / frame.height <= y1
+            for line in lines
+        ) == 1
+        for text, (x0, y0, x1, y1) in (
+            ("disconnected from host", (0.30, 0.22, 0.70, 0.38)),
+            ("back to menu", (0.12, 0.64, 0.30, 0.75)),
+            ("show details", (0.50, 0.64, 0.70, 0.75)),
+        )
+    )
 
 
 def _external_connection_heading_visible(observation: MenuObservation) -> bool:
