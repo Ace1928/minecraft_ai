@@ -652,9 +652,19 @@ class TemporalPolicyClient:
             self.metrics.last_response_age_ms = max(
                 0.0, (time.monotonic_ns() - submitted_ns) / 1_000_000.0,
             )
+        response_type = response.get("type")
+        if response_type not in {"error", "prediction"}:
+            raise RuntimeError(f"unexpected policy response: {response_type}")
+        if response_type == "error" and not isinstance(response.get("error"), str):
+            raise RuntimeError("learned policy returned a malformed error response")
         if self._discard_pending_response:
+            # The owning option has already released its controls. Drain its
+            # matched terminal record, including an inference error, without
+            # discarding the persistent worker's unrelated world memory.
+            # Transport identity and terminal shape are still checked above.
             self.metrics.retired_responses += 1
-        if response.get("type") == "error":
+            return response
+        if response_type == "error":
             if (
                 self.config.provider == "external"
                 and self._consumed_deadline_ns > 0
@@ -665,8 +675,6 @@ class TemporalPolicyClient:
                 # action. Keep that worker alive; release the actuator only.
                 raise _PolicyDeadlineExpired
             raise RuntimeError(str(response.get("error", "policy inference failed")))
-        if response.get("type") != "prediction":
-            raise RuntimeError(f"unexpected policy response: {response.get('type')}")
         self._consumed_request_context = request_context
         return response
 

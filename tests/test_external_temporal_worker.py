@@ -304,7 +304,10 @@ def test_option_handoffs_preserve_capable_worker_memory_until_explicit_world_res
     assert router.status()["episode_id"] is None
 
 
-def test_scoped_action_reset_retires_pending_output_without_restarting_worker(startup_client):
+@pytest.mark.parametrize("reply_kind", ("prediction", "error", "timeout-error"))
+def test_scoped_action_reset_retires_pending_output_without_restarting_worker(
+    startup_client, reply_kind,
+):
     client, ready, replies, workers, _memories = startup_client
     replies.append({**ready, "reset_scopes": ["actions", "world"]})
     client.warmup()
@@ -319,10 +322,17 @@ def test_scoped_action_reset_retires_pending_output_without_restarting_worker(st
     assert client._pending_request_id == old_request
     assert client._pending_request_context is None and client._discard_pending_response
     workers[0].ready = {
-        "type": "prediction", "request_id": old_request,
+        "type": "prediction" if reply_kind == "prediction" else "error",
+        "request_id": old_request,
         "output": {"keys": ["w"], "buttons": ["left"], "mouse_dx": 9,
                    "inference_ns": 1, "model_version": client.config.model_version},
     }
+    if reply_kind != "prediction":
+        workers[0].ready.pop("output")
+        workers[0].ready["error"] = (
+            "TimeoutError: old option exceeded its deadline"
+            if reply_kind == "timeout-error" else "RuntimeError: old option inference failed"
+        )
 
     action = client.act(board, intent.model_copy(update={"episode_id": "new-option"}),
                         sequence=release.sequence + 1)
@@ -330,12 +340,59 @@ def test_scoped_action_reset_retires_pending_output_without_restarting_worker(st
     assert not action.keys_down and not action.buttons_down
     assert action.mouse_dx == action.mouse_dy == 0
     assert client.metrics.retired_responses == 1
+    assert client.metrics.failures == client.metrics.deadline_misses == 0
+    assert client.metrics.last_error is None
     assert client._accepted_predictions == 0
     assert client._process is workers[0] and client._startup_verified
+    assert client.status()["reset_scopes"] == ("actions", "world")
+    assert client._pending_request_id != old_request
     commands = [json.loads(line) for line in workers[0].stdin.getvalue().splitlines()]
     assert commands[1] == {"type": "reset", "scope": "actions"}
     assert commands[2]["type"] == "infer"
     assert commands[2]["intent"]["episode_id"] == "new-option"
+
+
+@pytest.mark.parametrize("case", (
+    "wrong-id", "unknown-type", "missing-type", "malformed-error", "current-error",
+))
+def test_retired_error_drain_does_not_hide_transport_or_current_request_failure(
+    startup_client, case,
+):
+    client, ready, replies, workers, _memories = startup_client
+    replies.append({**ready, "reset_scopes": ["actions", "world"]})
+    client.warmup()
+    board = PerceptionBlackboard()
+    intent = MotorIntent(skill_id="explore", mode="explore", episode_id="option-a")
+    client.act(board, intent, sequence=1)
+    request_id = client._pending_request_id
+    assert request_id is not None
+    if case != "current-error":
+        client.reset()
+    response = {"type": "error", "request_id": request_id, "error": "RuntimeError: failed"}
+    if case == "wrong-id":
+        response["request_id"] = "unrelated-request"
+    elif case == "unknown-type":
+        response["type"] = "ready"
+    elif case == "missing-type":
+        response.pop("type")
+    elif case == "malformed-error":
+        response["error"] = {"untrusted": "not a protocol error string"}
+    workers[0].ready = response
+
+    action = client.act(board, intent.model_copy(update={"episode_id": "option-b"}),
+                        sequence=client._last_sequence + 1)
+
+    assert not action.keys_down and not action.buttons_down
+    assert action.mouse_dx == action.mouse_dy == 0
+    assert client.metrics.failures == 1 and client.metrics.retired_responses == 0
+    assert client.metrics.requests == 1 and client._accepted_predictions == 0
+    assert client._process is None and not client._startup_verified
+    assert client.status()["reset_scopes"] == ()
+    assert workers[0].poll() is not None
+    commands = [json.loads(line) for line in workers[0].stdin.getvalue().splitlines()]
+    assert commands[-1] == {"type": "stop"}
+    assert [command["intent"]["episode_id"] for command in commands
+            if command["type"] == "infer"] == ["option-a"]
 
 
 @pytest.mark.parametrize("invalid_kind", ["identity", "protocol", "not-ready", "absent"])
