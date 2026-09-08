@@ -75,7 +75,7 @@ from .social import (
     SocialState,
 )
 from .telemetry import TelemetryPublisher
-from .trajectory import ActionOrigin, TrajectoryRecorder
+from .trajectory import ActionOrigin, ActionProvenance, TrajectoryRecorder
 from .storage import OperatorContextSnapshot, StateDatabase
 from .supervisor import operator_intent_lock, operator_pause_latched, send_command
 
@@ -230,6 +230,20 @@ __all__ = [
 ]
 
 
+_KEEPALIVE_ROTATION_SKILLS = ("traverse_level_ground", "explore_forward")
+_KeepaliveScope = tuple[str, str, int, int, int]
+
+
+@dataclass
+class _KeepalivePredictionEvidence:
+    run_id: str
+    skill_id: str
+    scope: _KeepaliveScope
+    prediction_ids: set[str] = field(default_factory=set)
+    policy_identity: tuple[str, str | None, str] | None = None
+    disqualified: bool = False
+
+
 @dataclass
 class AgentRuntime:
     perception: RealtimePerceptionService
@@ -322,6 +336,10 @@ class AgentRuntime:
     _traversal_escalation_pending: bool = field(default=False, init=False)
     _headroom_recovery: _HeadroomRecovery | None = field(default=None, init=False)
     _headroom_inspection_memory: MemoryRecord | None = field(default=None, init=False)
+    _keepalive_prediction_evidence: _KeepalivePredictionEvidence | None = field(
+        default=None, init=False,
+    )
+    _keepalive_rotation_hint: _KeepalivePredictionEvidence | None = field(default=None, init=False)
     _gather_acquisition_continuation: _GatherAcquisitionContinuation | None = field(
         default=None,
         init=False,
@@ -1553,11 +1571,12 @@ class AgentRuntime:
             getattr(self, "_headroom_recovery", None) is not None
             or getattr(self, "_traversal_escalation_pending", False)
         ):
+            self._keepalive_rotation_hint = None
             return None
         candidates: list[tuple[int, SkillSpec, SkillStats | None]] = []
         # Exhausted traversal recovery must reach cognition before another
         # disposable walk can stall and invalidate that decision again.
-        for order, skill_id in enumerate(("traverse_level_ground", "explore_forward")):
+        for order, skill_id in enumerate(_KEEPALIVE_ROTATION_SKILLS):
             skill = self.skills.specs.get(skill_id)
             if skill is None:
                 continue
@@ -1565,6 +1584,26 @@ class AgentRuntime:
             candidates.append((order, skill, stats))
         if not candidates:
             return None
+        hint = self._keepalive_rotation_hint
+        self._keepalive_rotation_hint = None  # One choice, never a persistent failure penalty.
+        if hint is not None:
+            if (
+                self._keepalive_rotation_scope() != hint.scope
+                or (self.executor.run is not None
+                    and self.executor.run.outcome == SkillOutcome.RUNNING)
+                or any(getattr(self, owner, None) is not None for owner in (
+                    "_cognition_perception_probe", "_craft_semantic_probe",
+                    "_gather_acquisition_continuation", "_input_release_pending_ns",
+                ))
+                or self._stop.is_set() or operator_pause_latched() or emergency_stop_latched()
+                or not self._headroom_scene_is_safe()
+            ):
+                return None
+            alternate = next((spec for _, spec, _ in candidates
+                              if spec.skill_id != hint.skill_id
+                              and initiation_satisfied(spec, self.blackboard)), None)
+            if alternate is not None:
+                return alternate
         healthy = [
             candidate
             for candidate in candidates
@@ -1579,6 +1618,117 @@ class AgentRuntime:
                 candidate[0],
             ),
         )[1]
+
+    def _keepalive_rotation_scope(self) -> _KeepaliveScope | None:
+        """Autonomous context only; sample durable operator revision outside the hot loop."""
+
+        if (
+            (self._plan_goal_id or "").startswith("operator:")
+            or bool(getattr(self, "_pending_operator_message_ids", ()))
+            or bool(getattr(self, "_pending_operator_status_updates", {}))
+        ):
+            return None
+        revision = 0
+        if self.state_db is not None:
+            try:
+                context = self.state_db.load_operator_context(statuses={
+                    OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+                    OperatorMessageStatus.ACKNOWLEDGED,
+                }, limit=20)
+            except (sqlite3.Error, ValueError, RuntimeError):
+                return None
+            if (
+                context.target is not None or len(context.messages) == 20
+                or _active_operator_messages(context.messages)
+                or any(message.status in {
+                    OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+                } for message in context.messages)
+            ):
+                return None
+            revision = context.revision
+        latest = self.blackboard.raw_latest()
+        if latest is None:
+            return None
+        return (latest.instance_id, self._plan_goal_id or "", self._plan_started_ns,
+                self._execution_revision, revision)
+
+    def _note_keepalive_prediction(
+        self, execution: ExecutionTick | None, action: MotorAction, provenance: ActionProvenance,
+    ) -> None:
+        """Count at most three actual accepted predictions, not 20 Hz holds or cold waits."""
+
+        evidence = self._keepalive_prediction_evidence
+        if (evidence is None or evidence.disqualified or execution is None
+                or execution.run.run_id != evidence.run_id
+                or execution.run.skill_id != evidence.skill_id
+                or execution.run.context_key != _EXPLORE_KEEPALIVE_CONTEXT
+                or self.executor.run is None or self.executor.run.run_id != evidence.run_id
+                or execution.run.outcome != SkillOutcome.RUNNING):
+            return
+        if action.keys_down or action.buttons_down:
+            evidence.disqualified = True
+            return
+        if (provenance.origin != ActionOrigin.POLICY
+                or provenance.policy_action_kind != "prediction"):
+            return
+        condition = provenance.condition or {}
+        if (
+            not provenance.prediction_id or provenance.prediction_id != provenance.policy_request_id
+            or condition.get("episode_id") != evidence.run_id
+            or condition.get("skill_id") != evidence.skill_id
+            or provenance.source_captured_ns is None
+            or not execution.run.started_ns <= provenance.source_captured_ns <= time.monotonic_ns()
+        ):
+            return
+        status = execution.policy_status
+        component_key = "primary" if provenance.route_id == "semantic" else provenance.route_id
+        component = status if provenance.route_id == "direct" else status.get(component_key)
+        if not isinstance(component, dict):
+            return
+        causal = component.get("last_action_provenance")
+        if not isinstance(causal, dict) or any(causal.get(key) != expected for key, expected in (
+            ("prediction_id", provenance.prediction_id),
+            ("request_id", provenance.policy_request_id),
+            ("source_frame_id", provenance.source_frame_id),
+            ("source_captured_ns", provenance.source_captured_ns),
+            ("condition", provenance.condition),
+        )):
+            return
+        # TemporalPolicyClient snapshots this prediction and its causal sibling
+        # together; never borrow the router root's or another expert's output.
+        prediction = component.get("last_prediction")
+        if not isinstance(prediction, dict):
+            return
+        if (prediction.get("keys") not in ([], ()) or prediction.get("buttons") not in ([], ())
+                or prediction.get("suppressed_actions") not in ([], ())):
+            # A safety guard or a real attempted interaction is not model abstention.
+            evidence.disqualified = True
+            return
+        identity = (provenance.policy_id, provenance.model_version, provenance.route_id)
+        if evidence.policy_identity is not None and identity != evidence.policy_identity:
+            evidence.disqualified = True
+            return
+        evidence.policy_identity = identity
+        if len(evidence.prediction_ids) < 3:
+            evidence.prediction_ids.add(provenance.prediction_id)
+
+    def _finish_keepalive_prediction_evidence(
+        self, run: SkillRun, verification: OutcomeVerification | None,
+    ) -> None:
+        evidence = self._keepalive_prediction_evidence
+        if evidence is None or evidence.run_id != run.run_id:
+            return
+        self._keepalive_prediction_evidence = None
+        if (
+            not evidence.disqualified and len(evidence.prediction_ids) == 3
+            and run.skill_id == evidence.skill_id and run.context_key == _EXPLORE_KEEPALIVE_CONTEXT
+            and run.outcome == SkillOutcome.FAILED
+            and run.failure_code == SkillFailureCode.CONTROLLER_STARVATION
+            and verification is not None and verification.run_id == run.run_id
+            and verification.signal == OutcomeSignal.CONTROLLER_STARVATION
+            and self._keepalive_rotation_scope() == evidence.scope
+        ):
+            self._keepalive_rotation_hint = evidence
 
     def _note_terminal_for_cognition(
         self,
@@ -1757,6 +1907,7 @@ class AgentRuntime:
                 self._stop.set()
                 return
             raise
+        self._note_keepalive_prediction(execution, action, provenance)
         if (
             execution is not None
             and execution.action_origin in {ActionOrigin.SYNTHETIC, ActionOrigin.RESET}
@@ -3574,6 +3725,15 @@ class AgentRuntime:
         **kwargs: Any,
     ) -> SkillRun:
         run = self.executor.start(spec, **kwargs)
+        self._keepalive_prediction_evidence = None
+        self._keepalive_rotation_hint = None
+        if (source == SkillStartSource.KEEPALIVE and spec.skill_id in _KEEPALIVE_ROTATION_SKILLS
+                and run.context_key == _EXPLORE_KEEPALIVE_CONTEXT):
+            scope = self._keepalive_rotation_scope()
+            if scope is not None:
+                self._keepalive_prediction_evidence = _KeepalivePredictionEvidence(
+                    run.run_id, run.skill_id, scope,
+                )
         try:
             self.on_skill_run_started(
                 run=run.model_copy(deep=True), source=source, origin=origin,
@@ -3615,6 +3775,7 @@ class AgentRuntime:
         if matching_verification is not None and matching_verification.run_id != run.run_id:
             matching_verification = None
             logging.getLogger(__name__).error("Skill-terminal evidence rejected: ValueError")
+        self._finish_keepalive_prediction_evidence(run, matching_verification)
         try:
             self.on_skill_run_terminal(
                 run=run.model_copy(deep=True), outcome_verification=matching_verification,
