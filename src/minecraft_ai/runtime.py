@@ -2342,6 +2342,27 @@ class AgentRuntime:
             and observation is not None
             and fact.observed_ns == observation.observed_ns
         )
+        target_anchor = next((fact for fact in retained if fact.key == "target.visible"), None)
+        if (
+            probe.target_description and probe.target_description.strip()
+            and target_anchor is not None
+        ):
+            # Keep only requested companions of this named target's accepted
+            # visible observation. False/zero remain evidence, not abstention.
+            # This shares the existing scene-bound lease; it does not refresh
+            # geometry, infer tracks or grant independent interaction authority.
+            retained += tuple(
+                fact
+                for key in probe.requested_keys
+                if key in {
+                    "target.near", "target.mineable", "target.kind", "target.dx", "target.dy",
+                }
+                and (fact := self.blackboard.fact(
+                    key, min_confidence=0.7, now_ns=now_ns,
+                )) is not None
+                and fact.source == target_anchor.source
+                and fact.observed_ns == target_anchor.observed_ns
+            )
         if (
             source is None
             or not source.startswith("vlm:")
