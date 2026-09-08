@@ -106,13 +106,18 @@ def test_nonliteral_directive_releases_once_without_ack_plan_or_model_work(tmp_p
         assert database.load_operator_messages(limit=1)[0].status == OperatorMessageStatus.QUEUED
 
 
-def test_literal_fast_path_runs_after_one_fresh_capture_without_model_wait(tmp_path):
+def test_literal_fast_path_runs_after_one_fresh_capture_without_model_wait(tmp_path, monkeypatch):
+    # Windows may return the same monotonic clock reading for consecutive
+    # calls. Advance the simulated capture clock explicitly, without sleeps.
+    clock = [time.monotonic_ns()]
+    monkeypatch.setattr(time, "monotonic_ns", lambda: clock[0])
     with StateDatabase(tmp_path / "state.sqlite") as database:
         runtime, stale, model, terminal, actions = _marked_runtime(
             database, text="Mine the marked dirt block.",
         )
         assert runtime._start_cognition_if_due() is True
         original = runtime.blackboard.raw_latest()
+        clock[0] += 50_000_000
         runtime.blackboard.publish(original.model_copy(update={
             "frame_id": original.frame_id + 1, "captured_ns": time.monotonic_ns(),
         }))
@@ -157,9 +162,12 @@ def test_atomic_and_real_recovery_runs_never_acquire_disposable_marker(tmp_path,
         assert runtime.executor.run is run and not terminal
 
 
-def test_current_death_scene_defers_to_existing_safety_router(tmp_path):
+def test_current_death_scene_defers_to_existing_safety_router(tmp_path, monkeypatch):
+    clock = [time.monotonic_ns()]
+    monkeypatch.setattr(time, "monotonic_ns", lambda: clock[0])
     with StateDatabase(tmp_path / "state.sqlite") as database:
         runtime, _, _, terminal, _ = _marked_runtime(database)
+        clock[0] += 50_000_000
         now = time.monotonic_ns()
         runtime.blackboard.publish(FrameState(
             frame_id=2, captured_ns=now, instance_id="bedrock:operator-preemption",
@@ -243,6 +251,7 @@ def test_tick_yields_after_release_before_any_cognition_or_optional_action(tmp_p
         monkeypatch.setattr(runtime, "_continue_after_capture", lambda: True)
         for method in (
             "_consume_cognition", "_start_cognition_if_due", "_keepalive_horizon_reorient",
+            "_request_semantics_if_due",
         ):
             monkeypatch.setattr(runtime, method, lambda: pytest.fail("must await next capture"))
         runtime.tick()
