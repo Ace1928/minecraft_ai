@@ -350,7 +350,7 @@ class HighLevelController:
             if decision.skill_id is not None:
                 selected = self.skills.get(decision.skill_id)
                 if selected.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS and planks_retry_requires_wood(
-                    context
+                    context, skill_id=selected.skill_id,
                 ):
                     return self._repair_infeasible(
                         decision,
@@ -611,7 +611,7 @@ class HighLevelController:
             if (
                 skill.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
                 and context is not None
-                and planks_retry_requires_wood(context)
+                and planks_retry_requires_wood(context, skill_id=skill.skill_id)
             ):
                 continue
             if not initiation_satisfied(skill, blackboard):
@@ -699,7 +699,7 @@ class HighLevelController:
             if initiation_satisfied(skill, blackboard)
             and not (
                 skill.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
-                and planks_retry_requires_wood(context)
+                and planks_retry_requires_wood(context, skill_id=skill.skill_id)
             )
             and (allowed_skill_ids is None or skill.skill_id in allowed_skill_ids)
         )
@@ -777,7 +777,7 @@ class HighLevelController:
             and initiation_satisfied(skill, blackboard)
             and not (
                 skill.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
-                and planks_retry_requires_wood(context)
+                and planks_retry_requires_wood(context, skill_id=skill.skill_id)
             )
         )
         self.metrics.repairs += 1
@@ -947,7 +947,7 @@ class HighLevelController:
             if initiation_satisfied(skill, blackboard)
             and not (
                 skill.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
-                and planks_retry_requires_wood(context)
+                and planks_retry_requires_wood(context, skill_id=skill.skill_id)
             )
         )
         self.metrics.repairs += 1

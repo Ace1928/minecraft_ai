@@ -3343,7 +3343,9 @@ class AgentRuntime:
         if (
             decision.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
             and self._planks_retry_requires_wood()
-            and planks_retry_requires_wood(self._cognition_context())
+            and planks_retry_requires_wood(
+                self._cognition_context(), skill_id=decision.skill_id,
+            )
         ):
             self._reject_bound_cognition(future, "wood_prerequisite_changed")
             self._pending_operator_message_ids = ()

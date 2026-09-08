@@ -452,8 +452,57 @@ def _urgent_safety_required(blackboard: CognitionReadView) -> bool:
     return False
 
 
-def planks_retry_requires_wood(context: CognitionContext) -> bool:
-    """A fresh explicit wood-audit command permits one attempt, not a permanent bypass."""
+def _affirmative_inventory_inspection(text: str) -> bool:
+    """Recognize an inventory candidate, never a direct-input instruction.
+
+    Only an unquoted imperative clause qualifies. Independent actuator
+    prohibitions need not erase it, but negated or hypothetical inventory
+    requests stay blocked. Deliberation still owns the resulting skill choice.
+    """
+    normalized = " ".join(
+        text.casefold().replace("’", "'").replace("_", " ").replace("-", " ").split()
+    )
+    if re.search(
+        r"[?\"“”‘`]|(?<![a-z])'|'(?![a-z])|"
+        r"\b(?:explain|describe|tell|quote|quoted|quoting|say|says|said|example|"
+        r"hypothetical|suppose|imagine|if|unless|whether|when|until|provided|how|why)\b",
+        normalized,
+    ):
+        return False
+    for prohibition in re.finditer(
+        r"\b(?:avoid|do\s+not|don't|never|no\s+longer|refrain|stop|without)\b[^.!?;:]*",
+        normalized,
+    ):
+        if re.search(
+            r"\b(?:open(?:ing)?|inspect(?:ing)?|check(?:ing)?|audit(?:ing)?|view(?:ing)?|"
+            r"access(?:ing)?|touch(?:ing)?)"
+            r"(?:\s+[a-z]+){0,3}\s+(?:inventory|it|this|that)\b",
+            prohibition.group(),
+        ):
+            return False
+    for clause in re.split(r"[.!;]", normalized):
+        clause = clause.strip()
+        if ":" in clause:
+            label, clause = clause.split(":", 1)
+            # A bounded task label may precede an imperative; arbitrary
+            # reported text ("the sign reads: ...") is not a new directive.
+            if re.fullmatch(
+                r"(?:(?:one time|command following|inventory|operator|bounded)\s+)*"
+                r"(?:check|task|instruction|request)", label.strip(),
+            ) is None:
+                continue
+        if re.match(
+            r"\s*(?:please\s+)?(?:open|inspect|check|audit|view)"
+            r"\s+(?:the\s+)?inventory\b", clause,
+        ):
+            return True
+    return False
+
+
+def planks_retry_requires_wood(
+    context: CognitionContext, *, skill_id: str | None = None,
+) -> bool:
+    """Keep crafting blocked; a current inventory directive may admit GUI inspection."""
     if not context.planks_retry_requires_wood:
         return False
     active = next(
@@ -467,7 +516,20 @@ def planks_retry_requires_wood(context: CognitionContext) -> bool:
     if (
         active is not None
         and active.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
-        and _WOOD_INVENTORY_AUDIT_SKILLS.intersection(_operator_requested_skill_ids(active.text))
     ):
+        if _WOOD_INVENTORY_AUDIT_SKILLS.intersection(_operator_requested_skill_ids(active.text)):
+            return False
+    if (
+        skill_id == "open_inventory" and active is not None
+        and active is context.operator_messages[0]
+        and (
+            active.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+            or (active.kind == OperatorMessageKind.INSTRUCTION
+                and active.status == OperatorMessageStatus.ACKNOWLEDGED)
+        )
+        and _affirmative_inventory_inspection(active.text)
+    ):
+        # Ordinary instructions retain authority after ACK; corrections do not.
+        # This semantic-only exception cannot unblock crafting or force a skill.
         return False
     return True
