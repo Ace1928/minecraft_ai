@@ -608,3 +608,7 @@ Every release tracks:
 - memory benefit ablations;
 - operator focus-isolation violations (target: zero);
 - stop latency and held-input violations (target: zero).
+
+## 8 September 2026 owner priority: continuous native hard-survival learning
+
+See [implementation handoff](CONTINUOUS_NATIVE_HANDOFF_20260908.md). Prioritise the full continuous ERAIS organism, asynchronous processing across time scales, evidence-backed multimodal Fracture integration, hard-survival learning and verified goal progression. This adds acceptance criteria; existing roadmap items remain in force.
