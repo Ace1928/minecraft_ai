@@ -183,6 +183,8 @@ def _expected_keepalive_expiry(run: SkillRun) -> bool:
 def _plan_step_requests_inventory_transition(skill_id: str, step: str) -> bool:
     """Require an explicit GUI plan node before its transition can consume progress."""
 
+    if skill_id == "close_open_inventory" and step.strip().casefold() == skill_id:
+        return True
     normalized = " ".join(step.casefold().replace("_", " ").replace("-", " ").split())
     if skill_id == "open_inventory":
         prefixes = {
