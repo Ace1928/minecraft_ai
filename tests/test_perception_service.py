@@ -1806,3 +1806,52 @@ def test_durable_track_upsert_and_removal_preserve_other_tracks() -> None:
     }
     assert board.remove_semantic_track("operator:tree")
     assert [track.track_id for track in board.latest().tracks] == ["learned:tree"]
+
+
+@pytest.mark.parametrize("size", [(640, 360), (1920, 1080)])
+def test_centered_error_modal_blocks_world_controls_without_claiming_inventory(size):
+    # Scaled geometry of the actual storage-error modal retained on 2026-09-08.
+    image = Image.new("RGB", size, (45, 80, 50))
+    draw = ImageDraw.Draw(image)
+    width, height = size
+    draw.rectangle((width * .10, height * .21, width * .90, height * .79), fill=(49, 50, 51))
+    for left, right in ((.12, .30), (.315, .49), (.51, .69)):
+        draw.rectangle(
+            (width * left, height * .67, width * right, height * .75), fill=(210, 212, 213),
+        )
+    frame = _frame(image.convert("RGBA").tobytes("raw", "BGRA"), width=width, height=height)
+    assert bedrock_ui_chrome_present(frame)
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["scene.playable"].value is False
+    assert facts["scene.ui_overlay"].value is True
+    assert facts["scene.playable"].source.endswith(":not-training-label")
+    assert "scene.inventory_overlay" not in facts
+    assert "scene.mode" not in facts
+    from minecraft_ai.policy_service import _learned_scene_blocked
+    blackboard = PerceptionBlackboard()
+    blackboard.publish(FrameState(frame_id=1, captured_ns=frame.captured_ns,
+                                  instance_id="bedrock:modal-test", width=width, height=height,
+                                  facts=tuple(facts.values())))
+    assert _learned_scene_blocked(blackboard)
+
+
+def test_dark_stone_or_one_bright_region_is_not_centered_error_chrome():
+    image = Image.new("RGB", (640, 360), (49, 50, 51))
+    for one_button in (False, True):
+        if one_button:
+            ImageDraw.Draw(image).rectangle((80, 243, 189, 268), fill=(210, 212, 213))
+        frame = _frame(image.convert("RGBA").tobytes("raw", "BGRA"), width=640, height=360)
+        assert not perception_service._bedrock_centered_modal_present(frame)
+
+
+def test_centered_storage_notice_blocks_world_input():
+    image = Image.new("RGB", (640, 360), (45, 80, 50))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((179, 94, 461, 263), fill=(198, 198, 198))
+    draw.rectangle((187, 123, 453, 211), fill=(8, 8, 8))
+    draw.rectangle((187, 218, 453, 255), fill=(24, 128, 0))
+    frame = _frame(image.convert("RGBA").tobytes("raw", "BGRA"), width=640, height=360)
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert bedrock_ui_chrome_present(frame)
+    assert facts["scene.playable"].value is False
+    assert "scene.inventory_overlay" not in facts

@@ -643,6 +643,7 @@ class BootstrapFastPerception:
             inventory_overlay
             or away_overlay
             or _bedrock_top_ui_chrome_present(frame)
+            or _bedrock_centered_modal_present(frame)
         )
         bootstrap_source = (
             CROSSHAIR_BLOCK_FAST_SOURCE
@@ -996,6 +997,7 @@ def bedrock_ui_chrome_present(frame: CapturedFrame) -> bool:
         _bedrock_top_ui_chrome_present(frame)
         or bedrock_inventory_overlay_present(frame)
         or bedrock_away_overlay_present(frame)
+        or _bedrock_centered_modal_present(frame)
     )
 
 
@@ -1015,6 +1017,53 @@ def _bedrock_top_ui_chrome_present(frame: CapturedFrame) -> bool:
             bright += int(luma > 180 * 256)
             sampled += 1
     return bool(sampled > 0 and bright / sampled >= 0.90)
+
+
+def _bedrock_centered_modal_present(frame: CapturedFrame) -> bool:
+    """Block world input over the captured Bedrock centered-error dialog chrome.
+
+    The storage-error screen has no top toolbar or inventory pane. Its broad
+    dark panel and three separate light buttons provide a cheap negative-only
+    interlock. This does not identify the error, click a button, or label data.
+    """
+    if not frame.bgra or frame.width < 320 or frame.height < 180:
+        return False
+    pixels = _numpy_bgra(frame)
+    dark_panel = all(
+        _sampled_neutral_ratio(
+            frame, x_start=x0, x_end=x1, y_start=y0, y_end=y1,
+            luma_min=35, luma_max=65, pixels=pixels,
+        ) >= 0.95
+        for x0, x1, y0, y1 in ((0.12, 0.18, 0.30, 0.49),
+                              (0.82, 0.88, 0.30, 0.49),
+                              (0.20, 0.80, 0.30, 0.32))
+    )
+    if dark_panel and sum(
+        _sampled_neutral_ratio(
+            frame, x_start=x0, x_end=x1, y_start=0.675, y_end=0.745,
+            luma_min=185, luma_max=240, pixels=pixels,
+        ) >= 0.80
+        for x0, x1 in ((0.125, 0.295), (0.32, 0.48), (0.515, 0.675))
+    ) >= 2:  # A selected button becomes green; its two neighbours stay light.
+        return True
+    # The follow-up "almost out of storage" notice uses a different compact
+    # frame: light outer chrome, black text body and a green acknowledgement.
+    notice_frame = all(
+        _sampled_neutral_ratio(
+            frame, x_start=x0, x_end=x1, y_start=y0, y_end=y1,
+            luma_min=185, luma_max=225, pixels=pixels,
+        ) >= 0.95
+        for x0, x1, y0, y1 in ((0.30, 0.70, 0.28, 0.32),
+                              (0.285, 0.29, 0.36, 0.70),
+                              (0.711, 0.715, 0.36, 0.70))
+    )
+    return bool(notice_frame and _sampled_neutral_ratio(
+        frame, x_start=0.30, x_end=0.70, y_start=0.50, y_end=0.57,
+        luma_min=0, luma_max=20, pixels=pixels,
+    ) >= 0.95 and _region_palette_ratio(
+        frame, x_start=0.31, x_end=0.69, y_start=0.625, y_end=0.69,
+        palette="primary", pixels=pixels,
+    ) >= 0.85)
 
 
 # This deliberately narrow hotbar reader is pinned to Bedrock 1.26.45.1's
