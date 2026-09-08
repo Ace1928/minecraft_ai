@@ -130,6 +130,7 @@ class TemporalPolicyClient:
     metrics: PolicyServiceMetrics = field(default_factory=PolicyServiceMetrics, init=False)
     _process: subprocess.Popen[str] | None = field(default=None, init=False)
     _startup_verified: bool = field(default=False, init=False)
+    _reset_scopes: frozenset[str] = field(default_factory=frozenset, init=False)
     _response_bytes: bytearray = field(default_factory=bytearray, init=False)
     _memory: shared_memory.SharedMemory | None = field(default=None, init=False)
     _memory_size: int = field(default=0, init=False)
@@ -317,12 +318,23 @@ class TemporalPolicyClient:
         self._clear_input_state(reason="external-input-release")
 
     def reset(self) -> MotorAction:
+        """End an option without clearing a capable worker's world memory."""
+        return self._reset_scope("actions")
+
+    def reset_world(self) -> MotorAction:
+        """Reset after caller-confirmed world continuity loss, never an option change."""
+        return self._reset_scope("world")
+
+    def _reset_scope(self, scope: Literal["actions", "world"]) -> MotorAction:
         sequence = self._last_sequence + 1
         self._retire_pending_action()
         process = self._process
         if process is not None and process.poll() is None and process.stdin is not None:
+            request = {"type": "reset"}
+            if scope in self._reset_scopes:
+                request["scope"] = scope
             try:
-                process.stdin.write('{"type":"reset"}\n')
+                process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
                 process.stdin.flush()
             except OSError:
                 self.close()
@@ -348,6 +360,7 @@ class TemporalPolicyClient:
                 "cross-view-object" if self.config.provider == "minestudio-rocket2" else "text"
             ),
             "temporal_memory": True,
+            "reset_scopes": tuple(sorted(self._reset_scopes)),
             "research_only": self.config.research_only,
             "condition_scale": self.config.condition_scale,
             "scene_probe_interval": self.config.scene_probe_interval,
@@ -468,6 +481,7 @@ class TemporalPolicyClient:
 
     def close(self) -> None:
         self._startup_verified = False
+        self._reset_scopes = frozenset()
         process = self._process
         if process is not None:
             if process.poll() is None and process.stdin is not None:
@@ -611,7 +625,7 @@ class TemporalPolicyClient:
         if ready is None or ready.get("type") != "ready":
             raise RuntimeError(f"learned policy did not become ready: {ready}")
         if self.config.provider == "external":
-            _validate_external_ready(self.config, ready)
+            self._reset_scopes = _validate_external_ready(self.config, ready)
 
     def _consume_pending_response(self) -> dict[str, Any] | None:
         self._consumed_miss_recorded = False
@@ -1104,9 +1118,9 @@ class GroundedPolicyRouter:
 
         selected, route, used_fallback = self._body_for_level(intent.action_level)
         release: MotorAction | None = None
-        # A new atomic option receives fresh recurrent state even when it uses
-        # the same expert as its predecessor. Normal SkillExecutor termination
-        # already resets the router; this also makes direct callers safe.
+        # End the old option's action ownership, even with the same expert.
+        # A capability-aware client preserves world memory; legacy experts
+        # retain their historical recurrent reset. Option IDs are not worlds.
         if self._episode_id is not None or selected is not self._active:
             release = self._active.reset()
         if selected is not self._active:
@@ -1156,9 +1170,10 @@ class GroundedPolicyRouter:
         self._grounding_requests += 1
         self._grounding_discarded_actions += 1
 
-    def _deactivate_grounding(self) -> None:
-        if self._grounding_active:
-            release = self.grounded.reset()
+    def _deactivate_grounding(self, *, world_reset: bool = False) -> None:
+        if self._grounding_active or world_reset:
+            reset = getattr(self.grounded, "reset_world", None) if world_reset else None
+            release = reset() if callable(reset) else self.grounded.reset()
             self._grounding_sequence = max(self._grounding_sequence, release.sequence)
         self._grounding_active = False
         self._grounded_track_id = None
@@ -1167,11 +1182,21 @@ class GroundedPolicyRouter:
         self._last_grounded_feedback_ns = 0
 
     def reset(self) -> MotorAction:
+        """Release all option actions, preserving advertised world memory."""
+        return self._reset_scope(world_reset=False)
+
+    def reset_world(self) -> MotorAction:
+        """Called only for verified world discontinuity, not skill or GUI changes."""
+        return self._reset_scope(world_reset=True)
+
+    def _reset_scope(self, *, world_reset: bool) -> MotorAction:
         sequence = self._last_sequence + 1
         release = MotorAction(sequence=sequence)
         for policy in self._body_policies():
-            release = _merge_policy_release(release, policy.reset())
-        self._deactivate_grounding()
+            reset = getattr(policy, "reset_world", None) if world_reset else None
+            policy_release = reset() if callable(reset) else policy.reset()
+            release = _merge_policy_release(release, policy_release)
+        self._deactivate_grounding(world_reset=world_reset)
         self._last_sequence = sequence
         self._active = self.primary
         self._active_route = "semantic"
@@ -1769,7 +1794,7 @@ def _validate_external_raw_output(output: LearnedPolicyOutput) -> None:
         raise RuntimeError("external raw-motion worker requires world camera semantics")
 
 
-def _validate_external_ready(config: PolicyConfig, ready: dict[str, Any]) -> None:
+def _validate_external_ready(config: PolicyConfig, ready: dict[str, Any]) -> frozenset[str]:
     expected = {
         "protocol": "minecraft-ai.temporal-policy.v1",
         "architecture": config.external_architecture,
@@ -1782,6 +1807,13 @@ def _validate_external_ready(config: PolicyConfig, ready: dict[str, Any]) -> Non
         for key, value in expected.items()
     ):
         raise RuntimeError("external worker ready identity or protocol differs from configuration")
+    scopes = ready.get("reset_scopes", [])
+    if not isinstance(scopes, list) or any(
+        not isinstance(scope, str) or scope not in {"actions", "world"}
+        for scope in scopes
+    ):
+        raise RuntimeError("external worker reset_scopes must list actions and/or world")
+    return frozenset(scopes)
 
 
 def _validate_policy_config(config: PolicyConfig) -> None:

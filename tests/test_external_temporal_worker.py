@@ -6,14 +6,16 @@ import os
 import time
 
 import pytest
-from test_policy_service import _policy_config
+from test_policy_service import _policy_config, _RoutingPolicy
 
+from minecraft_ai.action_levels import ActionLevel
 from minecraft_ai.motor import MotorIntent
 from minecraft_ai.perception import PerceptionBlackboard
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 import minecraft_ai.policy_service as policy_service_module
 from minecraft_ai.policy_service import (
     LearnedPolicyOutput,
+    GroundedPolicyRouter,
     TemporalPolicyClient,
     _external_worker_command,
     _external_worker_environment,
@@ -220,6 +222,120 @@ def startup_client(tmp_path, monkeypatch):
         yield client, ready, replies, workers, memories
     finally:
         client.close()
+
+
+@pytest.mark.parametrize("scopes", (None, [], ["actions"], ["world"], ["world", "actions"]))
+def test_reset_scope_uses_only_verified_generation_capabilities(startup_client, scopes):
+    client, ready, replies, workers, _memories = startup_client
+    if scopes is not None:
+        ready["reset_scopes"] = scopes
+    replies.append(ready)
+    client.warmup()
+    client._held_keys, client._held_buttons = {"w"}, {"left"}
+    client._pending_camera = (7, 8)
+    client.restore_world_camera_state(estimated_pitch_units=96)
+
+    release = client.reset()
+    world_release = client.reset_world()
+
+    commands = [json.loads(line) for line in workers[0].stdin.getvalue().splitlines()]
+    assert commands == [
+        {"type": "reset", **({"scope": "actions"} if "actions" in (scopes or ()) else {})},
+        {"type": "reset", **({"scope": "world"} if "world" in (scopes or ()) else {})},
+    ]
+    assert release.keys_up == ("w",) and release.buttons_up == ("left",)
+    assert release.mouse_dx == release.mouse_dy == 0
+    assert world_release.sequence > release.sequence
+    assert client._pending_camera == (0, 0)
+    assert client.status()["estimated_pitch_units"] == 96
+    assert client.status()["reset_scopes"] == tuple(sorted(scopes or ()))
+    assert client._process is workers[0] and client._startup_verified
+
+
+@pytest.mark.parametrize("scopes", ("actions", {"actions": True}, ["action"], [True], None))
+def test_malformed_reset_capability_cannot_become_a_verified_generation(startup_client, scopes):
+    client, ready, replies, workers, _memories = startup_client
+    replies.append({**ready, "reset_scopes": scopes})
+    with pytest.raises(RuntimeError, match="reset_scopes"):
+        client.warmup()
+    assert client._process is None
+    assert not client._startup_verified
+    assert client.status()["reset_scopes"] == ()
+    assert workers[0].stdin.getvalue() == '{"type":"stop"}\n'
+
+
+def test_reset_capabilities_do_not_survive_worker_replacement(startup_client):
+    client, ready, replies, workers, _memories = startup_client
+    replies.extend(({**ready, "reset_scopes": ["actions", "world"]}, ready))
+    client.warmup()
+    client.reset()
+    client.close()
+    assert client.status()["reset_scopes"] == ()
+    client.warmup()
+    client.reset()
+    assert workers[1].stdin.getvalue() == '{"type":"reset"}\n'
+
+
+def test_option_handoffs_preserve_capable_worker_memory_until_explicit_world_reset(startup_client):
+    client, ready, replies, workers, _memories = startup_client
+    replies.append({**ready, "reset_scopes": ["world", "actions"]})
+    client.warmup()
+    observer = _RoutingPolicy("legacy-observer", key="a")
+    router = GroundedPolicyRouter(primary=client, grounded=observer)
+    intent = MotorIntent(skill_id="explore", mode="explore", episode_id="option-1")
+    router._bind_episode(intent)
+    assert workers[0].stdin.getvalue() == ""
+    router._bind_episode(intent.model_copy(update={"episode_id": "option-2"}))
+    router._bind_episode(intent.model_copy(update={
+        "episode_id": "inventory-3", "action_level": ActionLevel.GUI,
+    }))
+    router.reset()  # SkillExecutor's ordinary terminal cleanup.
+    commands = [json.loads(line) for line in workers[0].stdin.getvalue().splitlines()]
+    assert commands == [{"type": "reset", "scope": "actions"}] * 3
+    assert client._process is workers[0] and client._startup_verified
+    assert observer.resets == 0
+
+    router.reset_world()  # Only the owner of a confirmed world boundary calls this.
+
+    commands = [json.loads(line) for line in workers[0].stdin.getvalue().splitlines()]
+    assert commands[-1] == {"type": "reset", "scope": "world"}
+    assert len(commands) == 4
+    assert observer.resets == 1  # Legacy observer still receives its ordinary reset.
+    assert router.status()["episode_id"] is None
+
+
+def test_scoped_action_reset_retires_pending_output_without_restarting_worker(startup_client):
+    client, ready, replies, workers, _memories = startup_client
+    replies.append({**ready, "reset_scopes": ["actions", "world"]})
+    client.warmup()
+    board = PerceptionBlackboard()
+    intent = MotorIntent(skill_id="explore", mode="explore", episode_id="old-option")
+    client.act(board, intent, sequence=1)
+    old_request = client._pending_request_id
+    assert old_request is not None
+    client._held_keys, client._held_buttons = {"w"}, {"left"}
+    release = client.reset()
+    assert release.keys_up == ("w",) and release.buttons_up == ("left",)
+    assert client._pending_request_id == old_request
+    assert client._pending_request_context is None and client._discard_pending_response
+    workers[0].ready = {
+        "type": "prediction", "request_id": old_request,
+        "output": {"keys": ["w"], "buttons": ["left"], "mouse_dx": 9,
+                   "inference_ns": 1, "model_version": client.config.model_version},
+    }
+
+    action = client.act(board, intent.model_copy(update={"episode_id": "new-option"}),
+                        sequence=release.sequence + 1)
+
+    assert not action.keys_down and not action.buttons_down
+    assert action.mouse_dx == action.mouse_dy == 0
+    assert client.metrics.retired_responses == 1
+    assert client._accepted_predictions == 0
+    assert client._process is workers[0] and client._startup_verified
+    commands = [json.loads(line) for line in workers[0].stdin.getvalue().splitlines()]
+    assert commands[1] == {"type": "reset", "scope": "actions"}
+    assert commands[2]["type"] == "infer"
+    assert commands[2]["intent"]["episode_id"] == "new-option"
 
 
 @pytest.mark.parametrize("invalid_kind", ["identity", "protocol", "not-ready", "absent"])
