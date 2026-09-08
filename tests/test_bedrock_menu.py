@@ -629,6 +629,44 @@ def test_bedrock_connect_external_server_transition_is_loading() -> None:
     ) == MenuStage.LOADING
 
 
+def test_bedrock_connect_waits_through_retained_external_transfer_ocr() -> None:
+    now = 0.0
+
+    def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([_frame(index) for index in range(1, 5)]),
+        text_reader=_MappedTextReader({
+            1: _lines("ServerList", "Eidos Local Bedrock"),
+            2: _lines("Connecting tao external"),
+            3: _lines("Connecting tao external"),
+        }),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        timeout_s=3,
+        response_timeout_s=0.15,
+        poll_interval_s=0.1,
+        clock=lambda: now,
+        sleep=advance,
+        hud_detector=lambda frame: frame.frame_id == 4,
+    )
+    assert navigator.run().visited == (MenuStage.BEDROCK_CONNECT, MenuStage.IN_WORLD)
+    assert now > navigator.response_timeout_s
+    assert clicks.clicks == [(1, 500, 200)]
+
+
+@pytest.mark.parametrize("text", ["Connecting tao external", "Connecting external"])
+def test_partial_external_heading_is_not_a_global_loading_anchor(text: str) -> None:
+    assert classify_menu_stage(
+        _frame(1), _lines(text), lan_name="BedrockConnect",
+        server_name="Eidos Local Bedrock", hud_detector=lambda _frame: False,
+    ) == MenuStage.UNKNOWN
+
+
 def test_title_fallback_ignores_left_play_now_and_clicks_central_green_play() -> None:
     title = _pixel_frame(
         1,

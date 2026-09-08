@@ -451,6 +451,18 @@ class BedrockMenuNavigator:
                 self.sleep(self.poll_interval_s)
                 self._require_input_permitted()
                 current = self._observe()
+                if (
+                    source == MenuStage.BEDROCK_CONNECT
+                    and transition.destination == MenuStage.IN_WORLD
+                    and current.stage == MenuStage.UNKNOWN
+                    and _external_connection_heading_visible(current)
+                ):
+                    # The retained transfer heading was OCR'd as "Connecting
+                    # tao external", with its final word omitted. Only after
+                    # selecting our configured server may this exact central
+                    # heading extend observation to the existing loading bound.
+                    # It never permits another click or changes other screens.
+                    response_deadline = deadline
                 if current.stage == transition.destination or (
                     source in {MenuStage.TITLE, MenuStage.PLAY_SERVERS}
                     and transition.destination == MenuStage.PLAY
@@ -715,6 +727,18 @@ def _away_overlay_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> b
     return all(phrase in text for phrase in (
         "been away for a bit", "any button to jump back", "into the game",
     ))
+
+
+def _external_connection_heading_visible(observation: MenuObservation) -> bool:
+    return any(
+        line.confidence >= 60
+        and 0.20 <= line.center[0] / observation.frame.width <= 0.80
+        and 0.20 <= line.center[1] / observation.frame.height <= 0.85
+        and re.fullmatch(
+            r"connecting (?:to|tao) external(?: server)?", _normalized_text(line.text),
+        ) is not None
+        for line in observation.lines
+    )
 
 
 def load_configured_local_server(
