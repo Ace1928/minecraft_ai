@@ -843,6 +843,16 @@ class BootstrapFastPerception:
         return tuple(facts)
 
 
+@dataclass(frozen=True)
+class CaptureObservation:
+    """One exact capture and its synchronous fast facts, never merged history."""
+
+    capture: CapturedFrame
+    frame: FrameState
+    fast_facts: tuple[PerceptionFact, ...]
+    fast_model_id: str | None
+
+
 @dataclass
 class RealtimePerceptionService:
     capture_source: CaptureSource
@@ -854,12 +864,18 @@ class RealtimePerceptionService:
     fast_perception: FastPerception | None = field(default_factory=BootstrapFastPerception)
     _last_frame_ns: int | None = field(default=None, init=False)
     _last_capture: CapturedFrame | None = field(default=None, init=False)
+    _last_observation: CaptureObservation | None = field(default=None, init=False)
 
     @property
     def last_capture(self) -> CapturedFrame | None:
         return self._last_capture
 
+    @property
+    def last_observation(self) -> CaptureObservation | None:
+        return self._last_observation
+
     def capture_once(self) -> FrameState:
+        self._last_observation = None
         captured = self.capture_source.capture()
         if self._last_frame_ns is not None and captured.captured_ns <= self._last_frame_ns:
             raise RuntimeError("capture timestamps are not monotonic")
@@ -876,10 +892,16 @@ class RealtimePerceptionService:
         )
         self.blackboard.publish(state)
 
+        facts: tuple[PerceptionFact, ...] = ()
+        fast_model_id = None
         if self.fast_perception is not None:
-            facts = self.fast_perception.infer(captured)
+            fast_model_id = self.fast_perception.model_id
+            facts = tuple(self.fast_perception.infer(captured))
             if facts:
                 self.blackboard.merge_semantics(instance_id=self.instance_id, facts=facts)
+        self._last_observation = CaptureObservation(
+            capture=captured, frame=state, fast_facts=facts, fast_model_id=fast_model_id,
+        )
         return state
 
     def request_semantics(

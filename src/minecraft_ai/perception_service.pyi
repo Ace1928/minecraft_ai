@@ -1,5 +1,6 @@
 from minecraft_ai.perception.service import (
     CaptureSource as CaptureSource,
+    CaptureObservation as CaptureObservation,
     FastPerception as FastPerception,
     BEDROCK_INVENTORY_ZERO_SOURCE as BEDROCK_INVENTORY_ZERO_SOURCE,
     BEDROCK_HOTBAR_LOG_COUNT_SOURCE as BEDROCK_HOTBAR_LOG_COUNT_SOURCE,

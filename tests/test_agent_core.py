@@ -2602,6 +2602,7 @@ def test_gather_continuation_requires_three_exact_pickups_before_plan_advance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = object.__new__(AgentRuntime)
+    runtime._stop = threading.Event()
     runtime.skills = build_bootstrap_skill_library()
     runtime.executor = SkillExecutor(BootstrapMotorPolicy())
     runtime.blackboard = PerceptionBlackboard()
@@ -4543,6 +4544,7 @@ def test_pending_cognition_perception_probe_suppresses_exploration_keepalive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = object.__new__(AgentRuntime)
+    runtime._stop = threading.Event()
     runtime.metrics = RuntimeMetrics()
     runtime.skills = build_bootstrap_skill_library()
     runtime.executor = SkillExecutor(BootstrapMotorPolicy())
@@ -4675,6 +4677,7 @@ def test_idle_tick_reorients_extreme_pitch_only_in_verified_world(
     scene: str,
 ) -> None:
     runtime = object.__new__(AgentRuntime)
+    runtime._stop = threading.Event()
     runtime.metrics = RuntimeMetrics()
     runtime.skills = build_bootstrap_skill_library()
     runtime.executor = SkillExecutor(BootstrapMotorPolicy())

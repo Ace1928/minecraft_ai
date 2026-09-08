@@ -177,6 +177,20 @@ Import, native constructors and arbitrary close callbacks are cooperatively
 cancelled, not forcibly preempted. This is a trusted extension boundary, not a
 sandbox or a claim of live model activation.
 
+Runtime subclasses may also override `allow_fresh_capture(observation)` as a
+bounded, observation-only continuation veto. `CaptureObservation` retains the
+exact capture, its separate blackboard frame identity, and only the fast facts
+produced synchronously from those pixels; it excludes older merged semantics.
+The default returns `True`. Any other result or ordinary exception stops and
+releases through existing cleanup before downstream work; a `True` result cannot
+bypass normal safety or input ownership. The hook runs before initial cognition
+and motor warmup, and after fresh-frame/release checks on later ticks. Startup
+may reuse an existing capture; an adapter must validate its age and provenance.
+It must
+not perform inference, inputs, resets or resource mutation. This supports a
+local bounded pilot's stop condition, not automatic world-memory reset or a
+claim that the supplied observations are correct training labels.
+
 ### Skill lifecycle observations
 
 Runtime subclasses can implement `on_skill_run_started` and

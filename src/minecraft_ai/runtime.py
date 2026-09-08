@@ -51,6 +51,7 @@ from .perception import (
 from .perception_service import (
     BEDROCK_HUD_SAFETY_SOURCE,
     BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+    CaptureObservation,
     RealtimePerceptionService,
     crosshair_block_dhash,
     frame_dhash,
@@ -450,6 +451,8 @@ class AgentRuntime:
                 self.perception.capture_once()
             if self._stop.is_set():
                 return
+            if not self._continue_after_capture():
+                return
             # Operator grounding is deterministic and may make a pending
             # directive executable before the first strategic snapshot. Merge
             # it before launching slow cognition, including after a process
@@ -525,6 +528,43 @@ class AgentRuntime:
             # exact checkpoint startup failure in operator telemetry.
             self._policy_warmup_error = f"{type(exc).__name__}: {exc}"
 
+    def allow_fresh_capture(self, observation: CaptureObservation | None) -> bool:
+        """Optional bounded, observation-only continuation veto for local adapters.
+
+        A True result cannot bypass any subsequent safety or ownership check.
+        An override may only inspect this immutable capture bundle and local
+        state; it must not perform inference, inputs, resets or resource changes.
+        Startup may reuse a capture: overrides must check its age/provenance.
+        Missing evidence may be rejected. Expected denial uses ordinary runtime
+        shutdown, never an emergency/failsafe transition or a new scene claim.
+        """
+        return True
+
+    def _continue_after_capture(self) -> bool:
+        if self._stop.is_set():
+            return False
+        try:
+            allowed = self.allow_fresh_capture(
+                getattr(self.perception, "last_observation", None),
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Fresh-capture continuation guard failed: %s", type(exc).__name__,
+            )
+            allowed = False
+        if allowed is True and not self._stop.is_set():
+            return True
+        self.stop()
+        try:
+            self._release_and_reconcile_inputs()
+        except Exception as exc:
+            # A rejected/failed release cannot grant continuation. The existing
+            # run-finally disarm and lease retirement remain independent owners.
+            logging.getLogger(__name__).warning(
+                "Capture-guard input release failed: %s", type(exc).__name__,
+            )
+        return False
+
     def tick(self) -> None:
         # Capture is synchronous and precedes action selection. A later tick's
         # deterministic hotbar evidence can only arrive after _send_motor below
@@ -560,6 +600,8 @@ class AgentRuntime:
             # Even an acknowledged retry happened after this tick's capture.
             # The next tick must observe the released body before selecting
             # another action; never replay the pre-release image or command.
+            return
+        if not self._continue_after_capture():
             return
         self._flush_pending_skill_stats()
         self._flush_pending_learning_records()
