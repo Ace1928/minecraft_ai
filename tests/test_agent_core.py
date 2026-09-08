@@ -4210,6 +4210,121 @@ def _attach_probe_cognition(runtime: AgentRuntime) -> Future[CognitionDecision]:
     return future
 
 
+def _runtime_with_described_target_handoff(
+    monkeypatch: pytest.MonkeyPatch, clock_ns: list[int],
+) -> tuple[AgentRuntime, _IdleStallPerception]:
+    runtime, perception, decision = _runtime_with_idle_stalls(monkeypatch, clock_ns)
+    assert runtime._cognition_context(requires_wood=False).active_perception_target is None
+    _consume_repeated_idle(runtime, decision.model_copy(update={
+        "ask_perception": ("target.visible", "target.near"), "instruction": "oak-log trunk",
+    }))
+    for frame_id in (2, 3):
+        clock_ns[0] += 50_000_000
+        _publish_idle_stall_frame(runtime, clock_ns[0], frame_id)
+        runtime._reconcile_cognition_perception_probe()
+    probe = runtime._cognition_perception_probe
+    assert probe is not None and probe.query_id is not None
+    assert runtime._cognition_context(requires_wood=False).active_perception_target is None
+    source = f"vlm:test:{probe.query_id}"
+    clock_ns[0] += 50_000_000
+    evidence_id = f"frame-{probe.frame_id}:world"
+    observed = tuple(PerceptionFact(
+        key=key, value=value, confidence=0.9, observed_ns=clock_ns[0],
+        source=source, expires_after_ms=15_000, evidence_refs=(evidence_id,),
+    ) for key, value in (
+        ("target.visible", True), ("target.near", True), ("target.dx", 0.0), ("target.dy", 0.0),
+    ))
+    _publish_probe_world_frame(runtime, clock_ns[0])
+    runtime.blackboard.merge_semantics(
+        instance_id=perception.instance_id,
+        facts=observed + (PerceptionFact(
+            key="scene.observation_dhash", value="0123456789abcdef", confidence=1.0,
+            observed_ns=clock_ns[0], source=source, expires_after_ms=120_000,
+        ),),
+        tracks=(Track(
+            track_id="generic-tree", label="tree", confidence=0.9,
+            region=ScreenRegion(x=0.4, y=0.3, width=0.2, height=0.3),
+            first_seen_ns=clock_ns[0], last_seen_ns=clock_ns[0],
+            evidence_refs=(evidence_id,),
+        ),),
+        evidence=(PerceptionEvidence(
+            evidence_id=evidence_id, frame_id=probe.frame_id, captured_ns=clock_ns[0],
+            region_kind=EvidenceRegion.WORLD, region=ScreenRegion(x=0, y=0, width=1, height=0.84),
+            pixel_sha256="0" * 64, crop_width=512, crop_height=288,
+        ),),
+    )
+    perception.completed += 1
+    perception.available = True
+    runtime._reconcile_cognition_perception_probe()
+    assert runtime._cognition_perception_probe is not None
+    assert runtime._cognition_perception_probe.handoff_deadline_ns is not None
+    return runtime, perception
+
+
+def test_followup_model_receives_requested_target_separately_from_generic_track(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _CapturingModel:
+        model_id = "target-followup-test"
+        messages: tuple[ModelMessage, ...] = ()
+
+        def complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse:
+            self.messages = messages
+            return ModelResponse(text='{"s":null,"x":false,"q":[]}', model=self.model_id,
+                                 latency_ms=1)
+
+    runtime, perception = _runtime_with_described_target_handoff(monkeypatch, [10_000_000_000])
+    model = _CapturingModel()
+    runtime.high_level = HighLevelController(model, runtime.skills)
+    runtime.cognition_hz = 1
+    runtime._last_decision = CognitionDecision(instruction="stone")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        runtime._pool = pool  # type: ignore[assignment]
+        runtime._start_cognition_if_due()
+        assert runtime._pending_decision is not None
+        runtime._pending_decision.result(timeout=2)
+    payload = json.loads(model.messages[1].content)
+    assert payload["active_perception_target"] == "oak-log trunk"
+    assert payload["frame"]["tracks"][0]["label"] == "tree"
+    assert "active_perception_target" not in payload["fresh_facts"]
+    assert runtime.blackboard.fact("target.kind") is None
+    assert "not an observed identity or permission to act" in model.messages[0].content
+    assert runtime.metrics.cognition_calls == 1 and len(perception.queries) == 1
+    assert runtime.executor.run is None
+    assert runtime._cognition_context(requires_wood=False).active_perception_target is None
+
+
+@pytest.mark.parametrize("reason", ("cleared", "execution", "operator", "expired", "replaced"))
+def test_followup_target_description_is_removed_with_probe_ownership(
+    monkeypatch: pytest.MonkeyPatch, reason: str,
+) -> None:
+    clock_ns = [10_000_000_000]
+    runtime, _ = _runtime_with_described_target_handoff(monkeypatch, clock_ns)
+    context = runtime._cognition_context(requires_wood=False)
+    assert context.active_perception_target == "oak-log trunk"
+    probe = runtime._cognition_perception_probe
+    assert probe is not None
+    if reason == "cleared":
+        runtime._clear_cognition_perception_probe(probe)
+    elif reason == "execution":
+        runtime._execution_revision += 1
+    elif reason == "expired":
+        assert probe.handoff_deadline_ns is not None
+        clock_ns[0] = probe.handoff_deadline_ns
+    elif reason == "replaced":
+        runtime.blackboard.remove_semantic_facts(
+            ("target.visible",), expected_source=probe.query_source,
+        )
+    else:
+        runtime._new_queued_operator_message_waiting = lambda: True  # type: ignore[method-assign]
+        runtime._pending_decision = Future()
+        runtime._preempt_pending_cognition_for_operator = lambda: False  # type: ignore[method-assign]
+        runtime._start_cognition_if_due()
+    assert runtime._cognition_context(requires_wood=False).active_perception_target is None
+    runtime._reconcile_cognition_perception_probe()
+    assert runtime._cognition_perception_probe is None
+
+
 def test_perception_handoff_keeps_one_slow_cognition_feasible_then_expires_action_grace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

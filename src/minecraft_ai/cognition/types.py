@@ -134,6 +134,8 @@ class CognitionContext:
     plan_index: int = 0
     plan_started_ns: int = 0
     planks_retry_requires_wood: bool = False
+    # Transient referent of this observation follow-up, never a visual fact or permission.
+    active_perception_target: str | None = None
 
 
 @dataclass

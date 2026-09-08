@@ -661,6 +661,8 @@ def test_high_level_receives_explicit_active_operator_correction() -> None:
 
     payload = json.loads(model.initial_messages[1].content)
     assert payload["active_operator_message"]["message_id"] == "correction"
+    assert context.active_perception_target is None
+    assert "active_perception_target" not in payload
     assert "Stop and climb the hill" in model.initial_messages[-1].content
     assert "explore_forward" in {skill["skill_id"] for skill in payload["skills"]}
     explore = next(skill for skill in payload["skills"] if skill["skill_id"] == "explore_forward")

@@ -2187,6 +2187,41 @@ class AgentRuntime:
         except ValueError:
             return False
 
+    def _active_cognition_perception_target(self) -> str | None:
+        """Keep one matched follow-up's requested referent separate from its visual facts."""
+
+        probe: _CognitionPerceptionProbe | None = getattr(self, "_cognition_perception_probe", None)
+        now_ns = time.monotonic_ns()
+        stop_event = getattr(self, "_stop", None)
+        if (
+            probe is None or not probe.target_description
+            or not any(key.startswith("target.") for key in probe.requested_keys)
+            or probe.query_id is None or probe.query_source is None
+            or not probe.query_source.startswith("vlm:")
+            or not probe.query_source.endswith(f":{probe.query_id}")
+            or probe.handoff_deadline_ns is None or now_ns >= probe.handoff_deadline_ns
+            or probe.cognition_future is not None
+            or probe.execution_revision != self._execution_revision
+            or not probe.retained_facts
+            or (self.executor.run is not None and self.executor.run.outcome == SkillOutcome.RUNNING)
+            or (stop_event is not None and stop_event.is_set())
+            or operator_pause_latched()
+            or self._new_queued_operator_message_waiting()
+            or not self._headroom_scene_is_safe()
+            or not self._cognition_probe_scene_matches(probe, now_ns=now_ns)
+        ):
+            return None
+        if any(
+            fact.source != probe.query_source
+            or (current := self.blackboard.fact(fact.key, now_ns=now_ns)) is None
+            or current.source != fact.source
+            or current.observed_ns != fact.observed_ns
+            or current.value != fact.value
+            for fact in probe.retained_facts
+        ):
+            return None
+        return probe.target_description
+
     def _clear_cognition_perception_probe(
         self,
         probe: _CognitionPerceptionProbe,
@@ -3940,6 +3975,7 @@ class AgentRuntime:
             planks_retry_requires_wood=(
                 self._planks_retry_requires_wood() if requires_wood is None else requires_wood
             ),
+            active_perception_target=self._active_cognition_perception_target(),
         )
 
     def _start_recovery_skill(
