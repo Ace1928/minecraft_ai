@@ -1878,28 +1878,23 @@ def bedrock_survival_hud_present(frame: CapturedFrame) -> bool:
 
 
 def bedrock_creative_hud_present(frame: CapturedFrame) -> bool:
-    """Verify an in-world creative-mode HUD (hotbar present, no heart bank).
+    """Verify the pinned classic hotbar without requiring survival hearts.
 
-    Creative mode omits the heart bank entirely, so the survival interlock
-    would wrongly reject it. The neutral hotbar frame plus a matching HUD band
-    is sufficient to arm in-world creative play.
+    Neutral terrain, clouds, and server-list panels are not a hotbar. Reuse
+    the calibrated rail, slot-grid and selection-frame geometry instead of
+    granting world authority from a gray-pixel ratio. Unsupported UI scales
+    or an unavailable geometry decoder abstain. This safety check does not
+    identify the game mode and is never a training label.
     """
-    if not frame.bgra or frame.width < 320 or frame.height < 180:
+    if (
+        frame.width < 1280 or frame.height < 700
+        or len(frame.bgra) != frame.width * frame.height * 4
+    ):
         return False
-    if bedrock_away_overlay_present(frame):
+    if bedrock_ui_chrome_present(frame) or bedrock_death_screen_present(frame):
         return False
     pixels = _numpy_bgra(frame)
-    hotbar_ratio = _hud_palette_ratio(
-        frame,
-        x_start=0.28,
-        x_end=0.72,
-        y_start=0.89,
-        y_end=1.0,
-        palette="hotbar",
-        pixels=pixels,
-    )
-    # Info-lines and the crosshair are shown; the hotbar row must be present.
-    return hotbar_ratio >= 0.03
+    return pixels is not None and _classic_hotbar_geometry(pixels) is not None
 
 
 def bedrock_in_world_hud_present(frame: CapturedFrame) -> bool:

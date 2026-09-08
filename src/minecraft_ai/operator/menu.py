@@ -161,16 +161,58 @@ class TesseractMenuTextReader:
             )
             if _away_overlay_visible(frame, away_lines):
                 return away_lines
-        return self._read_image(image)
+        lines = self._read_image(image)
+        # Sparse full-frame OCR can miss every dark label inside BedrockConnect
+        # while recognizing only its ping icon. At native scale its title is
+        # readable; then isolated caption bands avoid the button borders that
+        # Tesseract otherwise treats as empty table cells. Keep all geometry
+        # screenshot-relative and require the exact title before using crops.
+        if not any(
+            "serverlist" in _normalized_text(line.text).replace(" ", "")
+            or any(anchor in _normalized_text(line.text) for anchor in (
+                "minecraft", "worlds", "disconnected from host", "you died", "tou died",
+            ))
+            for line in lines
+        ):
+            panel_left, panel_top = int(frame.width * 0.275), int(frame.height * 0.13)
+            panel = image.crop((
+                panel_left, panel_top, int(frame.width * 0.725), int(frame.height * 0.845),
+            ))
+            panel_lines = tuple(
+                replace(line, left=line.left + panel_left, top=line.top + panel_top)
+                for line in self._read_image(panel, input_scale=1)
+            )
+            if any(
+                _normalized_text(line.text).replace(" ", "") == "serverlist"
+                and line.confidence >= 60
+                and 0.13 <= line.center[1] / frame.height <= 0.22
+                for line in panel_lines
+            ):
+                captions: list[OcrLine] = []
+                for row in range(5):
+                    center_y = 0.325 + row * 0.1185
+                    left, top = int(frame.width * 0.38), int(frame.height * (center_y - 0.035))
+                    caption = image.crop((
+                        left, top, int(frame.width * 0.68), int(frame.height * (center_y + 0.035)),
+                    ))
+                    captions.extend(
+                        replace(line, left=line.left + left, top=line.top + top)
+                        for line in self._read_image(caption, input_scale=1)
+                    )
+                return panel_lines + tuple(captions)
+        return lines
 
-    def _read_image(self, image: Image.Image) -> tuple[OcrLine, ...]:
+    def _read_image(
+        self, image: Image.Image, *, input_scale: int | None = None,
+    ) -> tuple[OcrLine, ...]:
         # Bedrock's pixel font is substantially more reliable in Tesseract at
         # enlarged nearest-neighbour scale (notably title anchors and
         # configured server names). Keep click geometry in original screenshot
         # coordinates when parsing.
-        if self.input_scale != 1:
+        scale = self.input_scale if input_scale is None else input_scale
+        if scale != 1:
             image = image.resize(
-                (image.width * self.input_scale, image.height * self.input_scale),
+                (image.width * scale, image.height * scale),
                 Image.Resampling.NEAREST,
             )
         encoded = io.BytesIO()
@@ -191,7 +233,7 @@ class TesseractMenuTextReader:
             raise MenuNavigationError(f"menu OCR exited {completed.returncode}: {error[:200]}")
         return _parse_tesseract_tsv(
             completed.stdout.decode("utf-8", errors="replace"),
-            coordinate_scale=self.input_scale,
+            coordinate_scale=scale,
         )
 
 

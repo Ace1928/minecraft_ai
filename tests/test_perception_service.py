@@ -741,7 +741,9 @@ def test_away_notice_blocks_playable_hud_without_authorizing_wake(
 
 @pytest.mark.parametrize("missing", ["rim", "inset", "text-0", "text-1", "text-2", "panel"])
 def test_away_notice_requires_separate_panel_and_text_cues(missing: str) -> None:
-    image = _away_notice_image(missing=missing)
+    # The panel-free control has a full survival signature, not a gray band
+    # that accidentally passed the former permissive creative-HUD detector.
+    image = _away_notice_image(hearts=230, missing=missing)
     frame = _frame(image.convert("RGBA").tobytes("raw", "BGRA"),
                    width=image.width, height=image.height)
     assert not bedrock_away_overlay_present(frame)
@@ -753,6 +755,85 @@ def test_away_notice_requires_separate_panel_and_text_cues(missing: str) -> None
 def test_uniform_world_is_not_an_away_notice(shade: int) -> None:
     frame = _frame(bytes((shade, shade, shade, 255)) * 640 * 360, width=640, height=360)
     assert not bedrock_away_overlay_present(frame)
+
+
+def _classic_creative_image(*, selected_slot: int | None = None) -> Image.Image:
+    frame = _classic_hotbar_frame(selected_slot=selected_slot)
+    image = Image.frombytes("RGBA", (frame.width, frame.height), frame.bgra, "raw", "BGRA")
+    # Retain the existing measured classic rail/selection/grid, omit survival hearts.
+    ImageDraw.Draw(image).rectangle((560, 870, 760, 900), fill=(20, 20, 20, 255))
+    return image
+
+
+@pytest.mark.parametrize("selected_slot", [None, *range(9)])
+def test_creative_hud_requires_pinned_classic_geometry_without_hearts(selected_slot) -> None:
+    image = _classic_creative_image(selected_slot=selected_slot)
+    frame = _frame(image.tobytes("raw", "BGRA"), width=image.width, height=image.height)
+    assert not bedrock_survival_hud_present(frame)
+    assert bedrock_creative_hud_present(frame)
+    assert bedrock_in_world_hud_present(frame)
+    assert live_control_arm_reason(frame) == "hud"
+
+
+@pytest.mark.parametrize("scene", ["stone", "clouds", "server-list", "horizontal-rail"])
+def test_neutral_world_and_server_form_are_not_creative_hud(scene) -> None:
+    width, height = 1920, 1080
+    image = Image.new("RGB", (width, height), (125, 125, 125))
+    draw = ImageDraw.Draw(image)
+    if scene in {"clouds", "server-list"}:
+        image.paste((126, 164, 224), (0, 0, width, height))
+        draw.polygon(((0, 900), (1150, 675), (width, 720), (width, height), (0, height)),
+                     fill=(211, 209, 221))
+    if scene == "server-list":
+        # Geometry of the observed BedrockConnect form over a cloud/sky world.
+        draw.rectangle((510, 140, 1410, 940), fill=(198, 198, 198))
+        draw.rectangle((538, 230, 1382, 908), fill=(45, 45, 45))
+        for top in (292, 420, 548, 676, 804):
+            draw.rectangle((570, top, 1322, min(top + 116, 900)), fill=(198, 198, 198))
+    elif scene == "horizontal-rail":
+        image.paste((20, 20, 20), (0, 0, width, height))
+        draw.rectangle((688, 992, 1319, 995), fill=(140, 140, 140))
+    frame = _frame(image.convert("RGBA").tobytes("raw", "BGRA"), width=width, height=height)
+    assert not bedrock_creative_hud_present(frame)
+    assert not bedrock_in_world_hud_present(frame)
+
+
+@pytest.mark.parametrize("overlay", ["away", "storage-modal", "inventory"])
+def test_existing_negative_ui_interlocks_override_visible_creative_hotbar(overlay) -> None:
+    image = _classic_creative_image()
+    width, height = image.size
+    draw = ImageDraw.Draw(image)
+    if overlay == "away":
+        notice = _away_notice_image(hearts=0).resize(image.size, Image.Resampling.NEAREST)
+        bounds = (int(width * .288), int(height * .684),
+                  int(width * .712), int(height * .854))
+        image.paste(notice.crop(bounds), bounds)
+    elif overlay == "storage-modal":
+        draw.rectangle((width * .10, height * .21, width * .90, height * .79),
+                       fill=(49, 50, 51))
+        for left, right in ((.12, .30), (.315, .49), (.51, .69)):
+            draw.rectangle((width * left, height * .67, width * right, height * .75),
+                           fill=(210, 212, 213))
+    else:
+        draw.rectangle((width * .10, height * .12, width * .90, height * .21),
+                       fill=(190, 190, 190))
+        draw.rectangle((width * .10, height * .20, width * .90, height * .34),
+                       fill=(110, 110, 110))
+    frame = _frame(image.tobytes("raw", "BGRA"), width=width, height=height)
+    assert bedrock_ui_chrome_present(frame)
+    assert perception_service._classic_hotbar_geometry(perception_service._numpy_bgra(frame))
+    assert not bedrock_creative_hud_present(frame)
+    assert not bedrock_in_world_hud_present(frame)
+
+
+def test_creative_hud_abstains_when_decoder_or_scale_is_unsupported(monkeypatch) -> None:
+    image = _classic_creative_image().resize((1280, 700), Image.Resampling.NEAREST)
+    frame = _frame(image.tobytes("raw", "BGRA"), width=image.width, height=image.height)
+    assert not bedrock_creative_hud_present(frame)
+    image = _classic_creative_image()
+    frame = _frame(image.tobytes("raw", "BGRA"), width=image.width, height=image.height)
+    monkeypatch.setattr(perception_service, "_numpy_bgra", lambda _frame: None)
+    assert not bedrock_creative_hud_present(frame)
 
 
 @pytest.mark.parametrize("count", range(1, 17))

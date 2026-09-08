@@ -190,6 +190,44 @@ def test_away_ocr_crop_maps_original_coordinates_and_requires_complete_anchors(
         assert result == full_lines
 
 
+@pytest.mark.parametrize("valid_title", [False, True])
+def test_server_list_caption_ocr_requires_exact_title_and_retains_coordinates(
+    monkeypatch: pytest.MonkeyPatch, valid_title: bool,
+) -> None:
+    reader = TesseractMenuTextReader(executable="unused-test-tesseract")
+    calls: list[tuple[tuple[int, int], int | None]] = []
+    noise = (OcrLine("Bee = — ——", 280, 400, 100, 20),)
+
+    def read_image(image: Any, *, input_scale: int | None = None) -> tuple[OcrLine, ...]:
+        calls.append((image.size, input_scale))
+        if len(calls) == 1:  # Away notice crop.
+            return ()
+        if len(calls) == 2:  # Full-frame sparse OCR omitted the button labels.
+            return noise
+        assert input_scale == 1
+        if len(calls) == 3:
+            return (OcrLine("ServerList" if valid_title else "Server", 160, 20, 100, 20),)
+        if len(calls) == 7:  # Fourth visible caption, not a hard-coded click.
+            return (OcrLine("Eidos Local Bedrock", 20, 12, 200, 20, 89),)
+        return ()
+
+    monkeypatch.setattr(reader, "_read_image", read_image)
+    frame = _pixel_frame(1, width=1000, height=600)
+    result = reader.read(frame)
+
+    if valid_title:
+        assert len(calls) == 8
+        target = next(line for line in result if line.text == "Eidos Local Bedrock")
+        assert target.center == (500, 409)
+        assert classify_menu_stage(
+            frame, result, lan_name="BedrockConnect", server_name="Eidos Local Bedrock",
+            hud_detector=lambda _frame: True,
+        ) == MenuStage.BEDROCK_CONNECT
+    else:
+        assert len(calls) == 3
+        assert result == noise
+
+
 def test_away_wakes_once_and_observes_through_away_and_unknown_until_hud() -> None:
     clicks = _RecordingClicks()
     navigator = BedrockMenuNavigator(
