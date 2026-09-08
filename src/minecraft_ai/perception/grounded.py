@@ -204,6 +204,7 @@ class GroundedPerceptionInspection:
     report: GroundedPerceptionReport
     latency_ms: float
     schema_repaired: bool = False
+    crosshair_block_response: _CrosshairBlockResponse | None = None
 
 
 class GroundedPerceptionRepairError(RuntimeError):
@@ -703,15 +704,26 @@ def _expand_crosshair_response(
     )
 
 
+def _parse_crosshair_block_response(text: str) -> _CrosshairBlockResponse:
+    encoded = _strip_code_fence(text)
+    response = _CrosshairBlockResponse.model_validate_json(encoded)
+    json.loads(encoded, object_pairs_hook=_unique_crosshair_object)
+    return response
+
+
 def _expand_crosshair_block_response(
     text: str,
     evidence: PerceptionEvidence,
 ) -> GroundedVLMResponse:
     """Translate one explicit center-block class without inventing other facts."""
 
-    encoded = _strip_code_fence(text)
-    response = _CrosshairBlockResponse.model_validate_json(encoded)
-    json.loads(encoded, object_pairs_hook=_unique_crosshair_object)
+    return _crosshair_block_claims(_parse_crosshair_block_response(text), evidence)
+
+
+def _crosshair_block_claims(
+    response: _CrosshairBlockResponse,
+    evidence: PerceptionEvidence,
+) -> GroundedVLMResponse:
     if (
         response.block is None
         or response.block == "unknown"
@@ -870,14 +882,19 @@ class GroundedPerceptionHarness:
                 image_bytes=segmented.composite_png,
                 mime_type="image/png",
             )
-        raw = _expand_crosshair_block_response(response.text, segmented.evidence[0])
+        parsed = _parse_crosshair_block_response(response.text)
+        raw = _crosshair_block_claims(parsed, segmented.evidence[0])
         report = validate_grounded_response(
             raw,
             frame_id=frame_id,
             evidence=segmented.evidence,
             requested_keys=("recovery.crosshair.block",),
         )
-        return GroundedPerceptionInspection(report=report, latency_ms=response.latency_ms)
+        return GroundedPerceptionInspection(
+            report=report,
+            latency_ms=response.latency_ms,
+            crosshair_block_response=parsed,
+        )
 
     def inspect(
         self,

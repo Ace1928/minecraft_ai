@@ -260,6 +260,8 @@ class ActiveVLMMetrics:
     last_crosshair_rgb_distance: float | None = None
     last_error: str | None = None
     last_fact_keys: tuple[str, ...] = ()
+    # Parsed completion provenance only; not evidence that publication was accepted.
+    last_crosshair_block_receipt: dict[str, object] | None = None
     claim_rejections: int = 0
     prose_rejections: int = 0
     unknown_claims: int = 0
@@ -385,6 +387,16 @@ class ActiveVLMWorker:
         if result.schema_repaired:
             self.metrics.schema_repair_attempts += 1
             self.metrics.schema_repair_successes += 1
+        if (
+            job.query.mode == PerceptionQueryMode.CROSSHAIR_BLOCK
+            and result.crosshair_block_response is not None
+        ):
+            self.metrics.last_crosshair_block_receipt = {
+                "query_id": job.query.query_id,
+                "source_crop_pixel_sha256": result.report.evidence[0].pixel_sha256,
+                "block": result.crosshair_block_response.block,
+                "confidence": result.crosshair_block_response.confidence,
+            }
         return _semantic_observation(result.report), result.latency_ms
 
     def _publish(self, job: SemanticJob, observation: SemanticObservation) -> None:
@@ -589,6 +601,7 @@ class ActiveVLMWorker:
 
     def status(self) -> dict[str, object]:
         thread = self._thread
+        crosshair_receipt = self.metrics.last_crosshair_block_receipt
         return {
             "model_id": self.model.model_id,
             "thread_alive": bool(thread is not None and thread.is_alive()),
@@ -607,6 +620,9 @@ class ActiveVLMWorker:
             "last_crosshair_rgb_distance": self.metrics.last_crosshair_rgb_distance,
             "last_error": self.metrics.last_error,
             "last_fact_keys": list(self.metrics.last_fact_keys),
+            "last_crosshair_block_receipt": (
+                None if crosshair_receipt is None else dict(crosshair_receipt)
+            ),
             "claim_rejections": self.metrics.claim_rejections,
             "prose_rejections": self.metrics.prose_rejections,
             "unknown_claims": self.metrics.unknown_claims,

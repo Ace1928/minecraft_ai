@@ -206,8 +206,13 @@ def test_dedicated_crosshair_block_probe_is_one_exact_crop_and_two_fields() -> N
     assert evidence.frame_id == 19
     assert evidence.captured_ns == frame.captured_ns
     assert evidence.crop_width == evidence.crop_height == 511
+    assert result.crosshair_block_response is not None
+    assert result.crosshair_block_response.model_dump() == {
+        "block": "dirt", "confidence": 0.85,
+    }
     with Image.open(io.BytesIO(model.image)) as image:
         assert image.size == (511, 511)
+        assert hashlib.sha256(image.tobytes()).hexdigest() == evidence.pixel_sha256
     assert model.name == "minecraft_crosshair_block"
     assert set(model.schema["required"]) == {"block", "confidence"}
     assert "danger" not in model.prompt
@@ -229,6 +234,41 @@ def test_dedicated_crosshair_block_probe_is_one_exact_crop_and_two_fields() -> N
 def test_dedicated_crosshair_block_abstentions_emit_no_fact(wire: str) -> None:
     evidence = _build_crosshair_block_evidence(_frame(), frame_id=7).evidence[0]
     assert _expand_crosshair_block_response(wire, evidence).claims == ()
+
+
+@pytest.mark.parametrize(
+    ("block", "confidence"),
+    (("unknown", 0.9), (None, 0.9), ("dirt", None), ("dirt", 0.0)),
+)
+def test_dedicated_crosshair_retains_nullable_parsed_answer_without_inventing_facts(
+    block: str | None, confidence: float | None,
+) -> None:
+    class _Model:
+        model_id = "abstaining-crosshair-model"
+        calls = 0
+
+        def inspect(self, prompt: str, *, image_bytes: bytes, mime_type: str) -> ModelResponse:
+            self.calls += 1
+            return ModelResponse(
+                text=json.dumps({"block": block, "confidence": confidence}),
+                model=self.model_id,
+                latency_ms=4,
+            )
+
+    model = _Model()
+    result = GroundedPerceptionHarness(model).inspect_crosshair_block_detailed(
+        _frame(), frame_id=7,
+    )
+
+    assert model.calls == 1
+    assert not result.schema_repaired
+    assert result.crosshair_block_response is not None
+    assert result.crosshair_block_response.model_dump() == {
+        "block": block, "confidence": confidence,
+    }
+    assert result.report.observed_values() == {}
+    assert all(claim.status == ClaimStatus.UNKNOWN for claim in result.report.claims)
+    assert len(result.report.claims) == 6
 
 
 def test_dedicated_crosshair_block_hard_negative_remains_explicit() -> None:

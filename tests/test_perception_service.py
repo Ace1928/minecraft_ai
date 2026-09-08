@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import hashlib
+import json
 import statistics
 import time
 
@@ -1170,6 +1172,7 @@ def test_active_vlm_prefers_strict_structured_vision_contract() -> None:
     assert observation.rejection_count == 0
     assert not observation.prose_rejected
     assert latency_ms == 12.0
+    assert worker.status()["last_crosshair_block_receipt"] is None
 
 
 def test_active_vlm_typed_crosshair_route_publishes_only_recovery_local_facts() -> None:
@@ -1249,6 +1252,71 @@ def test_active_vlm_typed_crosshair_route_publishes_only_recovery_local_facts() 
     assert board.fact("scene.summary") is None
     assert board.fact("perception.uncertainty") is None
     assert board.latest() is not None and board.latest().tracks == ()
+
+
+@pytest.mark.parametrize(
+    ("block", "confidence"),
+    (("unknown", 0.9), (None, 0.9), ("dirt", None), ("dirt", 0.0)),
+)
+def test_crosshair_receipt_preserves_query_crop_and_abstention_without_authority(
+    block: str | None, confidence: float | None,
+) -> None:
+    class _Model:
+        model_id = "abstaining-test-vlm"
+        calls = 0
+        source_crop_pixel_sha256 = ""
+
+        def inspect(self, prompt: str, *, image_bytes: bytes, mime_type: str) -> ModelResponse:
+            self.calls += 1
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                self.source_crop_pixel_sha256 = hashlib.sha256(image.tobytes()).hexdigest()
+            return ModelResponse(
+                text=json.dumps({"block": block, "confidence": confidence}),
+                model=self.model_id,
+                latency_ms=3,
+            )
+
+    frame = _frame(b"\0" * (9 * 8 * 4))
+    board = PerceptionBlackboard()
+    model = _Model()
+    worker = ActiveVLMWorker(model, board, "bedrock:test")
+    job = SemanticJob(
+        query=ActivePerceptionQuery(
+            query_id="q-abstain", mode=PerceptionQueryMode.CROSSHAIR_BLOCK,
+            question="Classify the crosshair block.", frame_id=1,
+        ),
+        frame=frame,
+        frame_dhash=frame_dhash(frame),
+    )
+
+    observation, latency_ms = worker._inspect(job)
+    expected = {
+        "query_id": "q-abstain",
+        "source_crop_pixel_sha256": model.source_crop_pixel_sha256,
+        "block": block,
+        "confidence": confidence,
+    }
+    assert worker.status()["last_crosshair_block_receipt"] == expected
+    assert observation.facts == {}
+    assert observation.unknown_claim_count == 6
+    assert observation.rejection_count == 0
+    assert latency_ms == 3
+    assert model.calls == 1
+    assert worker.metrics.schema_repair_attempts == 0
+
+    # Missing current crop evidence rejects publication, not the diagnostic receipt.
+    board.publish(
+        FrameState(frame_id=1, captured_ns=frame.captured_ns, instance_id="bedrock:test",
+                   width=9, height=8)
+    )
+    worker._publish(job, observation)
+    assert worker.metrics.stale_rejections == 1
+    assert board.fresh_facts() == {}
+    assert worker.status()["last_crosshair_block_receipt"] == expected
+    status_receipt = worker.status()["last_crosshair_block_receipt"]
+    assert isinstance(status_receipt, dict)
+    status_receipt["block"] = "stone"
+    assert worker.status()["last_crosshair_block_receipt"] == expected
 
 
 def test_crosshair_result_rejects_incomplete_or_changed_crop_evidence() -> None:
