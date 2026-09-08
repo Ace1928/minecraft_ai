@@ -304,6 +304,7 @@ class AgentRuntime:
     )
     _execution_revision: int = field(default=0, init=False)
     _pending_execution_revision: int = field(default=0, init=False)
+    _disposable_keepalive_run_id: str | None = field(default=None, init=False)
     _plan_steps: tuple[str, ...] = field(default=(), init=False)
     _plan_goal_id: str | None = field(default=None, init=False)
     _plan_index: int = field(default=0, init=False)
@@ -609,6 +610,8 @@ class AgentRuntime:
         self.telemetry.publish(self._telemetry_payload(state="running"))
         self._publish_player_chat_facts()
         self._planks_retry_requires_wood()
+        if self._yield_keepalive_to_operator():
+            return
         running = self.executor.run
         if (
             (running is None or running.outcome != SkillOutcome.RUNNING)
@@ -625,7 +628,8 @@ class AgentRuntime:
                 return
         self._consume_cognition()
         self._reconcile_cognition_perception_probe()
-        self._start_cognition_if_due()
+        if self._start_cognition_if_due():
+            return
         self._request_semantics_if_due(frame.frame_id)
         self._route_observed_scene_recovery()
         self._advance_headroom_recovery()
@@ -644,9 +648,8 @@ class AgentRuntime:
                 # preemption; elapsed settling alone does not end ownership.
                 self._flush_pending_skill_stats()
                 return
-            # Never idle the player while cognition is in flight: keep a
-            # precondition-free exploration option running so motor keeps
-            # emitting movement. Cognition switches skills when it returns.
+            # Autonomous cognition may use disposable exploration, but an
+            # unresolved operator directive needs a stable execution snapshot.
             rescue = self._explore_keep_alive()
             if rescue is not None:
                 self._start_skill(
@@ -1579,7 +1582,10 @@ class AgentRuntime:
         and walk into the same wall. One bounded mouse_dy per idle tick; a
         missing supervisor pitch must not freeze the body.
         """
-        if getattr(self, "_headroom_recovery", None) is not None:
+        if (
+            getattr(self, "_headroom_recovery", None) is not None
+            or self._unresolved_operator_directive_waiting()
+        ):
             return False
         current_pitch = self._authoritative_world_camera_pitch_units()
         if current_pitch is None:
@@ -1612,6 +1618,7 @@ class AgentRuntime:
         if (
             getattr(self, "_headroom_recovery", None) is not None
             or getattr(self, "_traversal_escalation_pending", False)
+            or self._unresolved_operator_directive_waiting()
         ):
             self._keepalive_rotation_hint = None
             return None
@@ -2602,7 +2609,9 @@ class AgentRuntime:
             and plan_active
         )
 
-    def _start_cognition_if_due(self) -> None:
+    def _start_cognition_if_due(self) -> bool | None:
+        if self._yield_keepalive_to_operator():
+            return True
         perception_probe = getattr(self, "_cognition_perception_probe", None)
         if perception_probe is not None:
             if self._new_queued_operator_message_waiting():
@@ -2616,11 +2625,11 @@ class AgentRuntime:
                 # The VLM worker and planner share one serialized local-model
                 # lane. Permit exactly one follow-up after publication; no
                 # replanning can extend this query's bounded scene ownership.
-                return
+                return None
         headroom = getattr(self, "_headroom_recovery", None)
         if headroom is not None:
             if not self._queued_operator_message_waiting():
-                return
+                return None
             # Fresh operator authority cancels this optional autonomous
             # transaction. If a child is running, release it before the normal
             # operator fast path or model decision takes ownership.
@@ -2642,7 +2651,7 @@ class AgentRuntime:
         continuation = getattr(self, "_gather_acquisition_continuation", None)
         if continuation is not None:
             if not self._queued_operator_message_waiting():
-                return
+                return None
             running = self.executor.run
             self._gather_acquisition_continuation = None
             if (
@@ -2667,7 +2676,7 @@ class AgentRuntime:
             # Short closed-loop transactions retain ownership until their
             # bounded verifier or timeout finishes. Safety scene recovery and
             # the supervisor's pause/emergency paths remain independent.
-            return
+            return None
         if self._pending_decision is not None:
             if self._preempt_pending_cognition_for_operator():
                 # The replacement is a completed deterministic decision. Apply
@@ -2675,14 +2684,14 @@ class AgentRuntime:
                 # ownership from a disposable keepalive without waiting for
                 # the stale model request to finish.
                 self._consume_cognition()
-            return
+            return None
         now = time.monotonic_ns()
         new_operator_message = self._new_queued_operator_message_waiting()
         if (
             now < getattr(self, "_cognition_retry_not_before_ns", 0)
             and not new_operator_message
         ):
-            return
+            return None
         if new_operator_message:
             # New operator authority is a new decision problem, not another
             # attempt at the failed snapshot. It may bypass the old backoff
@@ -2695,9 +2704,9 @@ class AgentRuntime:
             and not operator_waiting
             and now - self._last_cognition_ns < interval
         ):
-            return
+            return None
         if not self._cognition_due(operator_waiting=operator_waiting):
-            return
+            return None
         bound_inputs = None
         if self._uses_bound_cognition():
             try:
@@ -2705,7 +2714,7 @@ class AgentRuntime:
                 context = bound_inputs[0]
             except (ValueError, RuntimeError, sqlite3.Error):
                 self._schedule_cognition_retry(now_ns=now)
-                return
+                return None
         else:
             context = self._cognition_context()
         if self._stage_operator_fast_path(context):
@@ -2719,12 +2728,12 @@ class AgentRuntime:
                         perception_probe, cognition_future=self._pending_decision,
                     )
             self._consume_cognition()
-            return
+            return None
         if getattr(self, "_gui_fast_path_deferred", False):
             # Keep the world visible while the sole local-model lane drains.
             # Starting slow cognition here would only queue behind that same
             # lane and postpone the pixel-grounded GUI transaction again.
-            return
+            return None
         self._pending_operator_message_ids = tuple(
             message.message_id
             for message in context.operator_messages
@@ -2770,6 +2779,7 @@ class AgentRuntime:
                 self._cognition_perception_probe = replace(
                     perception_probe, cognition_future=self._pending_decision,
                 )
+        return None
 
     def _uses_bound_cognition(self) -> bool:
         controller = self.high_level
@@ -3802,6 +3812,13 @@ class AgentRuntime:
         **kwargs: Any,
     ) -> SkillRun:
         run = self.executor.start(spec, **kwargs)
+        self._disposable_keepalive_run_id = (
+            run.run_id
+            if source == SkillStartSource.KEEPALIVE
+            and spec.skill_id in _KEEPALIVE_ROTATION_SKILLS
+            and run.context_key == _EXPLORE_KEEPALIVE_CONTEXT
+            else None
+        )
         self._keepalive_prediction_evidence = None
         self._keepalive_rotation_hint = None
         if (source == SkillStartSource.KEEPALIVE and spec.skill_id in _KEEPALIVE_ROTATION_SKILLS
@@ -3833,6 +3850,8 @@ class AgentRuntime:
 
         if run.outcome == SkillOutcome.RUNNING:
             raise ValueError("cannot record a running skill")
+        if run.run_id == self._disposable_keepalive_run_id:
+            self._disposable_keepalive_run_id = None
         if run.run_id in self._recorded_run_ids:
             return
         if run.skill_id == "collect_recent_drop":
@@ -4043,6 +4062,51 @@ class AgentRuntime:
             or self._pending_operator_status_updates
         ):
             self.metrics.last_storage_error = None
+
+    def _unresolved_operator_directive_waiting(self) -> bool:
+        """Resolve only the selected pending directive, not questions or old ACKs."""
+
+        if self.state_db is None:
+            return False
+        messages = self.state_db.load_operator_messages(
+            statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED},
+            limit=20,
+        )
+        selected = _active_operator_messages(messages)
+        return bool(selected and selected[0].kind in {
+            OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION,
+        })
+
+    def _yield_keepalive_to_operator(self) -> bool:
+        """Release disposable walking before an unresolved directive is considered.
+
+        A run's start provenance, not its skill name alone, makes it disposable.
+        Safety recovery retains priority. Returning True requires another capture
+        before cognition may consume or submit a decision against the released body.
+        Literal fast paths also wait that one capture, without requiring a model call.
+        """
+
+        executor = getattr(self, "executor", None)
+        running = None if executor is None else executor.run
+        if (
+            running is None or running.outcome != SkillOutcome.RUNNING
+            or running.run_id != self._disposable_keepalive_run_id
+            or running.context_key != _EXPLORE_KEEPALIVE_CONTEXT
+            or running.skill_id not in _KEEPALIVE_ROTATION_SKILLS
+            or _observed_scene_recovery(self.skills, self.blackboard) is not None
+            or not self._unresolved_operator_directive_waiting()
+        ):
+            return False
+        cancelled = self.executor.cancel()
+        self._execution_revision += 1
+        self._cognition_requested = True
+        self._keepalive_rotation_hint = None
+        try:
+            if cancelled.action is not None:
+                self._send_motor(cancelled.action, execution=cancelled)
+        finally:
+            self._record_terminal_run(cancelled.run, advance_plan=False)
+        return True
 
     def _queued_operator_message_waiting(self) -> bool:
         """Return whether any operator message still awaits acknowledgement."""

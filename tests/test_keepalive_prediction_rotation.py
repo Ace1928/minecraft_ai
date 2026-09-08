@@ -199,7 +199,8 @@ def test_rotation_cannot_outlive_context_or_bypass_safety(monkeypatch, change: s
     if change == "operator":
         runtime._pending_operator_message_ids = ("new-operator",)
     elif change == "operator-revision":
-        runtime.state_db = SimpleNamespace(load_operator_context=lambda **_:
+        runtime.state_db = SimpleNamespace(load_operator_messages=lambda **_: (),
+                                          load_operator_context=lambda **_:
                                           OperatorContextSnapshot(
                                               revision=1, messages=(), target=None,
                                           ))
