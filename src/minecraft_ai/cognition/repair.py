@@ -31,6 +31,7 @@ def _compact_wire_payload(decision: CognitionDecision) -> dict[str, object]:
         ("o", None if decision.say is None else decision.say[:160]),
         ("c", None if decision.game_chat is None else decision.game_chat[:160]),
         ("w", None if decision.research_query is None else decision.research_query[:160]),
+        ("d", None if decision.instruction is None else decision.instruction[:280]),
     )
     for key, value in optional_values:
         if value is not None:
@@ -174,4 +175,3 @@ def _parse_decision(text: str) -> CognitionDecision:
     if isinstance(raw, dict) and any(key in raw for key in ("r", "g", "s", "p")):
         return _CognitionWireDecision.model_validate(raw).expand()
     return CognitionDecision.model_validate(raw)
-

@@ -641,6 +641,49 @@ def test_compact_option_repair_preserves_operator_authority_and_parameter_bounds
     }
 
 
+@pytest.mark.parametrize("description", [None, "", "oak log trunk ahead", '"\\' * 140])
+@pytest.mark.parametrize("repaired_description", [None, "open ground beside the tree"])
+def test_semantic_repair_retains_only_explicit_description_as_untrusted_context(
+    description: str | None, repaired_description: str | None,
+) -> None:
+    class DescriptiveRepairingModel(_AuthorityRepairingModel):
+        def complete_structured(self, messages, *, name, schema):
+            response = super().complete_structured(messages, name=name, schema=schema)
+            payload = json.loads(response.text)
+            selected = description if len(self.calls) == 1 else repaired_description
+            if selected is not None:
+                payload["d"] = selected
+            if len(self.calls) == 1:
+                payload["q"] = ["target.visible"]
+            return response.model_copy(update={"text": json.dumps(payload)})
+
+    context = _context()
+    context.operator_messages = (OperatorMessage(
+        message_id="description-repair", created_ns=2,
+        text="Explore the visible open ground, but do not attack.",
+        status=OperatorMessageStatus.DELIVERED,
+    ),)
+    model = DescriptiveRepairingModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+    decision = controller.decide(_board(), context)
+
+    assert len(model.calls) == 2 and controller.metrics.repairs == 1
+    repair_messages = model.calls[1]
+    payload = json.loads(repair_messages[1].content)
+    if description is None:
+        assert "d" not in payload["rejected"]
+    else:
+        assert payload["rejected"]["d"] == description
+        assert len(payload["rejected"]["d"]) <= 280
+    assert payload["rejected"]["q"] == ["target.visible"]
+    assert "untrusted descriptive context" in repair_messages[0].content
+    assert "not a world fact or action authority" in repair_messages[0].content
+    assert decision.instruction == repaired_description  # No inherited/forced referent.
+    assert decision.skill_id == "explore_forward" and decision.ask_perception == ()
+    assert decision.chosen_goal_id == "operator:description-repair"
+    assert decision.skill_parameters == {"allow_attack": False}
+
+
 def test_high_level_receives_explicit_active_operator_correction() -> None:
     older = OperatorMessage(
         message_id="old",
