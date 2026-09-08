@@ -756,6 +756,9 @@ class BootstrapFastPerception:
                     ("scene.playable", True),
                     ("scene.ui_overlay", False),
                     ("scene.mode", "world"),
+                    # Supersede a recent death screen before its TTL expires;
+                    # otherwise the router can start a second, no-op respawn.
+                    ("scene.death", False),
                 )
             air_bubbles = bedrock_air_bubbles(frame)
             if air_bubbles is not None:

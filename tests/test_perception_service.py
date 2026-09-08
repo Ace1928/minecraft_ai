@@ -10,6 +10,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 import minecraft_ai.perception_service as perception_service
+from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.grounded_perception import (
     GroundedPerceptionRepairError,
     crosshair_block_rgb_grid,
@@ -51,6 +52,7 @@ from minecraft_ai.perception_service import (
     perceptual_hash_distance,
 )
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
+from minecraft_ai.runtime_support.helpers import _observed_scene_recovery
 
 
 class _UnusedVisionModel:
@@ -1088,7 +1090,7 @@ def test_bedrock_air_hud_rejects_nonmatching_world_pixels() -> None:
     assert "danger.immediate" not in facts
 
 
-def test_bedrock_death_screen_blocks_world_control_without_emitting_action() -> None:
+def _death_screen_frame() -> CapturedFrame:
     width, height = 1279, 635
     pixels = bytearray(bytes((20, 20, 20, 255)) * width * height)
     for x_start, x_end, y_start, y_end, color in (
@@ -1099,7 +1101,11 @@ def test_bedrock_death_screen_blocks_world_control_without_emitting_action() -> 
             for x in range(int(width * x_start), int(width * x_end)):
                 offset = (y * width + x) * 4
                 pixels[offset : offset + 4] = color
-    frame = _frame(bytes(pixels), width=width, height=height)
+    return _frame(bytes(pixels), width=width, height=height)
+
+
+def test_bedrock_death_screen_blocks_world_control_without_emitting_action() -> None:
+    frame = _death_screen_frame()
 
     assert bedrock_death_screen_present(frame)
     facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
@@ -1107,6 +1113,66 @@ def test_bedrock_death_screen_blocks_world_control_without_emitting_action() -> 
     assert facts["scene.mode"].value == "death"
     assert facts["scene.death"].value is True
     assert facts["scene.death"].source.startswith("safety:")
+
+
+@pytest.mark.parametrize("successor", ("hud", "ambiguous", "ui-only"))
+def test_only_trusted_hud_supersedes_recent_death_and_new_death_still_routes(
+    monkeypatch: pytest.MonkeyPatch, successor: str,
+) -> None:
+    clock = [1_000_000_000]
+    monkeypatch.setattr(time, "monotonic_ns", lambda: clock[0])
+    board = PerceptionBlackboard()
+    observer = BootstrapFastPerception()
+    skills = build_bootstrap_skill_library()
+
+    def publish(frame: CapturedFrame, frame_id: int) -> None:
+        board.publish(FrameState(
+            frame_id=frame_id, captured_ns=clock[0], instance_id="death-transition",
+            width=frame.width, height=frame.height, facts=observer.infer(frame),
+        ))
+
+    death_frame = _death_screen_frame()
+    publish(death_frame, 1)
+    old_death = board.fact("scene.death")
+    assert old_death is not None and old_death.value is True
+    recovery = _observed_scene_recovery(skills, board)
+    assert recovery is not None and recovery.skill_id == "respawn_after_death"
+
+    clock[0] += 50_000_000  # Still inside the original death fact's 250ms TTL.
+    assert old_death.fresh()
+    if successor == "hud":
+        frame = _classic_hotbar_frame()
+        assert bedrock_in_world_hud_present(frame)
+    else:
+        image = Image.new("RGBA", (640, 360), (20, 20, 20, 255))
+        if successor == "ui-only":
+            ImageDraw.Draw(image).rectangle((64, 44, 576, 75), fill=(190, 190, 190, 255))
+            ImageDraw.Draw(image).rectangle((64, 72, 576, 122), fill=(110, 110, 110, 255))
+        frame = _frame(image.tobytes("raw", "BGRA"), width=640, height=360)
+        assert not bedrock_in_world_hud_present(frame)
+        assert bedrock_ui_chrome_present(frame) is (successor == "ui-only")
+    publish(frame, 2)
+    current = board.fact("scene.death")
+    assert current is not None
+    if successor == "hud":
+        playable = board.fact("scene.playable")
+        assert playable is not None and playable.value is True
+        assert current.value is False
+        assert current.observed_ns == playable.observed_ns == clock[0]
+        assert current.source == playable.source == old_death.source
+        assert _observed_scene_recovery(skills, board) is None
+    else:
+        assert current is old_death
+        recovery = _observed_scene_recovery(skills, board)
+        assert recovery is not None and recovery.skill_id == "respawn_after_death"
+
+    clock[0] += 50_000_000
+    publish(death_frame, 3)
+    current = board.fact("scene.death")
+    assert current is not None and current.value is True
+    assert current.observed_ns == clock[0]
+    recovery = _observed_scene_recovery(skills, board)
+    assert recovery is not None and recovery.skill_id == "respawn_after_death"
 
 
 def test_bedrock_death_screen_detects_isolated_1080p_session() -> None:
