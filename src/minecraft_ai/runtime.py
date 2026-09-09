@@ -123,6 +123,7 @@ from minecraft_ai.runtime_support.helpers import (
     _int_fact,
     _observed_scene_recovery,
     _operator_target_facts,
+    _plan_step_matches_skill,
     _plan_step_requests_inventory_transition,
     _reported_action_level,
     _restore_policy_world_camera,
@@ -207,6 +208,7 @@ __all__ = [
     '_int_fact',
     '_observed_scene_recovery',
     '_operator_target_facts',
+    '_plan_step_matches_skill',
     '_plan_step_requests_inventory_transition',
     '_reported_action_level',
     '_restore_policy_world_camera',
@@ -3645,6 +3647,32 @@ class AgentRuntime:
         self._plan_index += 1
         self._plan_step_completed_ns = time.monotonic_ns()
 
+    def _skip_exhausted_plan_step(self, run: SkillRun) -> None:
+        """Advance past a strategic node after repeated empirical failure.
+
+        Keepalive and controller starvation are not competence evidence, matching
+        skill-stat accounting. This consumes one index only; a later plan can retry.
+        """
+        if run.outcome not in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
+            return
+        if run.failure_code == SkillFailureCode.CONTROLLER_STARVATION:
+            return
+        if run.context_key == _EXPLORE_KEEPALIVE_CONTEXT:
+            return
+        if not self._plan_steps or self._plan_index >= len(self._plan_steps):
+            return
+        expected_context = self._plan_goal_id or "default"
+        if run.context_key != expected_context:
+            return
+        stats = self.skills.stats.get((run.skill_id, run.context_key))
+        if stats is None or stats.consecutive_failures < 2:
+            return
+        if not _plan_step_matches_skill(run.skill_id, self._plan_steps[self._plan_index]):
+            return
+        self._plan_index += 1
+        self._plan_step_completed_ns = time.monotonic_ns()
+        self._cognition_requested = True
+
     def _adopt_plan_if_revised(self, decision: CognitionDecision) -> None:
         """Persist a long-horizon plan across motor ticks.
 
@@ -3890,9 +3918,13 @@ class AgentRuntime:
         elif run.outcome == SkillOutcome.FAILED:
             self.metrics.skill_failures += 1
             self.metrics.skill_failed_outcomes += 1
+            if advance_plan:
+                self._skip_exhausted_plan_step(run)
         elif run.outcome == SkillOutcome.TIMED_OUT:
             self.metrics.skill_failures += 1
             self.metrics.skill_timeouts += 1
+            if advance_plan:
+                self._skip_exhausted_plan_step(run)
         elif run.outcome == SkillOutcome.CANCELLED:
             self.metrics.skill_cancellations += 1
 

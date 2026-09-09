@@ -180,6 +180,27 @@ def _expected_keepalive_expiry(run: SkillRun) -> bool:
         and run.skill_id in _BOUNDED_KEEPALIVE_SKILL_IDS
     )
 
+_GUI_PLAN_SKILLS = frozenset(
+    {
+        "activate_visible_gui_control",
+        "close_open_inventory",
+        "open_inventory",
+    }
+)
+
+
+def _normalized_plan_text(value: str) -> str:
+    return " ".join(value.casefold().replace("_", " ").replace("-", " ").split())
+
+
+def _plan_step_matches_skill(skill_id: str, step: str) -> bool:
+    """True only when this skill is the current plan node, not any world option."""
+
+    if skill_id in _GUI_PLAN_SKILLS:
+        return _plan_step_requests_inventory_transition(skill_id, step)
+    return _normalized_plan_text(skill_id) == _normalized_plan_text(step)
+
+
 def _plan_step_requests_inventory_transition(skill_id: str, step: str) -> bool:
     """Require an explicit GUI plan node before its transition can consume progress."""
 

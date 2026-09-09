@@ -1818,6 +1818,66 @@ def _run(skill_id: str):
     )
 
 
+def test_repeated_progress_failure_skips_matching_plan_step(tmp_path: Path) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime_for_learning(database)
+        runtime._plan_steps = ("gather_nearby_wood", "open_inventory")
+        runtime._plan_goal_id = "role:generalist:1:progress"
+        runtime._last_decision = CognitionDecision(chosen_goal_id=runtime._plan_goal_id)
+        failed = SkillRun(
+            run_id="gather-1",
+            skill_id="gather_nearby_wood",
+            context_key=runtime._plan_goal_id,
+            started_ns=1,
+            ended_ns=2,
+            outcome=SkillOutcome.FAILED,
+            failure_code=SkillFailureCode.MINING_ACQUISITION_TIMEOUT,
+            failure_reason="mining.acquisition_timeout",
+        )
+
+        runtime._record_terminal_run(failed)
+        assert runtime._plan_index == 0
+        assert runtime._cognition_requested is False
+
+        runtime._record_terminal_run(failed.model_copy(update={"run_id": "gather-2"}))
+        assert runtime._plan_index == 1
+        assert runtime._cognition_requested is True
+
+
+def test_keepalive_and_starvation_do_not_skip_progress_plan(tmp_path: Path) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime_for_learning(database)
+        runtime._plan_steps = ("gather_nearby_wood", "open_inventory")
+        runtime._plan_goal_id = "role:generalist:1:progress"
+        keepalive = SkillRun(
+            run_id="keep-1",
+            skill_id="gather_nearby_wood",
+            context_key="explore-keepalive",
+            started_ns=1,
+            ended_ns=2,
+            outcome=SkillOutcome.FAILED,
+            failure_code=SkillFailureCode.LOCOMOTION_STALLED,
+            failure_reason="locomotion.stalled",
+        )
+        runtime._record_terminal_run(keepalive)
+        runtime._record_terminal_run(keepalive.model_copy(update={"run_id": "keep-2"}))
+        assert runtime._plan_index == 0
+
+        starved = SkillRun(
+            run_id="starve-1",
+            skill_id="gather_nearby_wood",
+            context_key=runtime._plan_goal_id,
+            started_ns=3,
+            ended_ns=4,
+            outcome=SkillOutcome.FAILED,
+            failure_code=SkillFailureCode.CONTROLLER_STARVATION,
+            failure_reason="controller.starvation",
+        )
+        runtime._record_terminal_run(starved)
+        runtime._record_terminal_run(starved.model_copy(update={"run_id": "starve-2"}))
+        assert runtime._plan_index == 0
+
+
 def test_cognition_skips_while_plan_executing() -> None:
     from minecraft_ai.runtime import AgentRuntime
     from minecraft_ai.skills import SkillRun
@@ -1874,6 +1934,7 @@ def _runtime_for_learning(database: StateDatabase) -> AgentRuntime:
     runtime._plan_goal_id = None
     runtime._plan_index = 0
     runtime._plan_step_completed_ns = 0
+    runtime._cognition_requested = False
     return runtime
 
 

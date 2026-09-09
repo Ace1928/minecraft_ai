@@ -1186,6 +1186,34 @@ def test_skill_shortlist_uses_unseen_prior_and_penalizes_repeated_failure() -> N
     assert payloads[1]["competence"] == 0.0
 
 
+def test_skill_shortlist_uses_non_default_context_failure_evidence() -> None:
+    bootstrap = build_bootstrap_skill_library()
+    library = SkillLibrary()
+    library.register(bootstrap.get("explore_forward"))
+    library.register(bootstrap.get("reacquire_target"))
+    timeout = SkillRun(
+        run_id="timeout",
+        skill_id="explore_forward",
+        context_key="explore-keepalive",
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.TIMED_OUT,
+        failure_reason="skill-timeout",
+    )
+    for index in range(6):
+        library.record(timeout.model_copy(update={"run_id": f"timeout-{index}"}))
+    controller = HighLevelController(_GrammarCapturingModel(), library)
+
+    payloads = controller._feasible_skill_payloads(_board())
+
+    assert [payload["skill_id"] for payload in payloads] == [
+        "reacquire_target",
+        "explore_forward",
+    ]
+    assert payloads[0]["competence"] == 0.5
+    assert payloads[1]["competence"] == 0.0
+
+
 def test_skill_shortlist_reserves_matching_and_safety_options() -> None:
     bootstrap = build_bootstrap_skill_library()
     controller = HighLevelController(_GrammarCapturingModel(), bootstrap)

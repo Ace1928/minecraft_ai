@@ -5,7 +5,10 @@ from pathlib import Path
 import pytest
 
 from minecraft_ai.cognition import CognitionDecision
-from minecraft_ai.runtime_support.helpers import _plan_step_requests_inventory_transition
+from minecraft_ai.runtime_support.helpers import (
+    _plan_step_matches_skill,
+    _plan_step_requests_inventory_transition,
+)
 from minecraft_ai.skills import SkillOutcome, SkillRun
 from minecraft_ai.storage import StateDatabase
 from test_agent_core import _runtime_for_learning
@@ -31,6 +34,14 @@ def test_close_node_match_does_not_invent_aliases_or_ignore_negation(step: str) 
 @pytest.mark.parametrize("skill_id", ("open_inventory", "activate_visible_gui_control"))
 def test_canonical_close_node_does_not_match_other_gui_skills(skill_id: str) -> None:
     assert not _plan_step_requests_inventory_transition(skill_id, "close_open_inventory")
+
+
+def test_plan_step_skill_match_is_identity_not_any_world_option() -> None:
+    assert _plan_step_matches_skill("gather_nearby_wood", "gather_nearby_wood")
+    assert _plan_step_matches_skill("gather_nearby_wood", "gather nearby wood")
+    assert not _plan_step_matches_skill("gather_nearby_wood", "open_inventory")
+    assert not _plan_step_matches_skill("mine_visible_block", "gather_nearby_wood")
+    assert _plan_step_matches_skill("open_inventory", "check inventory")
 
 
 def _close_run(*, outcome: SkillOutcome = SkillOutcome.SUCCEEDED) -> SkillRun:

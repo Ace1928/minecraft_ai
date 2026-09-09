@@ -174,6 +174,24 @@ class SkillLibrary:
             stats.cancellations += 1
         return stats
 
+    def combined_stats(self, skill_id: str) -> SkillStats | None:
+        """Sum every recorded context so ranking is not blind to keepalive/progress."""
+
+        matching = tuple(
+            stats for (recorded_id, _), stats in self.stats.items() if recorded_id == skill_id
+        )
+        if not matching:
+            return None
+        combined = SkillStats()
+        for stats in matching:
+            combined.successes += stats.successes
+            combined.failures += stats.failures
+            combined.timeouts += stats.timeouts
+            combined.cancellations += stats.cancellations
+            if stats.consecutive_failures > combined.consecutive_failures:
+                combined.consecutive_failures = stats.consecutive_failures
+        return combined
+
     def contextual_score(self, skill_id: str, context_key: str = "default") -> float:
         stats = self.stats.get((skill_id, context_key))
         if stats is None:
