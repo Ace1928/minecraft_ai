@@ -49,7 +49,7 @@ The current architecture has valuable substrate but the intelligence path has re
 
 #### `perception_service.py`
 
-`_extract_fast_visual_features()` currently identifies blocks, sky, underwater state, and obstacles with sampled RGB thresholds. Move this into `BootstrapFastPerception`; never use those facts as ground truth labels. Replace it with learned fast perception in Phase 2.
+`BootstrapFastPerception` already refuses colour statistics as semantic block/target/obstacle/biome/scene/time labels. Those RGB features remain diagnostic/hash cues only, with a promotion gate for learned fast perception. Do not reintroduce semantic RGB guesses.
 
 #### `cognition.py`
 
@@ -61,7 +61,7 @@ Current runtime skill adaptation references APIs/statistics that do not align wi
 
 #### `tech_tree.py`
 
-The new file hard-codes a wood→stone→iron milestone tree, which contradicts the repository's exact-version-graph design. Replace it with `ProgressionModel`, derived from versioned achievements/advancements, item/tool capabilities, exact dependency graph queries, current inventory/world evidence, and role/custom objectives. Hard-coded milestones may remain only as benchmark fixtures.
+`tech_tree.py` remains a test/example fixture. Runtime progression hints now come from observed capability counts via `progression_skill_for_capabilities`, not `TechTreeTracker`. Exact-version knowledge still owns mechanical feasibility; experience only supplies contextual cost/success posteriors.
 
 #### `spatial.py`
 

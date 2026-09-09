@@ -95,6 +95,39 @@ _ACTION_PROVEN_TRAVERSAL_SKILL_IDS = frozenset({"gather_nearby_wood"})
 _TRAVERSAL_MOVEMENT_KEYS = frozenset({"a", "d", "s", "space", "w"})
 _LOCOMOTION_RELEASE_KEYS = ("a", "ctrl", "d", "s", "shift", "space", "w")
 _REACQUIRE_MIN_CONFIDENCE = 0.65
+_MAX_OPTION_DEPTH = 4
+
+
+@dataclass
+class _OptionFrame:
+    """Suspended parent option restored after a nested child returns."""
+
+    spec: SkillSpec
+    run: SkillRun
+    parameters: dict[str, str | int | float | bool]
+    instruction_override: str | None
+    initiated: bool
+    last_intent: MotorIntent | None
+    mining_guard: MiningLeaseGuard
+    plank_crafter: BoundedPlankCraftController
+    outcome_verifier: TemporalOutcomeVerifier
+    pending_mining_verification: _PendingMiningVerification | None
+    inventory_open_sent: bool
+    inventory_close_sent: bool
+    death_respawn_sent: bool
+    away_dismiss_sent: bool
+    collection_possession: _CollectionPossessionState
+    mining_hotbar_log_baseline: PerceptionFact | None
+    mining_attack_started: bool
+    mining_damage_progress_observed: bool
+    gather_mining_started: bool
+    gather_acquisitions_remaining: int
+    verified_collection_hotbar_log_count: int | None
+    complete_on_locomotion_progress: bool
+    locomotion_progress_events: int
+    locomotion_progress_first_ns: int | None
+    locomotion_progress_events_required: int
+    locomotion_progress_min_ms: int
 
 
 def _exact_hotbar_log_fact(
@@ -168,6 +201,7 @@ class SkillExecutor:
         self._locomotion_progress_first_ns: int | None = None
         self._locomotion_progress_events_required = 1
         self._locomotion_progress_min_ms = 0
+        self._option_stack: list[_OptionFrame] = []
 
     @property
     def run(self) -> SkillRun | None:
@@ -333,6 +367,118 @@ class SkillExecutor:
             parameters=self._parameters,
         )
         return self._run
+
+    @property
+    def option_depth(self) -> int:
+        active = 1 if self._run is not None and self._run.outcome == SkillOutcome.RUNNING else 0
+        return active + len(self._option_stack)
+
+    def parent_run(self) -> SkillRun | None:
+        if not self._option_stack:
+            return None
+        return self._option_stack[-1].run
+
+    def push_child(
+        self,
+        spec: SkillSpec,
+        *,
+        run_id: str,
+        context_key: str = "default",
+        parameters: dict[str, str | int | float | bool] | None = None,
+        now_ns: int | None = None,
+        instruction: str | None = None,
+    ) -> SkillRun:
+        """Suspend the running parent and start ``spec`` as a nested option."""
+
+        if self._run is None or self._run.outcome != SkillOutcome.RUNNING or self._spec is None:
+            raise RuntimeError("a parent skill must be running to nest an option")
+        if self.option_depth >= _MAX_OPTION_DEPTH:
+            raise RuntimeError("option stack depth exceeded")
+        self._option_stack.append(self._capture_option_frame())
+        self._run = None
+        self._spec = None
+        try:
+            return self.start(
+                spec,
+                run_id=run_id,
+                context_key=context_key,
+                parameters=parameters,
+                now_ns=now_ns,
+                instruction=instruction,
+            )
+        except Exception:
+            self._restore_option_frame(self._option_stack.pop())
+            raise
+
+    def resume_parent(self) -> SkillRun:
+        """Restore the suspended parent after a nested child finishes."""
+
+        if not self._option_stack:
+            raise RuntimeError("no suspended parent option")
+        self._restore_option_frame(self._option_stack.pop())
+        if self._run is None:
+            raise RuntimeError("restored parent option is missing")
+        return self._run
+
+    def _capture_option_frame(self) -> _OptionFrame:
+        if self._spec is None or self._run is None:
+            raise RuntimeError("no skill is running")
+        return _OptionFrame(
+            spec=self._spec,
+            run=self._run,
+            parameters=dict(self._parameters),
+            instruction_override=self._instruction_override,
+            initiated=self._initiated,
+            last_intent=self._last_intent,
+            mining_guard=self._mining_guard,
+            plank_crafter=self._plank_crafter,
+            outcome_verifier=self._outcome_verifier,
+            pending_mining_verification=self._pending_mining_verification,
+            inventory_open_sent=self._inventory_open_sent,
+            inventory_close_sent=self._inventory_close_sent,
+            death_respawn_sent=self._death_respawn_sent,
+            away_dismiss_sent=self._away_dismiss_sent,
+            collection_possession=self._collection_possession,
+            mining_hotbar_log_baseline=self._mining_hotbar_log_baseline,
+            mining_attack_started=self._mining_attack_started,
+            mining_damage_progress_observed=self._mining_damage_progress_observed,
+            gather_mining_started=self._gather_mining_started,
+            gather_acquisitions_remaining=self._gather_acquisitions_remaining,
+            verified_collection_hotbar_log_count=self._verified_collection_hotbar_log_count,
+            complete_on_locomotion_progress=self._complete_on_locomotion_progress,
+            locomotion_progress_events=self._locomotion_progress_events,
+            locomotion_progress_first_ns=self._locomotion_progress_first_ns,
+            locomotion_progress_events_required=self._locomotion_progress_events_required,
+            locomotion_progress_min_ms=self._locomotion_progress_min_ms,
+        )
+
+    def _restore_option_frame(self, frame: _OptionFrame) -> None:
+        self._spec = frame.spec
+        self._run = frame.run
+        self._parameters = dict(frame.parameters)
+        self._instruction_override = frame.instruction_override
+        self._initiated = frame.initiated
+        self._last_intent = frame.last_intent
+        self._mining_guard = frame.mining_guard
+        self._plank_crafter = frame.plank_crafter
+        self._outcome_verifier = frame.outcome_verifier
+        self._pending_mining_verification = frame.pending_mining_verification
+        self._inventory_open_sent = frame.inventory_open_sent
+        self._inventory_close_sent = frame.inventory_close_sent
+        self._death_respawn_sent = frame.death_respawn_sent
+        self._away_dismiss_sent = frame.away_dismiss_sent
+        self._collection_possession = frame.collection_possession
+        self._mining_hotbar_log_baseline = frame.mining_hotbar_log_baseline
+        self._mining_attack_started = frame.mining_attack_started
+        self._mining_damage_progress_observed = frame.mining_damage_progress_observed
+        self._gather_mining_started = frame.gather_mining_started
+        self._gather_acquisitions_remaining = frame.gather_acquisitions_remaining
+        self._verified_collection_hotbar_log_count = frame.verified_collection_hotbar_log_count
+        self._complete_on_locomotion_progress = frame.complete_on_locomotion_progress
+        self._locomotion_progress_events = frame.locomotion_progress_events
+        self._locomotion_progress_first_ns = frame.locomotion_progress_first_ns
+        self._locomotion_progress_events_required = frame.locomotion_progress_events_required
+        self._locomotion_progress_min_ms = frame.locomotion_progress_min_ms
 
     def tick(
         self,
@@ -1242,6 +1388,7 @@ class SkillExecutor:
         if self._run is None or self._spec is None:
             raise RuntimeError("no skill is running")
         now = time.monotonic_ns() if now_ns is None else now_ns
+        self._option_stack.clear()
         return self._finish(
             SkillOutcome.CANCELLED,
             now,

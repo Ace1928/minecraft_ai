@@ -22,6 +22,7 @@ class SkillStartSource(str, Enum):
     CONTINUATION = "continuation"
     KEEPALIVE = "keepalive"
     BOOTSTRAP = "bootstrap"
+    PLAN = "plan"
 
 @dataclass(frozen=True, slots=True)
 class SkillDecisionOrigin:

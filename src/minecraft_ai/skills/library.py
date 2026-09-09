@@ -175,7 +175,11 @@ class SkillLibrary:
         return stats
 
     def combined_stats(self, skill_id: str) -> SkillStats | None:
-        """Sum every recorded context so ranking is not blind to keepalive/progress."""
+        """Sum counts across contexts as a global prior, not a competence bucket.
+
+        Consecutive-failure streaks stay local. Mixing "mining while drowning"
+        with "mine the log in front of you" is not a skill ranking signal.
+        """
 
         matching = tuple(
             stats for (recorded_id, _), stats in self.stats.items() if recorded_id == skill_id
@@ -188,8 +192,6 @@ class SkillLibrary:
             combined.failures += stats.failures
             combined.timeouts += stats.timeouts
             combined.cancellations += stats.cancellations
-            if stats.consecutive_failures > combined.consecutive_failures:
-                combined.consecutive_failures = stats.consecutive_failures
         return combined
 
     def contextual_score(self, skill_id: str, context_key: str = "default") -> float:
@@ -198,6 +200,41 @@ class SkillLibrary:
             return 0.0
         # Beta(1,1) prior prevents one lucky success from becoming absolute confidence.
         return (stats.successes + 1.0) / (stats.successes + stats.failures + stats.timeouts + 2.0)
+
+    def hierarchical_success_probability(
+        self,
+        skill_id: str,
+        context_key: str = "default",
+        *,
+        prior_strength: float = 4.0,
+    ) -> float:
+        """Local success rate shrunk toward all-context competence.
+
+        ``(S_c + λ p_global) / (N_c + λ)``. Sparse contexts borrow the global
+        prior; abundant local evidence dominates.
+        """
+
+        matching = tuple(
+            stats for (recorded_id, _), stats in self.stats.items() if recorded_id == skill_id
+        )
+        if not matching:
+            return 0.5
+        global_successes = sum(stats.successes for stats in matching)
+        global_decisive = sum(
+            stats.successes + stats.failures + stats.timeouts for stats in matching
+        )
+        p_global = (global_successes + 1.0) / (global_decisive + 2.0)
+        local = self.stats.get((skill_id, context_key))
+        if local is None:
+            return p_global
+        local_n = local.successes + local.failures + local.timeouts
+        return (local.successes + prior_strength * p_global) / (local_n + prior_strength)
+
+    def contextual_failure_streak(
+        self, skill_id: str, context_key: str = "default"
+    ) -> int:
+        stats = self.stats.get((skill_id, context_key))
+        return 0 if stats is None else stats.consecutive_failures
 
     def promote(self, skill_id: str, stage: SkillStage) -> SkillSpec:
         current = self.get(skill_id)

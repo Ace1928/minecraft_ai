@@ -57,9 +57,16 @@ from .perception_service import (
     frame_dhash,
     perceptual_hash_distance,
 )
+from .experience_graph import ExperienceGraph
+from .plan_graph import (
+    PlanGraph,
+    bind_plan_step_skill,
+    plan_graph_from_steps,
+    progression_skill_for_capabilities,
+    sanitize_plan_steps,
+)
 from .planning import Goal, GoalSource
 from .roles import RoleProfile
-from .tech_tree import keepalive_skill_for_inventory
 from .safety import MotorAction
 from .skills import (
     SkillLibrary,
@@ -312,6 +319,8 @@ class AgentRuntime:
     _plan_index: int = field(default=0, init=False)
     _plan_started_ns: int = field(default=0, init=False)
     _plan_step_completed_ns: int = field(default=0, init=False)
+    _plan_graph: PlanGraph | None = field(default=None, init=False)
+    _experience: ExperienceGraph = field(default_factory=ExperienceGraph, init=False)
     _last_operator_target_id: str | None = field(default=None, init=False)
     _policy_warmup_error: str | None = field(default=None, init=False)
     _gui_fast_path_deferred: bool = field(default=False, init=False)
@@ -650,17 +659,22 @@ class AgentRuntime:
                 # preemption; elapsed settling alone does not end ownership.
                 self._flush_pending_skill_stats()
                 return
-            # Autonomous cognition may use disposable exploration, but an
-            # unresolved operator directive needs a stable execution snapshot.
-            rescue = self._explore_keep_alive()
-            if rescue is not None:
-                self._start_skill(
-                    rescue,
-                    source=SkillStartSource.KEEPALIVE,
-                    run_id=uuid.uuid4().hex,
-                    context_key=_EXPLORE_KEEPALIVE_CONTEXT,
-                )
+            # Prefer the current typed plan node over disposable keepalive so a
+            # stalled gather is not replaced by traverse while wood is still due.
+            if self._start_current_plan_skill():
                 active = self.executor.run
+            else:
+                # Autonomous cognition may use disposable exploration, but an
+                # unresolved operator directive needs a stable execution snapshot.
+                rescue = self._explore_keep_alive()
+                if rescue is not None:
+                    self._start_skill(
+                        rescue,
+                        source=SkillStartSource.KEEPALIVE,
+                        run_id=uuid.uuid4().hex,
+                        context_key=_EXPLORE_KEEPALIVE_CONTEXT,
+                    )
+                    active = self.executor.run
             if active is None or active.outcome != SkillOutcome.RUNNING:
                 self._flush_pending_skill_stats()
                 return
@@ -870,6 +884,14 @@ class AgentRuntime:
                 )
                 return
             if self._route_headroom_terminal(result):
+                return
+            parent_run = getattr(self.executor, "parent_run", None)
+            if callable(parent_run) and parent_run() is not None:
+                self._note_terminal_for_cognition(result.run, recovery_started=True)
+                try:
+                    self.executor.resume_parent()
+                except RuntimeError:
+                    pass
                 return
             recovery = _first_feasible_recovery(
                 self.skills,
@@ -3495,7 +3517,17 @@ class AgentRuntime:
         if decision.skill_id is not None:
             running = self.executor.run
             if running is not None and running.outcome == SkillOutcome.RUNNING:
-                if (
+                if self._should_nest_option(running.skill_id, decision.skill_id):
+                    spec = self.skills.get(decision.skill_id)
+                    self._request_policy_warm(spec.action_level)
+                    self.executor.push_child(
+                        spec,
+                        run_id=uuid.uuid4().hex,
+                        context_key=decision.chosen_goal_id or running.context_key,
+                        parameters=decision.skill_parameters,
+                        instruction=decision.instruction,
+                    )
+                elif (
                     running.skill_id != decision.skill_id
                     or self.executor.parameters != decision.skill_parameters
                     or running.context_key == _EXPLORE_KEEPALIVE_CONTEXT
@@ -3644,7 +3676,12 @@ class AgentRuntime:
                 and decision_goal != self._plan_goal_id
             ):
                 return
-        self._plan_index += 1
+        graph = getattr(self, "_plan_graph", None)
+        if graph is not None and graph.mark_succeeded(run.skill_id):
+            self._plan_steps = graph.sequential_labels()
+            self._plan_index = graph.cursor
+        else:
+            self._plan_index += 1
         self._plan_step_completed_ns = time.monotonic_ns()
 
     def _skip_exhausted_plan_step(self, run: SkillRun) -> None:
@@ -3669,7 +3706,17 @@ class AgentRuntime:
             return
         if not _plan_step_matches_skill(run.skill_id, self._plan_steps[self._plan_index]):
             return
-        self._plan_index += 1
+        graph = getattr(self, "_plan_graph", None)
+        if graph is not None:
+            graph.block_current_method(
+                run.skill_id,
+                reason=run.failure_reason or "failed",
+                skills=getattr(self, "skills", None),
+            )
+            self._plan_steps = graph.sequential_labels()
+            self._plan_index = graph.cursor
+        else:
+            self._plan_index += 1
         self._plan_step_completed_ns = time.monotonic_ns()
         self._cognition_requested = True
 
@@ -3687,7 +3734,7 @@ class AgentRuntime:
             current remaining steps (a genuine extension/refinement). An exact
             echo of the remaining steps changes nothing.
         """
-        steps = decision.plan_steps
+        steps = sanitize_plan_steps(decision.plan_steps)
         if not steps:
             # A concrete operator command must not inherit a different
             # operator command's unfinished plan. Questions and status replies
@@ -3705,6 +3752,7 @@ class AgentRuntime:
                 self._plan_goal_id = decision.chosen_goal_id
                 self._plan_index = 0
                 self._plan_started_ns = time.monotonic_ns()
+                self._plan_graph = None
             return
         goal_changed = (
             decision.chosen_goal_id is not None
@@ -3715,6 +3763,13 @@ class AgentRuntime:
             if self._is_prefix(remaining, steps):
                 if steps != remaining:
                     self._plan_steps = steps
+                    self._plan_index = 0
+                    self._plan_graph = plan_graph_from_steps(
+                        steps,
+                        goal_id=self._plan_goal_id,
+                        skills=getattr(self, "skills", None),
+                    )
+                    self._warm_plan_specialists()
                 return
             return
         if goal_changed or not remaining:
@@ -3722,10 +3777,85 @@ class AgentRuntime:
             self._plan_goal_id = decision.chosen_goal_id
             self._plan_index = 0
             self._plan_started_ns = time.monotonic_ns()
+            self._plan_graph = plan_graph_from_steps(
+                steps,
+                goal_id=decision.chosen_goal_id,
+                skills=getattr(self, "skills", None),
+            )
+            self._warm_plan_specialists()
 
     @staticmethod
     def _is_prefix(prefix: tuple[str, ...], steps: tuple[str, ...]) -> bool:
         return len(prefix) <= len(steps) and steps[: len(prefix)] == prefix
+
+    def _request_policy_warm(self, level: ActionLevel) -> None:
+        policy = getattr(getattr(self, "executor", None), "policy", None)
+        request = getattr(policy, "request_warm", None)
+        if callable(request):
+            request(level)
+
+    def _warm_plan_specialists(self, *, skip_skill_id: str | None = None) -> None:
+        skills = getattr(self, "skills", None)
+        if skills is None or not self._plan_steps:
+            return
+        remaining = self._plan_steps[self._plan_index : self._plan_index + 2]
+        for step in remaining:
+            skill_id = bind_plan_step_skill(step, skills)
+            if skill_id is None or skill_id == skip_skill_id or skill_id not in skills.specs:
+                continue
+            self._request_policy_warm(skills.get(skill_id).action_level)
+
+    def _should_nest_option(self, parent_skill_id: str, child_skill_id: str) -> bool:
+        if parent_skill_id == child_skill_id:
+            return False
+        skills = getattr(self, "skills", None)
+        if skills is None or parent_skill_id not in skills.specs:
+            return False
+        if getattr(self.executor, "option_depth", 1) >= 4:
+            return False
+        parent = skills.get(parent_skill_id)
+        if child_skill_id in parent.recovery_skills:
+            return True
+        graph = getattr(self, "_plan_graph", None)
+        if graph is None:
+            return False
+        current = graph.current()
+        if current is None or current.skill_id != parent_skill_id:
+            return False
+        from .plan_graph import alternative_skill_ids
+
+        alt_skills = {
+            node.skill_id
+            for node_id in current.alternative_ids
+            if (node := graph.nodes.get(node_id)) is not None and node.skill_id is not None
+        }
+        return child_skill_id in alt_skills or child_skill_id in alternative_skill_ids(
+            skills, parent_skill_id
+        )
+
+    def _start_current_plan_skill(self) -> bool:
+        running = self.executor.run
+        if running is not None and running.outcome == SkillOutcome.RUNNING:
+            return False
+        if not self._plan_steps or not (0 <= self._plan_index < len(self._plan_steps)):
+            return False
+        skills = getattr(self, "skills", None)
+        if skills is None:
+            return False
+        skill_id = bind_plan_step_skill(self._plan_steps[self._plan_index], skills)
+        if skill_id is None or skill_id not in skills.specs:
+            return False
+        context_key = self._plan_goal_id or "default"
+        if skills.contextual_failure_streak(skill_id, context_key) >= 2:
+            return False
+        spec = skills.get(skill_id)
+        self._start_skill(
+            spec,
+            source=SkillStartSource.PLAN,
+            run_id=uuid.uuid4().hex,
+            context_key=context_key,
+        )
+        return True
 
     def _publish_player_chat_facts(self) -> None:
         """Turn freshly observed player chat lines into an authorizing fact.
@@ -3839,7 +3969,12 @@ class AgentRuntime:
         origin: SkillDecisionOrigin | None = None, parent_run_id: str | None = None,
         **kwargs: Any,
     ) -> SkillRun:
+        self._request_policy_warm(spec.action_level)
+        self._warm_plan_specialists(skip_skill_id=spec.skill_id)
         run = self.executor.start(spec, **kwargs)
+        graph = getattr(self, "_plan_graph", None)
+        if graph is not None:
+            graph.mark_running(spec.skill_id)
         self._disposable_keepalive_run_id = (
             run.run_id
             if source == SkillStartSource.KEEPALIVE
@@ -3878,6 +4013,13 @@ class AgentRuntime:
 
         if run.outcome == SkillOutcome.RUNNING:
             raise ValueError("cannot record a running skill")
+        experience = getattr(self, "_experience", None)
+        if experience is not None:
+            spec = None
+            skills = getattr(self, "skills", None)
+            if skills is not None and run.skill_id in skills.specs:
+                spec = skills.get(run.skill_id)
+            experience.observe(run, spec)
         if run.run_id == self._disposable_keepalive_run_id:
             self._disposable_keepalive_run_id = None
         if run.run_id in self._recorded_run_ids:
@@ -4239,7 +4381,7 @@ class AgentRuntime:
         skills = getattr(self, "skills", None)
         if skills is None:
             return None
-        skill_id = keepalive_skill_for_inventory(
+        skill_id = progression_skill_for_capabilities(
             self._observed_hotbar_inventory(),
             available_skill_ids=set(skills.specs),
             recently_failed_skill_ids=self._recently_failed_skill_ids(),
@@ -4567,6 +4709,25 @@ class AgentRuntime:
                     0
                     if self._plan_started_ns == 0
                     else int((time.monotonic_ns() - self._plan_started_ns) // 1_000_000)
+                ),
+                "graph": (
+                    None
+                    if (plan_graph := getattr(self, "_plan_graph", None)) is None
+                    else {
+                        "cursor": plan_graph.cursor,
+                        "nodes": [
+                            {
+                                "id": node.node_id,
+                                "objective": node.objective,
+                                "skill_id": node.skill_id,
+                                "state": node.state.value,
+                                "attempts": node.attempts,
+                                "block_reason": node.block_reason,
+                            }
+                            for node_id, node in plan_graph.nodes.items()
+                            if node_id in plan_graph.order
+                        ],
+                    }
                 ),
             },
             "skill_outcome": None if running is None else running.outcome.value,

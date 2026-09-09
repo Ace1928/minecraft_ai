@@ -1211,7 +1211,9 @@ def test_skill_shortlist_uses_non_default_context_failure_evidence() -> None:
         "explore_forward",
     ]
     assert payloads[0]["competence"] == 0.5
-    assert payloads[1]["competence"] == 0.0
+    # Keepalive-context failures are a global prior, not a default-context
+    # consecutive-failure bucket, so competence shrinks but does not hit zero.
+    assert 0.0 < payloads[1]["competence"] < 0.5
 
 
 def test_skill_shortlist_reserves_matching_and_safety_options() -> None:

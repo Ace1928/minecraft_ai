@@ -10,6 +10,7 @@ import pickle
 import select
 import subprocess
 import sys
+import threading
 import time
 import types
 import uuid
@@ -1080,6 +1081,8 @@ class GroundedPolicyRouter:
         init=False,
     )
     _warmed: set[int] = field(default_factory=set, init=False)
+    _warm_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    _warming: dict[int, threading.Thread] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         if self.max_track_age_ms <= 0:
@@ -1293,7 +1296,12 @@ class GroundedPolicyRouter:
         return f"learned:{self.grounded.policy_id}:aux-localization:not-training-label"
 
     def close(self) -> None:
+        with self._warm_lock:
+            threads = tuple(self._warming.values())
+        for thread in threads:
+            thread.join(timeout=30)
         self._warmed.clear()
+        self._warming.clear()
         for policy in self._policies():
             close = getattr(policy, "close", None)
             if callable(close):
@@ -1304,16 +1312,82 @@ class GroundedPolicyRouter:
         self._ensure_warm(self.primary)
         self._ensure_warm(self.raw_motion)
 
+    def request_warm(self, level: ActionLevel) -> None:
+        """Start warming the body for ``level`` without binding the episode.
+
+        Call this when a plan admits a future GUI or GROUNDED option so the
+        specialist loads while the current option finishes.
+        """
+
+        selected, _, _ = self._body_for_level(level)
+        self._begin_warm(selected, blocking=False)
+        if level == ActionLevel.GROUNDED:
+            self._begin_warm(self.grounded, blocking=False)
+        elif level == ActionLevel.GUI:
+            self._begin_warm(self.gui, blocking=False)
+
+    def specialist_ready(self, level: ActionLevel) -> bool:
+        selected, _, _ = self._body_for_level(level)
+        policies: list[MotorPolicy | None] = [selected]
+        if level == ActionLevel.GROUNDED:
+            policies.append(self.grounded)
+        elif level == ActionLevel.GUI:
+            policies.append(self.gui)
+        with self._warm_lock:
+            for policy in policies:
+                if policy is None:
+                    continue
+                key = id(policy)
+                if key not in self._warmed:
+                    return False
+                thread = self._warming.get(key)
+                if thread is not None and thread.is_alive():
+                    return False
+        return True
+
     def _ensure_warm(self, policy: MotorPolicy | None) -> None:
+        self._begin_warm(policy, blocking=True)
+
+    def _begin_warm(self, policy: MotorPolicy | None, *, blocking: bool) -> None:
         if policy is None:
             return
         key = id(policy)
-        if key in self._warmed:
+        wait_for: threading.Thread | None = None
+        start_inline = False
+        with self._warm_lock:
+            if key in self._warmed:
+                return
+            existing = self._warming.get(key)
+            if existing is not None and existing.is_alive():
+                wait_for = existing
+            elif blocking:
+                start_inline = True
+            else:
+                thread = threading.Thread(
+                    target=self._warm_policy,
+                    args=(policy,),
+                    name=f"policy-warm-{key}",
+                    daemon=True,
+                )
+                self._warming[key] = thread
+                thread.start()
+                return
+        if wait_for is not None:
+            wait_for.join()
             return
-        warmup = getattr(policy, "warmup", None)
-        if callable(warmup):
-            warmup()
-        self._warmed.add(key)
+        if start_inline:
+            self._warm_policy(policy)
+
+    def _warm_policy(self, policy: MotorPolicy) -> None:
+        key = id(policy)
+        try:
+            warmup = getattr(policy, "warmup", None)
+            if callable(warmup):
+                warmup()
+        finally:
+            with self._warm_lock:
+                self._warmed.add(key)
+                self._warming.pop(key, None)
 
     def status(self) -> dict[str, object]:
         primary_status = _policy_status(self.primary)

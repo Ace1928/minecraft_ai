@@ -616,19 +616,22 @@ class HighLevelController:
                 continue
             if not initiation_satisfied(skill, blackboard):
                 continue
-            stats = self.skills.combined_stats(skill.skill_id)
+            context_key = "default"
+            if context is not None and context.plan_goal_id:
+                context_key = context.plan_goal_id
+            stats = self.skills.stats.get((skill.skill_id, context_key))
             identity_tokens = planning_tokens(" ".join((skill.skill_id, skill.name)))
             description_tokens = planning_tokens(skill.description)
             overlap = 4 * len(query_tokens & identity_tokens) + len(
                 query_tokens & description_tokens
             )
-            competence = (
-                0.5
-                if stats is None
-                else (stats.successes + 1.0)
-                / (stats.successes + stats.failures + stats.timeouts + 2.0)
+            competence = self.skills.hierarchical_success_probability(
+                skill.skill_id, context_key
             )
-            failure_penalty = 0.0 if stats is None else min(0.45, 0.08 * stats.consecutive_failures)
+            failure_penalty = min(
+                0.45,
+                0.08 * self.skills.contextual_failure_streak(skill.skill_id, context_key),
+            )
             ranking_score = max(0.0, competence - failure_penalty)
             payload = {
                 "skill_id": skill.skill_id,

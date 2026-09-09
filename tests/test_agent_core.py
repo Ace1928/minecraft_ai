@@ -1844,6 +1844,47 @@ def test_repeated_progress_failure_skips_matching_plan_step(tmp_path: Path) -> N
         assert runtime._cognition_requested is True
 
 
+def test_duplicate_gather_plan_collapses_and_blocks_to_an_alternative(
+    tmp_path: Path,
+) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime_for_learning(database)
+        runtime.skills = build_bootstrap_skill_library()
+        runtime._disposable_keepalive_run_id = None
+        runtime._adopt_plan_if_revised(
+            CognitionDecision(
+                chosen_goal_id="role:generalist:1:progress",
+                plan_steps=(
+                    "gather_nearby_wood",
+                    "gather_nearby_wood",
+                    "gather_nearby_wood",
+                    "gather_nearby_wood",
+                    "gather_nearby_wood",
+                ),
+            )
+        )
+        assert runtime._plan_steps == ("gather_nearby_wood",)
+        assert runtime._plan_index == 0
+        failed = SkillRun(
+            run_id="gather-1",
+            skill_id="gather_nearby_wood",
+            context_key="role:generalist:1:progress",
+            started_ns=1,
+            ended_ns=2,
+            outcome=SkillOutcome.FAILED,
+            failure_code=SkillFailureCode.MINING_ACQUISITION_TIMEOUT,
+            failure_reason="mining.acquisition_timeout",
+        )
+        runtime._record_terminal_run(failed)
+        runtime._record_terminal_run(failed.model_copy(update={"run_id": "gather-2"}))
+        assert runtime._cognition_requested is True
+        graph = runtime._plan_graph
+        assert graph is not None
+        current = graph.current()
+        if current is not None:
+            assert current.skill_id != "gather_nearby_wood"
+
+
 def test_keepalive_and_starvation_do_not_skip_progress_plan(tmp_path: Path) -> None:
     with StateDatabase(tmp_path / "state.sqlite3") as database:
         runtime = _runtime_for_learning(database)
@@ -1933,8 +1974,11 @@ def _runtime_for_learning(database: StateDatabase) -> AgentRuntime:
     runtime._plan_steps = ()
     runtime._plan_goal_id = None
     runtime._plan_index = 0
+    runtime._plan_started_ns = 0
     runtime._plan_step_completed_ns = 0
+    runtime._plan_graph = None
     runtime._cognition_requested = False
+    runtime._disposable_keepalive_run_id = None
     return runtime
 
 

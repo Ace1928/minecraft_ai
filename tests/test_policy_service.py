@@ -254,6 +254,35 @@ def test_router_startup_warmup_skips_specialists_until_first_use() -> None:
     assert gui.warmups == 1
 
 
+def test_router_anticipatory_warm_loads_specialist_before_bind() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _RoutingPolicy("rocket", key="a")
+    gui = _RoutingPolicy("vpt-gui", key="e")
+    router = GroundedPolicyRouter(primary, grounded=grounded, gui=gui)
+    router.warmup()
+    assert grounded.warmups == 0
+    assert gui.warmups == 0
+
+    router.request_warm(ActionLevel.GROUNDED)
+    deadline = time.monotonic() + 2.0
+    while not router.specialist_ready(ActionLevel.GROUNDED) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert grounded.warmups == 1
+    assert gui.warmups == 0
+
+    router.act(
+        _tracked_board(),
+        MotorIntent(
+            skill_id="mine",
+            mode="mine",
+            episode_id="mine-warm",
+            action_level=ActionLevel.GROUNDED,
+        ),
+        sequence=1,
+    )
+    assert grounded.warmups == 1
+
+
 def test_router_binds_raw_motion_without_a_grounded_observer() -> None:
     primary = _RoutingPolicy("steve", key="w")
     raw_motion = _RoutingPolicy("native-vpt", key="space")

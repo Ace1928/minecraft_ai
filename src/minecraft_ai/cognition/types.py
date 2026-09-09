@@ -4,9 +4,10 @@ import hashlib
 import json
 from dataclasses import dataclass
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from minecraft_ai.memory import MemoryRecord
+from minecraft_ai.plan_graph import sanitize_plan_steps
 from minecraft_ai.planning import Goal
 from minecraft_ai.roles import RoleProfile
 from minecraft_ai.skills import SkillRun
@@ -59,6 +60,11 @@ class CognitionDecision(BaseModel):
 
     _model_origin: DecisionModelOrigin | None = PrivateAttr(default=None)
 
+    @field_validator("plan_steps")
+    @classmethod
+    def _reject_sentinel_plan_steps(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return sanitize_plan_steps(value)
+
     @property
     def model_origin(self) -> DecisionModelOrigin | None:
         """Selected parsed model attempt before any foundation authority rewrite."""
@@ -104,6 +110,11 @@ class _CognitionWireDecision(BaseModel):
         max_length=5,
         description="Sequential plan: up to 5 short next-steps.",
     )
+
+    @field_validator("n")
+    @classmethod
+    def _reject_sentinel_wire_plan_steps(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return sanitize_plan_steps(value)
 
     def expand(self) -> CognitionDecision:
         return CognitionDecision(
