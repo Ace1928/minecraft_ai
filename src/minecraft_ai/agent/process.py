@@ -4,11 +4,12 @@ import argparse
 import platform
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.cognition import HighLevelController
-from minecraft_ai.config import app_paths, load_config
+from minecraft_ai.config import RuntimeConfig, app_paths, load_config
 from minecraft_ai.datasets import DatasetSource, DatasetSourceType, TrajectoryManifest
 from minecraft_ai.execution import SkillExecutor
 from minecraft_ai.models import OpenAICompatibleLocalModel
@@ -17,13 +18,52 @@ from minecraft_ai.perception import PerceptionBlackboard
 from minecraft_ai.perception_service import ActiveVLMWorker, RealtimePerceptionService
 from minecraft_ai.platforms import create_bedrock_capture
 from minecraft_ai.platforms.bedrock_session import BedrockSession
-from minecraft_ai.platforms.bedrock_x11 import IsolationError
+from minecraft_ai.platforms.bedrock_x11 import CapturedFrame, IsolationError
 from minecraft_ai.policy_service import GroundedPolicyRouter, TemporalPolicyClient
 from minecraft_ai.roles import get_role
 from minecraft_ai.runtime_factory import RuntimeStartupCleanupIncomplete, run_agent_runtime
 from minecraft_ai.storage import StateDatabase
 from minecraft_ai.supervisor import send_command
 from minecraft_ai.trajectory import TrajectoryRecorder, new_trajectory_id
+
+
+def build_motor_policy(
+    config: RuntimeConfig,
+    *,
+    frame_provider: Callable[[], CapturedFrame | None],
+) -> MotorPolicy:
+    """Assemble the configured body experts independently of one another.
+
+    RAW/MOTION and GUI specialists no longer require a GROUNDED observer.
+    """
+    if not config.policy.enabled:
+        return BootstrapMotorPolicy()
+    primary = TemporalPolicyClient(config.policy, frame_provider=frame_provider)
+    grounded = (
+        None
+        if config.grounded_policy is None or not config.grounded_policy.enabled
+        else TemporalPolicyClient(config.grounded_policy, frame_provider=frame_provider)
+    )
+    gui = (
+        None
+        if config.gui_policy is None or not config.gui_policy.enabled
+        else TemporalPolicyClient(config.gui_policy, frame_provider=frame_provider)
+    )
+    raw_motion = (
+        None
+        if config.raw_motion_policy is None or not config.raw_motion_policy.enabled
+        else TemporalPolicyClient(
+            config.raw_motion_policy, frame_provider=frame_provider
+        )
+    )
+    if grounded is None and gui is None and raw_motion is None:
+        return primary
+    return GroundedPolicyRouter(
+        primary,
+        grounded=grounded,
+        gui=gui,
+        raw_motion=raw_motion,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -121,43 +161,7 @@ def main(argv: list[str] | None = None) -> int:
             stale_frame_ms=config.stale_frame_ms,
             active_vlm=active_vlm,
         )
-        policy: MotorPolicy
-        if config.policy.enabled:
-            primary_policy = TemporalPolicyClient(
-                config.policy,
-                frame_provider=lambda: perception.last_capture,
-            )
-            if config.grounded_policy is not None and config.grounded_policy.enabled:
-                grounded_policy = TemporalPolicyClient(
-                    config.grounded_policy,
-                    frame_provider=lambda: perception.last_capture,
-                )
-                gui_policy = (
-                    None
-                    if config.gui_policy is None or not config.gui_policy.enabled
-                    else TemporalPolicyClient(
-                        config.gui_policy,
-                        frame_provider=lambda: perception.last_capture,
-                    )
-                )
-                raw_motion_policy = (
-                    None
-                    if config.raw_motion_policy is None or not config.raw_motion_policy.enabled
-                    else TemporalPolicyClient(
-                        config.raw_motion_policy,
-                        frame_provider=lambda: perception.last_capture,
-                    )
-                )
-                policy = GroundedPolicyRouter(
-                    primary_policy,
-                    grounded_policy,
-                    gui=gui_policy,
-                    raw_motion=raw_motion_policy,
-                )
-            else:
-                policy = primary_policy
-        else:
-            policy = BootstrapMotorPolicy()
+        policy = build_motor_policy(config, frame_provider=lambda: perception.last_capture)
         supervisor_status = send_command("status")
         camera_status = supervisor_status.get("world_camera")
         if isinstance(camera_status, dict):

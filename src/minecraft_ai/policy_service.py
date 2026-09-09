@@ -1036,15 +1036,19 @@ class GroundedPolicyRouter:
 
     The caller supplies an explicit :class:`ActionLevel`; this router never
     guesses an abstraction from prose, target presence, or model confidence.
-    The fast VPT body is eligible for RAW/MOTION, STEVE remains the semantic
-    LATENT/SKILL body, and the GUI expert owns GUI episodes. ROCKET never owns
-    the physical body: for GROUNDED episodes it runs asynchronously and its
-    body action is discarded, while its auxiliary localization is admitted as
-    a temporally filtered target belief.
+    RAW/MOTION uses ``raw_motion`` when configured, otherwise the semantic
+    primary. LATENT and SKILL stay on the primary. GUI uses ``gui`` when
+    configured. GROUNDED keeps the semantic body; ``grounded`` is an optional
+    asynchronous target observer whose physical action is discarded.
+
+    Specialists may be omitted independently. Startup warmup loads the
+    semantic body and the RAW/MOTION body when present. GUI and GROUNDED
+    observers warm on first use so unused specialists do not compete for
+    memory before a matching option exists.
     """
 
     primary: MotorPolicy
-    grounded: MotorPolicy
+    grounded: MotorPolicy | None = None
     gui: MotorPolicy | None = None
     raw_motion: MotorPolicy | None = None
     min_track_confidence: float = 0.65
@@ -1075,6 +1079,7 @@ class GroundedPolicyRouter:
         default_factory=WorldCameraState,
         init=False,
     )
+    _warmed: set[int] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
         if self.max_track_age_ms <= 0:
@@ -1088,11 +1093,10 @@ class GroundedPolicyRouter:
         if not 0.0 <= self.target_near_max_center_error <= 2**0.5:
             raise ValueError("target_near_max_center_error is outside the normalized frame")
         self._active = self.primary
-        policy_ids = [self.primary.policy_id, self.grounded.policy_id]
-        if self.raw_motion is not None:
-            policy_ids.append(self.raw_motion.policy_id)
-        if self.gui is not None:
-            policy_ids.append(self.gui.policy_id)
+        policy_ids = [self.primary.policy_id]
+        for policy in (self.raw_motion, self.gui, self.grounded):
+            if policy is not None:
+                policy_ids.append(policy.policy_id)
         self.policy_id = "router:" + "+".join(policy_ids)
         # Only body experts share the physical camera accumulator. ROCKET's
         # predicted camera is intentionally discarded with the rest of its
@@ -1139,6 +1143,11 @@ class GroundedPolicyRouter:
             return None
 
         selected, route, used_fallback = self._body_for_level(intent.action_level)
+        self._ensure_warm(selected)
+        if intent.action_level == ActionLevel.GROUNDED:
+            self._ensure_warm(self.grounded)
+        elif intent.action_level == ActionLevel.GUI:
+            self._ensure_warm(self.gui)
         release: MotorAction | None = None
         # End the old option's action ownership, even with the same expert.
         # A capability-aware client preserves world memory; legacy experts
@@ -1179,6 +1188,8 @@ class GroundedPolicyRouter:
         blackboard: PerceptionBlackboard,
         intent: MotorIntent,
     ) -> None:
+        if self.grounded is None:
+            return
         self._grounding_sequence += 1
         # ROCKET's worker is deadline-aware and normally only enqueues/consumes
         # one process response here. Its returned body command is deliberately
@@ -1193,7 +1204,7 @@ class GroundedPolicyRouter:
         self._grounding_discarded_actions += 1
 
     def _deactivate_grounding(self, *, world_reset: bool = False) -> None:
-        if self._grounding_active or world_reset:
+        if self.grounded is not None and (self._grounding_active or world_reset):
             reset = getattr(self.grounded, "reset_world", None) if world_reset else None
             release = reset() if callable(reset) else self.grounded.reset()
             self._grounding_sequence = max(self._grounding_sequence, release.sequence)
@@ -1277,24 +1288,36 @@ class GroundedPolicyRouter:
 
     def outcome_observer_source(self) -> str:
         """Return the exact configured source trusted for target outcomes."""
+        if self.grounded is None:
+            raise RuntimeError("no grounded observer is configured")
         return f"learned:{self.grounded.policy_id}:aux-localization:not-training-label"
 
     def close(self) -> None:
+        self._warmed.clear()
         for policy in self._policies():
             close = getattr(policy, "close", None)
             if callable(close):
                 close()
 
     def warmup(self) -> None:
-        """Preload every learned expert so an event-time switch cannot stall control."""
-        for policy in self._policies():
-            warmup = getattr(policy, "warmup", None)
-            if callable(warmup):
-                warmup()
+        """Load bodies needed for the first option; specialists wait until used."""
+        self._ensure_warm(self.primary)
+        self._ensure_warm(self.raw_motion)
+
+    def _ensure_warm(self, policy: MotorPolicy | None) -> None:
+        if policy is None:
+            return
+        key = id(policy)
+        if key in self._warmed:
+            return
+        warmup = getattr(policy, "warmup", None)
+        if callable(warmup):
+            warmup()
+        self._warmed.add(key)
 
     def status(self) -> dict[str, object]:
         primary_status = _policy_status(self.primary)
-        grounded_status = _policy_status(self.grounded)
+        grounded_status = None if self.grounded is None else _policy_status(self.grounded)
         raw_motion_status = None if self.raw_motion is None else _policy_status(self.raw_motion)
         gui_status = None if self.gui is None else _policy_status(self.gui)
         active_status = _policy_status(self._active)
@@ -1310,15 +1333,21 @@ class GroundedPolicyRouter:
             "episode_bindings": self._episode_bindings,
             "episode_binding_conflicts": self._episode_binding_conflicts,
             "fallback_bindings": self._fallback_bindings,
-            "grounding_role": "asynchronous-target-belief-only",
+            "grounding_role": (
+                "asynchronous-target-belief-only"
+                if self.grounded is not None
+                else "unavailable"
+            ),
             "grounding_active": self._grounding_active,
             "grounding_episode_id": self._episode_id if self._grounding_active else None,
             "grounded_track_id": self._grounded_track_id,
             "grounded_interaction_id": self._grounded_interaction_id,
             "grounding_requests": self._grounding_requests,
             "grounding_discarded_actions": self._grounding_discarded_actions,
-            "grounding_observer_last_action_provenance": grounded_status.get(
-                "last_action_provenance"
+            "grounding_observer_last_action_provenance": (
+                None
+                if grounded_status is None
+                else grounded_status.get("last_action_provenance")
             ),
             "last_action_provenance": _routed_action_provenance(
                 active_status.get("last_action_provenance"),
@@ -1515,6 +1544,8 @@ class GroundedPolicyRouter:
         blackboard: PerceptionBlackboard,
         intent: MotorIntent,
     ) -> bool:
+        if self.grounded is None:
+            return False
         interaction_id = _rocket_interaction_id(intent.mode)
         if interaction_id < 0:
             return False
@@ -1562,6 +1593,9 @@ class GroundedPolicyRouter:
         self._grounded_confidence = selected.confidence
         self._last_grounded_feedback_ns = 0
         return True
+
+
+ActionLevelPolicyRouter = GroundedPolicyRouter
 
 
 def _operator_reference_matches(track: object, current_hash: object) -> bool:

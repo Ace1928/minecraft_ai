@@ -6,7 +6,7 @@ import numpy
 import pytest
 
 from minecraft_ai.action_levels import ActionLevel
-from minecraft_ai.config import PolicyConfig
+from minecraft_ai.config import PolicyConfig, RuntimeConfig
 from minecraft_ai.motor import MotorIntent
 from minecraft_ai.perception import (
     FrameState,
@@ -212,17 +212,98 @@ def test_grounded_router_uses_rocket_only_as_grounding_observer() -> None:
     assert grounded.calls == 1
 
 
-def test_grounded_router_prewarms_every_learned_controller() -> None:
+def test_router_startup_warmup_skips_specialists_until_first_use() -> None:
     primary = _RoutingPolicy("steve", key="w")
     grounded = _RoutingPolicy("rocket", key="a")
     raw_motion = _RoutingPolicy("vpt", key="space")
-    router = GroundedPolicyRouter(primary, grounded, raw_motion=raw_motion)
+    gui = _RoutingPolicy("vpt-gui", key="e")
+    router = GroundedPolicyRouter(
+        primary, grounded=grounded, raw_motion=raw_motion, gui=gui
+    )
 
     router.warmup()
 
     assert primary.warmups == 1
-    assert grounded.warmups == 1
     assert raw_motion.warmups == 1
+    assert grounded.warmups == 0
+    assert gui.warmups == 0
+
+    router.act(
+        _tracked_board(),
+        MotorIntent(
+            skill_id="mine",
+            mode="mine",
+            episode_id="mine-1",
+            action_level=ActionLevel.GROUNDED,
+        ),
+        sequence=1,
+    )
+    assert grounded.warmups == 1
+    assert gui.warmups == 0
+
+    router.act(
+        PerceptionBlackboard(),
+        MotorIntent(
+            skill_id="respawn_after_death",
+            mode="death_gui",
+            episode_id="respawn-1",
+            action_level=ActionLevel.GUI,
+        ),
+        sequence=2,
+    )
+    assert gui.warmups == 1
+
+
+def test_router_binds_raw_motion_without_a_grounded_observer() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    raw_motion = _RoutingPolicy("native-vpt", key="space")
+    router = GroundedPolicyRouter(primary, raw_motion=raw_motion)
+    motion = MotorIntent(
+        skill_id="traverse_level_ground",
+        mode="traverse_level_ground",
+        episode_id="motion-1",
+        action_level=ActionLevel.MOTION,
+    )
+
+    first = router.act(PerceptionBlackboard(), motion, sequence=1)
+    assert first.keys_down == ("space",)
+    status = router.status()
+    assert status["active_route"] == "raw_motion"
+    assert status["grounded"] is None
+    assert status["grounding_role"] == "unavailable"
+    assert router.grounded is None
+
+
+def test_build_motor_policy_constructs_raw_without_grounded(monkeypatch) -> None:
+    from minecraft_ai.agent.process import build_motor_policy
+
+    created: list[str] = []
+
+    class FakeClient:
+        def __init__(self, config: PolicyConfig, frame_provider=None) -> None:
+            self.policy_id = config.model_version or config.provider
+            created.append(config.provider)
+
+    monkeypatch.setattr("minecraft_ai.agent.process.TemporalPolicyClient", FakeClient)
+    policy = build_motor_policy(
+        RuntimeConfig(
+            policy=PolicyConfig(
+                enabled=True,
+                provider="minestudio-steve1",
+                model_version="steve",
+            ),
+            raw_motion_policy=PolicyConfig(
+                enabled=True,
+                provider="openai-vpt",
+                model_version="vpt",
+            ),
+        ),
+        frame_provider=lambda: None,
+    )
+    assert isinstance(policy, GroundedPolicyRouter)
+    assert policy.grounded is None
+    assert policy.raw_motion is not None
+    assert created == ["minestudio-steve1", "openai-vpt"]
 
 
 def test_grounded_router_binds_vpt_body_for_atomic_motion_episode() -> None:
@@ -292,8 +373,9 @@ def test_grounded_router_routes_blocking_gui_to_dedicated_learned_expert() -> No
     assert action.keys_up == ("w",)
     assert router.status()["active_route"] == "gui"
     assert router.status()["gui"] == {"policy_id": "vpt-gui"}
+    assert (primary.warmups, grounded.warmups, gui.warmups) == (0, 0, 1)
     router.warmup()
-    assert (primary.warmups, grounded.warmups, gui.warmups) == (1, 1, 1)
+    assert (primary.warmups, grounded.warmups, gui.warmups) == (1, 0, 1)
 
 
 def test_grounded_router_excludes_observer_camera_from_physical_pitch(tmp_path: Path) -> None:
