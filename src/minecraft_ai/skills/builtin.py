@@ -80,7 +80,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             action_permissions=SkillActionPermissions(
                 allow_attack=False,
                 allow_use=False,
-                allow_jump=True,
+                allow_jump=False,
                 allow_drop=False,
                 allow_inventory=False,
                 allow_hotbar=False,
@@ -480,7 +480,6 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             expected_effects=("block_broken",),
             recovery_skills=(
                 "escape_submersion",
-                "traverse_visible_obstacle",
                 "retreat_from_danger",
                 "reacquire_target",
             ),
