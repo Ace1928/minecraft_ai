@@ -84,6 +84,10 @@ MAX_MOTOR_LEASE_TTL_MS = 5_000
 
 
 def _validate_motor_lease_ttl(ttl_ms: int) -> None:
+    # Type annotations do not validate direct callers. NaN would pass both
+    # range comparisons and produce a lease the watchdog can never expire.
+    if type(ttl_ms) is not int:
+        raise MotorRejected("lease ttl must be an integer")
     if ttl_ms < MIN_MOTOR_LEASE_TTL_MS or ttl_ms > MAX_MOTOR_LEASE_TTL_MS:
         raise MotorRejected("lease ttl outside safety bounds")
 
@@ -239,8 +243,12 @@ class MotorGate:
         if not target_instance:
             raise MotorRejected("target instance identity is required")
         _validate_motor_lease_ttl(ttl_ms)
+        if type(max_action_duration_ms) is not int:
+            raise MotorRejected("action duration must be an integer")
         if max_action_duration_ms < 1 or max_action_duration_ms > 1000:
             raise MotorRejected("action duration outside safety bounds")
+        if type(first_sequence) is not int or first_sequence < 0:
+            raise MotorRejected("first sequence must be a non-negative integer")
         with self._lock:
             self._revoke_locked("lease-issue")
             lease = MotorLease(
