@@ -114,7 +114,9 @@ class BootstrapMotorPolicy:
         self._last_mouse_dx = mouse_dx
         self._last_mouse_dy = mouse_dy
 
-        underwater = _reliable_truth(blackboard, "environment.underwater")
+        underwater = _reliable_truth(
+            blackboard, "environment.underwater"
+        ) or _reliable_truth(blackboard, "player.submerged")
         scene_playable = blackboard.fact("scene.playable", min_confidence=0.65)
         playable = not (scene_playable is not None and not bool(scene_playable.value))
 
@@ -124,7 +126,17 @@ class BootstrapMotorPolicy:
         elif underwater:
             desired_keys.add("space")
             desired_keys.add("w")
-        elif mode in {"approach", "navigate", "explore", "mine", "attack", "use"}:
+        elif mode in {
+            "approach",
+            "navigate",
+            "explore",
+            "mine",
+            "attack",
+            "use",
+            "gather_wood",
+            "traverse_level_ground",
+            "traverse_obstacle",
+        }:
             desired_keys.add("w")
             obstacle_detected = bool(
                 obstacle_ahead
@@ -132,7 +144,7 @@ class BootstrapMotorPolicy:
                 and not obstacle_ahead.source.startswith("bootstrap:")
                 and obstacle_ahead.value
             )
-            if obstacle_detected:
+            if obstacle_detected or mode == "traverse_obstacle":
                 desired_keys.add("space")
         elif mode in {"retreat", "backoff"}:
             desired_keys.add("s")
@@ -146,9 +158,12 @@ class BootstrapMotorPolicy:
             desired_keys.add("shift")
         if bool(intent.parameters.get("jump", False)):
             desired_keys.add("space")
+        elif bool(intent.parameters.get("allow_jump", False)):
+            if self._tick_count % 15 == 0:
+                desired_keys.add("space")
 
         # 4. Action button rhythms (mine, attack, place, use)
-        if mode == "mine" and target_visible:
+        if mode in {"mine", "gather_wood"} and target_visible:
             desired_buttons.add("left")
         elif mode == "attack" and target_visible:
             # Tactical hit rhythm on left click

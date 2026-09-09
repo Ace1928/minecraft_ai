@@ -157,7 +157,17 @@ def launch_agent_process(
     process: AgentProcess | None = None
     try:
         command_sha256 = _command_sha256(tuple(command))
-        identity = _linux_process_identity(child.pid) if _IS_LINUX else None
+        identity = None
+        if _IS_LINUX:
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                candidate = _linux_process_identity(child.pid)
+                if candidate is not None and _command_sha256(candidate[1]) == command_sha256:
+                    identity = candidate
+                    break
+                if child.poll() is not None:
+                    break
+                time.sleep(0.02)
         proc_start_ticks = None if identity is None else identity[0]
         process = AgentProcess(
             pid=child.pid,
