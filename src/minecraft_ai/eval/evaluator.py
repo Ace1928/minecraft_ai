@@ -6,10 +6,10 @@ import uuid
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..trajectory import TrajectoryReader
-from .metrics import TraceMetrics, trace_metrics
+from .metrics import TraceMetrics, trace_metrics, validate_external_metrics
 from .tasks import BenchmarkSuite, BenchmarkTask, MetricCriterion, MetricOperator
 
 
@@ -23,9 +23,18 @@ class EvaluationStatus(StrEnum):
 class EvaluationEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    source: str
+    source: str = Field(min_length=1)
     metrics: dict[str, float | int | bool | str] = Field(default_factory=dict)
     artifact_refs: tuple[str, ...] = ()
+
+    @field_validator("metrics")
+    @classmethod
+    def independent_metrics(
+        cls, values: dict[str, float | int | bool | str],
+    ) -> dict[str, float | int | bool | str]:
+        """Keep evaluator outcomes separate from trajectory-owned namespaces."""
+        validate_external_metrics(values)
+        return values
 
 
 class CriterionResult(BaseModel):

@@ -8,12 +8,38 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..trajectory import ReplayTrajectorySample
 
 
+COMPUTED_METRIC_NAMESPACES = frozenset({"trace", "action", "camera", "latency", "safety"})
+
+
+def validate_external_metrics(
+    extra: dict[str, float | int | bool | str],
+    measured_keys: Iterable[str] = (),
+) -> None:
+    """Reject evidence that could impersonate or replace measured trace values."""
+    collisions = set(extra).intersection(measured_keys)
+    reserved = {
+        key for key in extra if key.partition(".")[0] in COMPUTED_METRIC_NAMESPACES
+    }
+    if collisions or reserved:
+        raise ValueError(
+            "invalid evaluation evidence: computed metric names are reserved: "
+            + ", ".join(sorted(collisions | reserved))
+        )
+    for key, value in extra.items():
+        if not key.strip():
+            raise ValueError("invalid evaluation evidence: metric names must be nonempty")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"invalid evaluation evidence: {key} must be finite")
+
+
 class TraceMetrics(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     values: dict[str, float | int | bool | str] = Field(default_factory=dict)
 
     def merged(self, extra: dict[str, float | int | bool | str]) -> TraceMetrics:
+        """Add independent outcomes without changing trace-owned measurements."""
+        validate_external_metrics(extra, self.values)
         values = dict(self.values)
         values.update(extra)
         return TraceMetrics(values=values)

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+from typer.testing import CliRunner
+
+import minecraft_ai.cli as cli
 from minecraft_ai.datasets import ActionLevel, DatasetSource, DatasetSourceType, TrajectoryManifest
 from minecraft_ai.eval import (
     BenchmarkCategory,
@@ -14,7 +19,7 @@ from minecraft_ai.eval import (
     compare_reports,
 )
 from minecraft_ai.eval.bedrock_worlds import BEDROCK_WORLD_CONTRACTS
-from minecraft_ai.eval.metrics import TraceMetricAccumulator
+from minecraft_ai.eval.metrics import TraceMetricAccumulator, TraceMetrics
 from minecraft_ai.perception import FrameState
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.safety import MotorAction
@@ -22,7 +27,7 @@ from minecraft_ai.storage import StateDatabase
 from minecraft_ai.trajectory import ActionOrigin, ActionProvenance, TrajectoryRecorder
 
 
-def _record_jump_trajectory(tmp_path: Path) -> Path:
+def _record_jump_trajectory(tmp_path: Path, *, noop: bool = False) -> Path:
     trajectory_id = "benchmark-jump"
     manifest = TrajectoryManifest(
         trajectory_id=trajectory_id,
@@ -67,7 +72,7 @@ def _record_jump_trajectory(tmp_path: Path) -> Path:
         height=3,
     )
     assert recorder.record_accepted(
-        action=MotorAction(sequence=0, keys_down=("w", "ctrl", "space")),
+        action=MotorAction(sequence=0, keys_down=() if noop else ("w", "ctrl", "space")),
         provenance=ActionProvenance(
             policy_id="synthetic:benchmark-fixture",
             route_id="synthetic",
@@ -146,6 +151,90 @@ def test_comparison_refuses_small_sample_promotion_evidence() -> None:
     )
 
     assert comparison["promotion_evidence_sufficient"] is False
+
+
+def test_external_outcome_cannot_turn_noop_into_measured_movement(tmp_path: Path) -> None:
+    trajectory = _record_jump_trajectory(tmp_path, noop=True)
+    runner = BenchmarkRunner(bedrock_baseline_suite())
+    evidence = EvaluationEvidence(
+        source="controlled-world:test", metrics={"event.destination_reached": 1},
+    )
+    report = runner.evaluate_trajectory(
+        trajectory, task_ids=("a_move_forward",), evidence=evidence,
+    )
+    assert report.results[0].status == EvaluationStatus.FAILED
+    assert report.results[0].metrics["action.forward_presses"] == 0
+    assert report.results[0].criteria[0].observed == 0
+    assert report.results[0].criteria[1].passed is True
+
+    # Frozen Pydantic models still contain mutable dictionaries: the merge boundary
+    # must enforce the same rule even when construction-time validation is bypassed.
+    evidence.metrics["action.forward_presses"] = 1
+    with pytest.raises(ValueError, match="invalid evaluation evidence.*action.forward_presses"):
+        runner.evaluate_trajectory(trajectory, task_ids=("a_move_forward",), evidence=evidence)
+
+
+@pytest.mark.parametrize("key", [
+    "action.forward_presses", "trace.duration_s", "latency.frame_to_accept_p95_ms",
+    "safety.sequence_violations", "camera.world_pitch_net_units", "action.future_metric",
+    "trace", "latency",
+])
+def test_evidence_rejects_computed_namespaces_even_when_measurement_is_absent(key: str) -> None:
+    with pytest.raises(ValueError, match="invalid evaluation evidence"):
+        EvaluationEvidence(source="test", metrics={key: 1})
+    with pytest.raises(ValueError, match="invalid evaluation evidence"):
+        TraceMetrics().merged({key: 1})
+
+
+def test_external_merge_rejects_exact_collision_outside_reserved_namespaces() -> None:
+    measured = TraceMetrics(values={"independent.outcome": 0})
+    with pytest.raises(ValueError, match="computed metric names are reserved"):
+        measured.merged({"independent.outcome": 1})
+    assert measured.values == {"independent.outcome": 0}
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_external_outcomes_must_be_finite(value: float) -> None:
+    with pytest.raises(ValueError, match="must be finite"):
+        EvaluationEvidence(source="test", metrics={"event.destination_reached": value})
+
+
+def test_independent_event_reward_and_custom_outcomes_remain_supported(tmp_path: Path) -> None:
+    trajectory = _record_jump_trajectory(tmp_path)
+    evidence = EvaluationEvidence(source="controlled-world:test", metrics={
+        "event.item_crafted": 1, "reward.inventory_planks_delta": 4, "world.fixture": "crafting",
+    })
+    report = BenchmarkRunner(bedrock_baseline_suite()).evaluate_trajectory(
+        trajectory, task_ids=("b_craft_planks", "a_move_forward"), evidence=evidence,
+    )
+    assert [result.status for result in report.results] == [
+        EvaluationStatus.PASSED, EvaluationStatus.UNSCORED,
+    ]
+    assert report.results[0].metrics["world.fixture"] == "crafting"
+
+
+@pytest.mark.parametrize("command", ["eval", "benchmark"])
+def test_cli_reports_invalid_evidence_before_report_or_database_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str,
+) -> None:
+    trajectory = _record_jump_trajectory(tmp_path)
+    evidence = tmp_path / "evidence.json"
+    evidence.write_text(json.dumps({
+        "source": "test", "metrics": {"action.forward_presses": 1},
+    }), encoding="utf-8")
+    monkeypatch.setattr(cli, "StateDatabase", lambda *_: pytest.fail("invalid report persisted"))
+    output = tmp_path / "report.json"
+    args = (
+        ["eval", "run", "--trajectory", str(trajectory), "--task", "a_move_forward",
+         "--evidence", str(evidence)]
+        if command == "eval" else
+        ["benchmark", "report", "--trajectory-root", str(trajectory.parent),
+         "--evidence-dir", str(tmp_path)]
+    )
+    result = CliRunner().invoke(cli.app, [*args, "--output", str(output)])
+    assert result.exit_code == 2, result.output
+    assert "invalid evaluation evidence" in result.output
+    assert not output.exists()
 
 
 def test_trace_metrics_separate_jump_edges_holds_and_world_pitch_drift() -> None:

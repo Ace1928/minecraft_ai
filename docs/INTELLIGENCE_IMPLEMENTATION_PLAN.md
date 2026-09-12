@@ -257,6 +257,10 @@ Adapt MCU's category idea rather than copying Java assumptions. Define tasks acr
 
 For strict agent evaluation, the agent sees only allowed observations. A **separate evaluator channel** may use controlled test-world instrumentation or post-hoc save/world inspection to score success, because evaluation ground truth is not an agent observation.
 
+Implemented evidence admission is documented in [EVALUATION.md](EVALUATION.md):
+independent outcomes cannot replace computed action, trace, camera, latency or
+safety measurements. This source contract does not close the exit gates below.
+
 ### Baseline metrics
 
 Record before replacing heuristics:

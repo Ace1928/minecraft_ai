@@ -49,6 +49,7 @@ from .knowledge.importers import import_java_datapack, import_minecraft_data
 from .human_recording import HumanRecordingRequest, record_human_session
 from .eval import (
     BenchmarkRunner,
+    EvaluationEvidence,
     TraceMetricAccumulator,
     bedrock_baseline_suite,
     compare_reports,
@@ -1244,7 +1245,7 @@ def eval_run(
     report = runner.evaluate_trajectory(
         trajectory,
         task_ids=tuple(task_ids),
-        evidence=None if evidence is None else load_evidence(evidence),
+        evidence=None if evidence is None else _load_evaluation_evidence(evidence),
         git_commit=_git_commit(),
     )
     destination = output or _benchmark_output(report.benchmark_run_id)
@@ -1294,7 +1295,7 @@ def benchmark_report(
     evidence_by_trajectory = {}
     if evidence_dir is not None:
         for evidence_path in sorted(evidence_dir.glob("*.json")):
-            evidence_by_trajectory[evidence_path.stem] = load_evidence(evidence_path)
+            evidence_by_trajectory[evidence_path.stem] = _load_evaluation_evidence(evidence_path)
     runner = BenchmarkRunner(bedrock_baseline_suite())
     report = runner.evaluate_many(
         trajectories,
@@ -1307,6 +1308,13 @@ def benchmark_report(
         database.save_benchmark_report(report)
     print(report.model_dump_json(indent=2))
     print(f"[green]Benchmark report:[/green] {destination}")
+
+
+def _load_evaluation_evidence(path: Path) -> EvaluationEvidence:
+    try:
+        return load_evidence(path)
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(f"invalid evaluation evidence in {path}: {exc}") from exc
 
 
 def _benchmark_output(benchmark_run_id: str) -> Path:
