@@ -1,0 +1,21 @@
+name: Upgrade patch review
+on:
+  push:
+    branches: ['agent-upgrade/reactive-20260912']
+    paths: ['.github/workflows/upgrade-review.yml']
+permissions:
+  contents: read
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python -c "import pathlib,base64,zlib; pathlib.Path('upgrade.patch').write_bytes(zlib.decompress(base64.b64decode(pathlib.Path('.agent-upgrade.patch.b64').read_bytes())))"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-patch
+          path: upgrade.patch
+          retention-days: 1
