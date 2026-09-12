@@ -68,6 +68,8 @@ class SkillSpec(BaseModel):
     max_duration_ms: int = Field(default=30_000, ge=50, le=3_600_000)
     action_level: ActionLevel = ActionLevel.LATENT
     outcome_kind: Literal["traversal"] | None = None
+    allow_unknown_block_probe: bool = False
+    inactivity_timeout_ms: int | None = Field(default=None, ge=1000, le=120_000)
     policy_ref: str | None = None
     policy_instruction: str | None = Field(default=None, min_length=1, max_length=256)
     policy_condition_scale: float | None = Field(default=None, ge=0.0, le=12.0)

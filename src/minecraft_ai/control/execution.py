@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from minecraft_ai.perception import CognitionReadView
 from minecraft_ai.control.action_envelope import constrain_action
+from minecraft_ai.control.mining_knowledge import MiningKnowledge, MiningTrial
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from minecraft_ai.crafting_control import (
     BoundedPlankCraftController,
@@ -105,6 +106,7 @@ class _OptionFrame:
 
     spec: SkillSpec
     run: SkillRun
+    last_active_input_ns: int
     parameters: dict[str, str | int | float | bool]
     instruction_override: str | None
     initiated: bool
@@ -180,9 +182,11 @@ class SkillExecutor:
         self._run: SkillRun | None = None
         self._parameters: dict[str, str | int | float | bool] = {}
         self._instruction_override: str | None = None
+        self._last_active_input_ns = 0
         self._initiated = False
         self._last_intent: MotorIntent | None = None
         self._mining_guard = MiningLeaseGuard()
+        self._mining_trials: dict[str, MiningTrial] = {}
         self._plank_crafter = BoundedPlankCraftController()
         self._outcome_verifier = TemporalOutcomeVerifier()
         self._pending_mining_verification: _PendingMiningVerification | None = None
@@ -203,6 +207,28 @@ class SkillExecutor:
         self._locomotion_progress_events_required = 1
         self._locomotion_progress_min_ms = 0
         self._option_stack: list[_OptionFrame] = []
+
+    def configure_mining_timing(self, *, max_hold_ms: int, acquisition_ms: int) -> None:
+        if self._run is not None and self._run.outcome == SkillOutcome.RUNNING:
+            raise RuntimeError("configure timing before starting input")
+        if (type(max_hold_ms) is not int or not 1000 <= max_hold_ms <= 120_000
+                or type(acquisition_ms) is not int or not 1000 <= acquisition_ms <= 60_000):
+            raise ValueError("mining timing outside bounded configuration range")
+        self._mining_guard.absolute_max_ms = max_hold_ms
+        self._mining_guard.acquisition_timeout_ms = acquisition_ms
+
+    def configure_mining_knowledge(self, knowledge: MiningKnowledge) -> None:
+        if self._run is not None and self._run.outcome == SkillOutcome.RUNNING:
+            raise RuntimeError("configure mining knowledge before starting input")
+        self._mining_guard.knowledge = knowledge
+
+    @property
+    def mining_knowledge(self) -> MiningKnowledge | None:
+        value = getattr(self._mining_guard, "knowledge", None)
+        return value if isinstance(value, MiningKnowledge) else None
+
+    def take_mining_trial(self, run_id: str) -> MiningTrial | None:
+        return self._mining_trials.pop(run_id, None)
 
     @property
     def run(self) -> SkillRun | None:
@@ -251,7 +277,12 @@ class SkillExecutor:
         """Return option bindings intersected with the skill's action contract."""
         if self._spec is None or self._run is None:
             return {}
-        return _policy_parameters(self._spec.action_permissions, self._parameters)
+        parameters = _policy_parameters(self._spec.action_permissions, self._parameters)
+        parameters.pop("allow_unknown_block_probe", None)
+        if (self._spec.allow_unknown_block_probe and parameters.get("allow_attack") is True
+                and self._parameters.get("allow_unknown_block_probe") is not False):
+            parameters["allow_unknown_block_probe"] = True
+        return parameters
 
     def close(self) -> None:
         close = getattr(self.policy, "close", None)
@@ -322,11 +353,14 @@ class SkillExecutor:
             raise ValueError("gather_acquisitions_remaining must be between 1 and 3")
         started = time.monotonic_ns() if now_ns is None else now_ns
         self._spec = spec
+        self._last_active_input_ns = started
         self._parameters = dict(parameters or {})
         self._instruction_override = instruction
         self._initiated = False
         self._last_intent = None
         self._mining_guard.reset()
+        self._mining_guard.attempt = None
+        self._mining_guard.attempt_count = 0
         self._plank_crafter.reset()
         self._outcome_verifier.reset()
         self._pending_mining_verification = None
@@ -396,6 +430,9 @@ class SkillExecutor:
         if self.option_depth >= _MAX_OPTION_DEPTH:
             raise RuntimeError("option stack depth exceeded")
         self._option_stack.append(self._capture_option_frame())
+        self._mining_guard = replace(
+            self._mining_guard, _lease=None, _pending=None, _held_keys=set(), _held_buttons=set(),
+        )
         self._run = None
         self._spec = None
         try:
@@ -427,6 +464,7 @@ class SkillExecutor:
         return _OptionFrame(
             spec=self._spec,
             run=self._run,
+            last_active_input_ns=self._last_active_input_ns,
             parameters=dict(self._parameters),
             instruction_override=self._instruction_override,
             initiated=self._initiated,
@@ -454,6 +492,7 @@ class SkillExecutor:
         )
 
     def _restore_option_frame(self, frame: _OptionFrame) -> None:
+        self._last_active_input_ns = frame.last_active_input_ns
         self._spec = frame.spec
         self._run = frame.run
         self._parameters = dict(frame.parameters)
@@ -642,6 +681,18 @@ class SkillExecutor:
         )
         self._last_intent = intent
         mining = self._mining_guard.inspect(action, blackboard, intent, now_ns=now)
+        if mining.failure_code is None:
+            emitted = mining.action
+            if (emitted.mouse_dx or emitted.mouse_dy or emitted.keys_down
+                    or emitted.buttons_down or self._mining_guard.held_keys
+                    or self._mining_guard.held_buttons):
+                self._last_active_input_ns = now
+            limit = self._spec.inactivity_timeout_ms
+            if limit is not None and now - self._last_active_input_ns >= limit * 1_000_000:
+                return self._finish(
+                    SkillOutcome.FAILED, now, "controller emitted no permitted active input",
+                    recover=True, failure_code=SkillFailureCode.CONTROLLER_STARVATION,
+                )
         accepted_left_press = bool(
             mining.failure_code is None and "left" in mining.action.buttons_down
         )
@@ -1435,6 +1486,37 @@ class SkillExecutor:
             force_release_keys=force_release_keys,
             force_release_buttons=force_release_buttons,
         )
+        try:
+            attempt = getattr(self._mining_guard, "attempt", None)
+            knowledge = self.mining_knowledge
+            if (attempt is not None and knowledge is not None
+                    and attempt.episode_id == current.run_id
+                    and getattr(self._mining_guard, "attempt_count", 0) == 1
+                    and attempt.target.selected_item != "unverified_item"
+                    and ended_ns > attempt.started_ns):
+                verified = bool(
+                    outcome_verification is not None
+                    and outcome_verification.run_id == current.run_id
+                    and outcome_verification.kind == OutcomeKind.MINING
+                    and outcome_verification.status == OutcomeStatus.SUCCEEDED
+                    and outcome_verification.signal == OutcomeSignal.BLOCK_BROKEN
+                    and outcome_verification.confidence >= 0.9
+                    and outcome_verification.target_kind == attempt.target.kind
+                )
+                # A timeout, stopped input, or missing drop censors the attempt.
+                # None is deliberately not a negative mechanics/harvest label.
+                trial = MiningTrial(
+                    attempt_id=current.run_id,
+                    key=knowledge.key(attempt.target.kind, attempt.target.selected_item),
+                    broke=True if verified else None,
+                    elapsed_ms=(ended_ns - attempt.started_ns) / 1_000_000,
+                    evidence=("verified:block_broken" if verified else "censored:" + outcome.value),
+                )
+                if len(self._mining_trials) >= 128:
+                    self._mining_trials.pop(next(iter(self._mining_trials)))
+                self._mining_trials[current.run_id] = trial
+        except ValueError:
+            pass  # Invalid/incomplete metadata censors learning, never input release.
         policy_status = _policy_status_snapshot(self.policy)
         self._last_intent = None
         self._outcome_verifier.reset()

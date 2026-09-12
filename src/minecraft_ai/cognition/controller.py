@@ -161,6 +161,12 @@ class HighLevelController:
                     }
                     for goal in selected_goals
                 ],
+                "mining_evidence": list(context.mining_evidence[:4]),
+                "mining_evidence_semantics": (
+                    "Break, harvest and pickup are separate outcomes. Missing pickup does not "
+                    "establish a wrong tool. Game rules and empirical counts are distinct; "
+                    "unknown capability may warrant an allowed, grounded mining experiment."
+                ),
                 "memories": [
                     {
                         "id": memory.memory_id[:64],

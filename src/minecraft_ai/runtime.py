@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from minecraft_ai.control.mining import is_hand_safe_soft_block
+
 import concurrent.futures
 import copy
 import logging
@@ -67,6 +69,7 @@ from .plan_graph import (
 )
 from .planning import Goal, GoalSource
 from .roles import RoleProfile
+from .outcome_verifier import OutcomeKind, OutcomeStatus
 from .safety import MotorAction
 from .skills import (
     SkillLibrary,
@@ -269,6 +272,7 @@ class AgentRuntime:
     social: SocialState = field(default_factory=SocialState)
     custom_goals: list[Goal] = field(default_factory=list)
     state_db: StateDatabase | None = None
+    mining_ruleset_id: str | None = None
     motor_hz: float = 20.0
     cognition_hz: float = 0.5
     cognition_request_timeout_ms: int = 60_000
@@ -323,6 +327,7 @@ class AgentRuntime:
     _plan_step_completed_ns: int = field(default=0, init=False)
     _plan_graph: PlanGraph | None = field(default=None, init=False)
     _experience: ExperienceGraph = field(default_factory=ExperienceGraph, init=False)
+    _mining_collection_parents: dict[str, str] = field(default_factory=dict, init=False)
     _last_operator_target_id: str | None = field(default=None, init=False)
     _policy_warmup_error: str | None = field(default=None, init=False)
     _gui_fast_path_deferred: bool = field(default=False, init=False)
@@ -374,6 +379,12 @@ class AgentRuntime:
             raise ValueError("bound cognition timeout must be between 1 and 300000 ms")
         if self.stale_frame_consecutive_limit < 1:
             raise ValueError("stale_frame_consecutive_limit must be positive")
+        from minecraft_ai.control.mining_knowledge import MiningKnowledge
+        configure_mining = getattr(self.executor, "configure_mining_knowledge", None)
+        if callable(configure_mining) and getattr(self.executor, "mining_knowledge", None) is None:
+            configure_mining(MiningKnowledge(
+                self.memories, self.mining_ruleset_id or ("session:" + uuid.uuid4().hex),
+            ))
         self._pool = SingleWorkerDaemonExecutor(
             thread_name="minecraft-ai-cognition",
         )
@@ -934,7 +945,7 @@ class AgentRuntime:
                 expires_after_ms=6_000,
             ),),
         )
-        return self._start_skill(
+        collection = self._start_skill(
             self.skills.get("collect_recent_drop"),
             source=SkillStartSource.CONTINUATION,
             parent_run_id=broken_run.run_id,
@@ -942,6 +953,12 @@ class AgentRuntime:
             context_key=broken_run.context_key,
             collection_hotbar_log_baseline=baseline,
         )
+        if not hasattr(self, "_mining_collection_parents"):
+            self._mining_collection_parents = {}
+        if len(self._mining_collection_parents) >= 128:
+            self._mining_collection_parents.pop(next(iter(self._mining_collection_parents)))
+        self._mining_collection_parents[collection.run_id] = broken_run.run_id
+        return collection
 
     def _clear_drop_collection_authorization(self, run: SkillRun) -> None:
         """Revoke the short-lived pickup fact on every collector terminal path."""
@@ -1022,7 +1039,7 @@ class AgentRuntime:
                     recovery.phase = "retry"
                     recovery.retry_run_id = retry_id
                     self._start_skill(
-                        self.skills.get("traverse_visible_obstacle"),
+                        self._headroom_retry_spec(recovery.origin_skill_id),
                         source=SkillStartSource.RECOVERY,
                         parent_run_id=result.run.run_id,
                         run_id=retry_id,
@@ -1073,7 +1090,7 @@ class AgentRuntime:
             now_ns = time.monotonic_ns()
             active_vlm = self.perception.active_vlm
             assert active_vlm is not None
-            traversal = self.skills.get("traverse_visible_obstacle")
+            traversal = self._headroom_retry_spec(result.run.skill_id)
             self._headroom_recovery = _HeadroomRecovery(
                 context_key=result.run.context_key,
                 traversal_parameters=_compatible_recovery_parameters(
@@ -1085,6 +1102,18 @@ class AgentRuntime:
                 origin_run_id=result.run.run_id,
             )
         return True
+
+    def _headroom_retry_spec(self, origin_skill_id: str) -> SkillSpec:
+        origin = self.skills.specs.get(origin_skill_id)
+        if origin is not None and (
+            origin.outcome_kind == "traversal"
+            or origin.skill_id in {
+                "traverse_level_ground", "traverse_visible_obstacle", "explore_forward",
+            }
+        ):
+            return origin
+        # Moving again cannot complete a resource-gathering objective.
+        return self.skills.get("traverse_visible_obstacle")
 
     def _quiesce_headroom_inputs(self) -> bool:
         """Release every held input while preserving this runtime's live lease."""
@@ -1365,6 +1394,7 @@ class AgentRuntime:
             recovery,
             now_ns=time.monotonic_ns(),
             current_frame=self.perception.last_capture,
+            mining_knowledge=self.executor.mining_knowledge,
         )
         if target is not None:
             run_id = uuid.uuid4().hex
@@ -1385,9 +1415,11 @@ class AgentRuntime:
                 parameters={
                     "target": target.kind,
                     "target_track_id": track_id,
+                    **({"harvest_required": False}
+                       if not is_hand_safe_soft_block(target.kind) else {}),
                 },
                 instruction=(
-                    "Mine only the grounded soft block under the crosshair until it breaks."
+                    "Clear only the grounded blocking block under the crosshair."
                 ),
             )
             return
@@ -4020,13 +4052,6 @@ class AgentRuntime:
 
         if run.outcome == SkillOutcome.RUNNING:
             raise ValueError("cannot record a running skill")
-        experience = getattr(self, "_experience", None)
-        if experience is not None:
-            spec = None
-            skills = getattr(self, "skills", None)
-            if skills is not None and run.skill_id in skills.specs:
-                spec = skills.get(run.skill_id)
-            experience.observe(run, spec)
         if run.run_id == self._disposable_keepalive_run_id:
             self._disposable_keepalive_run_id = None
         if run.run_id in self._recorded_run_ids:
@@ -4044,10 +4069,48 @@ class AgentRuntime:
             self._recorded_run_ids.discard(self._recorded_run_order.popleft())
         self._recorded_run_order.append(run.run_id)
         self._recorded_run_ids.add(run.run_id)
+        experience = getattr(self, "_experience", None)
+        if experience is not None:
+            spec = None
+            skills = getattr(self, "skills", None)
+            if skills is not None and run.skill_id in skills.specs:
+                spec = skills.get(run.skill_id)
+            experience.observe(run, spec)
+        executor = getattr(self, "executor", None)
+        take_trial = getattr(executor, "take_mining_trial", None)
+        trial = take_trial(run.run_id) if callable(take_trial) else None
+        knowledge = getattr(executor, "mining_knowledge", None)
+        if trial is not None and knowledge is not None:
+            learned = knowledge.record(trial)
+            if learned is not None and self.state_db is not None:
+                self._pending_memories[learned.memory_id] = learned
         matching_verification = outcome_verification
         if matching_verification is not None and matching_verification.run_id != run.run_id:
             matching_verification = None
             logging.getLogger(__name__).error("Skill-terminal evidence rejected: ValueError")
+        parents = getattr(self, "_mining_collection_parents", {})
+        parent_id = parents.pop(run.run_id, None)
+        parent_trial = (knowledge.trial(parent_id)
+                        if knowledge is not None and parent_id is not None else None)
+        if knowledge is not None and parent_trial is not None and parent_trial.broke is True:
+            from minecraft_ai.control.mining_knowledge import MiningTrial
+            collected = bool(
+                run.outcome == SkillOutcome.SUCCEEDED and matching_verification is not None
+                and matching_verification.kind == OutcomeKind.RESOURCE_ACQUISITION
+                and matching_verification.status == OutcomeStatus.SUCCEEDED
+                and matching_verification.signal == OutcomeSignal.RESOURCE_ACQUIRED
+                and matching_verification.confidence >= 0.9
+            )
+            collection_trial = MiningTrial(
+                attempt_id=run.run_id, parent_attempt_id=parent_id, key=parent_trial.key,
+                harvested=True if collected else None,
+                picked_up=True if collected else None,
+                elapsed_ms=max(0.001, ((run.ended_ns or run.started_ns) - run.started_ns) / 1e6),
+                evidence="verified:resource_acquired" if collected else "collection:unresolved",
+            )
+            learned = knowledge.record(collection_trial)
+            if learned is not None and self.state_db is not None:
+                self._pending_memories[learned.memory_id] = learned
         self._finish_keepalive_prediction_evidence(run, matching_verification)
         try:
             self.on_skill_run_terminal(
@@ -4412,7 +4475,11 @@ class AgentRuntime:
         progression = self._progression_goal()
         if progression is not None:
             goals = (progression, *goals)
-        memories = tuple(self.memories.retrieve(limit=20))
+        knowledge = getattr(getattr(self, "executor", None), "mining_knowledge", None)
+        memories = tuple(record for record in self.memories.retrieve(limit=40)
+                         if record.source != "runtime:mining-trial-v1"
+                         or (knowledge is not None
+                             and record.metadata.get("ruleset") == knowledge.scope))[:20]
         operator_messages: tuple[OperatorMessage, ...] = ()
         if operator_context is not None:
             messages = tuple(
@@ -4457,6 +4524,7 @@ class AgentRuntime:
             role=self.role,
             goals=goals,
             memories=memories,
+            mining_evidence=self._mining_planning_evidence(knowledge),
             promises=self.social.active_promises(),
             wiki=(),
             operator_messages=operator_messages,
@@ -4470,6 +4538,36 @@ class AgentRuntime:
             ),
             active_perception_target=self._active_cognition_perception_target(),
         )
+
+    def _mining_planning_evidence(self, knowledge: Any) -> tuple[dict[str, Any], ...]:
+        """Bounded facts for choosing tools, not new input authority."""
+        if knowledge is None:
+            return ()
+        kind = self.blackboard.fact("target.kind", min_confidence=0.7)
+        if kind is None or not isinstance(kind.value, str) or kind.source.startswith("bootstrap:"):
+            return ()
+        selected = self.blackboard.fact("player.selected_slot", min_confidence=0.7)
+        equipped = selected.value if selected is not None else None
+        rows: list[dict[str, Any]] = []
+        for slot in sorted(range(9), key=lambda slot: slot != equipped):
+            item = self.blackboard.fact(f"hotbar.slot.{slot}.item", min_confidence=0.7)
+            if (item is None or not isinstance(item.value, str)
+                    or item.source.startswith("bootstrap:")):
+                continue
+            belief = knowledge.belief(kind.value, item.value)
+            rule = knowledge.rule(kind.value, item.value)
+            rows.append({
+                "block": kind.value, "tool": item.value, "slot": slot,
+                "equipped": slot == equipped,
+                "observed_breaks": belief.breaks, "observed_harvests": belief.harvests,
+                "observed_nonharvests": belief.nonharvests, "observed_pickups": belief.pickups,
+                "censored_attempts": belief.censored,
+                "game_rule": None if rule is None else rule.model_dump(),
+                "scope": knowledge.scope,
+            })
+            if len(rows) == 4:
+                break
+        return tuple(rows)
 
     def _start_recovery_skill(
         self,

@@ -21,11 +21,13 @@ def build_bootstrap_skill_library() -> SkillLibrary:
     specs = (
         SkillSpec(
             skill_id="survey_surroundings",
+            version=2,
             name="Survey surroundings",
             description=(
                 "Stop walking and use the camera to inspect alternative routes and visible "
                 "obstructions. Camera motion is chosen by the installed policy, not a scan macro."
             ),
+            inactivity_timeout_ms=5_000,
             stage=SkillStage.EXPERIMENTAL,
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("surroundings_inspected",),
@@ -108,12 +110,13 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="mine_visible_block",
-            version=6,
+            version=7,
             name="Mine visible block",
             description=(
                 "Approach the visible mineable block, aim at its center, and hold attack until "
                 "the bound block is visually verified broken"
             ),
+            allow_unknown_block_probe=True,
             stage=SkillStage.EXPERIMENTAL,
             parameters=("target",),
             preconditions=(
@@ -131,7 +134,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 "reacquire_target",
                 "retreat_from_danger",
             ),
-            max_duration_ms=20_000,
+            max_duration_ms=45_000,
             action_level=ActionLevel.GROUNDED,
             policy_ref="mine",
             policy_instruction="mine the target block",
@@ -485,7 +488,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="gather_nearby_wood",
-            version=7,
+            version=8,
             name="Gather nearby wood",
             description=(
                 "Acquire exactly three new oak logs as three verified break-and-pickup "
@@ -498,6 +501,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 "inventory.hotbar.logs from the pinned calibrated oak-log observer; hidden "
                 "inventory, other wood species, and generic inventory.logs claims do not qualify"
             ),
+            inactivity_timeout_ms=8_000,
             stage=SkillStage.EXPERIMENTAL,
             parameters=(),
             success_conditions=(),

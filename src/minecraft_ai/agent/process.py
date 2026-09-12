@@ -170,6 +170,14 @@ def main(argv: list[str] | None = None) -> int:
             if isinstance(estimated_pitch, int) and callable(restore_camera):
                 restore_camera(estimated_pitch_units=estimated_pitch)
         executor = SkillExecutor(policy)
+        executor.configure_mining_timing(
+            max_hold_ms=config.mining_max_hold_ms,
+            acquisition_ms=config.mining_acquisition_timeout_ms,
+        )
+        if config.mining_rule_snapshot is not None:
+            from minecraft_ai.control.mining_knowledge import MiningKnowledge, MiningRuleSnapshot
+            snapshot = MiningRuleSnapshot.load(Path(config.mining_rule_snapshot).expanduser())
+            executor.configure_mining_knowledge(MiningKnowledge(memories, snapshot.scope, snapshot))
         trajectory: TrajectoryRecorder | None = None
         trajectory_disabled_reason: str | None = (
             None if config.trajectory.enabled else "disabled-by-configuration"
@@ -226,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
             memories=memories,
             social=social,
             state_db=database,
+            mining_ruleset_id=config.mining_ruleset_id,
             motor_hz=config.motor_hz,
             cognition_hz=config.cognition_hz,
             semantic_hz=config.semantic_hz,
