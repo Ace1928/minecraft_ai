@@ -291,3 +291,21 @@ def test_runtime_rechecks_selected_skill_and_active_directive(tmp_path, skill_id
         assert database.load_operator_messages(limit=1)[0].status == (
             OperatorMessageStatus.ACKNOWLEDGED if admitted else status
         )
+
+
+@pytest.mark.parametrize("text,expected", (
+    ("traverse_level_ground", ("traverse_level_ground",)),
+    ("traverse level ground", ("traverse_level_ground",)),
+    ("Cross level ground ahead.", ("traverse_level_ground",)),
+    ("traverse_visible_obstacle", ("traverse_visible_obstacle",)),
+    ("traverse visible obstacle", ("traverse_visible_obstacle",)),
+    ("traverse obstacle", ("traverse_visible_obstacle",)),
+    ("jump obstacle", ("traverse_visible_obstacle",)),
+    ("explore_forward", ("explore_forward",)),
+    ("explore", ("explore_forward",)),
+    ("move forward", ("explore_forward", "traverse_level_ground")),
+    ("walk ahead", ("explore_forward", "traverse_level_ground")),
+))
+def test_operator_requested_skill_ids_traversal_specialization(text, expected):
+    assert _operator_requested_skill_ids(text) == expected
+

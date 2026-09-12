@@ -426,11 +426,15 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
         add("approach_visible_target")
     if re.search(r"\b(?:find|locate|reacquire)\b.*\b(?:target|tree|block|object)\b", normalized):
         add("reacquire_target")
-    if re.search(r"\b(?:jump|climb|cross)\b.*\b(?:ledge|obstacle|rise|step)\b", normalized):
-        add("traverse_visible_obstacle")
-    if re.search(r"\bexplore\b", normalized):
-        add("explore_forward")
     if re.search(
+        r"\b(?:jump|climb|cross|traverse)\b.*\b(?:ledge|obstacle|rise|step)\b", normalized
+    ):
+        add("traverse_visible_obstacle")
+    if re.search(r"\blevel ground\b", normalized):
+        add("traverse_level_ground")
+    elif re.search(r"\bexplore\b", normalized):
+        add("explore_forward")
+    elif re.search(
         r"\b(?:move|run|traverse|walk)\b.*\b(?:ahead|forward|ground|terrain)\b", normalized
     ):
         add("explore_forward")
