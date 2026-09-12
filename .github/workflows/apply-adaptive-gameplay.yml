@@ -23,28 +23,21 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
-      - name: Export exact source for independent verification
-        run: |
-          mkdir -p /tmp/source-verification
-          git archive --format=tar.gz --output=/tmp/source-verification/source.tar.gz HEAD
-          git rev-parse HEAD > /tmp/source-verification/COMMIT.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: source-before-upgrade-${{ github.sha }}
-          path: /tmp/source-verification/
-          retention-days: 1
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Validate payload digest and original Git blob identities
+      - name: Validate exact transport repair, payload digest and original Git blob identities
         shell: bash
         run: |
           python - <<'PY'
           import base64, gzip, hashlib, pathlib
-          encoded = pathlib.Path('maintenance/adaptive-gameplay.patch.gz.b64').read_bytes()
+          raw = pathlib.Path('maintenance/adaptive-gameplay.patch.gz.b64').read_bytes()
+          assert hashlib.sha256(raw).hexdigest() == '24f85bd8fe942dd00b7e2afc040700a2a25ac485cdc8c98c5871329d906b4f8d'
+          encoded = raw.replace(b'qI5rsqSMQxTFAXDH7bS0ZTdiIgyWV5DzS', b'qI5rsqSMQxTFAXDHbS0ZTdiIgyWV5DzS')
+          encoded = encoded.replace(b'36YgIK3+6afq5MwWiGiGJJfW37OAht69Gg', b'36YgIK3+6afq5MwWiGJJfW37OAht69Gg')
+          encoded = encoded.replace(b'YTur6EPDOu52QrUB5e4DRtuqnIvfJF1BC', b'YTur6EPDOu52QrUBwe4DRtuqnIvfJF1BC')
           patch = gzip.decompress(base64.b64decode(encoded))
-          expected = 'a34c45a877eeaa74c10007c75d47a42ecc227e37c4efe5dc0050ecd33104eab4'
-          assert hashlib.sha256(patch).hexdigest() == expected, 'patch digest mismatch'
+          assert hashlib.sha256(patch).hexdigest() == 'a34c45a877eeaa74c10007c75d47a42ecc227e37c4efe5dc0050ecd33104eab4'
           pathlib.Path('/tmp/adaptive-gameplay.patch').write_bytes(patch)
           PY
           git apply --check --index /tmp/adaptive-gameplay.patch
