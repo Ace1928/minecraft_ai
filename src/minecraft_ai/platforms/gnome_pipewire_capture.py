@@ -22,6 +22,7 @@ from .bedrock_x11 import (
     resolve_host_monitor_content_rect,
     validate_host_monitor_window,
 )
+from .capture_source import BedrockCaptureSource
 
 
 _SYSTEM_PYTHON = Path("/usr/bin/python3")
@@ -384,13 +385,14 @@ def create_bedrock_capture(
     *,
     allow_host: bool = False,
     host_monitor_binding: HostMonitorBinding | None = None,
-    source: str = "pipewire",
+    source: BedrockCaptureSource | str = BedrockCaptureSource.PIPEWIRE,
 ) -> IsolatedX11Capture | MutterPipeWireCapture:
     """Select PipeWire only for a proven host-monitor session.
 
     ``source="x11"`` forces the window-targeted X11 capture (XGetImage) which is
     fully supported on host displays and needs no ScreenCast portal session.
     """
+    source = BedrockCaptureSource(source)
     if host_monitor_binding is None:
         return IsolatedX11Capture(
             display_name,
@@ -403,7 +405,7 @@ def create_bedrock_capture(
         raise IsolationError("host-monitor capture display does not match binding")
     if host_monitor_binding.window_id != target_window_id:
         raise IsolationError("host-monitor capture window does not match binding")
-    if source == "x11":
+    if source == BedrockCaptureSource.X11:
         return IsolatedX11Capture(
             display_name,
             target_window_id,

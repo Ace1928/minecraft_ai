@@ -77,6 +77,7 @@ from .platforms.bedrock_session import (
     stop_bedrock_session,
     wait_for_minecraft_window,
 )
+from .platforms.capture_source import BedrockCaptureSource
 from .roles import BUILTIN_ROLES
 from .service_control import (
     persistent_agent_service_load_state,
@@ -491,8 +492,8 @@ def run(
     role: str = typer.Option("generalist", help="Role/archetype profile."),
     edition: Edition = typer.Option(DEFAULT_EDITION, "--edition"),
     live: bool = typer.Option(False, help="Run the realtime isolated Bedrock agent."),
-    capture_source: str = typer.Option(
-        "pipewire",
+    capture_source: BedrockCaptureSource = typer.Option(
+        BedrockCaptureSource.PIPEWIRE,
         "--capture-source",
         help="Capture source: pipewire (default) or x11 (window-targeted XGetImage).",
     ),

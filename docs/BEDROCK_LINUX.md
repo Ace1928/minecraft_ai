@@ -80,8 +80,9 @@ Before arming live control, confirm that the dashboard frame includes all
 hearts, hunger icons, and all nine hotbar slots. A partially clipped HUD is not
 a valid perception or trajectory-recording surface. `run --live` enforces this
 as a fail-closed actuator interlock: it will not attach or issue a gameplay
-lease until an isolated capture contains both the survival heart bank and the
-hotbar. This detector is only a launch-safety interlock; it is explicitly not a
+lease until an isolated capture contains the full survival HUD or a recognized
+death, away, or inventory overlay that the agent can recover from. This detector
+is only a launch-safety interlock; it is explicitly not a
 semantic perception source or training label.
 
 ## Private-LAN operator dashboard
@@ -131,13 +132,19 @@ The profile is accepted only when the active Bedrock version, in-game mouse
 sensitivity, and configured per-axis policy scales match. Yaw and pitch are
 measured independently: WineGDK/Bedrock must not be assumed to map both axes
 through one scalar. On the first attachment to a physical game window, the
-supervisor uses a one-use mouse-only lease to home the pitch axis and establish
-a measured horizon. Calibration motion is paced across Bedrock input frames so
-Xwayland cannot collapse the pole and return phases into one net delta.
-Reattaching to that same physical target preserves the origin; changing targets
-invalidates it.
+supervisor uses a one-use mouse-only lease to send pitch homing commands and
+establish a command-origin estimate. Motion is paced across Bedrock input frames
+to reduce event coalescing. Completion and accepted counts do not verify the
+physical horizon; that retained-image qualification remains open. Reattaching to
+the same physical target preserves the command origin; changing targets
+invalidates it, as does starting a new calibration attempt.
 
-Sign in/select a world through the nested Bedrock window normally. Then start the agent:
+Observe the headless client through the captured-frame dashboard. For a configured
+local BedrockConnect server, `minecraft-ai bedrock navigate` performs bounded,
+screenshot-bound menu navigation (see `--help` for exact server selection). It is
+not a general sign-in flow, and there is no nested host window for normal physical
+keyboard/mouse interaction. Once the client is in-world or on a supported recovery
+overlay, start the agent:
 
 ```bash
 minecraft-ai run --live --role generalist
@@ -145,13 +152,14 @@ minecraft-ai run --live --role generalist
 
 `run --live` performs these steps:
 
-1. verify the emergency-stop latch is clear;
+1. parse options, including the shared `--capture-source [pipewire|x11]` choice,
+   before any runtime mutation, then verify emergency-stop/operator-pause latches;
 2. start/reuse the independent supervisor;
-3. verify the managed nested Bedrock session;
-4. find the Minecraft window only on that nested display;
-5. verify a complete survival HUD from the isolated capture;
+3. verify the managed headless Bedrock session and virtual-seat input isolation;
+4. find the Minecraft window only on that private display;
+5. verify a complete survival HUD or supported recovery overlay from the isolated capture;
 6. attach the isolated XTEST backend to that window;
-7. validate the exact-version mouse calibration and establish physical horizon;
+7. validate the exact-version mouse profile and establish/preserve the command-origin estimate;
 8. issue a short-lived motor capability lease;
 9. enter supervisor `RUNNING` state;
 10. spawn the independent realtime agent process;
@@ -168,7 +176,7 @@ minecraft-ai stop
 
 This stops the realtime agent first and then the supervisor.
 
-Stop the nested Bedrock session separately with:
+Stop the managed Bedrock session separately with:
 
 ```bash
 minecraft-ai bedrock stop
@@ -190,13 +198,24 @@ minecraft-ai reset-emergency-stop
 
 ## Capture
 
-`IsolatedX11Capture` connects to the nested X server and resolves the selected Minecraft window geometry. `mss` captures only that window region into BGRA frames. Capture timestamps must be monotonic and stale frames are fatal to the motor runtime.
+`--capture-source` accepts only `pipewire` (default preference) and `x11`. Unknown
+values fail CLI parsing before configuration writes, supervisor startup, capture,
+attachment, calibration or arming. The child parser and capture factory use the
+same supported-source definition. A valid PipeWire preference selects X11 on the
+headless private display; Mutter/PipeWire requires an exact host-monitor binding
+and explicit host capture permission. Host capture does not authorize autonomous
+host input.
+
+`IsolatedX11Capture` resolves the selected Minecraft drawable on the private X
+server. It tries window-targeted XGetImage, with scoped `mss`/root-image fallbacks,
+and validates complete content geometry before returning BGRA frames. Capture
+timestamps must be monotonic and stale frames are fatal to the motor runtime.
 
 The fast path does not wait for a VLM. Semantic vision runs asynchronously and merges typed facts/tracks/chat observations into the perception blackboard.
 
 ## Input
 
-`IsolatedX11InputBackend` uses XTEST directly against the nested X server. Commands are ordinary gameplay semantics:
+`IsolatedX11InputBackend` uses XTEST directly against the verified private X server. Commands are ordinary gameplay semantics:
 
 - key down/up;
 - mouse button down/up;
@@ -218,7 +237,7 @@ Before marking the Bedrock backend hardware-qualified, run on the target machine
 - kill realtime agent -> lease expires and input releases;
 - kill supervisor -> backend loses authority and input releases;
 - close/crash Minecraft -> target validation fails closed;
-- kill Xephyr -> capture/input fail closed;
+- kill headless Weston/Xwayland -> capture/input fail closed (retained legacy Xephyr sessions also need fail-closed teardown);
 - stale/frozen capture -> runtime faults supervisor;
 - malformed/replayed motor actions -> lease revokes;
 - suspend/resume -> no persistent held state;

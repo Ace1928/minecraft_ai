@@ -26,8 +26,10 @@ def _binding() -> HostMonitorBinding:
     )
 
 
+@pytest.mark.parametrize("source", ["pipewire", "x11"])
 def test_capture_factory_uses_x11_without_host_monitor_binding(
     monkeypatch: pytest.MonkeyPatch,
+    source: str,
 ) -> None:
     sentinel = object()
     calls: list[tuple[str, int, bool]] = []
@@ -41,10 +43,44 @@ def test_capture_factory_uses_x11_without_host_monitor_binding(
         fake_x11,
     )
 
-    capture = create_bedrock_capture(":12", 7)
+    capture = create_bedrock_capture(":12", 7, source=source)
 
     assert capture is sentinel
     assert calls == [(":12", 7, False)]
+
+
+@pytest.mark.parametrize("binding", [None, _binding()])
+def test_capture_factory_rejects_unknown_source_before_backend_access(
+    monkeypatch: pytest.MonkeyPatch, binding: HostMonitorBinding | None,
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("invalid capture source reached backend access")
+
+    for name in (
+        "IsolatedX11Capture", "MutterPipeWireCapture", "resolve_host_monitor_content_rect",
+    ):
+        monkeypatch.setattr(f"minecraft_ai.platforms.gnome_pipewire_capture.{name}", forbidden)
+    with pytest.raises(ValueError, match="typo"):
+        create_bedrock_capture(
+            ":0", 42, allow_host=True, host_monitor_binding=binding, source="typo",
+        )
+
+
+def test_capture_factory_honors_explicit_x11_for_host_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = object()
+    monkeypatch.setattr(
+        "minecraft_ai.platforms.gnome_pipewire_capture.IsolatedX11Capture",
+        lambda display, window_id, **kwargs: sentinel,
+    )
+    monkeypatch.setattr(
+        "minecraft_ai.platforms.gnome_pipewire_capture.resolve_host_monitor_content_rect",
+        lambda *_args: pytest.fail("explicit X11 must not start PipeWire resolution"),
+    )
+    assert create_bedrock_capture(
+        ":0", 42, allow_host=True, host_monitor_binding=_binding(), source="x11",
+    ) is sentinel
 
 
 def test_capture_factory_uses_mutter_only_for_exact_host_binding(

@@ -10,6 +10,8 @@ import typer
 from typer.testing import CliRunner
 
 import minecraft_ai.cli as cli
+from minecraft_ai.agent.process import build_parser
+from minecraft_ai.platforms.capture_source import BedrockCaptureSource
 
 
 @pytest.mark.parametrize("custom_config", [False, True])
@@ -100,6 +102,60 @@ def test_live_agent_launch_rechecks_pause_inside_intent_lock(
     assert calls == []
 
 
+@pytest.mark.parametrize("source", ["typo", "", "PIPEWIRE", "x11 "])
+@pytest.mark.parametrize("live", [False, True])
+def test_run_rejects_invalid_capture_source_before_any_mutation(
+    monkeypatch: pytest.MonkeyPatch, source: str, live: bool,
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("invalid capture source reached a runtime operation")
+
+    for name in (
+        "_ensure_dirs", "ensure_default_config", "load_config", "_start_supervisor",
+        "send_command", "_command", "create_bedrock_capture", "launch_agent_process",
+        "wait_for_minecraft_window", "load_camera_calibration",
+    ):
+        monkeypatch.setattr(cli, name, forbidden)
+    args = ["run", "--capture-source", source] + (["--live"] if live else [])
+    result = CliRunner().invoke(cli.app, args)
+    assert result.exit_code == 2, result.output
+    assert "--capture-source" in result.output
+    assert "pipewire" in result.output and "x11" in result.output
+
+
+@pytest.mark.parametrize("source", list(BedrockCaptureSource))
+def test_parent_and_child_accept_supported_capture_sources(
+    source: BedrockCaptureSource, live_config_launch, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = live_config_launch
+    capture_sources = []
+    original = cli.create_bedrock_capture
+
+    def capture(*args, **kwargs):
+        capture_sources.append(kwargs["source"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "create_bedrock_capture", capture)
+    result = CliRunner().invoke(cli.app, ["run", "--live", "--capture-source", source.value])
+    assert result.exit_code == 0, result.output
+    assert capture_sources == [source]
+    assert h.launches[0]["capture_source"] == source.value
+    args = build_parser().parse_args([
+        "--lease-id", "test", "--display", ":12", "--window-id", "42",
+        "--instance-id", "bedrock:test", "--capture-source", source.value,
+    ])
+    assert args.capture_source == source
+
+
+def test_child_parser_rejects_invalid_capture_source() -> None:
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args([
+            "--lease-id", "test", "--display", ":12", "--window-id", "42",
+            "--instance-id", "bedrock:test", "--capture-source", "typo",
+        ])
+    assert exc.value.code == 2
+
+
 @pytest.mark.parametrize("contents", [None, "policy: [", "[1, 2]", "policy:\n  camera_scale: -1\n"])
 def test_run_rejects_invalid_explicit_config_before_any_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contents: str | None,
@@ -118,7 +174,8 @@ def test_run_rejects_invalid_explicit_config_before_any_mutation(
         monkeypatch.setattr(cli, name, forbidden)
     result = CliRunner().invoke(cli.app, ["run", "--live", "--config", str(selected)])
     assert result.exit_code == 2, result.output
-    assert "selected" in result.output or "configuration" in result.output
+    # Rich may wrap a long temporary path in the middle of its filename.
+    assert "--config" in result.output or "configuration" in result.output
 
 
 @pytest.fixture

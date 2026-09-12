@@ -19,6 +19,7 @@ from minecraft_ai.perception_service import ActiveVLMWorker, RealtimePerceptionS
 from minecraft_ai.platforms import create_bedrock_capture
 from minecraft_ai.platforms.bedrock_session import BedrockSession
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame, IsolationError
+from minecraft_ai.platforms.capture_source import BedrockCaptureSource
 from minecraft_ai.policy_service import GroundedPolicyRouter, TemporalPolicyClient
 from minecraft_ai.roles import get_role
 from minecraft_ai.runtime_factory import RuntimeStartupCleanupIncomplete, run_agent_runtime
@@ -75,7 +76,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--role", default=None)
     parser.add_argument("--config", default=None)
     parser.add_argument("--allow-host-capture", action="store_true")
-    parser.add_argument("--capture-source", default="pipewire", choices=["pipewire", "x11"])
+    parser.add_argument(
+        "--capture-source",
+        type=BedrockCaptureSource,
+        default=BedrockCaptureSource.PIPEWIRE,
+        choices=tuple(BedrockCaptureSource),
+    )
     return parser
 
 
