@@ -3,21 +3,23 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..trajectory import TrajectoryReader
 from .metrics import TraceMetrics, trace_metrics, validate_external_metrics
-from .tasks import BenchmarkSuite, BenchmarkTask, MetricCriterion, MetricOperator
-
-
-class EvaluationStatus(StrEnum):
-    PASSED = "passed"
-    FAILED = "failed"
-    UNSCORED = "unscored"
-    ERROR = "error"
+from .reporting import (
+    BenchmarkReport as BenchmarkReport,
+    BenchmarkTaskResult as BenchmarkTaskResult,
+    CriterionResult as CriterionResult,
+    EvaluationStatus as EvaluationStatus,
+    _evaluate_criterion as _evaluate_criterion,
+    _number as _number,
+    criteria_status,
+    summarize_results,
+)
+from .tasks import BenchmarkSuite, BenchmarkTask
 
 
 class EvaluationEvidence(BaseModel):
@@ -37,49 +39,9 @@ class EvaluationEvidence(BaseModel):
         return values
 
 
-class CriterionResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    criterion: MetricCriterion
-    observed: float | int | bool | str | None = None
-    passed: bool | None = None
-
-
-class BenchmarkTaskResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    task_id: str
-    repetition: int = Field(default=0, ge=0)
-    status: EvaluationStatus
-    trajectory_id: str
-    criteria: tuple[CriterionResult, ...]
-    metrics: dict[str, float | int | bool | str]
-    evidence_sources: tuple[str, ...]
-    error: str | None = None
-
-
-class BenchmarkReport(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: int = 1
-    benchmark_run_id: str
-    suite_id: str
-    created_ns: int
-    git_commit: str | None = None
-    results: tuple[BenchmarkTaskResult, ...]
-    summary: dict[str, int | float | bool | str | None]
-
-    def write(self, path: Path) -> Path:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        staged = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        staged.write_text(self.model_dump_json(indent=2), encoding="utf-8")
-        staged.replace(path)
-        return path
-
-
 class BenchmarkRunner:
     def __init__(self, suite: BenchmarkSuite) -> None:
-        self.suite = suite
+        self.suite = BenchmarkSuite.model_validate(suite.model_dump())
 
     def evaluate_trajectory(
         self,
@@ -160,16 +122,7 @@ class BenchmarkRunner:
         criterion_results = tuple(
             _evaluate_criterion(criterion, metrics.values) for criterion in task.criteria
         )
-        missing = any(result.passed is None for result in criterion_results)
-        status = (
-            EvaluationStatus.UNSCORED
-            if missing
-            else (
-                EvaluationStatus.PASSED
-                if all(result.passed for result in criterion_results)
-                else EvaluationStatus.FAILED
-            )
-        )
+        status = criteria_status(criterion_results)
         sources = ["trajectory:supervisor-accepted-actions"]
         if evidence is not None:
             sources.append(evidence.source)
@@ -189,88 +142,17 @@ class BenchmarkRunner:
         *,
         git_commit: str | None,
     ) -> BenchmarkReport:
-        passed = sum(result.status == EvaluationStatus.PASSED for result in results)
-        failed = sum(result.status == EvaluationStatus.FAILED for result in results)
-        unscored = sum(result.status == EvaluationStatus.UNSCORED for result in results)
-        errors = sum(result.status == EvaluationStatus.ERROR for result in results)
-        scored = passed + failed
-        scored_repetitions = {
-            task.task_id: sum(
-                result.task_id == task.task_id
-                and result.status in {EvaluationStatus.PASSED, EvaluationStatus.FAILED}
-                for result in results
-            )
-            for task in self.suite.tasks
-        }
-        tasks_meeting_minimum = sum(
-            scored_repetitions[task.task_id] >= task.minimum_repetitions
-            for task in self.suite.tasks
-        )
-        coverage_complete = tasks_meeting_minimum == len(self.suite.tasks)
-        protected_failures = sum(
-            result.status == EvaluationStatus.FAILED
-            and self.suite.task(result.task_id).protected
-            for result in results
-        )
         return BenchmarkReport(
             benchmark_run_id=f"benchmark-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-"
             f"{uuid.uuid4().hex[:12]}",
             suite_id=self.suite.suite_id,
+            suite=self.suite,
             created_ns=time.time_ns(),
             git_commit=git_commit,
             results=results,
-            summary={
-                "tasks": len(results),
-                "suite_tasks": len(self.suite.tasks),
-                "scored": scored,
-                "unique_tasks_scored": sum(count > 0 for count in scored_repetitions.values()),
-                "tasks_meeting_minimum_repetitions": tasks_meeting_minimum,
-                "minimum_scored_results_required": sum(
-                    task.minimum_repetitions for task in self.suite.tasks
-                ),
-                "passed": passed,
-                "failed": failed,
-                "unscored": unscored,
-                "errors": errors,
-                "success_rate": passed / scored if scored else None,
-                "protected_failures": protected_failures,
-                "coverage_complete": coverage_complete,
-                "promotion_eligible": bool(
-                    coverage_complete and protected_failures == 0 and errors == 0
-                ),
-            },
+            summary=summarize_results(self.suite, results),
         )
 
 
 def load_evidence(path: Path) -> EvaluationEvidence:
     return EvaluationEvidence.model_validate(json.loads(path.read_text(encoding="utf-8")))
-
-
-def _evaluate_criterion(
-    criterion: MetricCriterion,
-    metrics: dict[str, float | int | bool | str],
-) -> CriterionResult:
-    observed = metrics.get(criterion.metric)
-    if observed is None:
-        return CriterionResult(criterion=criterion)
-    expected = criterion.value
-    passed: bool
-    if criterion.operator == MetricOperator.TRUTHY:
-        passed = bool(observed)
-    elif criterion.operator == MetricOperator.EQ:
-        passed = observed == expected
-    elif criterion.operator == MetricOperator.GTE:
-        passed = _number(observed) >= _number(expected)
-    elif criterion.operator == MetricOperator.LTE:
-        passed = _number(observed) <= _number(expected)
-    else:  # pragma: no cover - enum exhaustiveness guard
-        raise ValueError(f"unsupported metric operator: {criterion.operator}")
-    return CriterionResult(criterion=criterion, observed=observed, passed=passed)
-
-
-def _number(value: object) -> float:
-    if isinstance(value, bool):
-        return float(value)
-    if isinstance(value, (int, float)):
-        return float(value)
-    raise TypeError(f"metric comparison requires a number, got {value!r}")

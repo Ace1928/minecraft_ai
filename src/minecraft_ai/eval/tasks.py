@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class BenchmarkCategory(StrEnum):
@@ -36,35 +36,53 @@ class MetricOperator(StrEnum):
 
 
 class MetricCriterion(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
-    metric: str
+    metric: str = Field(min_length=1, pattern=r"\S")
     operator: MetricOperator
     value: float | int | bool | str | None = None
 
+    @model_validator(mode="after")
+    def valid_comparison(self) -> MetricCriterion:
+        """Reject contracts that cannot be evaluated against a present metric."""
+        if self.operator in {MetricOperator.GTE, MetricOperator.LTE} and not isinstance(
+            self.value, (int, float),
+        ):
+            raise ValueError("numeric criterion requires a numeric threshold")
+        if self.operator == MetricOperator.EQ and self.value is None:
+            raise ValueError("equality criterion requires a non-null expected value")
+        return self
+
 
 class BenchmarkTask(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 
-    task_id: str
+    task_id: str = Field(min_length=1, pattern=r"\S")
     name: str
     category: BenchmarkCategory
     level: BenchmarkLevel
     instruction: str
     timeout_s: float = Field(gt=0.0, le=3600.0)
-    criteria: tuple[MetricCriterion, ...]
-    world_fixture_id: str
-    evaluator_channel: str
-    protected: bool = False
-    minimum_repetitions: int = Field(default=5, ge=1, le=1000)
+    criteria: tuple[MetricCriterion, ...] = Field(min_length=1)
+    world_fixture_id: str = Field(min_length=1, pattern=r"\S")
+    evaluator_channel: str = Field(min_length=1, pattern=r"\S")
+    protected: bool = Field(default=False, strict=True)
+    minimum_repetitions: int = Field(default=5, ge=1, le=1000, strict=True)
 
 
 class BenchmarkSuite(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    suite_id: str
-    version: int = Field(ge=1)
-    tasks: tuple[BenchmarkTask, ...]
+    suite_id: str = Field(min_length=1, pattern=r"\S")
+    version: int = Field(ge=1, strict=True)
+    tasks: tuple[BenchmarkTask, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def unique_tasks(self) -> BenchmarkSuite:
+        """Keep task identities unambiguous for scoring and repetition coverage."""
+        if len({task.task_id for task in self.tasks}) != len(self.tasks):
+            raise ValueError("suite contains duplicate task IDs")
+        return self
 
     def task(self, task_id: str) -> BenchmarkTask:
         for task in self.tasks:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,8 @@ from minecraft_ai.datasets import ActionLevel, DatasetSource, DatasetSourceType,
 from minecraft_ai.eval import (
     BenchmarkCategory,
     BenchmarkRunner,
+    BenchmarkSuite,
+    BenchmarkTaskResult,
     EvaluationEvidence,
     EvaluationStatus,
     bedrock_baseline_suite,
@@ -27,8 +30,10 @@ from minecraft_ai.storage import StateDatabase
 from minecraft_ai.trajectory import ActionOrigin, ActionProvenance, TrajectoryRecorder
 
 
-def _record_jump_trajectory(tmp_path: Path, *, noop: bool = False) -> Path:
-    trajectory_id = "benchmark-jump"
+def _record_jump_trajectory(
+    tmp_path: Path, *, noop: bool = False, trajectory_id: str = "benchmark-jump",
+    task_id: str = "a_jump_obstacle",
+) -> Path:
     manifest = TrajectoryManifest(
         trajectory_id=trajectory_id,
         source=DatasetSource(
@@ -42,7 +47,7 @@ def _record_jump_trajectory(tmp_path: Path, *, noop: bool = False) -> Path:
         ),
         role="generalist",
         label="jump-range-fixture",
-        task_id="a_jump_obstacle",
+        task_id=task_id,
         game_version="1.test",
         platform="pytest",
         launcher_profile="fixture",
@@ -151,6 +156,267 @@ def test_comparison_refuses_small_sample_promotion_evidence() -> None:
     )
 
     assert comparison["promotion_evidence_sufficient"] is False
+    assert comparison["same_suite"] is False
+    assert comparison["baseline_errors"]
+
+
+def _complete_contract_report(suite: BenchmarkSuite | None = None):
+    """Synthetic scoring fixture for adversarial serialized-report mutations."""
+    suite = bedrock_baseline_suite() if suite is None else suite
+    runner = BenchmarkRunner(suite)
+    results = []
+    for task in suite.tasks:
+        metrics = TraceMetricAccumulator().finish().values
+        metrics["trace.steps"] = 1
+        metrics.update({criterion.metric: criterion.value for criterion in task.criteria})
+        for repetition in range(task.minimum_repetitions):
+            results.append(runner._evaluate_task(
+                task, f"fixture-{task.task_id}-{repetition}", TraceMetrics(values=metrics),
+                EvaluationEvidence(source="synthetic:report-contract-test"), repetition,
+            ))
+    return runner._report(tuple(results), git_commit="contract-test")
+
+
+@pytest.fixture
+def complete_report():
+    return _complete_contract_report()
+
+
+def test_complete_builtin_contract_reports_compare(complete_report) -> None:
+    payload = complete_report.model_dump(mode="json")
+    candidate = deepcopy(payload)
+    candidate["benchmark_run_id"] = "candidate"
+    comparison = compare_reports(payload, candidate)
+    assert comparison["baseline_valid"] and comparison["candidate_valid"]
+    assert comparison["same_suite"] and comparison["promotion_evidence_sufficient"]
+    assert comparison["baseline_success_rate"] == 1.0
+    assert comparison["success_rate_delta"] == 0.0
+
+
+def test_complete_recorded_custom_suite_requires_independent_contract(tmp_path: Path) -> None:
+    baseline = bedrock_baseline_suite()
+    suite = BenchmarkSuite(suite_id="recorded-regression-v1", version=1, tasks=tuple(
+        baseline.task(task).model_copy(update={"minimum_repetitions": 2})
+        for task in ("a_move_forward", "a_jump_obstacle")
+    ))
+    paths = []
+    evidence = {}
+    for task in suite.tasks:
+        for repetition in range(task.minimum_repetitions):
+            identity = f"{task.task_id}-{repetition}"
+            paths.append(_record_jump_trajectory(
+                tmp_path, trajectory_id=identity, task_id=task.task_id,
+            ))
+            evidence[identity] = EvaluationEvidence(
+                source="controlled-fixture:test", metrics={"event.destination_reached": 1},
+            )
+    runner = BenchmarkRunner(suite)
+    report = runner.evaluate_many(tuple(paths), evidence_by_trajectory=evidence)
+    assert report.summary["scored"] == 4
+    assert report.summary["promotion_eligible"] is True
+    path = report.write(tmp_path / "report.json")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert compare_reports(payload, payload, suite=suite)["promotion_evidence_sufficient"]
+    assert not compare_reports(payload, payload)["promotion_evidence_sufficient"]
+    with pytest.raises(ValueError, match="reused trajectory"):
+        runner.evaluate_many((paths[0], paths[0]), evidence_by_trajectory=evidence)
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"summary": {"promotion_eligible": True}},
+    {"schema_version": 1, "summary": {"promotion_eligible": True}},
+    {"schema_version": 2, "summary": {"promotion_eligible": True}},
+])
+def test_malformed_or_historical_reports_never_promote(payload) -> None:
+    comparison = compare_reports(payload, payload)
+    assert comparison["promotion_evidence_sufficient"] is False
+    assert comparison["same_suite"] is False
+    assert comparison["baseline_valid"] is False
+    assert comparison["baseline_errors"]
+    assert comparison["baseline_success_rate"] is None
+
+
+@pytest.mark.parametrize("field", ["suite", "suite_id", "benchmark_run_id", "results", "created_ns"])
+def test_report_requires_complete_identity_and_results(complete_report, field: str) -> None:
+    baseline = complete_report.model_dump(mode="json")
+    candidate = deepcopy(baseline)
+    del candidate[field]
+    comparison = compare_reports(baseline, candidate)
+    assert comparison["candidate_valid"] is False
+    assert comparison["candidate_errors"]
+    assert comparison["promotion_evidence_sufficient"] is False
+
+
+@pytest.mark.parametrize("field,value", [
+    ("suite_id", ""), ("suite_id", "different-suite"), ("benchmark_run_id", " "),
+    ("created_ns", True), ("created_ns", -1), ("results", []),
+    ("schema_version", 99), ("summary", {"promotion_eligible": True}),
+])
+def test_invalid_report_fields_cannot_reuse_valid_summary(complete_report, field, value) -> None:
+    baseline = complete_report.model_dump(mode="json")
+    candidate = deepcopy(baseline)
+    candidate[field] = value
+    comparison = compare_reports(baseline, candidate)
+    assert comparison["candidate_valid"] is False
+    assert comparison["promotion_evidence_sufficient"] is False
+
+
+@pytest.mark.parametrize("key", [
+    "tasks", "suite_tasks", "scored", "unique_tasks_scored", "tasks_meeting_minimum_repetitions",
+    "minimum_scored_results_required", "passed", "failed", "unscored", "errors", "success_rate",
+    "protected_failures", "coverage_complete", "promotion_eligible",
+])
+def test_every_summary_field_is_cross_checked(complete_report, key: str) -> None:
+    baseline = complete_report.model_dump(mode="json")
+    candidate = deepcopy(baseline)
+    value = candidate["summary"][key]
+    candidate["summary"][key] = not value if isinstance(value, bool) else value + 1
+    comparison = compare_reports(baseline, candidate)
+    assert comparison["candidate_valid"] is False
+    assert "canonical result admission" in str(comparison["candidate_errors"])
+    assert comparison["promotion_evidence_sufficient"] is False
+
+
+@pytest.mark.parametrize("change", ["missing", "extra", "coerced"])
+def test_summary_requires_exact_fields_and_scalar_types(complete_report, change: str) -> None:
+    payload = complete_report.model_dump(mode="json")
+    if change == "missing":
+        del payload["summary"]["protected_failures"]
+    elif change == "extra":
+        payload["summary"]["admitted"] = True
+    else:
+        payload["summary"]["protected_failures"] = False
+    assert not compare_reports(payload, payload)["promotion_evidence_sufficient"]
+
+
+@pytest.mark.parametrize("change", [
+    "status", "observed", "passed", "threshold", "metrics", "unknown-task", "duplicate",
+    "reused-trajectory", "empty-criteria", "error", "nan",
+])
+def test_result_tampering_is_not_repaired_from_a_fabricated_summary(
+    complete_report, change: str,
+) -> None:
+    payload = complete_report.model_dump(mode="json")
+    result = payload["results"][0]
+    if change == "status":
+        result["status"] = "failed"
+    elif change in {"observed", "passed"}:
+        result["criteria"][0][change] = 0 if change == "observed" else False
+    elif change == "threshold":
+        result["criteria"][0]["criterion"]["value"] = 0
+    elif change in {"metrics", "nan"}:
+        result["metrics"]["action.camera_updates"] = 0 if change == "metrics" else float("nan")
+    elif change == "unknown-task":
+        result["task_id"] = "invented"
+    elif change == "duplicate":
+        payload["results"][1] = deepcopy(result)
+    elif change == "reused-trajectory":
+        payload["results"][1]["trajectory_id"] = result["trajectory_id"]
+    elif change == "empty-criteria":
+        result["criteria"] = []
+    elif change == "error":
+        result["error"] = "unacknowledged failure"
+    comparison = compare_reports(payload, payload)
+    assert comparison["candidate_valid"] is False
+    assert comparison["candidate_errors"]
+    assert comparison["promotion_evidence_sufficient"] is False
+
+
+@pytest.mark.parametrize("change", ["version", "minimum", "protected", "criteria", "world"])
+def test_same_suite_id_does_not_authorize_changed_suite_definition(change: str) -> None:
+    suite = bedrock_baseline_suite().model_dump(mode="json")
+    if change == "version":
+        suite["version"] += 1
+    elif change == "minimum":
+        suite["tasks"][0]["minimum_repetitions"] = 1
+    elif change == "protected":
+        suite["tasks"][0]["protected"] = False
+    elif change == "criteria":
+        suite["tasks"][0]["criteria"][0]["value"] = 0
+    else:
+        suite["tasks"][0]["world_fixture_id"] = "unqualified-world"
+    payload = _complete_contract_report(BenchmarkSuite.model_validate(suite)).model_dump(mode="json")
+    # Even two internally consistent reports sharing the same altered definition
+    # must not replace the independently trusted frozen suite.
+    comparison = compare_reports(payload, payload)
+    assert comparison["candidate_valid"] is False
+    assert "expected frozen contract" in str(comparison["candidate_errors"])
+    assert comparison["promotion_evidence_sufficient"] is False
+
+
+@pytest.mark.parametrize("change", ["empty", "duplicate-task", "no-criteria", "no-threshold"])
+def test_invalid_suite_contracts_are_rejected(change: str) -> None:
+    suite = bedrock_baseline_suite().model_dump(mode="json")
+    if change == "empty":
+        suite["tasks"] = []
+    elif change == "duplicate-task":
+        suite["tasks"].append(deepcopy(suite["tasks"][0]))
+    elif change == "no-criteria":
+        suite["tasks"][0]["criteria"] = []
+    else:
+        suite["tasks"][0]["criteria"][0]["value"] = None
+    with pytest.raises(ValueError):
+        BenchmarkSuite.model_validate(suite)
+
+
+@pytest.mark.parametrize("kind", ["empty", "incomplete", "protected-failure", "error", "unscored"])
+def test_canonical_admission_preserves_negative_results(complete_report, kind: str) -> None:
+    runner = BenchmarkRunner(complete_report.suite)
+    results = list(complete_report.results)
+    if kind == "empty":
+        results = []
+    elif kind == "incomplete":
+        results.pop()
+    elif kind == "error":
+        first = results[0]
+        results[0] = BenchmarkTaskResult(
+            task_id=first.task_id, repetition=first.repetition, trajectory_id=first.trajectory_id,
+            status=EvaluationStatus.ERROR, criteria=(), metrics={}, evidence_sources=(),
+            error="trajectory checksum mismatch",
+        )
+    else:
+        first = results[0]
+        metrics = dict(first.metrics)
+        if kind == "unscored":
+            del metrics["event.target_centered"]
+        else:
+            metrics["action.camera_updates"] = 0
+        results[0] = runner._evaluate_task(
+            runner.suite.task(first.task_id), first.trajectory_id, TraceMetrics(values=metrics),
+            None, first.repetition,
+        )
+    report = runner._report(tuple(results), git_commit="test")
+    assert report.summary["promotion_eligible"] is False
+    if kind == "protected-failure":
+        assert report.summary["protected_failures"] == 1
+        assert report.summary["coverage_complete"] is True
+    if kind == "error":
+        assert report.summary["errors"] == 1
+    if kind == "unscored":
+        assert report.summary["unscored"] == 1
+    comparison = compare_reports(
+        complete_report.model_dump(mode="json"), report.model_dump(mode="json"),
+    )
+    assert comparison["candidate_valid"] is True
+    assert comparison["promotion_evidence_sufficient"] is False
+
+
+def test_mutated_report_is_revalidated_before_writing(tmp_path: Path, complete_report) -> None:
+    complete_report.summary["passed"] = 0
+    destination = tmp_path / "new-directory" / "report.json"
+    with pytest.raises(ValueError, match="canonical result admission"):
+        complete_report.write(destination)
+    assert not destination.parent.exists()
+
+
+def test_cli_comparison_preserves_historical_invalidity(tmp_path: Path) -> None:
+    report = tmp_path / "historical.json"
+    report.write_text('{"summary": {"promotion_eligible": true}}', encoding="utf-8")
+    result = CliRunner().invoke(cli.app, ["eval", "compare", str(report), str(report)])
+    assert result.exit_code == 0, result.output
+    comparison = json.loads(result.output)
+    assert comparison["promotion_evidence_sufficient"] is False
+    assert "historical reports must be re-evaluated" in str(comparison["baseline_errors"])
 
 
 def test_external_outcome_cannot_turn_noop_into_measured_movement(tmp_path: Path) -> None:

@@ -3,9 +3,11 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..trajectory import ReplayTrajectorySample
+from .reporting import BenchmarkReport, summarize_results
+from .tasks import BenchmarkSuite, bedrock_baseline_suite
 
 
 COMPUTED_METRIC_NAMESPACES = frozenset({"trace", "action", "camera", "latency", "safety"})
@@ -216,21 +218,34 @@ def wilson_interval(
     return max(0.0, center - margin), min(1.0, center + margin)
 
 
-def compare_reports(baseline: dict[str, object], candidate: dict[str, object]) -> dict[str, object]:
-    baseline_summary = _summary(baseline)
-    candidate_summary = _summary(candidate)
-    baseline_passed = _int_value(baseline_summary.get("passed", 0))
-    baseline_scored = _int_value(baseline_summary.get("scored", 0))
-    candidate_passed = _int_value(candidate_summary.get("passed", 0))
-    candidate_scored = _int_value(candidate_summary.get("scored", 0))
+def compare_reports(
+    baseline: dict[str, object], candidate: dict[str, object],
+    *, suite: BenchmarkSuite | None = None,
+) -> dict[str, object]:
+    """Compare only contract-consistent reports; retain explicit invalidity reasons.
+
+    The built-in frozen suite is trusted by default. Custom suite callers must
+    supply their expected contract independently of the reports being compared.
+    """
+    expected_suite = bedrock_baseline_suite() if suite is None else suite
+    expected_suite = BenchmarkSuite.model_validate(expected_suite.model_dump())
+    baseline_report, baseline_errors = _validated_report(baseline, expected_suite)
+    candidate_report, candidate_errors = _validated_report(candidate, expected_suite)
+    baseline_passed, baseline_scored, baseline_complete = _admission(baseline_report)
+    candidate_passed, candidate_scored, candidate_complete = _admission(candidate_report)
     baseline_rate = baseline_passed / baseline_scored if baseline_scored else None
     candidate_rate = candidate_passed / candidate_scored if candidate_scored else None
-    same_suite = baseline.get("suite_id") == candidate.get("suite_id")
-    baseline_complete = baseline_summary.get("promotion_eligible") is True
-    candidate_complete = candidate_summary.get("promotion_eligible") is True
+    same_suite = bool(
+        baseline_report is not None and candidate_report is not None
+        and baseline_report.suite == candidate_report.suite
+    )
     return {
         "baseline_run_id": baseline.get("benchmark_run_id"),
         "candidate_run_id": candidate.get("benchmark_run_id"),
+        "baseline_valid": baseline_report is not None,
+        "candidate_valid": candidate_report is not None,
+        "baseline_errors": baseline_errors,
+        "candidate_errors": candidate_errors,
         "same_suite": same_suite,
         "baseline_success_rate": baseline_rate,
         "candidate_success_rate": candidate_rate,
@@ -247,16 +262,30 @@ def compare_reports(baseline: dict[str, object], candidate: dict[str, object]) -
     }
 
 
-def _summary(report: dict[str, object]) -> dict[str, object]:
-    summary = report.get("summary")
-    return summary if isinstance(summary, dict) else {}
+def _validated_report(
+    payload: dict[str, object], suite: BenchmarkSuite,
+) -> tuple[BenchmarkReport | None, tuple[str, ...]]:
+    if payload.get("schema_version") != 2:
+        return None, (
+            "unsupported or missing report schema_version; schema 2 with a suite contract "
+            "is required (historical reports must be re-evaluated)",
+        )
+    try:
+        report = BenchmarkReport.model_validate(payload)
+    except ValidationError as exc:
+        return None, tuple(
+            f"{'.'.join(str(part) for part in error['loc']) or 'report'}: {error['msg']}"
+            for error in exc.errors(include_url=False, include_input=False)
+        )
+    if report.suite != suite:
+        return None, ("report suite definition does not match the expected frozen contract",)
+    return report, ()
 
 
-def _int_value(value: object) -> int:
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    return 0
+def _admission(report: BenchmarkReport | None) -> tuple[int, int, bool]:
+    if report is None:
+        return 0, 0, False
+    summary = summarize_results(report.suite, report.results)
+    passed, scored = summary["passed"], summary["scored"]
+    assert isinstance(passed, int) and isinstance(scored, int)
+    return passed, scored, summary["promotion_eligible"] is True
