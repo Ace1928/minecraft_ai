@@ -280,7 +280,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="traverse_level_ground",
-            version=4,
+            version=5,
             name="Traverse level ground",
             description=(
                 "Use the fast learned motion expert to cross a short visible lane while "
@@ -288,6 +288,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             ),
             outcome_kind="traversal",
             stage=SkillStage.EXPERIMENTAL,
+            parameters=("allow_attack", "allow_use", "allow_jump"),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("locomotion_progress", "destination_reached"),
             recovery_skills=(
@@ -303,7 +304,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             action_permissions=SkillActionPermissions(
                 allow_attack=False,
                 allow_use=False,
-                allow_jump=False,
+                allow_jump=True,
                 allow_drop=False,
                 allow_inventory=False,
                 allow_hotbar=False,

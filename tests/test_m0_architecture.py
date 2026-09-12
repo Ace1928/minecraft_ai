@@ -213,9 +213,9 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert exploration.version == 10
     assert exploration.recovery_skills[-1] == "traverse_visible_obstacle"
     assert level_ground.policy_ref == "traverse_level_ground"
-    assert level_ground.version == 4
+    assert level_ground.version == 5
     assert level_ground.action_level == ActionLevel.MOTION
-    assert level_ground.action_permissions.allow_jump is False
+    assert level_ground.action_permissions.allow_jump is True
     assert level_ground.action_permissions.allow_attack is False
     assert level_ground.recovery_skills[-1] == "traverse_visible_obstacle"
     assert obstacle.policy_ref == "traverse_obstacle"

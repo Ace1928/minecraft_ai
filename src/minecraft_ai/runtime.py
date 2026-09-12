@@ -745,6 +745,9 @@ class AgentRuntime:
                         source=SkillStartSource.KEEPALIVE,
                         run_id=uuid.uuid4().hex,
                         context_key=_EXPLORE_KEEPALIVE_CONTEXT,
+                        complete_on_locomotion_progress=True,
+                        locomotion_progress_events_required=3,
+                        locomotion_progress_min_ms=750,
                     )
                     active = self.executor.run
             if active is None or active.outcome != SkillOutcome.RUNNING:
@@ -3654,8 +3657,7 @@ class AgentRuntime:
                     parameters=decision.skill_parameters,
                     instruction=decision.instruction,
                 )
-            if not decision.request_replan:
-                self._traversal_escalation_pending = False
+            self._traversal_escalation_pending = False
         operator_waiting = self._queued_operator_message_waiting()
         if perception_probe_started:
             self._clear_cognition_retry()
@@ -3944,14 +3946,34 @@ class AgentRuntime:
         if skill_id is None or skill_id not in skills.specs:
             return False
         context_key = self._plan_goal_id or "default"
-        if skills.contextual_failure_streak(skill_id, context_key) >= 2:
+        if skills.is_contextually_blocked(skill_id, context_key):
+            graph = getattr(self, "_plan_graph", None)
+            if graph is not None:
+                streak = skills.contextual_failure_streak(skill_id, context_key)
+                graph.block_current_method(
+                    skill_id,
+                    reason=f"contextual-failure-streak:{streak}",
+                    skills=skills,
+                )
+                self._plan_steps = graph.sequential_labels()
+                self._plan_index = graph.cursor
+            else:
+                self._plan_index += 1
+            self._plan_step_completed_ns = time.monotonic_ns()
+            self._cognition_requested = True
             return False
         spec = skills.get(skill_id)
+        start_kwargs: dict[str, Any] = {}
+        if spec.outcome_kind == "traversal":
+            start_kwargs["complete_on_locomotion_progress"] = True
+            start_kwargs["locomotion_progress_events_required"] = 3
+            start_kwargs["locomotion_progress_min_ms"] = 750
         self._start_skill(
             spec,
             source=SkillStartSource.PLAN,
             run_id=uuid.uuid4().hex,
             context_key=context_key,
+            **start_kwargs,
         )
         return True
 

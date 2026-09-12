@@ -171,6 +171,15 @@ class SkillLibrary:
         if run.outcome == SkillOutcome.SUCCEEDED:
             stats.successes += 1
             stats.consecutive_failures = 0
+            for (recorded_id, recorded_context), recorded_stats in self.stats.items():
+                if (
+                    recorded_context == key[1]
+                    and recorded_id != key[0]
+                    and recorded_stats.consecutive_failures > 0
+                ):
+                    recorded_stats.consecutive_failures = max(
+                        0, recorded_stats.consecutive_failures - 1
+                    )
         elif run.outcome == SkillOutcome.FAILED:
             stats.failures += 1
             # Startup/warmup starvation is not evidence the option is the
@@ -248,6 +257,46 @@ class SkillLibrary:
     ) -> int:
         stats = self.stats.get((skill_id, context_key))
         return 0 if stats is None else stats.consecutive_failures
+
+    def failure_tolerance(
+        self,
+        skill_id: str,
+        context_key: str = "default",
+        *,
+        min_tolerance: int = 2,
+        max_tolerance: int = 5,
+    ) -> int:
+        """Calculate learned failure tolerance from hierarchical competence and uncertainty.
+
+        Replaces rigid magic numbers. Fixed discrete tasks (crafting, menu interaction)
+        strictly fail over after repeated prerequisite failures (tolerance=2).
+        Continuous traversal and open-world exploration adapt their trial budget
+        based on learned prior competence and environmental uncertainty.
+        """
+        spec = self.specs.get(skill_id)
+        if spec is not None and spec.outcome_kind == "traversal":
+            prob = self.hierarchical_success_probability(skill_id, context_key)
+            stats = self.stats.get((skill_id, context_key))
+            attempts = 0 if stats is None else stats.decisive_attempts
+            uncertainty = 1.0 / math.sqrt(1.0 + attempts)
+            extra = int(round(prob * 2.0 + uncertainty * 1.5))
+            return max(min_tolerance, min(max_tolerance, min_tolerance + extra))
+        return min_tolerance
+
+    def is_contextually_blocked(
+        self,
+        skill_id: str,
+        context_key: str = "default",
+        *,
+        min_tolerance: int = 2,
+        max_tolerance: int = 5,
+    ) -> bool:
+        """Check if a skill is currently blocked by consecutive failure evidence."""
+        streak = self.contextual_failure_streak(skill_id, context_key)
+        tolerance = self.failure_tolerance(
+            skill_id, context_key, min_tolerance=min_tolerance, max_tolerance=max_tolerance
+        )
+        return streak >= tolerance
 
     def promote(self, skill_id: str, stage: SkillStage) -> SkillSpec:
         current = self.get(skill_id)

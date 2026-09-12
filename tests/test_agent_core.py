@@ -5819,3 +5819,23 @@ def test_valid_acknowledgement_drains_next_message_without_failure_backoff(
         assert 0 < delay <= 250_000_000
     finally:
         database.close()
+
+
+def test_start_current_plan_skill_advances_past_repeated_contextual_failures() -> None:
+    runtime = object.__new__(AgentRuntime)
+    runtime.skills = build_bootstrap_skill_library()
+    runtime.executor = SimpleNamespace(run=None)
+    runtime._plan_steps = ("craft_wood_planks", "craft_crafting_table")
+    runtime._plan_index = 0
+    runtime._plan_goal_id = "test-plan"
+    runtime._plan_graph = None
+    runtime._cognition_requested = False
+
+    runtime.skills.stats[("craft_wood_planks", "test-plan")] = SkillStats(
+        failures=2, consecutive_failures=2,
+    )
+
+    started = runtime._start_current_plan_skill()
+    assert started is False
+    assert runtime._plan_index == 1
+    assert runtime._cognition_requested is True

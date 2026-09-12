@@ -265,3 +265,27 @@ def test_v7_stats_migrate_without_relabelling_historical_failures(tmp_path: Path
             "SELECT value FROM meta WHERE key='schema_version'",
         ).fetchone()
         assert version[0] == "8"
+
+
+def test_learned_failure_tolerance_and_context_streak_decay() -> None:
+    library = _library()
+    assert library.failure_tolerance("craft_wood_planks", "default") == 2
+
+    tol = library.failure_tolerance("jump", "wall")
+    assert tol >= 2
+    assert library.is_contextually_blocked("jump", "wall") is False
+
+    library.stats[("jump", "wall")] = SkillStats(failures=tol, consecutive_failures=tol)
+    assert library.is_contextually_blocked("jump", "wall") is True
+
+    library.record(
+        SkillRun(
+            run_id="other-win",
+            skill_id="look",
+            started_ns=1,
+            ended_ns=2,
+            outcome=SkillOutcome.SUCCEEDED,
+            context_key="wall",
+        )
+    )
+    assert library.stats[("jump", "wall")].consecutive_failures == tol - 1
