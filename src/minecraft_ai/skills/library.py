@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -39,6 +40,7 @@ class SkillActionPermissions(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    allow_movement: bool = True
     allow_attack: bool = True
     allow_use: bool = True
     allow_jump: bool = True
@@ -65,6 +67,7 @@ class SkillSpec(BaseModel):
     recovery_skills: tuple[str, ...] = ()
     max_duration_ms: int = Field(default=30_000, ge=50, le=3_600_000)
     action_level: ActionLevel = ActionLevel.LATENT
+    outcome_kind: Literal["traversal"] | None = None
     policy_ref: str | None = None
     policy_instruction: str | None = Field(default=None, min_length=1, max_length=256)
     policy_condition_scale: float | None = Field(default=None, ge=0.0, le=12.0)

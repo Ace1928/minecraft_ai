@@ -3159,7 +3159,7 @@ def test_ordinary_traversal_stall_routes_one_obstacle_recovery() -> None:
     )
 
     assert selected is not None
-    assert selected.skill_id == "traverse_visible_obstacle"
+    assert selected.skill_id == "survey_surroundings"
 
 
 def test_obstacle_stall_requests_cognition_and_blocks_disposable_keepalive() -> None:

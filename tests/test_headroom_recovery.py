@@ -303,7 +303,7 @@ def test_headroom_trigger_requires_exact_verified_obstacle_stall() -> None:
         exact,
         run=exact.run.model_copy(update={"skill_id": "traverse_level_ground"}),
     )
-    assert _verified_obstacle_stall(level_ground) is False
+    assert _verified_obstacle_stall(level_ground) is True
 
 
 def test_controller_starvation_does_not_start_headroom_or_body_intervention() -> None:

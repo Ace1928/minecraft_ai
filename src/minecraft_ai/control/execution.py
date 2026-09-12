@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from minecraft_ai.perception import CognitionReadView
+from minecraft_ai.control.action_envelope import constrain_action
 
 import time
 from dataclasses import dataclass, field
@@ -634,7 +635,11 @@ class SkillExecutor:
             ),
             parameters=self.policy_parameters,
         )
-        action = self.policy.act(blackboard, intent, sequence=sequence)
+        proposed = self.policy.act(blackboard, intent, sequence=sequence)
+        action = constrain_action(
+            proposed, intent.parameters, held_keys=self._mining_guard.held_keys,
+            held_buttons=self._mining_guard.held_buttons,
+        )
         self._last_intent = intent
         mining = self._mining_guard.inspect(action, blackboard, intent, now_ns=now)
         accepted_left_press = bool(
@@ -820,7 +825,10 @@ class SkillExecutor:
             action=mining.action,
             motor_intent=intent,
             policy_status=_policy_status_snapshot(self.policy),
-            action_origin=(ActionOrigin.SYNTHETIC if mining.synthetic else ActionOrigin.POLICY),
+            action_origin=(
+                ActionOrigin.SYNTHETIC
+                if mining.synthetic or action != proposed else ActionOrigin.POLICY
+            ),
             outcome_verification=(
                 traversal_verification
                 if traversal_verification is not None
@@ -1204,7 +1212,8 @@ class SkillExecutor:
     ) -> OutcomeVerification | None:
         if self._spec is None or self._run is None:
             return None
-        if self._spec.skill_id not in _TRAVERSAL_SKILL_IDS:
+        if (self._spec.outcome_kind != "traversal"
+                and self._spec.skill_id not in _TRAVERSAL_SKILL_IDS):
             return None
         if self._spec.skill_id == "gather_nearby_wood" and self._gather_mining_started:
             return None
@@ -1614,6 +1623,8 @@ def _policy_parameters(
 ) -> dict[str, str | int | float | bool]:
     """Intersect planner/operator bindings with an option's learned-action envelope."""
     merged = dict(parameters)
+    if not permissions.allow_movement or parameters.get("allow_movement") is False:
+        merged["allow_movement"] = False
     for name in (
         "allow_attack",
         "allow_use",

@@ -306,12 +306,11 @@ def _verified_gather_acquisition(
     )
 
 def _verified_obstacle_stall(result: ExecutionTick) -> bool:
-    """Accept only an exact action-bound traversal stall from an eligible option."""
+    """Accept an action-bound traversal stall, independent of model or skill name."""
 
     verification = result.outcome_verification
     return bool(
-        result.run.skill_id in {"gather_nearby_wood", "traverse_visible_obstacle"}
-        and result.run.outcome == SkillOutcome.FAILED
+        result.run.outcome == SkillOutcome.FAILED
         and result.run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
         and verification is not None
         and verification.run_id == result.run.run_id

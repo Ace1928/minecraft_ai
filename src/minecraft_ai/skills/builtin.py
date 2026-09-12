@@ -20,6 +20,25 @@ def build_bootstrap_skill_library() -> SkillLibrary:
     library = SkillLibrary()
     specs = (
         SkillSpec(
+            skill_id="survey_surroundings",
+            name="Survey surroundings",
+            description=(
+                "Stop walking and use the camera to inspect alternative routes and visible "
+                "obstructions. Camera motion is chosen by the installed policy, not a scan macro."
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
+            expected_effects=("surroundings_inspected",),
+            max_duration_ms=12_000,
+            action_level=ActionLevel.LATENT,
+            policy_ref="survey",
+            policy_instruction="Stand still. Look around for a clear route or a blocking block.",
+            action_permissions=SkillActionPermissions(
+                allow_movement=False, allow_attack=False, allow_use=False,
+                allow_jump=False, allow_drop=False, allow_inventory=False, allow_hotbar=False,
+            ),
+        ),
+        SkillSpec(
             skill_id="approach_visible_target",
             version=7,
             name="Approach visible target",
@@ -55,7 +74,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="reacquire_target",
-            version=9,
+            version=10,
             name="Reacquire target",
             description=(
                 "Look around deliberately to find the requested target again, stabilize it near "
@@ -78,6 +97,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             policy_ref="navigate",
             policy_instruction="find the target",
             action_permissions=SkillActionPermissions(
+                allow_movement=False,
                 allow_attack=False,
                 allow_use=False,
                 allow_jump=False,
@@ -223,12 +243,13 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="explore_forward",
-            version=9,
+            version=10,
             name="Explore forward",
             description=(
                 "Traverse visible open terrain to discover a genuinely new area, keep the view "
                 "near the horizon, avoid drops and water, and stop when a useful resource appears"
             ),
+            outcome_kind="traversal",
             stage=SkillStage.EXPERIMENTAL,
             parameters=("allow_attack", "allow_use", "allow_jump"),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
@@ -236,6 +257,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=(
                 "escape_submersion",
                 "retreat_from_danger",
+                "survey_surroundings",
                 "traverse_visible_obstacle",
             ),
             max_duration_ms=12_000,
@@ -255,18 +277,20 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="traverse_level_ground",
-            version=3,
+            version=4,
             name="Traverse level ground",
             description=(
                 "Use the fast learned motion expert to cross a short visible lane while "
                 "preserving stable world-view camera control"
             ),
+            outcome_kind="traversal",
             stage=SkillStage.EXPERIMENTAL,
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("locomotion_progress", "destination_reached"),
             recovery_skills=(
                 "escape_submersion",
                 "retreat_from_danger",
+                "survey_surroundings",
                 "traverse_visible_obstacle",
             ),
             max_duration_ms=30_000,
@@ -284,17 +308,18 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="traverse_visible_obstacle",
-            version=5,
+            version=6,
             name="Traverse visible obstacle",
             description=(
                 "Use learned short-horizon movement and camera control to jump over or climb "
                 "out of the visible terrain obstruction, then hand control back for replanning"
             ),
+            outcome_kind="traversal",
             stage=SkillStage.EXPERIMENTAL,
             parameters=("allow_attack", "allow_use", "allow_jump"),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("obstacle_crossed", "locomotion_progress"),
-            recovery_skills=("escape_submersion", "retreat_from_danger"),
+            recovery_skills=("escape_submersion", "retreat_from_danger", "survey_surroundings"),
             max_duration_ms=8_000,
             # This escape needs the goal-conditioned STEVE body. The fast VPT
             # route cannot consume "jump forward" and may emit no locomotion at
