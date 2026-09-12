@@ -211,6 +211,85 @@ def test_resolved_mod_rule_and_empirical_breaks_reach_actual_guard():
     )
 
 
+_DISTINCT_MOD_BLOCKS = ("pack:ore-rich", "pack:ore_rich", "pack:ore/rich", "pack:ore.rich")
+
+
+@pytest.mark.parametrize("allowed", _DISTINCT_MOD_BLOCKS)
+def test_actual_guard_keeps_namespaced_block_rules_distinct(allowed):
+    book = _book(snapshot=MiningRuleSnapshot(
+        ruleset_id="pack", provenance="fixture:exact-rule",
+        rules=(MiningRule(block=allowed, tool="pack:drill", can_break=True),),
+    ))
+    assert _target(book, block=allowed).kind == allowed
+    for other in _DISTINCT_MOD_BLOCKS:
+        if other != allowed:
+            assert _target(book, block=other) == SkillFailureCode.MINING_TARGET_UNVERIFIED
+
+
+@pytest.mark.parametrize("denied", _DISTINCT_MOD_BLOCKS)
+def test_actual_guard_exact_negative_rule_wins_over_other_spelling(denied):
+    book = _book(snapshot=MiningRuleSnapshot(
+        ruleset_id="pack", provenance="fixture:exact-rule",
+        rules=tuple(MiningRule(block=block, tool="pack:drill", can_break=block != denied)
+                    for block in _DISTINCT_MOD_BLOCKS),
+    ))
+    assert _target(
+        book, block=denied,
+        parameters={"allow_unknown_block_probe": True, "harvest_required": False},
+    ) == SkillFailureCode.MINING_WRONG_TOOL
+
+
+@pytest.mark.parametrize("tool", ["pack:drill-fast", "pack:drill/fast", "pack:drill.fast"])
+def test_actual_guard_equipped_tool_identity_does_not_borrow_underscore_rule(tool):
+    book = _book(snapshot=MiningRuleSnapshot(
+        ruleset_id="pack", provenance="fixture:exact-rule",
+        rules=(
+            MiningRule(block="pack:rock", tool="pack:drill_fast", can_break=True),
+            MiningRule(block="pack:rock", tool=tool, can_break=False),
+        ),
+    ))
+    assert _target(book, tool=tool, parameters={"allow_unknown_block_probe": True}) == (
+        SkillFailureCode.MINING_WRONG_TOOL
+    )
+    assert _target(book, tool="pack:drill_fast").selected_item == "pack:drill_fast"
+
+
+@pytest.mark.parametrize("learned", _DISTINCT_MOD_BLOCKS)
+def test_actual_guard_break_history_is_bound_to_exact_namespaced_block(learned):
+    book = _book()
+    for index in range(3):
+        book.record(MiningTrial(
+            attempt_id=str(index), key=book.key(learned, "pack:drill"),
+            broke=True, elapsed_ms=4000.0, evidence="fixture:joined-break",
+        ))
+    assert _target(book, block=learned).kind == learned
+    for other in _DISTINCT_MOD_BLOCKS:
+        if other != learned:
+            assert _target(book, block=other) == SkillFailureCode.MINING_TARGET_UNVERIFIED
+
+
+@pytest.mark.parametrize("malformed", ["pack:ore rich", "pack:ore@rich", "pack:ore\\rich"])
+def test_actual_guard_malformed_namespaced_block_cannot_borrow_known_rule(malformed):
+    book = _book(snapshot=MiningRuleSnapshot(
+        ruleset_id="pack", provenance="fixture:exact-rule",
+        rules=(MiningRule(block="pack:ore_rich", tool="pack:drill", can_break=True),),
+    ))
+    assert _target(book, block=malformed) == SkillFailureCode.MINING_TARGET_UNVERIFIED
+
+
+@pytest.mark.parametrize("block,tool", [
+    ("minecraft:stone", "minecraft:wooden_pickaxe"),
+    ("stone", "wooden_pickaxe"),
+    (" Stone ", "Wooden Pickaxe"),
+])
+def test_actual_guard_preserves_vanilla_aliases_and_bare_natural_names(block, tool):
+    book = _book(snapshot=MiningRuleSnapshot(
+        ruleset_id="vanilla", provenance="fixture:exact-rule",
+        rules=(MiningRule(block="stone", tool="wooden_pickaxe", can_break=False),),
+    ))
+    assert _target(book, block=block, tool=tool) == SkillFailureCode.MINING_WRONG_TOOL
+
+
 def test_unknown_probe_does_not_bypass_safety_or_equipped_tool_evidence():
     assert _target(_book(), parameters={"allow_unknown_block_probe": True}).kind == "pack:rock"
     assert (

@@ -1793,8 +1793,12 @@ def _tool_material(item: str, *, suffix: str) -> str | None:
 
 
 def _normalize_name(value: str) -> str:
-    normalized = value.strip().casefold().removeprefix("minecraft:")
-    return re.sub(r"[^a-z0-9:]+", "_", normalized).strip("_")
+    normalized = value.strip().casefold()
+    if ":" in normalized:
+        # Namespace-bearing identities are opaque, not natural-language names.
+        # Even malformed spelling must not borrow another block/tool's rule.
+        return normalized.removeprefix("minecraft:")
+    return re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
 
 
 def _describes_log(kind: str) -> bool:
