@@ -135,6 +135,10 @@ class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     role: str = "generalist"
+    mining_ruleset_id: str | None = Field(default=None, min_length=1, max_length=512)
+    mining_rule_snapshot: str | None = None
+    mining_max_hold_ms: int = Field(default=30_000, ge=1000, le=120_000)
+    mining_acquisition_timeout_ms: int = Field(default=10_000, ge=1000, le=60_000)
     motor_hz: float = Field(default=20.0, ge=5.0, le=60.0)
     cognition_hz: float = Field(default=0.5, gt=0.0, le=10.0)
     # Zero is an intentional event-only mode: cognition and tactical events may

@@ -6,6 +6,7 @@ from enum import StrEnum
 
 from minecraft_ai.control.adaptive_aim import AdaptiveMiningAim
 from minecraft_ai.control.visual_progress import MiningVisualProgress
+from minecraft_ai.control.mining_knowledge import MiningKnowledge
 from minecraft_ai.motor import MotorIntent
 from minecraft_ai.grounded_perception import (
     CROSSHAIR_BLOCK_FAST_SOURCE,
@@ -135,6 +136,7 @@ _TOOL_TIERS = {
 
 
 class _BlockFamily(StrEnum):
+    OBSERVED = "observed"
     LOG = "log"
     WOOD = "wood"
     SOFT = "soft"
@@ -220,6 +222,9 @@ class MiningLeaseGuard:
     acquisition_timeout_ms: int = 6_000
     acquisition_motion_grace_ms: int = 750
     operator_grounding_grace_ms: int = 1_500
+    knowledge: MiningKnowledge | None = None
+    attempt: _MiningLease | None = field(default=None, init=False)
+    attempt_count: int = field(default=0, init=False)
     _lease: _MiningLease | None = None
     _pending: _PendingMiningAcquisition | None = None
     _held_keys: set[str] = field(default_factory=set)
@@ -387,6 +392,7 @@ class MiningLeaseGuard:
             now_ns=now_ns,
             min_confidence=self.min_confidence,
             max_track_age_ms=self.max_track_age_ms,
+            knowledge=self.knowledge,
         )
         if pending is None and (
             mode not in _MINING_MODES
@@ -480,6 +486,7 @@ class MiningLeaseGuard:
             min_confidence=self.min_confidence,
             max_track_age_ms=self.max_track_age_ms,
             require_scene_match=True,
+            knowledge=self.knowledge,
             evidence_after_ns=(
                 pending.settle_after_ns
                 if pending.settling
@@ -645,6 +652,10 @@ class MiningLeaseGuard:
         now_ns: int,
     ) -> None:
         lease_ms = min(target.lease_ms, self.absolute_max_ms)
+        if self.knowledge is not None:
+            lease_ms = self.knowledge.budget_ms(
+                target.kind, target.selected_item, lease_ms, cap_ms=self.absolute_max_ms,
+            )
         self._lease = _MiningLease(
             episode_id=intent.episode_id or "",
             target=target,
@@ -655,6 +666,9 @@ class MiningLeaseGuard:
             visual_seen_ns=now_ns,
             visual_changed_ns=now_ns,
         )
+
+        self.attempt = self._lease
+        self.attempt_count += 1
 
     def _remember_emitted(self, action: MotorAction) -> None:
         self._held_keys.update(action.keys_down)
@@ -893,6 +907,7 @@ def _crosshair_probe_mining_authorized(
     now_ns: int,
     min_confidence: float,
     max_track_age_ms: int,
+    knowledge: MiningKnowledge | None = None,
 ) -> bool:
     """Admit only a currently verified runtime-owned crosshair mining target."""
 
@@ -912,6 +927,7 @@ def _crosshair_probe_mining_authorized(
         max_track_age_ms=max_track_age_ms,
         require_scene_match=True,
         evidence_after_ns=0,
+        knowledge=knowledge,
     )
     return isinstance(target, _VerifiedTarget) and target.track_id == track_id
 
@@ -1046,6 +1062,7 @@ def _verified_target(
     max_track_age_ms: int,
     require_scene_match: bool,
     evidence_after_ns: int,
+    knowledge: MiningKnowledge | None = None,
 ) -> _VerifiedTarget | SkillFailureCode:
     visible = blackboard.fact("target.visible", min_confidence=min_confidence, now_ns=now_ns)
     mineable = blackboard.fact("target.mineable", min_confidence=min_confidence, now_ns=now_ns)
@@ -1074,9 +1091,9 @@ def _verified_target(
             return SkillFailureCode.MINING_TARGET_UNVERIFIED
         kind = _normalize_name(track.label)
     else:
-        initial_rule = _block_rule(kind)
-        if initial_rule is None:
-            return SkillFailureCode.MINING_TARGET_UNVERIFIED
+        # Geometry can be checked before deciding capability. An unknown
+        # family is not input authorization; the evidence gate below decides.
+        initial_rule = _block_rule(kind) or _BlockRule(_BlockFamily.OBSERVED)
         track = _crosshair_track(
             blackboard,
             kind=kind,
@@ -1157,10 +1174,24 @@ def _verified_target(
         # same rule applies to an exact operator region whose reference hash is
         # still matched by the runtime.
         kind = _normalize_name(track.label)
+    selected_item = _selected_item(
+        blackboard, now_ns=now_ns, min_confidence=min_confidence,
+        evidence_after_ns=evidence_after_ns,
+    )
+    exact = (knowledge.rule(kind, selected_item)
+             if knowledge is not None and selected_item is not None else None)
+    experienced = bool(knowledge is not None and selected_item is not None
+                       and knowledge.belief(kind, selected_item).breaks >= 3)
+    resolved_breakable = bool(exact is not None and exact.can_break is True)
+    probe = intent.parameters.get("allow_unknown_block_probe") is True
+    if exact is not None and exact.can_break is False:
+        return SkillFailureCode.MINING_WRONG_TOOL
     rule = _block_rule(kind)
     if rule is None:
-        return SkillFailureCode.MINING_TARGET_UNVERIFIED
-    if rule.family == _BlockFamily.UNBREAKABLE:
+        if not (resolved_breakable or experienced or (probe and selected_item is not None)):
+            return SkillFailureCode.MINING_TARGET_UNVERIFIED
+        rule = _BlockRule(_BlockFamily.OBSERVED)
+    if rule.family == _BlockFamily.UNBREAKABLE and not resolved_breakable:
         return SkillFailureCode.MINING_WRONG_TOOL
     if intent.mode.casefold() == "gather_wood" and rule.family != _BlockFamily.LOG:
         return SkillFailureCode.MINING_TARGET_MISMATCH
@@ -1174,7 +1205,9 @@ def _verified_target(
         return SkillFailureCode.MINING_TARGET_MISMATCH
     if mineable_is_bound and mineable is not None and mineable.value is not True:
         return SkillFailureCode.MINING_TARGET_UNVERIFIED
-    inferred_hand_safe = current_grounding and rule.family in _HAND_SAFE_FAMILIES
+    inferred_hand_safe = current_grounding and (
+        rule.family in _HAND_SAFE_FAMILIES or resolved_breakable or experienced
+    )
     if not inferred_hand_safe and (
         mineable is None
         or not mineable_is_bound
@@ -1198,18 +1231,19 @@ def _verified_target(
         ):
             return SkillFailureCode.MINING_TARGET_UNVERIFIED
 
-    selected_item = _selected_item(
-        blackboard,
-        now_ns=now_ns,
-        min_confidence=min_confidence,
-        evidence_after_ns=evidence_after_ns,
-    )
     if selected_item is None:
         if rule.family not in _HAND_SAFE_FAMILIES:
             return SkillFailureCode.MINING_TOOL_UNVERIFIED
         selected_item = _UNVERIFIED_ITEM
     tool_tier = _tool_tier(selected_item, suffix="pickaxe")
-    if rule.minimum_pick_tier is not None and (
+    harvest_required = intent.parameters.get("harvest_required") is not False
+    if harvest_required and exact is not None and exact.can_harvest is False:
+        return SkillFailureCode.MINING_WRONG_TOOL
+    tool_resolved = bool(
+        (not harvest_required and (resolved_breakable or experienced))
+        or (exact is not None and exact.can_harvest is True)
+    )
+    if not tool_resolved and rule.minimum_pick_tier is not None and (
         tool_tier is None or tool_tier < rule.minimum_pick_tier
     ):
         return SkillFailureCode.MINING_WRONG_TOOL
@@ -1709,6 +1743,8 @@ def _block_rule(kind: str) -> _BlockRule | None:
 
 
 def _lease_duration_ms(rule: _BlockRule, selected_item: str) -> int:
+    if rule.family == _BlockFamily.OBSERVED:
+        return 5_000  # Cold-start probe, never a prediction of game mechanics.
     if rule.family in {_BlockFamily.LOG, _BlockFamily.WOOD}:
         material = _tool_material(selected_item, suffix="axe")
         if material is None:
@@ -1758,7 +1794,7 @@ def _tool_material(item: str, *, suffix: str) -> str | None:
 
 def _normalize_name(value: str) -> str:
     normalized = value.strip().casefold().removeprefix("minecraft:")
-    return re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
+    return re.sub(r"[^a-z0-9:]+", "_", normalized).strip("_")
 
 
 def _describes_log(kind: str) -> bool:
