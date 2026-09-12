@@ -3963,6 +3963,21 @@ class AgentRuntime:
             self._cognition_requested = True
             return False
         spec = skills.get(skill_id)
+        if not initiation_satisfied(spec, self.blackboard):
+            graph = getattr(self, "_plan_graph", None)
+            if graph is not None:
+                graph.block_current_method(
+                    skill_id,
+                    reason="initiation-precondition-unsatisfied",
+                    skills=skills,
+                )
+                self._plan_steps = graph.sequential_labels()
+                self._plan_index = graph.cursor
+            else:
+                self._plan_index += 1
+            self._plan_step_completed_ns = time.monotonic_ns()
+            self._cognition_requested = True
+            return False
         start_kwargs: dict[str, Any] = {}
         if spec.outcome_kind == "traversal":
             start_kwargs["complete_on_locomotion_progress"] = True
