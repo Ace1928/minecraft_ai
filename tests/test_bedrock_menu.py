@@ -376,6 +376,92 @@ def test_menu_navigator_follows_only_screenshot_confirmed_transitions() -> None:
     assert result.payload()["status"] == "in-world"
 
 
+def test_featured_genwars_overlay_is_a_startup_popup() -> None:
+    stage = classify_menu_stage(
+        _frame(1),
+        _lines(
+            "Have you tried the action-packed PvP adventure GenWars?",
+            "Drop from the sky and squad up to build and defend your",
+        ),
+        lan_name="BedrockConnect",
+        server_name="Eidos Local Bedrock",
+        hud_detector=lambda _frame: False,
+    )
+    assert stage is MenuStage.STARTUP_POPUP
+
+
+def test_menu_navigator_clicks_ocr_dismiss_on_featured_overlay() -> None:
+    frames = [_frame(index) for index in range(1, 6)]
+    reader = _MappedTextReader(
+        {
+            1: _lines(
+                "Have you tried the action-packed PvP adventure GenWars?",
+                "Dismiss",
+                "Battle now",
+            ),
+            2: _lines("Minecraft", "Play", "Settings", "Marketplace"),
+            3: _lines("Play", "Worlds", "LAN Games", "BedrockConnect"),
+            4: _lines("ServerList", "Connect to a Server", "Eidos Local Bedrock"),
+        }
+    )
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture(frames),
+        text_reader=reader,
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        poll_interval_s=0.0,
+        sleep=lambda _seconds: None,
+        hud_detector=lambda frame: frame.frame_id == 5,
+    )
+
+    result = navigator.run()
+
+    assert result.visited[0] is MenuStage.STARTUP_POPUP
+    assert clicks.clicks[0][1:] == _lines(
+        "Have you tried the action-packed PvP adventure GenWars?",
+        "Dismiss",
+        "Battle now",
+    )[1].center
+
+
+def test_menu_navigator_clicks_visual_dismiss_left_of_featured_battle() -> None:
+    featured = _pixel_frame(
+        1,
+        width=1000,
+        height=600,
+        green_box=(520, 430, 720, 490),
+    )
+    frames = [featured, *(_frame(index) for index in range(2, 6))]
+    reader = _MappedTextReader(
+        {
+            1: _lines("Have you tried the action-packed PvP adventure GenWars?"),
+            2: _lines("Minecraft", "Play", "Settings", "Marketplace"),
+            3: _lines("Play", "Worlds", "LAN Games", "BedrockConnect"),
+            4: _lines("ServerList", "Connect to a Server", "Eidos Local Bedrock"),
+        }
+    )
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture(frames),
+        text_reader=reader,
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        poll_interval_s=0.0,
+        sleep=lambda _seconds: None,
+        hud_detector=lambda frame: frame.frame_id == 5,
+    )
+
+    result = navigator.run()
+
+    assert result.visited[0] is MenuStage.STARTUP_POPUP
+    click_x, click_y = clicks.clicks[0][1], clicks.clicks[0][2]
+    assert click_x < 520
+    assert 430 <= click_y <= 490
+
+
 def test_menu_navigator_sends_nothing_on_unknown_initial_screen() -> None:
     clicks = _RecordingClicks()
     navigator = BedrockMenuNavigator(

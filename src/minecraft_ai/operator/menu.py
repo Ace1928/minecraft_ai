@@ -436,7 +436,14 @@ class BedrockMenuNavigator:
     def _transition_for(self, observation: MenuObservation) -> _Transition:
         if observation.stage == MenuStage.STARTUP_POPUP:
             return _Transition(
-                target_text=("skip for now", "not now", "continue", "ok", "let's go"),
+                target_text=(
+                    "dismiss",
+                    "skip for now",
+                    "not now",
+                    "continue",
+                    "ok",
+                    "let's go",
+                ),
                 destination=MenuStage.TITLE,
                 region=(0.10, 0.15, 0.90, 0.95),
             )
@@ -678,7 +685,7 @@ def classify_menu_stage(
     ):
         return MenuStage.DEATH
 
-    dismiss_phrases = ("skip for now", "not now", "continue", "ok", "let s go")
+    dismiss_phrases = ("skip for now", "not now", "continue", "ok", "let s go", "dismiss")
     popup_anchors = (
         "welcome to minecraft",
         "sign in with a microsoft",
@@ -691,6 +698,10 @@ def classify_menu_stage(
     if any(phrase in text for phrase in dismiss_phrases) and any(
         phrase in text for phrase in popup_anchors
     ):
+        return MenuStage.STARTUP_POPUP
+    # Bedrock 1.26 title-screen featured ads (GenWars and similar) sit on top
+    # of Play. OCR often misses the Dismiss label; the body copy is enough.
+    if "genwars" in compact or "have you tried the action-packed" in text:
         return MenuStage.STARTUP_POPUP
 
     if (
@@ -753,12 +764,12 @@ def classify_menu_stage(
 
     # Bedrock 1.26's stylized logo and selected Play label are unreliable in
     # Tesseract. Accept the title without them only when the characteristic
-    # wide central green Play control and at least two independently placed
+    # wide central Play control and at least two independently placed
     # title-menu labels are both present. The left-side "Play Now!" promotion
-    # is outside this visual band and is never a target.
-    if _find_green_title_play_control(frame) is not None and len(
-        _matched_title_menu_anchors(frame, lines)
-    ) >= 2:
+    # is outside this visual band and is never a target. 1.26 paints Play
+    # light-gray; older builds used a dense green control.
+    title_play = _find_title_play_control(frame)
+    if title_play is not None and len(_matched_title_menu_anchors(frame, lines)) >= 2:
         return MenuStage.TITLE
 
     loading_phrases = (
@@ -991,11 +1002,15 @@ def _transition_click_target(
             region=transition.region,
         )
     except MenuNavigationError as original_error:
+        if observation.stage == MenuStage.STARTUP_POPUP:
+            target = _find_featured_dismiss_control(observation.frame)
+            if target is not None:
+                return target
         if observation.stage == MenuStage.TITLE:
-            target = _find_green_title_play_control(observation.frame)
+            target = _find_title_play_control(observation.frame)
             if target is None:
                 raise MenuNavigationError(
-                    "title screen was recognized, but the central green Play control "
+                    "title screen was recognized, but the central Play control "
                     "was not visually confirmed; no input sent"
                 ) from None
             return target
@@ -1075,12 +1090,63 @@ def _matched_title_menu_anchors(
     return matched
 
 
+def _find_featured_dismiss_control(frame: CapturedFrame) -> OcrLine | None:
+    """Click the light sibling left of a lower-dialog green Battle/Play control.
+
+    Featured ads OCR the body copy reliably and the Dismiss label poorly.
+    The green action is never the target; Dismiss is the same-sized control
+    immediately to its left.
+    """
+
+    battle = _find_dense_green_control(
+        frame,
+        region=(0.40, 0.70, 0.85, 0.95),
+        minimum_width_fraction=0.12,
+        minimum_height_fraction=0.04,
+        description="featured battle control",
+    )
+    if battle is None:
+        return None
+    gap = max(8, int(battle.width * 0.04))
+    right = battle.left - gap
+    left = right - battle.width
+    if left < int(frame.width * 0.12) or right <= left:
+        return None
+    return OcrLine(
+        text="visually confirmed featured dismiss control",
+        left=left,
+        top=battle.top,
+        width=battle.width,
+        height=battle.height,
+        confidence=100.0,
+    )
+
+
+def _find_title_play_control(frame: CapturedFrame) -> OcrLine | None:
+    green = _find_green_title_play_control(frame)
+    if green is not None:
+        return green
+    return _find_light_title_play_control(frame)
+
+
 def _find_green_title_play_control(frame: CapturedFrame) -> OcrLine | None:
     return _find_dense_green_control(
         frame,
         region=(0.25, 0.32, 0.75, 0.55),
         minimum_width_fraction=0.24,
         minimum_height_fraction=0.05,
+        description="visually confirmed title Play control",
+    )
+
+
+def _find_light_title_play_control(frame: CapturedFrame) -> OcrLine | None:
+    """Bedrock 1.26 title Play is a wide light-gray control, not green."""
+
+    return _find_dense_neutral_control(
+        frame,
+        region=(0.28, 0.36, 0.72, 0.50),
+        minimum_width_fraction=0.22,
+        minimum_height_fraction=0.04,
         description="visually confirmed title Play control",
     )
 
@@ -1099,6 +1165,62 @@ def _find_green_respawn_control(frame: CapturedFrame) -> OcrLine | None:
         minimum_width_fraction=0.20,
         minimum_height_fraction=0.035,
         description="visually confirmed respawn control",
+    )
+
+
+def _find_dense_neutral_control(
+    frame: CapturedFrame,
+    *,
+    region: tuple[float, float, float, float],
+    minimum_width_fraction: float,
+    minimum_height_fraction: float,
+    description: str,
+) -> OcrLine | None:
+    expected_bytes = frame.width * frame.height * 4
+    if frame.width < 64 or frame.height < 64 or len(frame.bgra) != expected_bytes:
+        return None
+    x_start, y_start, x_end, y_end = region
+    x0, x1 = int(frame.width * x_start), int(frame.width * x_end)
+    y0, y1 = int(frame.height * y_start), int(frame.height * y_end)
+    source = memoryview(frame.bgra)
+
+    def is_light(x: int, y: int) -> bool:
+        offset = (y * frame.width + x) * 4
+        blue, green, red = (int(value) for value in source[offset : offset + 3])
+        return min(blue, green, red) >= 170 and max(blue, green, red) - min(
+            blue, green, red
+        ) <= 40
+
+    qualifying_rows: list[int] = []
+    minimum_row_pixels = max(1, int(frame.width * minimum_width_fraction))
+    for y in range(y0, y1):
+        if sum(is_light(x, y) for x in range(x0, x1)) >= minimum_row_pixels:
+            qualifying_rows.append(y)
+    row_runs = _contiguous_runs(qualifying_rows)
+    strong_rows = [run for run in row_runs if len(run) >= frame.height * minimum_height_fraction]
+    if len(strong_rows) != 1:
+        return None
+    rows = strong_rows[0]
+
+    qualifying_columns: list[int] = []
+    minimum_column_pixels = max(1, int(len(rows) * 0.45))
+    for x in range(x0, x1):
+        if sum(is_light(x, y) for y in rows) >= minimum_column_pixels:
+            qualifying_columns.append(x)
+    column_runs = _contiguous_runs(qualifying_columns)
+    strong_columns = [
+        run for run in column_runs if len(run) >= frame.width * minimum_width_fraction
+    ]
+    if len(strong_columns) != 1:
+        return None
+    columns = strong_columns[0]
+    return OcrLine(
+        text=description,
+        left=columns[0],
+        top=rows[0],
+        width=columns[-1] - columns[0] + 1,
+        height=rows[-1] - rows[0] + 1,
+        confidence=100.0,
     )
 
 
