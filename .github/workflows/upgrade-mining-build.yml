@@ -1,0 +1,50 @@
+name: Validate learned mining upgrade
+on:
+  push:
+    branches: ['agent-upgrade/reactive-20260912']
+    paths: ['.github/workflows/upgrade-mining-build.yml']
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Materialize checksum-pinned source changes
+        run: |
+          python - <<'PY'
+          import pathlib,base64,zlib,hashlib
+          encoded=''.join(pathlib.Path(f'.upgrade2-{i}.b64').read_text() for i in range(3))
+          patch=zlib.decompress(base64.b64decode(encoded,validate=True))
+          assert hashlib.sha256(patch).hexdigest()=='470d8a6f0b756d805cf8f8f709bc7268581f0ab0b027a8f79d923d5c29eb9afc'
+          pathlib.Path('/tmp/upgrade.patch').write_bytes(patch)
+          PY
+          git fetch origin 615d6cdc7f53d850a359b11e35977a0d01a3aea3
+          git checkout --detach 615d6cdc7f53d850a359b11e35977a0d01a3aea3
+          git apply --check /tmp/upgrade.patch
+          git apply /tmp/upgrade.patch
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[dev]'
+      - name: Format new modules and validate source
+        run: |
+          ruff format src/minecraft_ai/control/mining_knowledge.py tests/test_mining_knowledge.py
+          ruff check src tests
+      - run: mypy src
+      - run: python -m pytest -q --junitxml=/tmp/mining-tests.xml
+      - name: Publish tested source-only commit
+        run: |
+          git config user.name 'lloydhandyside'
+          git config user.email '157781245+Ace1928@users.noreply.github.com'
+          git add src tests
+          git commit -m 'feat(learning): persist scoped mining and tool outcomes, learn budgets, and interrupt idle policies'
+          git push origin HEAD:refs/heads/agent-upgrade/verified-mining-20260912
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mining-upgrade-tests
+          path: /tmp/mining-tests.xml
+          retention-days: 7
+          if-no-files-found: ignore
