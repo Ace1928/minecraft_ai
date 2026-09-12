@@ -882,7 +882,7 @@ class Supervisor:
                     # available while SIGTERM cleanup disarms its lease and
                     # seals the trajectory/learning buffers.
                     self.pause()
-                    stop_agent_process(timeout_s=GRACEFUL_AGENT_STOP_TIMEOUT_S)
+                    stop_agent_process(timeout_s=GRACEFUL_AGENT_STOP_TIMEOUT_S, planned=True)
                     result = self.status()
                     result["operator_pause_persisted"] = pause_persisted
                     result["agent_containment_confirmed"] = not AGENT_FILE.exists()
@@ -935,7 +935,7 @@ class Supervisor:
                     # a chance to disarm and flush its durable state. The
                     # supervisor itself retires only after that bounded wait.
                     self.pause()
-                    stop_agent_process(timeout_s=GRACEFUL_AGENT_STOP_TIMEOUT_S)
+                    stop_agent_process(timeout_s=GRACEFUL_AGENT_STOP_TIMEOUT_S, planned=True)
                     # Teardown takes this same lock. Revoke first, then deliver
                     # the bounded socket reply before allowing the serving
                     # process to exit and abandon its daemon request thread.

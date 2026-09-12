@@ -834,6 +834,28 @@ def test_close_does_not_block_when_writer_died_with_a_full_queue() -> None:
         recorder.close(timeout_s=0.01)
 
 
+def test_close_signal_can_be_retried_after_zero_budget_full_queue() -> None:
+    from unittest.mock import Mock
+
+    recorder = object.__new__(TrajectoryRecorder)
+    recorder._queue = queue.Queue(maxsize=1)
+    recorder._queue.put_nowait(object())
+    recorder._thread = Mock(is_alive=Mock(return_value=True))
+    recorder._worker_error = None
+    with pytest.raises(TimeoutError, match="accept close signal"):
+        recorder.close(timeout_s=0.0)
+    assert recorder._closed and not recorder._close_signal_enqueued
+    recorder._queue.get_nowait()
+    with pytest.raises(TimeoutError, match="flush before timeout"):
+        recorder.close(timeout_s=0.0)
+    assert recorder._close_signal_enqueued
+    assert recorder._queue.get_nowait() is None
+    recorder._thread.join.assert_called_once_with(timeout=0.0)
+    with pytest.raises(TimeoutError, match="flush before timeout"):
+        recorder.close(timeout_s=0.0)
+    assert recorder._queue.empty()  # Exactly one sentinel even across retries.
+
+
 def test_recorder_status_surfaces_runtime_disable_and_drops(tmp_path: Path) -> None:
     recorder = TrajectoryRecorder(
         manifest=_manifest("trajectory-status"),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import signal
 import subprocess
@@ -205,7 +206,17 @@ def stop_agent_process(
     process: AgentProcess | None = None,
     *,
     timeout_s: float = GRACEFUL_AGENT_STOP_TIMEOUT_S,
+    planned: bool = False,
 ) -> bool:
+    """Stop within one wait budget, optionally letting the parent drain workers.
+
+    Emergency and orphan cleanup remain group-first. A planned stop sends TERM
+    only to the verified parent; its workers are contained only if draining
+    exceeds the grace portion of the same total timeout.
+    """
+
+    if not math.isfinite(timeout_s) or timeout_s < 0:
+        raise ValueError("agent stop timeout must be finite and nonnegative")
     current = process
     if current is None:
         try:
@@ -213,20 +224,21 @@ def stop_agent_process(
         except (OSError, ValueError, TypeError, KeyError):
             return False
     state = _agent_process_state(current)
-    if state == "unverifiable":
+    original_zombie = state == "unverifiable" and _original_agent_zombie(current)
+    if state == "unverifiable" and not original_zombie:
         return False
     if state == "mismatch":
         _remove_descriptor_if_owned(current)
         return False
-    if state == "dead":
+    if state == "dead" or original_zombie:
         if not _process_group_alive(current.pid):
             _remove_descriptor_if_owned(current)
             return False
         if not _descriptor_has_process_identity(current):
             return False
-        stopped = _terminate_orphaned_group(current.pid, timeout_s=timeout_s)
+        stopped = _terminate_orphaned_group(current, timeout_s=timeout_s)
     else:
-        stopped = _terminate_group(current, timeout_s=timeout_s)
+        stopped = _terminate_group(current, timeout_s=timeout_s, planned=planned)
     if stopped and not _process_group_alive(current.pid):
         _remove_descriptor_if_owned(current)
         return True
@@ -254,6 +266,9 @@ def _pid_alive(pid: int) -> bool:
         return False
     try:
         os.kill(pid, 0)
+    except PermissionError:
+        # A permissions failure is not evidence that the recorded leader died.
+        return True
     except OSError:
         return False
     return True
@@ -355,61 +370,100 @@ def _command_matches_descriptor(command: tuple[str, ...], process: AgentProcess)
     return ("--allow-host-capture" in command) == process.allow_host_capture
 
 
-def _terminate_group(process: AgentProcess, *, timeout_s: float) -> bool:
+def _original_agent_zombie(process: AgentProcess) -> bool:
+    """Recognize the recorded dead leader when /proc/cmdline is already empty."""
+
+    if not _descriptor_has_process_identity(process):
+        return False
+    try:
+        stat = Path(f"/proc/{process.pid}/stat").read_text(encoding="utf-8")
+        close_paren = stat.rfind(")")
+        if close_paren < 0:
+            return False
+        fields = stat[close_paren + 1 :].split()
+        return (
+            len(fields) > 19
+            and fields[0] in {"Z", "X"}
+            and int(fields[2]) == process.pid
+            and int(fields[3]) == process.pid
+            and int(fields[19]) == process.proc_start_ticks
+        )
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
+def _group_signal_authorized(process: AgentProcess) -> bool:
+    if not _descriptor_has_process_identity(process):
+        return False
+    state = _agent_process_state(process)
+    return state in {"verified-live", "dead"} or (
+        state == "unverifiable" and _original_agent_zombie(process)
+    )
+
+
+def _wait_for_group_exit(process_group_id: int, *, deadline: float) -> bool:
+    while _process_group_alive(process_group_id):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
+    return True
+
+
+def _finish_group_stop(process: AgentProcess, *, deadline: float, grace_deadline: float) -> bool:
+    if _wait_for_group_exit(process.pid, deadline=grace_deadline):
+        return True
+    # The recorded leader may have exited while its workers drained. A reused
+    # or uninspectable live PID is never authority to kill the retained group.
+    if not _group_signal_authorized(process):
+        return False
+    try:
+        _signal_process_group(process.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+    except ProcessLookupError:
+        return not _process_group_alive(process.pid)
+    except OSError:
+        return False
+    return _wait_for_group_exit(process.pid, deadline=deadline)
+
+
+def _terminate_group(process: AgentProcess, *, timeout_s: float, planned: bool = False) -> bool:
+    deadline = time.monotonic() + timeout_s
+    grace_deadline = deadline - min(1.0, timeout_s / 4)
     if not _agent_identity_matches(process):
         return False
     kill_group = getattr(os, "killpg", None)
     if not callable(kill_group):
         return False
     try:
-        kill_group(process.pid, signal.SIGTERM)
-    except (OSError, ProcessLookupError):
+        if planned:
+            os.kill(process.pid, signal.SIGTERM)
+        else:
+            kill_group(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        # The identity-checked parent may finish before TERM is delivered.
+        # Retained workers still get their bounded drain interval.
+        pass
+    except OSError:
         return False
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if not _process_group_alive(process.pid):
-            return True
-        time.sleep(0.05)
-    if not _process_group_alive(process.pid):
-        return True
-    try:
-        kill_group(process.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-    except (OSError, ProcessLookupError):
-        return False
-    deadline = time.monotonic() + min(timeout_s, 1.0)
-    while time.monotonic() < deadline:
-        if not _process_group_alive(process.pid):
-            return True
-        time.sleep(0.05)
-    return not _process_group_alive(process.pid)
+    return _finish_group_stop(process, deadline=deadline, grace_deadline=grace_deadline)
 
 
-def _terminate_orphaned_group(process_group_id: int, *, timeout_s: float) -> bool:
+def _terminate_orphaned_group(process: AgentProcess, *, timeout_s: float) -> bool:
     """Boundedly stop members after their recorded Linux group leader exited."""
 
-    if not _IS_LINUX or process_group_id <= 0 or not _process_group_alive(process_group_id):
+    deadline = time.monotonic() + timeout_s
+    grace_deadline = deadline - min(1.0, timeout_s / 4)
+    if not _IS_LINUX or process.pid <= 0 or not _process_group_alive(process.pid):
         return False
-    kill_group = getattr(os, "killpg", None)
-    if not callable(kill_group):
+    if not _group_signal_authorized(process):
         return False
-    for sent_signal, wait_s in (
-        (signal.SIGTERM, timeout_s),
-        (getattr(signal, "SIGKILL", signal.SIGTERM), min(timeout_s, 1.0)),
-    ):
-        try:
-            kill_group(process_group_id, sent_signal)
-        except ProcessLookupError:
-            return not _process_group_alive(process_group_id)
-        except OSError:
-            return False
-        deadline = time.monotonic() + wait_s
-        while time.monotonic() < deadline:
-            if not _process_group_alive(process_group_id):
-                return True
-            time.sleep(0.05)
-        if not _process_group_alive(process_group_id):
-            return True
-    return not _process_group_alive(process_group_id)
+    try:
+        _signal_process_group(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return not _process_group_alive(process.pid)
+    except OSError:
+        return False
+    return _finish_group_stop(process, deadline=deadline, grace_deadline=grace_deadline)
 
 
 def _process_group_alive(process_group_id: int) -> bool:

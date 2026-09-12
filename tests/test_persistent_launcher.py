@@ -22,7 +22,9 @@ def _write_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
-def _launcher_harness(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
+def _launcher_harness(
+    tmp_path: Path, *, constant_role: str | None = None
+) -> tuple[Path, dict[str, str], Path]:
     root = tmp_path / "runtime"
     bin_dir = root / "bin"
     venv_bin = root / ".venv" / "bin"
@@ -33,10 +35,20 @@ def _launcher_harness(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     state.mkdir()
     (config_home / "minecraft-ai").mkdir(parents=True)
     shutil.copy2(Path(__file__).parents[1] / "start.sh", root / "start.sh")
-    _write_executable(
-        venv_bin / "python",
-        f"#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} \"$@\"\n",
-    )
+    python_wrapper = "#!/usr/bin/env bash\n"
+    if constant_role is not None:
+        # Retry-limit tests do not exercise configuration changes. Avoid loading
+        # all config/model schemas in every retry; dedicated role tests below
+        # still execute the real resolver and observe changes between attempts.
+        python_wrapper += (
+            'if [ "${1:-}" = -c ] '
+            '&& [[ "${2:-}" == *"from minecraft_ai.config import load_config"* ]]; then\n'
+            f"    printf '%s\\n' {shlex.quote(constant_role)}\n"
+            "    exit 0\n"
+            "fi\n"
+        )
+    python_wrapper += f"exec {shlex.quote(sys.executable)} \"$@\"\n"
+    _write_executable(venv_bin / "python", python_wrapper)
 
     _write_executable(
         venv_bin / "minecraft-ai",
@@ -427,7 +439,7 @@ def test_route_hold_adopts_only_ready_healthy_new_generation(tmp_path: Path) -> 
 def test_unrelated_startup_failure_still_replaces_bedrock_at_existing_limit(
     tmp_path: Path, grace_limit: bool
 ) -> None:
-    root, env, state = _launcher_harness(tmp_path)
+    root, env, state = _launcher_harness(tmp_path, constant_role="generalist")
     attempts = 5 if grace_limit else 22
     env.update({"RUN_FAILURE_KIND": "other", "STOP_AFTER_SLEEPS": str(attempts)})
     if grace_limit:

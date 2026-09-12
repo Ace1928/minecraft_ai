@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Callable
 from collections import deque
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import Any, cast
 
 from .cognition import (
@@ -390,6 +391,10 @@ class AgentRuntime:
         )
 
     def stop(self) -> None:
+        # Start the one public cleanup budget when admission is revoked, not
+        # after a private adapter's cooperative stop callback has returned.
+        if getattr(self, "_shutdown_deadline_ns", None) is None:
+            self._shutdown_deadline_ns = time.monotonic_ns() + 20_000_000_000
         self._stop.set()
 
     def close_before_run(self, *, timeout_s: float = 2.0) -> bool:
@@ -500,44 +505,98 @@ class AgentRuntime:
             self._failsafe(f"agent-runtime:{type(exc).__name__}:{exc}")
             raise
         finally:
-            self._stop.set()
-            # Retire requests before fallible device/telemetry cleanup. Running
-            # workers retain their accounting and discard only after completion.
-            # Partial/legacy runtime assembly may never initialize this optional
-            # registry. An existing invalid registry still fails visibly.
-            for future in tuple(getattr(self, "_bound_cognition_requests", {})):
-                self._reject_bound_cognition(future, "runtime_shutdown")
-            self._pool.shutdown(wait=False, cancel_futures=True)
-            if self._lease_thread is not None:
-                self._lease_thread.join(timeout=2.0)
+            self._shutdown_runtime()
+
+    def _shutdown_runtime(self) -> None:
+        """Revoke controls, then retire independent owners under one budget.
+
+        Known waits consume an absolute deadline; third-party callbacks remain
+        cooperative. The identity-checked process owner supplies the hard outer
+        containment bound. Child checkpoint evidence and parent recording are
+        separate results, neither a claim of whole-agent atomic persistence.
+        """
+        # Do not call an overridden stop(): private adapters already fence their
+        # owners at stop entry and may perform fallible cooperative cleanup.
+        AgentRuntime.stop(self)
+        deadline_ns = self._shutdown_deadline_ns
+        assert deadline_ns is not None
+        self._shutdown_results: dict[str, Any] = {}
+
+        def remaining_s() -> float:
+            return max(0.0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
+
+        def cleanup(name: str, callback: Callable[[], Any]) -> Any:
             try:
-                current = self.executor.run
-                if current is not None and current.outcome == SkillOutcome.RUNNING:
-                    cancelled = self.executor.cancel()
-                    try:
-                        if cancelled.action is not None:
-                            self._send_motor(cancelled.action, execution=cancelled)
-                    finally:
-                        self._record_terminal_run(cancelled.run)
-            except Exception:
-                pass
-            try:
-                send_command("disarm")
-            except Exception:
-                pass
-            self.perception.close()
-            self.executor.close()
-            if self.trajectory is not None:
-                try:
-                    self.trajectory.close()
-                except Exception as exc:
-                    self._failsafe(f"trajectory-flush:{type(exc).__name__}:{exc}")
-            try:
-                self._flush_pending_skill_stats(force=True)
-                self._flush_pending_learning_records(force=True)
+                result = callback()
             except Exception as exc:
-                self._failsafe(f"learning-flush:{type(exc).__name__}:{exc}")
-            self.telemetry.publish(self._telemetry_payload(state="stopped"), force=True)
+                # Diagnostics must not leak checkpoint paths, native metadata,
+                # or an adapter's private exception text to public telemetry.
+                self._shutdown_results[name] = {"error_code": type(exc).__name__}
+                logging.getLogger(__name__).warning(
+                    "Runtime cleanup %s failed: %s", name, type(exc).__name__,
+                )
+                return None
+            self._shutdown_results[name] = result
+            return result
+
+        def disarm() -> dict[str, Any]:
+            timeout_s = min(1.5, remaining_s())
+            if timeout_s < 0.05:
+                raise TimeoutError("runtime revocation budget exhausted")
+            return send_command("disarm", timeout_s=timeout_s)
+
+        revoked = cleanup("actuator_release", disarm)
+        inputs_released = isinstance(revoked, dict) and revoked.get("motor_lease_active") is False
+        # Keep only the release conclusion, not the supervisor's full status.
+        self._shutdown_results["actuator_release"] = inputs_released
+        def retire_cognition_requests() -> None:
+            for future in tuple(getattr(self, "_bound_cognition_requests", {})):
+                cleanup("cognition_request", partial(self._reject_bound_cognition,
+                    future, "runtime_shutdown",
+                ))
+
+        cleanup("cognition_registry", retire_cognition_requests)
+        cleanup("cognition_pool", lambda: self._pool.shutdown(wait=False, cancel_futures=True))
+
+        def cancel_terminal() -> None:
+            current = self.executor.run
+            if current is not None and current.outcome == SkillOutcome.RUNNING:
+                # No skill reset, recovery option, action, or inference at the
+                # terminal boundary. Supervisor revocation owns actual release.
+                cancelled = self.executor.cancel_for_shutdown()
+                self._record_terminal_run(cancelled.run)
+
+        cleanup("terminal_run", cancel_terminal)
+        lease_thread = self._lease_thread
+        if lease_thread is not None:
+            cleanup("lease_thread", lambda: lease_thread.join(
+                timeout=min(2.0, remaining_s()),
+            ))
+        # Perception retirement fences publications before model checkpointing.
+        cleanup("perception", lambda: self.perception.close(
+            deadline_ns=min(deadline_ns, time.monotonic_ns() + 2_000_000_000),
+        ))
+        policy = getattr(self.executor, "policy", None)
+        retire = getattr(policy, "retire", None)
+        if callable(retire):
+            cleanup("policy", lambda: retire(
+                # Reserve room for recorder and parent learning evidence. Every
+                # child shares this cutoff; no per-worker additive timeout.
+                deadline_ns=deadline_ns - 5_000_000_000,
+                inputs_released=inputs_released and not emergency_stop_latched(),
+            ))
+        else:
+            # Explicit legacy transition: no capability means no checkpoint ACK
+            # claim. Custom close callbacks remain cooperative under outer stop.
+            cleanup("legacy_policy_close", self.executor.close)
+        trajectory = self.trajectory
+        if trajectory is not None:
+            cleanup("trajectory", lambda: trajectory.close(timeout_s=remaining_s()))
+        cleanup("skill_statistics", lambda: self._flush_pending_skill_stats(force=True))
+        cleanup("learning_records", lambda: self._flush_pending_learning_records(force=True))
+        cleanup("telemetry", lambda: self.telemetry.publish(
+            self._telemetry_payload(state="stopped"), force=True,
+        ))
 
     def _warmup_policy(self) -> None:
         warmup = getattr(self.executor.policy, "warmup", None)

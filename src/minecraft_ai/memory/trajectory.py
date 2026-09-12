@@ -421,6 +421,7 @@ class TrajectoryRecorder:
     _written_steps: int = field(default=0, init=False)
     _dropped_steps: int = field(default=0, init=False)
     _closed: bool = field(default=False, init=False)
+    _close_signal_enqueued: bool = field(default=False, init=False)
     _worker_error: BaseException | None = field(default=None, init=False)
     _recording_disabled_reason: str | None = field(default=None, init=False)
 
@@ -594,25 +595,29 @@ class TrajectoryRecorder:
         return True
 
     def close(self, *, timeout_s: float = 15.0) -> TrajectoryManifest:
-        if not self._closed:
-            self._closed = True
-            deadline = time.monotonic() + max(0.0, timeout_s)
+        self._closed = True
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        if not self._close_signal_enqueued:
             while True:
                 if self._worker_error is not None:
                     raise RuntimeError("trajectory writer failed") from self._worker_error
                 if not self._thread.is_alive():
                     raise RuntimeError("trajectory writer exited before close")
                 remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("trajectory writer queue did not accept close signal")
                 try:
-                    self._queue.put(None, timeout=min(0.1, remaining))
+                    # Even an exhausted budget can admit a nonblocking sentinel.
+                    # A full queue leaves admission retryable on the next close.
+                    self._queue.put(None, timeout=max(0.0, min(0.1, remaining)))
                 except queue.Full:
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            "trajectory writer queue did not accept close signal"
+                        ) from None
                     continue
+                self._close_signal_enqueued = True
                 break
+        if self._thread.is_alive():
             self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
-        elif self._thread.is_alive():
-            self._thread.join(timeout=max(0.0, timeout_s))
         if self._thread.is_alive():
             raise TimeoutError("trajectory writer did not flush before timeout")
         if self._worker_error is not None:

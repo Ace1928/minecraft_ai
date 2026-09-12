@@ -301,14 +301,30 @@ class ActiveVLMWorker:
         # thread and interrupting the remaining runtime resource cleanup.
         self._thread = thread
 
-    def stop(self) -> None:
-        self._stop.set()
+    def stop(self, *, deadline_ns: int | None = None) -> bool:
+        """Fence semantic work, then boundedly observe the daemon worker exit.
+
+        A running model call is not interrupted. False retains its ownership;
+        its eventual result cannot publish after retirement. The default keeps
+        the historical two-second wait without extending a supplied deadline.
+        """
+        if deadline_ns is not None and type(deadline_ns) is not int:
+            raise ValueError("perception stop deadline must be monotonic nanoseconds")
+        deadline = time.monotonic_ns() + 2_000_000_000 if deadline_ns is None else deadline_ns
+        # Linearize retirement with admission and the final local publication.
+        # Neither critical section calls the external model.
+        with self._admission_lock:
+            self._stop.set()
         try:
             self._jobs.put_nowait(None)
         except queue.Full:
             pass
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+        thread = self._thread
+        if thread is not None:
+            if thread is threading.current_thread():
+                return False
+            thread.join(timeout=max(0.0, (deadline - time.monotonic_ns()) / 1e9))
+        return thread is None or not thread.is_alive()
 
     def submit(self, job: SemanticJob) -> bool:
         """Drop stale semantic work instead of blocking realtime capture."""
@@ -341,6 +357,8 @@ class ActiveVLMWorker:
                 return
             self._busy.set()
             try:
+                if self._stop.is_set():
+                    return
                 observation, latency_ms = self._inspect(job)
                 self.metrics.completed += 1
                 self.metrics.last_latency_ms = latency_ms
@@ -400,6 +418,8 @@ class ActiveVLMWorker:
         return _semantic_observation(result.report), result.latency_ms
 
     def _publish(self, job: SemanticJob, observation: SemanticObservation) -> None:
+        if self._stop.is_set():
+            return
         latest = self.blackboard.raw_latest()
         if latest is None or latest.instance_id != self.instance_id:
             return
@@ -591,13 +611,16 @@ class ActiveVLMWorker:
             )
             for index, text in enumerate(observation.chat)
         )
-        self.blackboard.merge_semantics(
-            instance_id=self.instance_id,
-            facts=facts,
-            tracks=tracks,
-            chat=chat,
-            evidence=observation.evidence,
-        )
+        with self._admission_lock:
+            if self._stop.is_set():
+                return
+            self.blackboard.merge_semantics(
+                instance_id=self.instance_id,
+                facts=facts,
+                tracks=tracks,
+                chat=chat,
+                evidence=observation.evidence,
+            )
 
     def status(self) -> dict[str, object]:
         thread = self._thread
@@ -936,10 +959,21 @@ class RealtimePerceptionService:
         now = time.monotonic_ns() if now_ns is None else now_ns
         return now - latest.captured_ns > self.stale_frame_ms * 1_000_000
 
-    def close(self) -> None:
-        if self.active_vlm is not None:
-            self.active_vlm.stop()
-        self.capture_source.close()
+    def close(self, *, deadline_ns: int | None = None) -> bool:
+        """Retire semantics and always close capture, even after worker failure.
+
+        Only worker waiting is deadline-bound; capture backends must cooperate.
+        A False return means an already-running daemon model call remains alive,
+        with publication and new admission fenced.
+        """
+        try:
+            if self.active_vlm is not None:
+                if deadline_ns is None:
+                    return self.active_vlm.stop()
+                return self.active_vlm.stop(deadline_ns=deadline_ns)
+            return True
+        finally:
+            self.capture_source.close()
 
 
 def frame_dhash(frame: CapturedFrame) -> str:

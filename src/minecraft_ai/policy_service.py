@@ -122,6 +122,15 @@ class _PolicyDeadlineExpired(TimeoutError):
     """A drained, identified response missed its parent-owned deadline."""
 
 
+def _validate_retirement_arguments(deadline_ns: int, inputs_released: bool) -> None:
+    # An exhausted caller budget permits only immediate containment; it must
+    # not silently become a fresh per-worker timeout.
+    if type(deadline_ns) is not int or not 0 < deadline_ns < 2**63:
+        raise ValueError("retirement requires an absolute monotonic deadline")
+    if type(inputs_released) is not bool:
+        raise ValueError("retirement requires an explicit input-release result")
+
+
 @dataclass
 class TemporalPolicyClient:
     """Deadline-aware client for an isolated learned temporal policy process."""
@@ -136,6 +145,7 @@ class TemporalPolicyClient:
     _reset_scopes: frozenset[str] = field(default_factory=frozenset, init=False)
     _drain_binding: DrainBinding | None = field(default=None, init=False)
     _draining: bool = field(default=False, init=False)
+    _retiring: bool = field(default=False, init=False)
     _drain_receipt: dict[str, Any] | None = field(default=None, init=False)
     _drain_terminal_response: dict[str, Any] | None = field(default=None, init=False)
     _last_submitted_request_id: str | None = field(default=None, init=False)
@@ -241,7 +251,7 @@ class TemporalPolicyClient:
         if sequence <= self._last_sequence:
             raise ValueError("motor policy sequence must increase monotonically")
         self._last_sequence = sequence
-        if self._draining:
+        if self._draining or self._retiring:
             return self._release(sequence, reason="worker-draining")
         if _learned_scene_blocked(blackboard, intent):
             self.metrics.scene_blocks += 1
@@ -338,7 +348,7 @@ class TemporalPolicyClient:
 
     def _reset_scope(self, scope: Literal["actions", "world"]) -> MotorAction:
         sequence = self._last_sequence + 1
-        if self._draining:
+        if self._draining or self._retiring:
             self._last_sequence = sequence
             return self._release(sequence, reason="worker-draining")
         self._retire_pending_action()
@@ -511,7 +521,7 @@ class TemporalPolicyClient:
         }
 
     def drain(self, *, deadline_ns: int) -> dict[str, Any]:
-        """Explicit terminal checkpoint transaction; never called by close yet.
+        """Explicit terminal checkpoint transaction; called only by planned retirement.
 
         The sole lifecycle owner must first revoke real inputs through the
         supervisor and reconcile that release with notify_inputs_released().
@@ -621,28 +631,106 @@ class TemporalPolicyClient:
         finally:
             os.set_blocking(descriptor, was_blocking)
 
-    def close(self) -> None:
+    def retire(self, *, deadline_ns: int, inputs_released: bool) -> dict[str, Any]:
+        """Retire one generation after the caller's authoritative release result.
+
+        This is not the ordinary recovery ``close`` path. A legacy worker may
+        exit cleanly but cannot supply a negotiated checkpoint acknowledgment.
+        Raw receipts remain private even when cleanup or the exit check fails.
+        """
+        _validate_retirement_arguments(deadline_ns, inputs_released)
+        if self._retiring:
+            raise RuntimeError("worker retirement is terminal and cannot be repeated")
+        self._retiring = True
+        process = self._process
+        loaded = process is not None
+        capable = self._drain_binding is not None
+        mode = "not_loaded" if not loaded else "drain" if capable else "legacy"
+        error: str | None = None
+        acknowledged = False
+        try:
+            if loaded and not inputs_released:
+                error = "inputs_not_released"
+                # No legacy stop/checkpoint request without confirmed release.
+                self._draining = True
+            elif loaded and sys.platform == "win32":
+                # Windows pipe handles cannot use our bounded POSIX writer.
+                # Contain this generation without claiming a checkpoint ACK.
+                error = "drain_platform_unsupported" if capable else "legacy_stop_unsupported"
+                self._draining = True
+            elif loaded:
+                self.notify_inputs_released()
+                if capable:
+                    self.drain(deadline_ns=deadline_ns)
+                    acknowledged = True
+        except Exception as exc:
+            error = f"drain_{type(exc).__name__}"
+            # Failed release reconciliation is not permission to request a
+            # legacy checkpoint via stop, even without a drain capability.
+            self._draining = True
+        finally:
+            acknowledged = self._drain_receipt is not None
+            # A failed/attempted native drain must never fall back to another
+            # checkpoint-producing stop. Legacy retirement keeps its old wire.
+            if capable:
+                self._draining = True
+            try:
+                self.close(deadline_ns=deadline_ns)
+            except Exception as exc:
+                error = error or f"cleanup_{type(exc).__name__}"
+            self._draining = True
+        exited = self._process is None
+        if process is not None and exited and process.returncode != 0 and error is None:
+            error = "worker_exit_not_normal"
+        worker = {
+            "policy_id": self.policy_id,
+            "mode": mode,
+            "checkpoint_acknowledged": acknowledged,
+            "process_exited": exited,
+            "error_code": error,
+        }
+        return {"complete": exited and error is None, "workers": [worker]}
+
+    def close(self, *, deadline_ns: int | None = None) -> None:
+        """Legacy cleanup, optionally bounded by the retirement owner's budget."""
+        if deadline_ns is not None:
+            _validate_retirement_arguments(deadline_ns, False)
+
+        def wait_budget() -> float:
+            if deadline_ns is None:
+                return 1.0
+            return min(1.0, max(0.0, (deadline_ns - time.monotonic_ns()) / 1e9))
+
         self._startup_verified = False
         self._reset_scopes = frozenset()
         process = self._process
         if process is not None:
-            if not self._draining and process.poll() is None and process.stdin is not None:
+            windows_containment = deadline_ns is not None and sys.platform == "win32"
+            if windows_containment and process.poll() is None:
+                process.terminate()
+            if (
+                not windows_containment and not self._draining
+                and process.poll() is None and process.stdin is not None
+            ):
                 try:
-                    process.stdin.write('{"type":"stop"}\n')
-                    process.stdin.flush()
-                except OSError:
+                    if deadline_ns is None:
+                        process.stdin.write('{"type":"stop"}\n')
+                        process.stdin.flush()
+                    else:
+                        self._write_drain_request({"type": "stop"}, deadline_ns=deadline_ns)
+                except (OSError, TimeoutError):
                     pass
             try:
-                process.wait(timeout=1.0)
+                process.wait(timeout=wait_budget())
             except subprocess.TimeoutExpired:
                 process.terminate()
                 try:
-                    process.wait(timeout=1.0)
+                    process.wait(timeout=wait_budget())
                 except subprocess.TimeoutExpired:
                     process.kill()
                     # A kill request is not confirmed exit. Retain process and
                     # shared-memory ownership if even the final reap times out.
-                    process.wait(timeout=1.0)
+                    process.wait(timeout=wait_budget())
             self._process = None
         if self._memory is not None:
             self._memory.close()
@@ -678,7 +766,7 @@ class TemporalPolicyClient:
 
     def warmup(self) -> None:
         """Load and verify the configured checkpoint before its first live action."""
-        if self._draining:
+        if self._draining or self._retiring:
             raise RuntimeError("cannot warm a terminally draining worker")
         frame = self.frame_provider()
         if frame is None:
@@ -686,7 +774,7 @@ class TemporalPolicyClient:
         self._ensure_started(len(frame.bgra))
 
     def _ensure_started(self, required_size: int) -> None:
-        if self._draining:
+        if self._draining or self._retiring:
             raise RuntimeError("cannot restart a terminally draining worker")
         if (
             self._startup_verified
@@ -707,7 +795,7 @@ class TemporalPolicyClient:
         self._startup_verified = True
 
     def _start_worker(self, required_size: int) -> None:
-        if self._draining:
+        if self._draining or self._retiring:
             raise RuntimeError("cannot start a terminally draining worker")
         limit = self.config.max_worker_starts
         if limit is not None and self._worker_start_attempts >= limit:
@@ -855,7 +943,7 @@ class TemporalPolicyClient:
         intent: MotorIntent,
         blackboard: PerceptionBlackboard,
     ) -> None:
-        if self._draining:
+        if self._draining or self._retiring:
             raise RuntimeError("cannot submit to a terminally draining worker")
         assert self._memory is not None
         assert self._process is not None
@@ -1248,6 +1336,7 @@ class GroundedPolicyRouter:
     _warmed: set[int] = field(default_factory=set, init=False)
     _warm_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     _warming: dict[int, threading.Thread] = field(default_factory=dict, init=False)
+    _retiring: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if self.max_track_age_ms <= 0:
@@ -1284,6 +1373,8 @@ class GroundedPolicyRouter:
         if sequence <= self._last_sequence:
             raise ValueError("motor policy sequence must increase monotonically")
         self._last_sequence = sequence
+        if self._retiring:
+            return MotorAction(sequence=sequence)
         release = self._bind_episode(intent)
         grounding_bound = self._episode_level == ActionLevel.GROUNDED and (
             self._bind_grounded_target(blackboard, intent)
@@ -1393,6 +1484,9 @@ class GroundedPolicyRouter:
     def _reset_scope(self, *, world_reset: bool) -> MotorAction:
         sequence = self._last_sequence + 1
         release = MotorAction(sequence=sequence)
+        if self._retiring:
+            self._last_sequence = sequence
+            return release
         for policy in self._body_policies():
             reset = getattr(policy, "reset_world", None) if world_reset else None
             policy_release = reset() if callable(reset) else policy.reset()
@@ -1415,7 +1509,7 @@ class GroundedPolicyRouter:
         the non-actuating grounding observer alive for a short verification
         window. A normal reset still tears everything down at option exit.
         """
-        if not self._grounding_active or self._grounded_track_id is None:
+        if self._retiring or not self._grounding_active or self._grounded_track_id is None:
             return self.reset()
         sequence = self._last_sequence + 1
         release = MotorAction(sequence=sequence)
@@ -1442,7 +1536,8 @@ class GroundedPolicyRouter:
         """Advance only the bound ROCKET observer and merge fresh target facts."""
         episode_id = intent.episode_id or f"legacy:{intent.skill_id}"
         if (
-            not self._grounding_active
+            self._retiring
+            or not self._grounding_active
             or self._grounded_track_id is None
             or self._episode_level != ActionLevel.GROUNDED
             or episode_id != self._episode_id
@@ -1472,6 +1567,72 @@ class GroundedPolicyRouter:
             if callable(close):
                 close()
 
+    def retire(self, *, deadline_ns: int, inputs_released: bool) -> dict[str, Any]:
+        """Fence every route, then retire unique workers within one owner budget.
+
+        Warming owns its worker's sole response reader. A timed-out warming
+        thread is retained, never raced by a second drain/close reader. Outer
+        lifecycle containment must handle any such unretired child.
+        """
+        _validate_retirement_arguments(deadline_ns, inputs_released)
+        with self._warm_lock:
+            if self._retiring:
+                raise RuntimeError("router retirement is terminal and cannot be repeated")
+            self._retiring = True
+            threads = tuple(self._warming.items())
+        warming = set()
+        for key, thread in threads:
+            if not self._wait_for_warm_owner(key, thread, deadline_ns=deadline_ns):
+                warming.add(key)
+        policies = self._policies()
+        release_errors = set()
+        # Reconcile all bodies AND the non-actuating observer before the first
+        # checkpoint. Missing callbacks on simple policies do not skip others.
+        if inputs_released:
+            for policy in policies:
+                callback = getattr(policy, "notify_inputs_released", None)
+                if id(policy) not in warming and callable(callback):
+                    try:
+                        callback()
+                    except Exception:
+                        release_errors.add(id(policy))
+        workers: list[dict[str, Any]] = []
+        complete = True
+        for policy in policies:
+            report: dict[str, Any] = {
+                "policy_id": policy.policy_id, "mode": "unmanaged",
+                "checkpoint_acknowledged": False, "process_exited": False,
+                "error_code": None,
+            }
+            if id(policy) in warming:
+                report["error_code"] = "warmup_deadline_exceeded"
+            else:
+                retire = getattr(policy, "retire", None)
+                if callable(retire):
+                    try:
+                        result = retire(
+                            deadline_ns=deadline_ns,
+                            inputs_released=inputs_released and id(policy) not in release_errors,
+                        )
+                        workers.extend(result["workers"])
+                        complete = complete and result["complete"]
+                        continue
+                    except Exception as exc:
+                        report["error_code"] = f"retirement_{type(exc).__name__}"
+                elif not callable(getattr(policy, "close", None)):
+                    # Built-in bootstrap/simple policies own no worker lifetime.
+                    report["mode"] = "not_loaded"
+                    report["process_exited"] = True
+                    if id(policy) in release_errors:
+                        report["error_code"] = "release_reconciliation_failed"
+                else:
+                    # An arbitrary synchronous close has no enforceable budget.
+                    # Do not spawn another thread that could race outer cleanup.
+                    report["error_code"] = "retirement_unsupported"
+            workers.append(report)
+            complete = complete and report["process_exited"] and report["error_code"] is None
+        return {"complete": complete, "workers": workers}
+
     def warmup(self) -> None:
         """Load bodies needed for the first option; specialists wait until used."""
         self._ensure_warm(self.primary)
@@ -1499,6 +1660,8 @@ class GroundedPolicyRouter:
         elif level == ActionLevel.GUI:
             policies.append(self.gui)
         with self._warm_lock:
+            if self._retiring:
+                return False
             for policy in policies:
                 if policy is None:
                     continue
@@ -1520,6 +1683,8 @@ class GroundedPolicyRouter:
         wait_for: threading.Thread | None = None
         start_inline = False
         with self._warm_lock:
+            if self._retiring:
+                raise RuntimeError("cannot warm a terminally retiring router")
             if key in self._warmed:
                 return
             existing = self._warming.get(key)
@@ -1527,6 +1692,7 @@ class GroundedPolicyRouter:
                 wait_for = existing
             elif blocking:
                 start_inline = True
+                self._warming[key] = threading.current_thread()
             else:
                 thread = threading.Thread(
                     target=self._warm_policy,
@@ -1538,10 +1704,30 @@ class GroundedPolicyRouter:
                 thread.start()
                 return
         if wait_for is not None:
-            wait_for.join()
+            if not self._wait_for_warm_owner(key, wait_for):
+                raise RuntimeError("cannot wait recursively for this policy warmup")
             return
         if start_inline:
             self._warm_policy(policy)
+
+    def _wait_for_warm_owner(
+        self, key: int, thread: threading.Thread, *, deadline_ns: int | None = None,
+    ) -> bool:
+        """Wait for policy ownership, not an inline caller's later lifetime."""
+        while True:
+            with self._warm_lock:
+                if self._warming.get(key) is not thread:
+                    return True
+            if thread is threading.current_thread():
+                return False
+            if not thread.is_alive():
+                return True
+            wait_s = 0.02
+            if deadline_ns is not None:
+                wait_s = min(wait_s, (deadline_ns - time.monotonic_ns()) / 1e9)
+                if wait_s <= 0:
+                    return False
+            thread.join(timeout=wait_s)
 
     def _warm_policy(self, policy: MotorPolicy) -> None:
         key = id(policy)
@@ -1551,7 +1737,8 @@ class GroundedPolicyRouter:
                 warmup()
         finally:
             with self._warm_lock:
-                self._warmed.add(key)
+                if not self._retiring:
+                    self._warmed.add(key)
                 self._warming.pop(key, None)
 
     def status(self) -> dict[str, object]:

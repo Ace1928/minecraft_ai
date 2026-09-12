@@ -105,13 +105,36 @@ precede this transaction. Checkpoint paths and receipts remain private and are
 not included in operator/public telemetry. They are assertions from the trusted
 worker, not independent filesystem verification or whole-agent durability.
 
-This transport is **not yet wired into automatic runtime shutdown/reload**.
-The parent-only signal ordering, reset-free skill cancellation, recorder flush
-budget and outer launcher coordination still need integration before live use.
-Existing `close()` does not initiate drain; once explicitly requested, cleanup
-does not send another stop/checkpoint. Unacknowledged failure never becomes a
-successful save, and shared memory is retained until child exit is confirmed.
-Worker implementation, durable assets and deployment settings remain external.
+Planned shutdown now uses this transport when the configured worker advertises
+it. Public runtime stop fences admission and starts one 20-second budget. Cleanup
+first obtains the supervisor's actual input-revocation acknowledgement, then
+cancels skill bookkeeping without a policy reset, recovery, status callback or
+new action. Semantic publication is fenced before retirement. Unique motor and
+observer workers share one cutoff, with five seconds reserved for recording and
+parent learning cleanup. Each cleanup failure is retained separately without
+skipping later owners. Known waits are deadline-bound; arbitrary adapter cleanup
+remains cooperative and does not constitute a hard real-time guarantee.
+
+Normal supervisor pause/stop explicitly selects parent-only SIGTERM. Workers
+retain their drain interval; identity-rechecked group containment and its exit
+confirmation fit within the outer 25-second total budget. Emergency and orphan
+containment remain group-first. A process-group disappearance is containment
+evidence, not a checkpoint receipt. Ordinary recovery `close()` does not initiate
+drain; after attempted native drain it never sends another stop/checkpoint.
+Missing or invalid acknowledgement is not save success, even if forced exit is
+confirmed. Shared memory remains owned until child exit is confirmed.
+
+Direct deployment callers must likewise select
+`stop_agent_process(..., planned=True)` after verified revocation. The default
+remains group-first containment; it must not be mistaken for a checkpoint-safe
+planned reload. Neither form grants resume permission or stops the game client.
+
+Legacy workers use their existing stop path without inventing an acknowledgement.
+The first replacement of an already-running legacy worker therefore requires a
+separately observed legacy shutdown/checkpoint/reap transition; it cannot be
+qualified by demanding a protocol that the old worker never advertised. These
+source tests do **not** activate new models or qualify a configured live worker.
+Native implementation, durable assets and deployment settings remain external.
 
 Before an automated agent-only reload, require supervisor status
 `agent_reload_resume_supported: true`. After confirmed retirement, use
@@ -121,6 +144,18 @@ intent. It never grants a new operator resume or retires a faulted supervisor.
 Older generations must not be probed after stopping the agent: leave them
 running until an authorized supervisor update can install this capability.
 Ordinary `resume` is an operator action, not the automated reload substitute.
+
+The outer launcher also requires coordination: its TERM/EXIT cleanup stops
+Bedrock, and its health watchdog can replace an agent still loading. An agent-only
+deployment must preserve that launcher and hold only its identity-verified shell
+with a reversible SIGSTOP/SIGCONT barrier. Verify that no recovery CLI child is
+already executing before the hold; stopping the shell does not freeze a child
+already performing recovery. Never substitute service termination, a global
+process stop, or a relaxed safety interlock. Keep the barrier until the guarded
+replacement has the same supervisor generation, preserved game/calibration,
+fresh retained playable pixels, readiness and recording evidence. On failure,
+retain the hold for the deployment owner; do not blindly resume the watchdog.
+This is an external deployment precondition, not a new automatic scheduler.
 
 ### Required failure behavior
 

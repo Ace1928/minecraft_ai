@@ -125,7 +125,7 @@ def _stop_agent() -> tuple[bool, dict[str, object]]:
             control_error = exc
     # Give the live runtime an explicit motor-revocation opportunity before
     # SIGTERM starts its bounded trajectory and learning flush.
-    stopped = stop_agent_process()
+    stopped = stop_agent_process(planned=control_error is None)
     contained = not AGENT_FILE.exists()
     detail: dict[str, object] = {
         "agent_stop_attempted": stopped,

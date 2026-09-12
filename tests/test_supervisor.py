@@ -719,8 +719,9 @@ def test_controlled_shutdown_allows_agent_cleanup_to_disarm(
 
     cleanup_completed = threading.Event()
 
-    def graceful_agent_stop(*, timeout_s: float) -> bool:
+    def graceful_agent_stop(*, timeout_s: float, planned: bool) -> bool:
         assert timeout_s == supervisor_module.GRACEFUL_AGENT_STOP_TIMEOUT_S
+        assert planned is True
         cleanup = threading.Thread(
             target=lambda: (supervisor.disarm("agent-cleanup"), cleanup_completed.set())
         )

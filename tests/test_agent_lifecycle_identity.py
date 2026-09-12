@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import signal
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -504,3 +505,278 @@ def test_agent_signal_failure_retains_descriptor(
 
     assert lifecycle.stop_agent_process(timeout_s=0.01) is False
     assert AgentProcess.load(descriptor) == process
+
+
+@dataclass
+class _StopHarness:
+    process: AgentProcess
+    descriptor: Path
+    identity: tuple[int, tuple[str, ...]] | None
+    now: float = 0.0
+    leader_running: bool = True
+    group_running: bool = True
+    leader_exits_on_term: bool = False
+    group_exits_on_kill: bool = False
+    group_exit_at: float | None = None
+    signals: list[tuple[str, int, float]] = field(default_factory=list)
+    sleeps: list[float] = field(default_factory=list)
+
+    def sleep(self, seconds: float) -> None:
+        assert 0 < seconds <= 0.05
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def group_alive(self, _pid: int) -> bool:
+        return self.group_running and (
+            self.group_exit_at is None or self.now < self.group_exit_at
+        )
+
+    def signal_parent(self, pid: int, sent_signal: int) -> None:
+        assert pid == self.process.pid
+        self.signals.append(("parent", sent_signal, self.now))
+        if self.leader_exits_on_term and sent_signal == signal.SIGTERM:
+            self.leader_running = False
+
+    def signal_group(self, pid: int, sent_signal: int) -> None:
+        assert pid == self.process.pid
+        self.signals.append(("group", sent_signal, self.now))
+        if self.group_exits_on_kill and sent_signal == _SIGKILL:
+            self.group_running = False
+
+
+@pytest.fixture
+def stop_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _StopHarness:
+    command = _agent_command()
+    process = _process(command)
+    descriptor = tmp_path / "agent-process.json"
+    harness = _StopHarness(process, descriptor, (1234, command))
+    monkeypatch.setattr(lifecycle, "AGENT_FILE", descriptor)
+    monkeypatch.setattr(lifecycle, "_IS_LINUX", True)
+    monkeypatch.setattr(lifecycle, "_pid_alive", lambda _pid: harness.leader_running)
+    monkeypatch.setattr(lifecycle, "_linux_process_identity", lambda _pid: harness.identity)
+    monkeypatch.setattr(lifecycle, "_process_group_alive", harness.group_alive)
+    monkeypatch.setattr(lifecycle.os, "kill", harness.signal_parent)
+    monkeypatch.setattr(lifecycle.os, "killpg", harness.signal_group, raising=False)
+    monkeypatch.setattr(lifecycle.time, "monotonic", lambda: harness.now)
+    monkeypatch.setattr(lifecycle.time, "sleep", harness.sleep)
+    process.persist()
+    return harness
+
+
+def test_planned_stop_only_signals_parent_while_workers_drain(stop_harness: _StopHarness) -> None:
+    stop_harness.group_exit_at = 0.2
+
+    assert lifecycle.stop_agent_process(timeout_s=2, planned=True)
+
+    assert stop_harness.signals == [("parent", signal.SIGTERM, 0.0)]
+    assert stop_harness.now == pytest.approx(0.2)
+    assert not stop_harness.descriptor.exists()
+
+
+def test_planned_parent_exit_does_not_cut_short_worker_drain(stop_harness: _StopHarness) -> None:
+    stop_harness.leader_exits_on_term = True
+    stop_harness.group_exit_at = 0.2
+
+    assert lifecycle.stop_agent_process(timeout_s=2, planned=True)
+
+    assert stop_harness.signals == [("parent", signal.SIGTERM, 0.0)]
+    assert stop_harness.now == pytest.approx(0.2)
+    assert not stop_harness.descriptor.exists()
+
+
+@pytest.mark.parametrize("leader_exits", [False, True])
+def test_planned_worker_containment_waits_until_grace_deadline(
+    stop_harness: _StopHarness, leader_exits: bool
+) -> None:
+    stop_harness.leader_exits_on_term = leader_exits
+    stop_harness.group_exits_on_kill = True
+
+    assert lifecycle.stop_agent_process(timeout_s=2, planned=True)
+
+    assert stop_harness.signals == [
+        ("parent", signal.SIGTERM, 0.0),
+        ("group", _SIGKILL, 1.5),
+    ]
+    assert stop_harness.now == 1.5
+    assert not stop_harness.descriptor.exists()
+
+
+@pytest.mark.parametrize("planned,orphan", [(True, False), (False, False), (True, True)])
+@pytest.mark.parametrize("timeout_s", [0.0, 0.01, 2.0, 25.0])
+def test_stop_has_one_total_wait_budget_including_containment(
+    stop_harness: _StopHarness, planned: bool, orphan: bool, timeout_s: float
+) -> None:
+    stop_harness.leader_running = not orphan
+
+    assert not lifecycle.stop_agent_process(timeout_s=timeout_s, planned=planned)
+
+    grace_deadline = timeout_s - min(1.0, timeout_s / 4)
+    assert stop_harness.signals == [
+        ("group" if orphan or not planned else "parent", signal.SIGTERM, 0.0),
+        ("group", _SIGKILL, grace_deadline),
+    ]
+    assert stop_harness.now == timeout_s
+    assert sum(stop_harness.sleeps) == pytest.approx(timeout_s)
+    assert AgentProcess.load(stop_harness.descriptor) == stop_harness.process
+
+
+@pytest.mark.parametrize("planned,orphan", [(True, False), (False, False), (True, True)])
+@pytest.mark.parametrize(
+    "replacement",
+    [None, (9999, _agent_command()), (9999, (sys.executable, "-c", "pass"))],
+    ids=["unverifiable", "different-agent-generation", "unrelated-pid-reuse"],
+)
+def test_delayed_kill_rechecks_identity_and_preserves_descriptor(
+    stop_harness: _StopHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    planned: bool,
+    orphan: bool,
+    replacement: tuple[int, tuple[str, ...]] | None,
+) -> None:
+    stop_harness.leader_running = not orphan
+    monkeypatch.setattr(lifecycle, "_original_agent_zombie", lambda _process: False)
+
+    def replace_after_term(seconds: float) -> None:
+        stop_harness.sleep(seconds)
+        stop_harness.leader_running = True
+        stop_harness.identity = replacement
+
+    monkeypatch.setattr(lifecycle.time, "sleep", replace_after_term)
+
+    assert not lifecycle.stop_agent_process(timeout_s=2, planned=planned)
+
+    assert stop_harness.signals == [
+        ("group" if orphan or not planned else "parent", signal.SIGTERM, 0.0)
+    ]
+    assert stop_harness.now == 1.5
+    assert AgentProcess.load(stop_harness.descriptor) == stop_harness.process
+
+
+def test_planned_stop_rechecks_identity_before_parent_term(
+    stop_harness: _StopHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identities = iter((stop_harness.identity, None))
+    monkeypatch.setattr(lifecycle, "_linux_process_identity", lambda _pid: next(identities))
+
+    assert not lifecycle.stop_agent_process(timeout_s=2, planned=True)
+
+    assert stop_harness.signals == []
+    assert stop_harness.descriptor.exists()
+
+
+def test_planned_parent_signal_permission_failure_keeps_descriptor(
+    stop_harness: _StopHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        lifecycle.os, "kill", lambda *_args: (_ for _ in ()).throw(PermissionError("denied"))
+    )
+
+    assert not lifecycle.stop_agent_process(timeout_s=2, planned=True)
+
+    assert stop_harness.signals == []
+    assert stop_harness.descriptor.exists()
+
+
+def test_parent_exit_between_identity_check_and_term_preserves_worker_grace(
+    stop_harness: _StopHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def exit_before_term(_pid: int, _sent_signal: int) -> None:
+        stop_harness.leader_running = False
+        raise ProcessLookupError
+
+    monkeypatch.setattr(lifecycle.os, "kill", exit_before_term)
+    stop_harness.group_exit_at = 0.2
+
+    assert lifecycle.stop_agent_process(timeout_s=2, planned=True)
+
+    assert stop_harness.signals == []
+    assert stop_harness.now == pytest.approx(0.2)
+    assert not stop_harness.descriptor.exists()
+
+
+@pytest.mark.parametrize(
+    "state,group,session,start_ticks,expected",
+    [
+        ("Z", 4242, 4242, 1234, True),
+        ("X", 4242, 4242, 1234, True),
+        ("S", 4242, 4242, 1234, False),
+        ("Z", 4243, 4242, 1234, False),
+        ("Z", 4242, 4243, 1234, False),
+        ("Z", 4242, 4242, 5678, False),
+    ],
+)
+def test_zombie_leader_requires_exact_start_group_and_session_before_delayed_kill(
+    stop_harness: _StopHarness,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    group: int,
+    session: int,
+    start_ticks: int,
+    expected: bool,
+) -> None:
+    fields = [state, "1", str(group), str(session)] + ["0"] * 15 + [str(start_ticks)]
+    stat = f"4242 (python (agent)) {' '.join(fields)}"
+    original_read = Path.read_text
+
+    def read_stat(path: Path, *args: object, **kwargs: object) -> str:
+        if path == Path("/proc/4242/stat"):
+            return stat
+        return original_read(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    def become_zombie(seconds: float) -> None:
+        stop_harness.sleep(seconds)
+        stop_harness.identity = None
+
+    monkeypatch.setattr(Path, "read_text", read_stat)
+    monkeypatch.setattr(lifecycle.time, "sleep", become_zombie)
+    stop_harness.group_exits_on_kill = True
+
+    assert lifecycle.stop_agent_process(timeout_s=2, planned=True) is expected
+
+    assert stop_harness.signals[0] == ("parent", signal.SIGTERM, 0.0)
+    assert stop_harness.signals[1:] == ([("group", _SIGKILL, 1.5)] if expected else [])
+    assert stop_harness.descriptor.exists() is not expected
+
+
+def test_recorded_zombie_at_stop_entry_uses_orphan_group_containment(
+    stop_harness: _StopHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fields = ["Z", "1", "4242", "4242"] + ["0"] * 15 + ["1234"]
+    stat = f"4242 (python) {' '.join(fields)}"
+    original_read = Path.read_text
+
+    def read_stat(path: Path, *args: object, **kwargs: object) -> str:
+        if path == Path("/proc/4242/stat"):
+            return stat
+        return original_read(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", read_stat)
+    stop_harness.identity = None
+    stop_harness.group_exits_on_kill = True
+
+    assert lifecycle.stop_agent_process(timeout_s=2, planned=True)
+
+    assert stop_harness.signals == [
+        ("group", signal.SIGTERM, 0.0),
+        ("group", _SIGKILL, 1.5),
+    ]
+    assert not stop_harness.descriptor.exists()
+
+
+@pytest.mark.parametrize("timeout_s", [-1, float("inf"), float("nan")])
+def test_invalid_stop_budget_never_signals(stop_harness: _StopHarness, timeout_s: float) -> None:
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        lifecycle.stop_agent_process(timeout_s=timeout_s, planned=True)
+    assert stop_harness.signals == []
+    assert stop_harness.now == 0
+    assert stop_harness.descriptor.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX signal-zero semantics")
+def test_signal_zero_permission_error_is_not_evidence_of_dead_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        lifecycle.os, "kill", lambda *_args: (_ for _ in ()).throw(PermissionError("denied"))
+    )
+    assert lifecycle._pid_alive(4242)

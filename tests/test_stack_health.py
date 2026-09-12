@@ -29,7 +29,7 @@ def test_stack_cleanup_never_resumes_paused_supervisor(
 ) -> None:
     calls: list[str] = []
     monkeypatch.setattr(agent_lifecycle, "AGENT_FILE", tmp_path / "missing-agent.json")
-    monkeypatch.setattr(agent_lifecycle, "stop_agent_process", lambda: False)
+    monkeypatch.setattr(agent_lifecycle, "stop_agent_process", lambda **_kwargs: False)
     monkeypatch.setattr(supervisor, "supervisor_alive", lambda: True)
     monkeypatch.setattr(
         supervisor,
@@ -51,7 +51,7 @@ def test_stack_cleanup_fails_when_agent_descriptor_remains(
     descriptor = tmp_path / "agent-process.json"
     descriptor.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(agent_lifecycle, "AGENT_FILE", descriptor)
-    monkeypatch.setattr(agent_lifecycle, "stop_agent_process", lambda: False)
+    monkeypatch.setattr(agent_lifecycle, "stop_agent_process", lambda **_kwargs: False)
     monkeypatch.setattr(supervisor, "supervisor_alive", lambda: False)
 
     healthy, detail = stack_health._stop_agent()
@@ -69,7 +69,8 @@ def test_stack_cleanup_disarms_before_graceful_agent_stop(
     monkeypatch.setattr(
         agent_lifecycle,
         "stop_agent_process",
-        lambda: calls.append("agent-stop") or True,
+        lambda **kwargs: calls.append("agent-stop" if kwargs == {"planned": True} else "bad-stop")
+        or True,
     )
     monkeypatch.setattr(supervisor, "supervisor_alive", lambda: True)
     monkeypatch.setattr(

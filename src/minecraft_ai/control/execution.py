@@ -1456,6 +1456,22 @@ class SkillExecutor:
             recover=self._spec.skill_id == "craft_wood_planks",
         )
 
+    def cancel_for_shutdown(self, *, now_ns: int | None = None) -> ExecutionTick:
+        """Retain cancellation evidence without resetting or invoking the policy.
+
+        This is terminal bookkeeping, not an input release. The runtime must
+        revoke actual controls through the supervisor independently first.
+        """
+        if self._run is None or self._spec is None:
+            raise RuntimeError("no skill is running")
+        self._option_stack.clear()
+        return self._finish(
+            SkillOutcome.CANCELLED,
+            time.monotonic_ns() if now_ns is None else now_ns,
+            "runtime-shutdown",
+            terminal=True,
+        )
+
     def _finish(
         self,
         outcome: SkillOutcome,
@@ -1468,6 +1484,7 @@ class SkillExecutor:
         force_release_keys: tuple[str, ...] = (),
         force_release_buttons: tuple[str, ...] = (),
         outcome_verification: OutcomeVerification | None = None,
+        terminal: bool = False,
     ) -> ExecutionTick:
         if self._run is None or self._spec is None:
             raise RuntimeError("no skill is running")
@@ -1481,7 +1498,7 @@ class SkillExecutor:
             }
         )
         motor_intent = self._last_intent
-        release = self._release_motor(
+        release = None if terminal else self._release_motor(
             force_release_left=force_release_left,
             force_release_keys=force_release_keys,
             force_release_buttons=force_release_buttons,
@@ -1517,7 +1534,7 @@ class SkillExecutor:
                 self._mining_trials[current.run_id] = trial
         except ValueError:
             pass  # Invalid/incomplete metadata censors learning, never input release.
-        policy_status = _policy_status_snapshot(self.policy)
+        policy_status = {} if terminal else _policy_status_snapshot(self.policy)
         self._last_intent = None
         self._outcome_verifier.reset()
         self._mining_damage_progress_observed = False
