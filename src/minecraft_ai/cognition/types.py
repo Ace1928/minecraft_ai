@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
@@ -138,6 +139,7 @@ class CognitionContext:
     memories: tuple[MemoryRecord, ...]
     promises: tuple[Promise, ...]
     wiki: tuple[WikiEvidence, ...]
+    mining_evidence: tuple[dict[str, Any], ...] = ()
     operator_messages: tuple[OperatorMessage, ...] = ()
     recent_skill_runs: tuple[SkillRun, ...] = ()
     current_plan: tuple[str, ...] = ()

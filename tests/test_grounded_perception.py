@@ -399,7 +399,7 @@ def test_dedicated_crosshair_block_hard_negative_remains_explicit() -> None:
     (
         '{"block":"dirt","confidence":0.9,"danger":false}',
         '{"block":"dirt","block":"stone","confidence":0.9}',
-        '{"block":"diamond_block","confidence":0.9}',
+        '{"block":"mod::diamond_block","confidence":0.9}',
         '{"block":"dirt","confidence":"0.9"}',
     ),
 )

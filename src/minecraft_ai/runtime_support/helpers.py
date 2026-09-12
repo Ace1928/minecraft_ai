@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from minecraft_ai.control.mining_knowledge import MiningKnowledge
+from minecraft_ai.control.mining import _selected_item
+
 import json
 import sqlite3
 import time
@@ -336,8 +339,7 @@ def _verified_traversal_progress(result: ExecutionTick) -> bool:
 
     verification = result.outcome_verification
     return bool(
-        result.run.skill_id == "traverse_visible_obstacle"
-        and result.run.outcome == SkillOutcome.SUCCEEDED
+        result.run.outcome == SkillOutcome.SUCCEEDED
         and verification is not None
         and verification.run_id == result.run.run_id
         and verification.kind == OutcomeKind.TRAVERSAL
@@ -371,7 +373,7 @@ def _headroom_retry_advances_plan(
 
     if not _verified_headroom_retry(result, recovery) or recovery is None:
         return False
-    if recovery.origin_skill_id != "traverse_visible_obstacle":
+    if recovery.origin_skill_id != result.run.skill_id:
         # Clearing terrain while gathering restores mobility; it does not
         # prove that any log was acquired or complete the gather plan node.
         return False
@@ -389,6 +391,7 @@ def _headroom_clear_target(
     *,
     now_ns: int,
     current_frame: CapturedFrame | None,
+    mining_knowledge: MiningKnowledge | None = None,
 ) -> _HeadroomTarget | None:
     """Resolve one current, query-owned, hand-safe center classification."""
 
@@ -445,7 +448,15 @@ def _headroom_clear_target(
         return None
     normalized_kind = normalize_block_kind(block.value)
     if not is_hand_safe_soft_block(normalized_kind):
-        return None
+        tool = _selected_item(blackboard, now_ns=now_ns, min_confidence=0.70)
+        if tool is None or mining_knowledge is None:
+            return None
+        rule = mining_knowledge.rule(normalized_kind, tool)
+        if rule is not None and rule.can_break is False:
+            return None
+        if not ((rule is not None and rule.can_break is True)
+                or mining_knowledge.belief(normalized_kind, tool).breaks >= 3):
+            return None
     latest = blackboard.latest()
     raw_latest = blackboard.raw_latest()
     if (

@@ -112,13 +112,10 @@ _CROSSHAIR_BLOCK_NAMES = (
     "diorite", "deepslate", "bedrock", "oak_log", "spruce_log", "oak_planks",
     "leaves", "water", "unknown",
 )
-_CrosshairBlockName = Literal[
-    "dirt", "coarse_dirt", "grass_block", "gravel", "sand", "red_sand", "clay",
-    "mud", "muddy_mangrove_roots", "mycelium", "podzol", "snow_block", "soul_sand",
-    "soul_soil", "stone", "cobblestone", "mossy_cobblestone", "andesite", "granite",
-    "diorite", "deepslate", "bedrock", "oak_log", "spruce_log", "oak_planks",
-    "leaves", "water", "unknown",
+_CrosshairBlockName = Annotated[
+    str, Field(min_length=1, max_length=128, pattern=r"^[a-z0-9_]+(?::[a-z0-9_./-]+)?$")
 ]
+
 _CROSSHAIR_PROBE_KEYS = (
     "scene.mode", "scene.playable", "danger.immediate", "target.visible",
     "target.kind", "target.mineable", "target.dx", "target.dy",
@@ -746,24 +743,23 @@ def _crosshair_block_claims(
 
 
 def _crosshair_block_prompt() -> str:
-    choices = ",".join(_CROSSHAIR_BLOCK_NAMES)
     return (
         "Classify only the Minecraft block directly behind the white crosshair at the exact "
         "center of this single crop. Return JSON with exactly block and confidence. block is "
-        f"one of {choices} or null. If the crosshair touches a boundary, the image is dark or "
+        "a visible block identifier (including mod namespaces) or null. Do not invent an "
+        "unfamiliar mod identifier. If the crosshair touches a boundary, the image is dark or "
         "ambiguous, or the exact identity is uncertain, use unknown. Never choose an adjacent "
         "easier block. confidence is a conservative 0..1 number or null. No prose."
     )
 
 
 def _crosshair_block_grammar() -> str:
-    names = " | ".join(json.dumps(json.dumps(value)) for value in _CROSSHAIR_BLOCK_NAMES)
     return "\n".join(
         (
             'root ::= "{" ws "\\\"block\\\"" ws ":" ws block ws "," ws '
             '"\\\"confidence\\\"" ws ":" ws confidence ws "}" ws',
             'block ::= "null" | block-name',
-            f"block-name ::= {names}",
+            'block-name ::= "\\\"" [a-z0-9_] [a-z0-9_:./-]{0,127} "\\\""',
             'confidence ::= "null" | probability',
             'probability ::= "0" ("." [0-9]+)? | "1" ("." "0"+)?',
             "ws ::= [ \\t\\n]*",
@@ -1071,7 +1067,6 @@ _CLAIM_RULES: dict[str, _ClaimRule] = {
     "recovery.crosshair.block": _ClaimRule(
         (str,),
         _WORLD,
-        choices=frozenset(_CROSSHAIR_BLOCK_NAMES) - {"unknown"},
     ),
     "scene.mode": _ClaimRule(
         (str,),
