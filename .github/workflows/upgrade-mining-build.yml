@@ -24,6 +24,13 @@ jobs:
           git checkout --detach 615d6cdc7f53d850a359b11e35977a0d01a3aea3
           git apply --check /tmp/upgrade.patch
           git apply /tmp/upgrade.patch
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/minecraft_ai/runtime.py'); s=p.read_text()
+          s=s.replace('from .safety import MotorAction', 'from .outcome_verifier import OutcomeKind, OutcomeStatus\nfrom .safety import MotorAction')
+          s=s.replace('            if item is None or not isinstance(item.value, str) or item.source.startswith("bootstrap:"):', '            if (item is None or not isinstance(item.value, str)\n                    or item.source.startswith("bootstrap:")):')
+          p.write_text(s)
+          PY
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
