@@ -7,12 +7,14 @@ on:
     paths:
       - 'src/minecraft_ai/control/**'
       - 'src/minecraft_ai/skills/**'
+      - 'src/minecraft_ai/mining_control.pyi'
       - 'tests/**'
       - '.github/workflows/gameplay-regression.yml'
   pull_request:
     paths:
       - 'src/minecraft_ai/control/**'
       - 'src/minecraft_ai/skills/**'
+      - 'src/minecraft_ai/mining_control.pyi'
       - 'tests/**'
       - '.github/workflows/gameplay-regression.yml'
 
@@ -49,8 +51,11 @@ jobs:
           cache: pip
       - name: Install test dependencies
         run: python -m pip install -e '.[dev]'
-      - name: Exercise mining, adaptive recovery and state persistence
-        run: python -m pytest -q tests/test_mining_control.py tests/test_adaptive_gameplay.py tests/test_storage.py --junitxml=gameplay-results.xml
+      - name: Exercise mining, adaptive aim, recovery and state persistence
+        run: >-
+          python -m pytest -q tests/test_mining_control.py tests/test_adaptive_aim.py
+          tests/test_adaptive_gameplay.py tests/test_recovery_exploration.py
+          tests/test_storage.py --junitxml=gameplay-results.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:
