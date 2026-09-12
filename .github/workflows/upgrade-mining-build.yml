@@ -15,8 +15,7 @@ jobs:
         run: |
           python - <<'PY'
           import pathlib,base64,zlib,hashlib
-          encoded=''.join(pathlib.Path(f'.upgrade2-{i}.b64').read_text() for i in range(3))
-          patch=zlib.decompress(base64.b64decode(encoded,validate=True))
+          patch=zlib.decompress(base64.b64decode(''.join(pathlib.Path(f'.upgrade2-{i}.b64').read_text() for i in range(3)),validate=True))
           assert hashlib.sha256(patch).hexdigest()=='470d8a6f0b756d805cf8f8f709bc7268581f0ab0b027a8f79d923d5c29eb9afc'
           pathlib.Path('/tmp/upgrade.patch').write_bytes(patch)
           PY
@@ -29,17 +28,17 @@ jobs:
           p=Path('src/minecraft_ai/runtime.py'); s=p.read_text()
           s=s.replace('from .safety import MotorAction', 'from .outcome_verifier import OutcomeKind, OutcomeStatus\nfrom .safety import MotorAction')
           s=s.replace('            if item is None or not isinstance(item.value, str) or item.source.startswith("bootstrap:"):', '            if (item is None or not isinstance(item.value, str)\n                    or item.source.startswith("bootstrap:")):')
+          s=s.replace('if parent_trial is not None and parent_trial.broke is True:', 'if knowledge is not None and parent_trial is not None and parent_trial.broke is True:')
           p.write_text(s)
           PY
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: python -m pip install -e '.[dev]'
-      - name: Format new modules and validate source
-        run: |
+      - run: |
           ruff format src/minecraft_ai/control/mining_knowledge.py tests/test_mining_knowledge.py
           ruff check src tests
-      - run: mypy src
+          mypy src
       - run: python -m pytest -q --junitxml=/tmp/mining-tests.xml
       - name: Publish tested source-only commit
         run: |
