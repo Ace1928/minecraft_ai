@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -20,7 +21,13 @@ from minecraft_ai.perception import (
 )
 from minecraft_ai.roles import get_role
 from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
-from minecraft_ai.skills import SkillFailureCode, SkillLibrary, SkillOutcome, SkillRun
+from minecraft_ai.skills import (
+    SkillCondition,
+    SkillFailureCode,
+    SkillLibrary,
+    SkillOutcome,
+    SkillRun,
+)
 from minecraft_ai.wiki import WikiEvidence
 
 
@@ -1627,6 +1634,225 @@ def test_empty_failed_repair_requests_new_evidence_instead_of_identical_replan(
     assert decision.request_replan is True
     assert decision.ask_perception == expected_keys
     assert controller.metrics.retry_repairs == 1
+
+
+_STALL_REPAIR_GOAL = "role:generalist:1:progress"
+
+
+def _failed_gather_repair(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    run_updates: dict[str, object] | None = None,
+    context_updates: dict[str, object] | None = None,
+    original_updates: dict[str, object] | None = None,
+    repaired_updates: dict[str, object] | None = None,
+    required_constraints: tuple[tuple[str, bool], ...] = (),
+) -> CognitionDecision:
+    """Exercise the repair boundary with typed fixtures, never live model evidence."""
+    library = build_bootstrap_skill_library()
+    gather = library.get("gather_nearby_wood")
+    # An explicit resource prerequisite makes the old fallback distinguishable
+    # from the new typed-stall question. Bootstrap gather has none; this fixture
+    # does not claim to reproduce the live persisted skill or raw model reply.
+    library.register(gather.model_copy(update={
+        "version": gather.version + 1,
+        "preconditions": (
+            SkillCondition(key="target.visible", operator="truthy"),
+            SkillCondition(key="target.near", operator="truthy"),
+        ),
+    }))
+    recent = SkillRun(
+        run_id="typed-stall-2", skill_id="gather_nearby_wood",
+        context_key=_STALL_REPAIR_GOAL, started_ns=2, ended_ns=3,
+        outcome=SkillOutcome.FAILED,
+        failure_code=SkillFailureCode.LOCOMOTION_STALLED,
+        failure_reason="locomotion.stalled",
+    ).model_copy(update=run_updates or {})
+    library.record(recent.model_copy(update={"run_id": "typed-stall-1"}))
+    library.record(recent)
+    context = _context()
+    context.plan_goal_id = _STALL_REPAIR_GOAL
+    context.current_plan = ("gather_nearby_wood", "craft_wood_planks")
+    context.plan_index = 0
+    context.recent_skill_runs = (recent,)
+    for key, value in (context_updates or {}).items():
+        setattr(context, key, value)
+    plan_before = (context.plan_goal_id, context.current_plan, context.plan_index)
+    original = CognitionDecision(
+        skill_id="gather_nearby_wood", chosen_goal_id=_STALL_REPAIR_GOAL,
+    ).model_copy(update=original_updates or {})
+    repaired = CognitionDecision(
+        reasoning_summary="Observe before any further action.",
+        chosen_goal_id=_STALL_REPAIR_GOAL, request_replan=True,
+        instruction="the obstruction immediately ahead",
+        plan_steps=("gather_nearby_wood", "craft_wood_planks"),
+    ).model_copy(update=repaired_updates or {})
+    controller = HighLevelController(_IdleCapturingModel(), library)
+    repairs: list[object] = []
+
+    def complete(messages: object, **_kwargs: object) -> CognitionDecision:
+        repairs.append(messages)
+        return repaired
+
+    monkeypatch.setattr(controller, "_complete", complete)
+    if required_constraints:
+        original_bounds = controller._decision_repair_bounds
+        monkeypatch.setattr(
+            controller, "_decision_repair_bounds",
+            lambda *args, **kwargs: replace(
+                original_bounds(*args, **kwargs), required_action_constraints=required_constraints,
+            ),
+        )
+    decision = controller._repair_repeated_failure(original, _board(), context, recent)
+    assert len(repairs) == 1
+    assert decision.skill_id is None and decision.request_replan is True
+    assert decision.plan_steps == repaired.plan_steps
+    assert decision.instruction == repaired.instruction
+    assert (context.plan_goal_id, context.current_plan, context.plan_index) == plan_before
+    return decision
+
+
+@pytest.mark.parametrize("provided_keys", [(), ("scene.horizon_visible",)])
+@pytest.mark.parametrize("original_goal", [None, _STALL_REPAIR_GOAL])
+@pytest.mark.parametrize("repaired_goal", [None, _STALL_REPAIR_GOAL])
+def test_autonomous_typed_gather_stall_requests_obstacle_not_resource_prerequisites(
+    monkeypatch: pytest.MonkeyPatch,
+    provided_keys: tuple[str, ...],
+    original_goal: str | None,
+    repaired_goal: str | None,
+) -> None:
+    decision = _failed_gather_repair(
+        monkeypatch,
+        original_updates={"chosen_goal_id": original_goal},
+        repaired_updates={"chosen_goal_id": repaired_goal, "ask_perception": provided_keys},
+    )
+
+    assert decision.ask_perception == ("obstacle.ahead",)
+    assert decision.chosen_goal_id == repaired_goal
+
+
+@pytest.mark.parametrize(
+    "provided_keys",
+    [
+        ("target.visible",),
+        ("target.visible", "target.near"),
+        ("obstacle.ahead",),
+        ("scene.playable",),
+        ("target.visible", "scene.horizon_visible"),
+    ],
+)
+def test_typed_stall_repair_preserves_existing_canonical_model_question(
+    monkeypatch: pytest.MonkeyPatch, provided_keys: tuple[str, ...],
+) -> None:
+    decision = _failed_gather_repair(
+        monkeypatch, repaired_updates={"ask_perception": provided_keys},
+    )
+    assert decision.ask_perception == provided_keys
+    assert decision.chosen_goal_id == _STALL_REPAIR_GOAL
+
+
+@pytest.mark.parametrize(
+    "run_updates",
+    [
+        {"failure_code": None, "failure_reason": "generic failure"},
+        {"failure_code": None, "failure_reason": "locomotion.stalled"},
+        {"outcome": SkillOutcome.TIMED_OUT},
+        {"outcome": SkillOutcome.CANCELLED},
+        {"failure_code": SkillFailureCode.CONTROLLER_STARVATION},
+        {"failure_code": SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED},
+        {"failure_code": SkillFailureCode.MINING_ACQUISITION_TIMEOUT},
+        {"failure_code": SkillFailureCode.MINING_VISUAL_STAGNATION},
+        {"context_key": "role:generalist:0:survive"},
+        {"context_key": "explore-keepalive"},
+    ],
+    ids=["generic-failure", "reason-only", "timeout", "cancelled", "starvation",
+         "pickup", "acquisition-timeout", "mining-stagnation", "other-task", "keepalive"],
+)
+def test_nonmatching_failure_keeps_existing_gather_prerequisite_questions(
+    monkeypatch: pytest.MonkeyPatch, run_updates: dict[str, object],
+) -> None:
+    decision = _failed_gather_repair(monkeypatch, run_updates=run_updates)
+    assert decision.ask_perception == ("target.visible", "target.near")
+
+
+@pytest.mark.parametrize(
+    "context_updates",
+    [
+        {"plan_goal_id": None},
+        {"plan_goal_id": "progress"},
+        {"plan_goal_id": "operator:current"},
+        {"current_plan": ()},
+        {"plan_index": -1},
+        {"plan_index": 2},
+        {"plan_goal_id": "role:generalist:0:survive"},
+    ],
+    ids=["no-goal", "not-role-goal", "operator-goal", "no-plan", "negative-cursor",
+         "finished-plan", "new-plan-context"],
+)
+def test_stall_question_override_requires_same_unfinished_autonomous_plan(
+    monkeypatch: pytest.MonkeyPatch, context_updates: dict[str, object],
+) -> None:
+    decision = _failed_gather_repair(monkeypatch, context_updates=context_updates)
+    assert decision.ask_perception == ("target.visible", "target.near")
+
+
+@pytest.mark.parametrize("changed_decision", ["original_updates", "repaired_updates"])
+def test_stall_question_override_cannot_reinterpret_another_selected_goal(
+    monkeypatch: pytest.MonkeyPatch, changed_decision: str,
+) -> None:
+    decision = _failed_gather_repair(
+        monkeypatch, **{changed_decision: {"chosen_goal_id": "role:other:task"}},
+    )
+    assert decision.ask_perception == ("target.visible", "target.near")
+    assert decision.chosen_goal_id == (
+        "role:other:task" if changed_decision == "repaired_updates" else _STALL_REPAIR_GOAL
+    )
+
+
+@pytest.mark.parametrize("field_name", ["research_query", "say", "game_chat"])
+def test_raw_repair_research_or_conversation_does_not_buy_stall_observation(
+    monkeypatch: pytest.MonkeyPatch, field_name: str,
+) -> None:
+    decision = _failed_gather_repair(
+        monkeypatch, repaired_updates={field_name: "Existing other request"},
+    )
+    assert decision.ask_perception == ("target.visible", "target.near")
+    # Existing authority strips unsolicited say; its raw presence must still
+    # prevent repurposing that reply into the new autonomous observation.
+    assert getattr(decision, field_name) == (
+        None if field_name == "say" else "Existing other request"
+    )
+
+
+@pytest.mark.parametrize("kind", list(OperatorMessageKind))
+def test_any_operator_context_preserves_existing_stall_repair_question_selection(
+    monkeypatch: pytest.MonkeyPatch, kind: OperatorMessageKind,
+) -> None:
+    message = OperatorMessage(
+        message_id="current", created_ns=1, text="Gather nearby wood",
+        kind=kind, status=OperatorMessageStatus.ACKNOWLEDGED,
+    )
+    decision = _failed_gather_repair(
+        monkeypatch, context_updates={"operator_messages": (message,)},
+    )
+    assert decision.ask_perception == ("target.visible", "target.near")
+    assert decision.chosen_goal_id == (
+        "operator:current"
+        if kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+        else _STALL_REPAIR_GOAL
+    )
+
+
+def test_stall_observation_preserves_required_action_constraints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constraints = (("allow_attack", False), ("allow_use", False), ("allow_jump", False))
+    decision = _failed_gather_repair(
+        monkeypatch, required_constraints=constraints,
+        repaired_updates={"skill_parameters": {key: True for key, _value in constraints}},
+    )
+    assert decision.ask_perception == ("obstacle.ahead",)
+    assert decision.skill_parameters == dict(constraints)
 
 
 def test_repair_cannot_alternate_between_two_recently_failed_options() -> None:
