@@ -30,6 +30,7 @@ from .perception_service import perceptual_hash_distance
 from .platforms.bedrock_x11 import CapturedFrame
 from .policy_timing import InferenceRateHold
 from .safety import MotorAction
+from .worker_drain import DRAIN_CONTRACT, DrainBinding
 
 
 class LearnedPolicyOutput(BaseModel):
@@ -133,6 +134,12 @@ class TemporalPolicyClient:
     _startup_verified: bool = field(default=False, init=False)
     _worker_start_attempts: int = field(default=0, init=False)
     _reset_scopes: frozenset[str] = field(default_factory=frozenset, init=False)
+    _drain_binding: DrainBinding | None = field(default=None, init=False)
+    _draining: bool = field(default=False, init=False)
+    _drain_receipt: dict[str, Any] | None = field(default=None, init=False)
+    _drain_terminal_response: dict[str, Any] | None = field(default=None, init=False)
+    _last_submitted_request_id: str | None = field(default=None, init=False)
+    _transport_trusted: bool = field(default=True, init=False)
     _response_bytes: bytearray = field(default_factory=bytearray, init=False)
     _memory: shared_memory.SharedMemory | None = field(default=None, init=False)
     _memory_size: int = field(default=0, init=False)
@@ -234,6 +241,8 @@ class TemporalPolicyClient:
         if sequence <= self._last_sequence:
             raise ValueError("motor policy sequence must increase monotonically")
         self._last_sequence = sequence
+        if self._draining:
+            return self._release(sequence, reason="worker-draining")
         if _learned_scene_blocked(blackboard, intent):
             self.metrics.scene_blocks += 1
             return self._release(sequence, reason="scene-blocked")
@@ -329,17 +338,34 @@ class TemporalPolicyClient:
 
     def _reset_scope(self, scope: Literal["actions", "world"]) -> MotorAction:
         sequence = self._last_sequence + 1
+        if self._draining:
+            self._last_sequence = sequence
+            return self._release(sequence, reason="worker-draining")
         self._retire_pending_action()
         process = self._process
         if process is not None and process.poll() is None and process.stdin is not None:
             request = {"type": "reset"}
             if scope in self._reset_scopes:
                 request["scope"] = scope
+            next_binding = self._drain_binding
+            if scope == "world" and next_binding is not None:
+                # Native world identity is not a skill-run/option identity.
+                # Old workers retain their no-ACK reset wire unchanged.
+                episode_id = uuid.uuid4().hex
+                request["episode_id"] = episode_id
+                next_binding = next_binding.with_world_episode(episode_id)
             try:
-                process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+                line = json.dumps(request, separators=(",", ":")) + "\n"
+                if process.stdin.write(line) != len(line):
+                    raise OSError("worker reset command was only partially written")
                 process.stdin.flush()
+                self._drain_binding = next_binding
             except OSError:
+                self._transport_trusted = False
                 self.close()
+            except BaseException:
+                self._transport_trusted = False
+                raise
         self._last_sequence = sequence
         return self._release(sequence, reason="policy-reset")
 
@@ -484,12 +510,119 @@ class TemporalPolicyClient:
             "last_error": self.metrics.last_error,
         }
 
+    def drain(self, *, deadline_ns: int) -> dict[str, Any]:
+        """Explicit terminal checkpoint transaction; never called by close yet.
+
+        The sole lifecycle owner must first revoke real inputs through the
+        supervisor and reconcile that release with notify_inputs_released().
+        This method neither grants/revokes actuator authority nor signals the
+        child. It retains shared memory for subsequent owner-controlled cleanup.
+        A receipt authenticates the worker's checkpoint report, not independent
+        filesystem verification, parent recording durability or gameplay success.
+        """
+        if self._draining:
+            raise RuntimeError("worker drain is terminal and cannot be repeated")
+        if type(deadline_ns) is not int or not time.monotonic_ns() < deadline_ns < 2**63:
+            raise ValueError("worker drain requires a future monotonic deadline")
+        binding = self._drain_binding
+        process = self._process
+        if binding is None or process is None or process.poll() is not None:
+            raise RuntimeError("worker does not advertise an available drain contract")
+        if self._held_keys or self._held_buttons or self._pending_camera != (0, 0):
+            raise ValueError("worker drain requires reconciled actuator release")
+        self._draining = True
+        self._retire_pending_action()
+        if not self._transport_trusted:
+            raise RuntimeError("worker transport admission is untrusted")
+        request_id = uuid.uuid4().hex
+        request = {
+            "type": "drain", "contract": DRAIN_CONTRACT, "request_id": request_id,
+            "session_id": binding.session_id, "episode_id": binding.episode_id,
+            "after_request_id": self._last_submitted_request_id, "deadline_ns": deadline_ns,
+        }
+        self._write_drain_request(request, deadline_ns=deadline_ns)
+        while True:
+            remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+            if remaining <= 0:
+                raise TimeoutError("worker drain acknowledgment deadline exceeded")
+            response = self._read_response(remaining)
+            if response is None:
+                raise TimeoutError("worker drain acknowledgment deadline exceeded")
+            if time.monotonic_ns() >= deadline_ns:
+                raise TimeoutError("worker drain acknowledgment arrived after deadline")
+            if self._pending_request_id is not None:
+                if (
+                    response.get("request_id") != self._pending_request_id
+                    or response.get("type") not in {"prediction", "error"}
+                    or (
+                        response.get("type") == "error"
+                        and not isinstance(response.get("error"), str)
+                    )
+                ):
+                    raise RuntimeError("worker drain encountered an unexpected inference response")
+                if response["type"] == "prediction":
+                    output = LearnedPolicyOutput.model_validate(response.get("output"))
+                    if output.model_version != self.config.model_version:
+                        raise RuntimeError("worker drain inference model identity changed")
+                # Identity-owned terminal records are consumed, never replayed
+                # through output_action, perception publication or motor holds.
+                self._pending_request_id = None
+                self._pending_deadline_ns = 0
+                self._pending_frame_captured_ns = 0
+                self.metrics.retired_responses += 1
+                continue
+            # Keep bounded terminal failure metadata privately too. A late or
+            # failed save is not rollback; none of this record grants success.
+            self._drain_terminal_response = response
+            receipt = binding.validate_ack(
+                response, request_id=request_id,
+                after_request_id=self._last_submitted_request_id,
+            )
+            self._drain_receipt = receipt  # Private; do not include in status().
+            remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+            if remaining <= 0:
+                raise TimeoutError("worker drain exit deadline exceeded")
+            if process.wait(timeout=remaining) != 0:
+                raise RuntimeError("worker drain did not exit normally")
+            if time.monotonic_ns() >= deadline_ns:
+                raise TimeoutError("worker drain exit completed after deadline")
+            return receipt
+
+    def _write_drain_request(self, request: dict[str, Any], *, deadline_ns: int) -> None:
+        """Bound even a wedged stdin write without another reader/thread."""
+        assert self._process is not None and self._process.stdin is not None
+        encoded = (json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8")
+        descriptor = self._process.stdin.fileno()
+        was_blocking = os.get_blocking(descriptor)
+        try:
+            os.set_blocking(descriptor, False)
+            offset = 0
+            while offset < len(encoded):
+                remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+                if remaining <= 0:
+                    raise TimeoutError("worker drain command deadline exceeded")
+                _, writable, _ = select.select([], [descriptor], [], remaining)
+                if not writable or time.monotonic_ns() >= deadline_ns:
+                    raise TimeoutError("worker drain command deadline exceeded")
+                try:
+                    written = os.write(descriptor, encoded[offset:])
+                except BlockingIOError:
+                    continue
+                if written <= 0:
+                    raise RuntimeError("worker drain command write failed")
+                offset += written
+        except BaseException:
+            self._transport_trusted = False
+            raise
+        finally:
+            os.set_blocking(descriptor, was_blocking)
+
     def close(self) -> None:
         self._startup_verified = False
         self._reset_scopes = frozenset()
         process = self._process
         if process is not None:
-            if process.poll() is None and process.stdin is not None:
+            if not self._draining and process.poll() is None and process.stdin is not None:
                 try:
                     process.stdin.write('{"type":"stop"}\n')
                     process.stdin.flush()
@@ -503,6 +636,9 @@ class TemporalPolicyClient:
                     process.wait(timeout=1.0)
                 except subprocess.TimeoutExpired:
                     process.kill()
+                    # A kill request is not confirmed exit. Retain process and
+                    # shared-memory ownership if even the final reap times out.
+                    process.wait(timeout=1.0)
             self._process = None
         if self._memory is not None:
             self._memory.close()
@@ -512,6 +648,8 @@ class TemporalPolicyClient:
                 pass
             self._memory = None
         self._memory_size = 0
+        self._drain_binding = None
+        self._last_submitted_request_id = None
         self._response_bytes.clear()
         self._pending_request_id = None
         self._pending_deadline_ns = 0
@@ -536,12 +674,16 @@ class TemporalPolicyClient:
 
     def warmup(self) -> None:
         """Load and verify the configured checkpoint before its first live action."""
+        if self._draining:
+            raise RuntimeError("cannot warm a terminally draining worker")
         frame = self.frame_provider()
         if frame is None:
             raise RuntimeError("cannot warm learned policy without a captured frame")
         self._ensure_started(len(frame.bgra))
 
     def _ensure_started(self, required_size: int) -> None:
+        if self._draining:
+            raise RuntimeError("cannot restart a terminally draining worker")
         if (
             self._startup_verified
             and self._process is not None
@@ -561,6 +703,8 @@ class TemporalPolicyClient:
         self._startup_verified = True
 
     def _start_worker(self, required_size: int) -> None:
+        if self._draining:
+            raise RuntimeError("cannot start a terminally draining worker")
         limit = self.config.max_worker_starts
         if limit is not None and self._worker_start_attempts >= limit:
             raise RuntimeError(f"learned policy worker-start limit exhausted ({limit})")
@@ -636,6 +780,14 @@ class TemporalPolicyClient:
             raise RuntimeError(f"learned policy did not become ready: {ready}")
         if self.config.provider == "external":
             self._reset_scopes = _validate_external_ready(self.config, ready)
+            self._drain_binding = DrainBinding.from_ready(
+                ready, model_sha256=self.config.model_sha256,
+            )
+            if self._drain_binding is not None and not {"actions", "world"}.issubset(
+                self._reset_scopes,
+            ):
+                raise RuntimeError("drain-capable worker must advertise scoped resets")
+        self._transport_trusted = True
 
     def _consume_pending_response(self) -> dict[str, Any] | None:
         self._consumed_miss_recorded = False
@@ -699,6 +851,8 @@ class TemporalPolicyClient:
         intent: MotorIntent,
         blackboard: PerceptionBlackboard,
     ) -> None:
+        if self._draining:
+            raise RuntimeError("cannot submit to a terminally draining worker")
         assert self._memory is not None
         assert self._process is not None
         assert self._process.stdin is not None
@@ -719,8 +873,15 @@ class TemporalPolicyClient:
             "intent": condition,
             "deadline_ns": deadline_ns,
         }
-        self._process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
-        self._process.stdin.flush()
+        try:
+            line = json.dumps(request, separators=(",", ":")) + "\n"
+            if self._process.stdin.write(line) != len(line):
+                raise OSError("worker inference command was only partially written")
+            self._process.stdin.flush()
+        except BaseException:
+            self._transport_trusted = False
+            raise
+        self._last_submitted_request_id = request_id
         self.metrics.requests += 1
         self._pending_request_id = request_id
         self._pending_request_context = _PolicyRequestContext(

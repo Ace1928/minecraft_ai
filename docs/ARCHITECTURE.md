@@ -94,6 +94,24 @@ with fresh request/frame/episode attribution, followed separately by a guarded
 live trace through the supervisor. Accepted inputs, observed displacement and
 successful gameplay remain different evidence gates.
 
+An optional `erais.native-minecraft-drain.v1` capability adds an explicit
+terminal checkpoint transaction. The parent binds the worker's READY session
+and checkpoint descriptor, retains the last flushed inference identity, and
+uses one deadline for command delivery, outstanding replies, a matching
+checkpoint acknowledgement and normal child exit. During drain it admits no
+inference, reset or positive action. Confirmed supervisor input release must
+precede this transaction. Checkpoint paths and receipts remain private and are
+not included in operator/public telemetry. They are assertions from the trusted
+worker, not independent filesystem verification or whole-agent durability.
+
+This transport is **not yet wired into automatic runtime shutdown/reload**.
+The parent-only signal ordering, reset-free skill cancellation, recorder flush
+budget and outer launcher coordination still need integration before live use.
+Existing `close()` does not initiate drain; once explicitly requested, cleanup
+does not send another stop/checkpoint. Unacknowledged failure never becomes a
+successful save, and shared memory is retained until child exit is confirmed.
+Worker implementation, durable assets and deployment settings remain external.
+
 Before an automated agent-only reload, require supervisor status
 `agent_reload_resume_supported: true`. After confirmed retirement, use
 `resume-for-agent-reload` with that exact `session_id`; it permits only an
