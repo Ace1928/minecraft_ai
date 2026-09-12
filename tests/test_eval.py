@@ -236,7 +236,9 @@ def test_malformed_or_historical_reports_never_promote(payload) -> None:
     assert comparison["baseline_success_rate"] is None
 
 
-@pytest.mark.parametrize("field", ["suite", "suite_id", "benchmark_run_id", "results", "created_ns"])
+@pytest.mark.parametrize(
+    "field", ["suite", "suite_id", "benchmark_run_id", "results", "created_ns"]
+)
 def test_report_requires_complete_identity_and_results(complete_report, field: str) -> None:
     baseline = complete_report.model_dump(mode="json")
     candidate = deepcopy(baseline)
@@ -335,7 +337,8 @@ def test_same_suite_id_does_not_authorize_changed_suite_definition(change: str) 
         suite["tasks"][0]["criteria"][0]["value"] = 0
     else:
         suite["tasks"][0]["world_fixture_id"] = "unqualified-world"
-    payload = _complete_contract_report(BenchmarkSuite.model_validate(suite)).model_dump(mode="json")
+    validated_suite = BenchmarkSuite.model_validate(suite)
+    payload = _complete_contract_report(validated_suite).model_dump(mode="json")
     # Even two internally consistent reports sharing the same altered definition
     # must not replace the independently trusted frozen suite.
     comparison = compare_reports(payload, payload)

@@ -1266,7 +1266,7 @@ def eval_compare(
     comparison = compare_reports(_load_json_object(baseline), _load_json_object(candidate))
     if output is not None:
         _write_json_atomic(output, comparison)
-    print(json.dumps(comparison, indent=2, sort_keys=True))
+    typer.echo(json.dumps(comparison, indent=2, sort_keys=True))
 
 
 @benchmark_app.command("report")
