@@ -2755,6 +2755,7 @@ def _apply_action_constraints(
     constrained = decoded
     suppressed: list[str] = []
     action_permissions: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("allow_movement", ("forward", "back", "left", "right", "sprint", "sneak", "jump")),
         ("allow_attack", ("attack",)),
         ("allow_use", ("use",)),
         ("allow_jump", ("jump",)),
