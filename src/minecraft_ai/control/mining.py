@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from minecraft_ai.control.adaptive_aim import AdaptiveMiningAim
 from minecraft_ai.control.visual_progress import MiningVisualProgress
 from minecraft_ai.motor import MotorIntent
 from minecraft_ai.grounded_perception import (
@@ -18,8 +19,6 @@ from minecraft_ai.skills import SkillFailureCode
 _MINING_MODES = frozenset({"mine", "gather", "gather_wood", "break"})
 _LOCOMOTION_KEYS = frozenset({"w", "a", "s", "d", "ctrl", "shift", "space"})
 _HOTBAR_KEYS = frozenset("123456789")
-_OPERATOR_AIM_GAIN = 40.0
-_OPERATOR_AIM_MAX_STEP = 12
 _OPERATOR_AIM_INITIAL_FRAME_GRACE_MS = 250
 _EMPTY_ITEMS = frozenset({"air", "empty", "empty_slot", "hand", "none"})
 _UNVERIFIED_ITEM = "unverified_item"
@@ -194,6 +193,7 @@ class _PendingMiningAcquisition:
     settling: bool = False
     settle_after_ns: int = 0
     last_aim_observation_ns: int = 0
+    aim: AdaptiveMiningAim = field(default_factory=AdaptiveMiningAim)
 
 
 @dataclass(frozen=True)
@@ -517,6 +517,8 @@ class MiningLeaseGuard:
                 action,
                 aim_track,
                 held_keys=held_keys,
+                aim=pending.aim,
+                now_ns=now_ns,
             )
             pending.motion_seen = True
             pending.settling = True
@@ -792,33 +794,25 @@ def _aim_at_operator_track(
     track: Track,
     *,
     held_keys: set[str],
+    aim: AdaptiveMiningAim,
+    now_ns: int,
 ) -> MotorAction:
-    """Emit one bounded camera-only correction toward an exact operator track."""
+    """Learn a bounded camera correction from fresh, same-target feedback."""
     quiesced = _quiesce_pending_action(action, held_keys=held_keys)
     region = track.region
-    center_x = region.x + region.width / 2.0
-    center_y = region.y + region.height / 2.0
-    horizontal_error = (
-        0.0 if region.x <= 0.5 <= region.x + region.width else center_x - 0.5
+    dx, dy = aim.step(
+        target_id=track.track_id,
+        center=(region.x + region.width / 2.0, region.y + region.height / 2.0),
+        aligned=(
+            region.x <= 0.5 <= region.x + region.width,
+            region.y <= 0.5 <= region.y + region.height,
+        ),
+        observed_ns=track.last_seen_ns,
+        now_ns=now_ns,
+        # Displacement while stopping locomotion cannot calibrate the camera.
+        stationary=not bool(_LOCOMOTION_KEYS.intersection(held_keys)),
     )
-    vertical_error = (
-        0.0 if region.y <= 0.5 <= region.y + region.height else center_y - 0.5
-    )
-    return quiesced.model_copy(
-        update={
-            "mouse_dx": _bounded_operator_aim_step(horizontal_error),
-            "mouse_dy": _bounded_operator_aim_step(vertical_error),
-        }
-    )
-
-
-def _bounded_operator_aim_step(error: float) -> int:
-    if error == 0.0:
-        return 0
-    step = round(error * _OPERATOR_AIM_GAIN)
-    if step == 0:
-        step = 1 if error > 0.0 else -1
-    return max(-_OPERATOR_AIM_MAX_STEP, min(_OPERATOR_AIM_MAX_STEP, step))
+    return quiesced.model_copy(update={"mouse_dx": dx, "mouse_dy": dy})
 
 
 def _press_left(action: MotorAction) -> MotorAction:
