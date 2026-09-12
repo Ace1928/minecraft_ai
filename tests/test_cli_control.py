@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,13 @@ from typer.testing import CliRunner
 import minecraft_ai.cli as cli
 from minecraft_ai.agent.process import build_parser
 from minecraft_ai.platforms.capture_source import BedrockCaptureSource
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _clean_cli_output(output: str) -> str:
+    return _ANSI_RE.sub("", output)
+
 
 
 @pytest.mark.parametrize("custom_config", [False, True])
@@ -119,8 +127,9 @@ def test_run_rejects_invalid_capture_source_before_any_mutation(
     args = ["run", "--capture-source", source] + (["--live"] if live else [])
     result = CliRunner().invoke(cli.app, args)
     assert result.exit_code == 2, result.output
-    assert "--capture-source" in result.output
-    assert "pipewire" in result.output and "x11" in result.output
+    output = _clean_cli_output(result.output)
+    assert "--capture-source" in output
+    assert "pipewire" in output and "x11" in output
 
 
 @pytest.mark.parametrize("source", list(BedrockCaptureSource))
@@ -175,7 +184,8 @@ def test_run_rejects_invalid_explicit_config_before_any_mutation(
     result = CliRunner().invoke(cli.app, ["run", "--live", "--config", str(selected)])
     assert result.exit_code == 2, result.output
     # Rich may wrap a long temporary path in the middle of its filename.
-    assert "--config" in result.output or "configuration" in result.output
+    output = _clean_cli_output(result.output)
+    assert "--config" in output or "configuration" in output
 
 
 @pytest.fixture
