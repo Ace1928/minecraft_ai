@@ -30,6 +30,12 @@ jobs:
           s=s.replace('            if item is None or not isinstance(item.value, str) or item.source.startswith("bootstrap:"):', '            if (item is None or not isinstance(item.value, str)\n                    or item.source.startswith("bootstrap:")):')
           s=s.replace('if parent_trial is not None and parent_trial.broke is True:', 'if knowledge is not None and parent_trial is not None and parent_trial.broke is True:')
           p.write_text(s)
+          p=Path('src/minecraft_ai/control/execution.py');s=p.read_text()
+          s=s.replace('        return self._mining_guard.knowledge','        value = getattr(self._mining_guard, "knowledge", None)\n        return value if isinstance(value, MiningKnowledge) else None')
+          s=s.replace('        attempt = self._mining_guard.attempt\n        knowledge = self.mining_knowledge\n','')
+          s=s.replace('            if (attempt is not None and knowledge is not None','            attempt = getattr(self._mining_guard, "attempt", None)\n            knowledge = self.mining_knowledge\n            if (attempt is not None and knowledge is not None')
+          s=s.replace('and self._mining_guard.attempt_count == 1','and getattr(self._mining_guard, "attempt_count", 0) == 1')
+          p.write_text(s)
           PY
       - uses: actions/setup-python@v5
         with:
