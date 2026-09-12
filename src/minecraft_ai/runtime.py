@@ -88,6 +88,8 @@ from .storage import OperatorContextSnapshot, StateDatabase
 from .supervisor import operator_intent_lock, operator_pause_latched, send_command
 
 
+from minecraft_ai.skills.recovery import select_learned_recovery
+
 from minecraft_ai.runtime_support.helpers import (
     _ATOMIC_SKILL_IDS,
     _BOUNDED_KEEPALIVE_SKILL_IDS,
@@ -893,10 +895,11 @@ class AgentRuntime:
                 except RuntimeError:
                     pass
                 return
-            recovery = _first_feasible_recovery(
+            recovery = select_learned_recovery(
                 self.skills,
                 result.recovery_skills,
                 self.blackboard,
+                context_key=result.run.context_key,
             )
             self._note_terminal_for_cognition(
                 result.run,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -124,6 +125,11 @@ class SkillStats:
     timeouts: int = 0
     cancellations: int = 0
     consecutive_failures: int = 0
+    censored_failures: int = 0
+
+    @property
+    def decisive_attempts(self) -> int:
+        return self.successes + max(0, self.failures - self.censored_failures) + self.timeouts
 
     @property
     def attempts(self) -> int:
@@ -131,7 +137,7 @@ class SkillStats:
 
     @property
     def success_rate(self) -> float:
-        decisive = self.successes + self.failures + self.timeouts
+        decisive = self.decisive_attempts
         return self.successes / decisive if decisive else 0.0
 
 
@@ -165,7 +171,9 @@ class SkillLibrary:
             # Startup/warmup starvation is not evidence the option is the
             # wrong work. Counting it as a competence failure exiles VPT
             # locomotion keepalive after two cold starts.
-            if run.failure_code != SkillFailureCode.CONTROLLER_STARVATION:
+            if run.failure_code == SkillFailureCode.CONTROLLER_STARVATION:
+                stats.censored_failures += 1
+            else:
                 stats.consecutive_failures += 1
         elif run.outcome == SkillOutcome.TIMED_OUT:
             stats.timeouts += 1
@@ -192,6 +200,7 @@ class SkillLibrary:
             combined.failures += stats.failures
             combined.timeouts += stats.timeouts
             combined.cancellations += stats.cancellations
+            combined.censored_failures += stats.censored_failures
         return combined
 
     def contextual_score(self, skill_id: str, context_key: str = "default") -> float:
@@ -199,36 +208,35 @@ class SkillLibrary:
         if stats is None:
             return 0.0
         # Beta(1,1) prior prevents one lucky success from becoming absolute confidence.
-        return (stats.successes + 1.0) / (stats.successes + stats.failures + stats.timeouts + 2.0)
+        return (stats.successes + 1.0) / (stats.decisive_attempts + 2.0)
 
     def hierarchical_success_probability(
         self,
         skill_id: str,
         context_key: str = "default",
         *,
-        prior_strength: float = 4.0,
+        prior_strength: float = 1.0,
     ) -> float:
-        """Local success rate shrunk toward all-context competence.
+        """Shrink local evidence toward OTHER contexts, without counting it twice.
 
-        ``(S_c + λ p_global) / (N_c + λ)``. Sparse contexts borrow the global
-        prior; abundant local evidence dominates.
+        Starvation remains a reported failure but is censored from competence
+        estimates because the controller did not execute a decisive attempt.
         """
-
-        matching = tuple(
-            stats for (recorded_id, _), stats in self.stats.items() if recorded_id == skill_id
+        if not math.isfinite(prior_strength) or prior_strength <= 0:
+            raise ValueError("prior_strength must be finite and positive")
+        others = tuple(
+            stats for (recorded_id, recorded_context), stats in self.stats.items()
+            if recorded_id == skill_id and recorded_context != context_key
         )
-        if not matching:
-            return 0.5
-        global_successes = sum(stats.successes for stats in matching)
-        global_decisive = sum(
-            stats.successes + stats.failures + stats.timeouts for stats in matching
+        prior = (sum(stats.successes for stats in others) + 1.0) / (
+            sum(stats.decisive_attempts for stats in others) + 2.0
         )
-        p_global = (global_successes + 1.0) / (global_decisive + 2.0)
         local = self.stats.get((skill_id, context_key))
         if local is None:
-            return p_global
-        local_n = local.successes + local.failures + local.timeouts
-        return (local.successes + prior_strength * p_global) / (local_n + prior_strength)
+            return prior
+        return (local.successes + prior_strength * prior) / (
+            local.decisive_attempts + prior_strength
+        )
 
     def contextual_failure_streak(
         self, skill_id: str, context_key: str = "default"

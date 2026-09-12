@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from minecraft_ai.eval.evaluator import BenchmarkReport
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 MAX_OPERATOR_REVISION = (1 << 63) - 1
 _OPERATOR_REVISION_KEY = "operator_authority_revision"
 
@@ -232,6 +232,7 @@ class StateDatabase:
                 timeouts INTEGER NOT NULL,
                 cancellations INTEGER NOT NULL,
                 consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                censored_failures INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(skill_id, context_key)
             );
             CREATE TABLE IF NOT EXISTS goals (
@@ -388,6 +389,9 @@ class StateDatabase:
             if version == 6:
                 self._migrate_v6_to_v7()
                 version = 7
+            if version == 7:
+                self._migrate_v7_to_v8()
+                version = 8
             self.connection.execute(
                 "UPDATE meta SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
@@ -513,6 +517,13 @@ class StateDatabase:
                 ON benchmark_task_results(benchmark_run_id, status);
             """
         )
+
+    def _migrate_v7_to_v8(self) -> None:
+        columns = {str(row[1]) for row in self.connection.execute("PRAGMA table_info(skill_stats)")}
+        if "censored_failures" not in columns:
+            self.connection.execute(
+                "ALTER TABLE skill_stats ADD COLUMN censored_failures INTEGER NOT NULL DEFAULT 0"
+            )
 
     def _migrate_v6_to_v7(self) -> None:
         columns = {
@@ -693,14 +704,15 @@ class StateDatabase:
             """
             INSERT INTO skill_stats(
                 skill_id, context_key, successes, failures, timeouts, cancellations,
-                consecutive_failures
-            ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                consecutive_failures, censored_failures
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(skill_id, context_key) DO UPDATE SET
                 successes=excluded.successes,
                 failures=excluded.failures,
                 timeouts=excluded.timeouts,
                 cancellations=excluded.cancellations,
-                consecutive_failures=excluded.consecutive_failures
+                consecutive_failures=excluded.consecutive_failures,
+                censored_failures=excluded.censored_failures
             """,
             (
                 skill_id,
@@ -710,6 +722,7 @@ class StateDatabase:
                 stats.timeouts,
                 stats.cancellations,
                 stats.consecutive_failures,
+                stats.censored_failures,
             ),
         )
 
@@ -721,7 +734,7 @@ class StateDatabase:
         for row in self.connection.execute(
             """
             SELECT skill_id, context_key, successes, failures, timeouts, cancellations,
-                   consecutive_failures
+                   consecutive_failures, censored_failures
             FROM skill_stats
             """
         ):
@@ -733,6 +746,7 @@ class StateDatabase:
                 timeouts,
                 cancellations,
                 consecutive_failures,
+                censored_failures,
             ) = row
             library.stats[(str(skill_id), str(context_key))] = SkillStats(
                 successes=int(successes),
@@ -740,6 +754,7 @@ class StateDatabase:
                 timeouts=int(timeouts),
                 cancellations=int(cancellations),
                 consecutive_failures=int(consecutive_failures),
+                censored_failures=int(censored_failures),
             )
         return library
 

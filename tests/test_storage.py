@@ -277,6 +277,6 @@ def test_v5_migration_adds_accept_time_benchmark_and_action_provenance(
         "target_track_id",
     } <= columns
     assert {"benchmark_runs", "benchmark_task_results"} <= tables
-    assert version == ("7",)
+    assert version == ("8",)
     assert legacy_origin == ("legacy",)
     assert "idx_trajectory_steps_policy_route" in indexes

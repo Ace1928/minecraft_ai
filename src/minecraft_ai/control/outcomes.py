@@ -6,6 +6,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from minecraft_ai.control.visual_progress import MiningVisualProgress
 from minecraft_ai.perception import PerceptionBlackboard, PerceptionFact, Track
 from minecraft_ai.safety import MotorAction
 
@@ -137,6 +138,7 @@ class OutcomeVerifierConfig:
 @dataclass
 class _MiningState:
     baseline_hash: str | None
+    luma_progress: MiningVisualProgress = field(default_factory=MiningVisualProgress, init=False)
     baseline_luma: bytes | None
     target_was_visible: bool
     target_source: str | None
@@ -401,6 +403,16 @@ class TemporalOutcomeVerifier:
             state.luma_candidate_samples = 0
 
         changed = _update_mining_hash(state, blackboard, self.config, now_ns)
+        progress_keys: tuple[str, ...] = ("frame.crosshair_dhash",) if changed else ()
+        if state.luma_progress.observe(
+            blackboard, now_ns=now_ns, not_before_ns=state.attack_started_ns or now_ns,
+            min_mean_change=self.config.mining_luma_change_mae,
+            pixel_delta=self.config.mining_luma_pixel_delta,
+            min_changed_fraction=self.config.mining_luma_changed_fraction,
+        ) and delta.attack_active and not state.invalidated:
+            state.last_change_ns = now_ns
+            changed = True
+            progress_keys += ("frame.crosshair_luma_grid",)
         _update_mining_luma(state, blackboard, self.config, now_ns)
         _update_target_loss(state, blackboard, self.config, now_ns)
         assert state.attack_started_ns is not None
@@ -541,7 +553,7 @@ class TemporalOutcomeVerifier:
                 now_ns,
                 0.55,
                 "crosshair pixels changed during attack but break evidence is incomplete",
-                ("frame.crosshair_dhash",),
+                progress_keys,
             )
         reason = (
             "mining evidence invalidated by camera or locomotion"
@@ -828,8 +840,11 @@ def _refresh_mining_baseline(
         state.baseline_hash = crosshair[0]
         state.last_hash = crosshair[0]
         state.last_hash_ns = crosshair[1]
+    state.luma_progress = MiningVisualProgress()
     luma = _luma_observation(blackboard, "frame.crosshair_luma_grid", now_ns)
     if luma is not None:
+        state.luma_progress.reference = luma[0]
+        state.luma_progress.last_observed_ns = luma[1]
         state.baseline_luma = luma[0]
         state.last_luma_ns = luma[1]
     target = _semantic_fact(

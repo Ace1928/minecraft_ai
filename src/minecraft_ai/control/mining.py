@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from minecraft_ai.control.visual_progress import MiningVisualProgress
 from minecraft_ai.motor import MotorIntent
 from minecraft_ai.grounded_perception import (
     CROSSHAIR_BLOCK_FAST_SOURCE,
@@ -181,6 +182,7 @@ class _MiningLease:
     visual_changed_ns: int
     visual_samples: int = 1
     override_active: bool = False
+    luma_progress: MiningVisualProgress = field(default_factory=MiningVisualProgress)
 
 
 @dataclass
@@ -694,10 +696,10 @@ class MiningLeaseGuard:
             return target_failure
 
         visual = _visual_hash(blackboard, now_ns=now_ns)
-        if visual is None:
+        if visual is None or visual[1] <= lease.visual_observed_ns:
             if now_ns - lease.visual_seen_ns >= self.visual_signal_grace_ms * 1_000_000:
                 return SkillFailureCode.MINING_VISUAL_SIGNAL_LOST
-        elif visual[1] > lease.visual_observed_ns:
+        else:
             lease.visual_samples += 1
             lease.visual_observed_ns = visual[1]
             lease.visual_seen_ns = now_ns
@@ -705,13 +707,31 @@ class MiningLeaseGuard:
                 lease.visual_hash = visual[0]
                 lease.visual_changed_ns = now_ns
 
+        if lease.luma_progress.observe(
+            blackboard, now_ns=now_ns, not_before_ns=lease.started_ns,
+        ):
+            lease.visual_changed_ns = now_ns
+
         if (
             lease.visual_samples >= self.minimum_visual_samples
             and now_ns - lease.visual_changed_ns >= self.stagnation_ms * 1_000_000
         ):
             return SkillFailureCode.MINING_VISUAL_STAGNATION
         if now_ns >= lease.deadline_ns:
-            return SkillFailureCode.MINING_LEASE_EXPIRED
+            # Block/tool tables are initial budgets, not proof the block should
+            # already be broken. Fresh progress may extend a slow attempt, but
+            # never beyond the independent absolute input-safety cap.
+            if (
+                lease.visual_samples >= self.minimum_visual_samples
+                and lease.visual_changed_ns > lease.started_ns
+                and now_ns - lease.visual_changed_ns < self.stagnation_ms * 1_000_000
+            ):
+                lease.deadline_ns = min(
+                    lease.started_ns + self.absolute_max_ms * 1_000_000,
+                    now_ns + self.stagnation_ms * 1_000_000,
+                )
+            if now_ns >= lease.deadline_ns:
+                return SkillFailureCode.MINING_LEASE_EXPIRED
         return None
 
 
@@ -1637,7 +1657,8 @@ def _visual_hash(
     now_ns: int,
 ) -> tuple[str, int] | None:
     fact = blackboard.fact("frame.crosshair_dhash", min_confidence=1.0, now_ns=now_ns)
-    if fact is None or not isinstance(fact.value, str):
+    if (fact is None or not isinstance(fact.value, str)
+            or fact.observed_ns > now_ns):
         return None
     try:
         _hash_distance(fact.value, fact.value)
