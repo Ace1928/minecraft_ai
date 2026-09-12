@@ -2,7 +2,15 @@
 
 A self-contained, open-source project for building a persistent Minecraft agent that plays through human-style visual perception and key/mouse controls while combining fast low-level motor control with slower multimodal cognition, planning, memory, social interaction, and continual skill learning.
 
-> Status: architecture/bootstrap phase. Live control is intentionally disabled until the independent safety supervisor and scoped-input backends pass their release gates.
+> Status: active development with isolated live Bedrock execution. The supervisor, scoped-input backend, visual observation, asynchronous cognition, skill execution and trajectory recording are implemented. Live startup remains subject to safety/readiness checks; reliable survival and resource progression are the next gameplay milestones.
+
+## Built foundation and direction
+
+The running system separates fast physical control from slower planning and perception. Typed skills, observed outcomes, persistent memories and contextual recovery statistics let work span many control ticks. Recent upgrades add model-independent action restrictions, verified traversal-stall recovery, adaptive mining aim and matching-skill plan completion.
+
+The destination is a persistent player that can follow directions, learn useful skills, manage survival, build and collaborate with people. Those are progression goals, not guarantees about today's player. See the [execution roadmap](docs/ROADMAP.md) for demonstrated behavior and the [intelligence implementation plan](docs/INTELLIGENCE_IMPLEMENTATION_PLAN.md) for the wider design. Rates in the target architecture below are design targets, not measured live throughput.
+
+Custom native models and learning systems connect through optional motor, cognition and lifecycle interfaces. Their implementations, model assets and deployment configuration can remain outside this open foundation. Installing an adapter and demonstrating better gameplay are separate steps.
 
 ## Reference platform
 
@@ -75,7 +83,7 @@ minecraft-ai knowledge sync --version <bedrock-version>
 minecraft-ai wiki "How do I make a crafter?"
 ```
 
-`minecraft-ai stop` must work even when the cognition/model processes are unhealthy. Live motor control will not be enabled until that invariant is tested on each supported backend.
+`minecraft-ai stop` must work even when the cognition/model processes are unhealthy. Each live backend remains subject to independent stopping and scoped-input checks.
 
 ## Edition support
 
@@ -91,8 +99,8 @@ Preferred order:
 1. identify the exact Bedrock process/session and Wine prefix;
 2. capture only that game surface/session;
 3. inject gameplay-equivalent input inside the isolated Bedrock/Wine execution boundary where technically reliable;
-4. otherwise use a dedicated nested compositor/session whose input cannot leak to the host desktop;
-5. use host-global desktop injection only with explicit opt-in and a persistent warning.
+4. use a dedicated headless compositor/session with a verified virtual seat, excluding host input from the game as well as game input from the host;
+5. refuse autonomous actuation when that isolation cannot be established; there is no host-global input fallback.
 
 The release criterion is behavioral: while the agent is actively moving, looking, mining, fighting, or using inventory UI, the operator must be able to type and use the host desktop without receiving agent input.
 
