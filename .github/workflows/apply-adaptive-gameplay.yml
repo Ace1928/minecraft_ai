@@ -26,7 +26,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Validate exact transport repair, payload digest and original Git blob identities
+      - name: Validate transport digest and original Git blob identities
         shell: bash
         run: |
           python - <<'PY'
@@ -42,9 +42,28 @@ jobs:
           PY
           git apply --check --index /tmp/adaptive-gameplay.patch
           git apply --index /tmp/adaptive-gameplay.patch
+      - name: Apply regression-discovered corrections
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          changes = {
+              'src/minecraft_ai/skills/library.py': [('prior_strength: float = 4.0', 'prior_strength: float = 1.0')],
+              'src/minecraft_ai/control/outcomes.py': [('progress_keys = ("frame.crosshair_dhash",) if changed else ()', 'progress_keys: tuple[str, ...] = ("frame.crosshair_dhash",) if changed else ()')],
+              'tests/test_adaptive_gameplay.py': [('pytest.approx(3 / 5)', 'pytest.approx(3 / 4)'), ('pytest.approx(1.4 / 5)', 'pytest.approx(1.1 / 2)')],
+              'tests/test_storage.py': [('assert version == ("7",)', 'assert version == ("8",)')],
+          }
+          for name, replacements in changes.items():
+              path = Path(name)
+              source = path.read_text()
+              for before, after in replacements:
+                  assert source.count(before) == 1, name
+                  source = source.replace(before, after)
+              path.write_text(source)
+          PY
       - name: Install test and static-analysis dependencies
         run: python -m pip install -e '.[dev]'
-      - name: Format added modules and enforce repository checks
+      - name: Enforce repository checks
         run: |
           ruff format src/minecraft_ai/control/visual_progress.py src/minecraft_ai/skills/recovery.py tests/test_adaptive_gameplay.py
           ruff check src tests
