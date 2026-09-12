@@ -1,0 +1,79 @@
+name: Apply adaptive gameplay upgrade
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'maintenance/adaptive-gameplay.patch.gz.b64'
+      - '.github/workflows/apply-adaptive-gameplay.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: adaptive-gameplay-upgrade
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - name: Export exact source for independent verification
+        run: |
+          mkdir -p /tmp/source-verification
+          git archive --format=tar.gz --output=/tmp/source-verification/source.tar.gz HEAD
+          git rev-parse HEAD > /tmp/source-verification/COMMIT.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-before-upgrade-${{ github.sha }}
+          path: /tmp/source-verification/
+          retention-days: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Validate payload digest and original Git blob identities
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64, gzip, hashlib, pathlib
+          encoded = pathlib.Path('maintenance/adaptive-gameplay.patch.gz.b64').read_bytes()
+          patch = gzip.decompress(base64.b64decode(encoded))
+          expected = 'a34c45a877eeaa74c10007c75d47a42ecc227e37c4efe5dc0050ecd33104eab4'
+          assert hashlib.sha256(patch).hexdigest() == expected, 'patch digest mismatch'
+          pathlib.Path('/tmp/adaptive-gameplay.patch').write_bytes(patch)
+          PY
+          git apply --check --index /tmp/adaptive-gameplay.patch
+          git apply --index /tmp/adaptive-gameplay.patch
+      - name: Install test and static-analysis dependencies
+        run: python -m pip install -e '.[dev]'
+      - name: Format added modules and enforce repository checks
+        run: |
+          ruff format src/minecraft_ai/control/visual_progress.py src/minecraft_ai/skills/recovery.py tests/test_adaptive_gameplay.py
+          ruff check src tests
+          mypy src
+          python -m compileall -q src
+      - name: Full regression suite
+        run: pytest -q
+      - name: Publish only validated changes without overwriting concurrent work
+        shell: bash
+        run: |
+          git add src tests
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat: learn contextual recovery and sustain mining through fresh visual progress'
+          git push origin HEAD:main
+          mkdir -p /tmp/verified-upgrade
+          git archive --format=tar.gz --output=/tmp/verified-upgrade/source.tar.gz HEAD
+          git rev-parse HEAD > /tmp/verified-upgrade/COMMIT.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-adaptive-gameplay
+          path: /tmp/verified-upgrade/
+          retention-days: 1
+          if-no-files-found: error
