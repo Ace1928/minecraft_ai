@@ -158,6 +158,14 @@ tests do not establish gameplay competence.
 
 ### Optional local runtime factory
 
+A separately managed configuration can be selected with
+`minecraft-ai run --live --config /path/to/runtime.yaml`. The file is validated
+before attaching or arming; calibration checks and the child process use that
+same selected configuration. This does not rewrite the default configuration,
+change a running agent, or bypass pause/emergency controls. Keep the selected
+file unchanged during launch. External watchdogs must explicitly preserve that
+selection on recovery; this option does not change their default behavior.
+
 A trusted, separately installed planner can opt into the canonical agent process
 through local configuration only: `runtime_factory.reference` is a
 `module:callable`, and `runtime_factory.startup_timeout_s` bounds construction

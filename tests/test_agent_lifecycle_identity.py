@@ -49,9 +49,11 @@ def _process(command: tuple[str, ...], *, start_ticks: int = 1234) -> AgentProce
     )
 
 
+@pytest.mark.parametrize("custom_config", [False, True])
 def test_launch_persists_linux_start_ticks_and_exact_agent_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    custom_config: bool,
 ) -> None:
     commands: list[tuple[str, ...]] = []
 
@@ -94,10 +96,16 @@ def test_launch_persists_linux_start_ticks_and_exact_agent_command(
         instance_id="bedrock:test",
         role="creative_builder",
         capture_source="x11",
+        config_file=tmp_path / "selected.yaml" if custom_config else None,
     )
 
     assert process.proc_start_ticks == 9876
     assert process.command_sha256 == lifecycle._command_sha256(commands[0])
+    if custom_config:
+        index = commands[0].index("--config")
+        assert commands[0][index + 1] == str(tmp_path / "selected.yaml")
+    else:
+        assert "--config" not in commands[0]
     assert AgentProcess.load(descriptor) == process
 
 

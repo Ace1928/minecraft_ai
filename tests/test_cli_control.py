@@ -1,21 +1,26 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterator
 
 import pytest
 import typer
+from typer.testing import CliRunner
 
 import minecraft_ai.cli as cli
 
 
+@pytest.mark.parametrize("custom_config", [False, True])
 def test_live_agent_launch_is_serialized_with_operator_intent(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    custom_config: bool,
 ) -> None:
     calls: list[str] = []
     lock_held = False
+    config_file = tmp_path / "selected.yaml" if custom_config else None
 
     @contextmanager
     def intent_lock() -> Iterator[None]:
@@ -32,6 +37,7 @@ def test_live_agent_launch_is_serialized_with_operator_intent(
     def launch_agent_process(**kwargs: object) -> SimpleNamespace:
         assert lock_held
         assert kwargs["lease_id"] == "lease-1"
+        assert kwargs["config_file"] == config_file
         calls.append("launch")
         return SimpleNamespace(pid=1234)
 
@@ -54,6 +60,7 @@ def test_live_agent_launch_is_serialized_with_operator_intent(
         role="creative_builder",
         allow_host_capture=False,
         capture_source="x11",
+        config_file=config_file,
     )
 
     assert result.pid == 1234
@@ -91,6 +98,140 @@ def test_live_agent_launch_rechecks_pause_inside_intent_lock(
         )
 
     assert calls == []
+
+
+@pytest.mark.parametrize("contents", [None, "policy: [", "[1, 2]", "policy:\n  camera_scale: -1\n"])
+def test_run_rejects_invalid_explicit_config_before_any_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contents: str | None,
+) -> None:
+    selected = tmp_path / "selected.yaml"
+    if contents is not None:
+        selected.write_text(contents, encoding="utf-8")
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("invalid explicit configuration must fail before any runtime mutation")
+
+    for name in (
+        "_ensure_dirs", "ensure_default_config", "_start_supervisor", "send_command",
+        "_command", "launch_agent_process",
+    ):
+        monkeypatch.setattr(cli, name, forbidden)
+    result = CliRunner().invoke(cli.app, ["run", "--live", "--config", str(selected)])
+    assert result.exit_code == 2, result.output
+    assert "selected" in result.output or "configuration" in result.output
+
+
+@pytest.fixture
+def live_config_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Exercise CLI config selection with every game/process operation faked."""
+    default_path = tmp_path / "default.yaml"
+    default_path.write_text(
+        "policy:\n  enabled: true\n  camera_scale: 6.0\n  camera_pitch_scale: 7.0\n",
+        encoding="utf-8",
+    )
+    default_bytes = default_path.read_bytes()
+    calls = []
+    compatibility = []
+    launches = []
+    real_load = cli.load_config
+
+    def load(path=None):
+        calls.append(("load", path))
+        return real_load(default_path if path is None else path)
+
+    monkeypatch.setattr(cli, "load_config", load)
+    monkeypatch.setattr(cli, "_ensure_dirs", lambda: calls.append(("dirs",)))
+    monkeypatch.setattr(cli, "ensure_default_config", lambda: calls.append(("default",)))
+    monkeypatch.setattr(cli, "emergency_stop_latched", lambda: False)
+    monkeypatch.setattr(cli, "operator_pause_latched", lambda: False)
+    monkeypatch.setattr(cli, "operator_intent_lock", lambda: nullcontext())
+    monkeypatch.setattr(cli, "agent_alive", lambda: False)
+    monkeypatch.setattr(cli, "supervisor_alive", lambda: True)
+    monkeypatch.setattr(cli, "send_command", lambda *_args, **_kw: {"state": "SAFE_IDLE"})
+    session = SimpleNamespace(display=":isolated-test")
+    monkeypatch.setattr(cli, "BedrockSession", SimpleNamespace(load=lambda: session))
+    monkeypatch.setattr(cli, "bedrock_session_alive", lambda _session: True)
+    monkeypatch.setattr(cli, "_require_autonomous_isolated_session", lambda _session: None)
+    monkeypatch.setattr(cli, "wait_for_minecraft_window", lambda *_args, **_kw: 42)
+    monkeypatch.setattr(cli, "discover_bedrock_linux_install", lambda: SimpleNamespace(
+        selected_build=SimpleNamespace(version="test-version"), wine_prefix=tmp_path / "wine",
+    ))
+    frame = SimpleNamespace(width=1280, height=720)
+    monkeypatch.setattr(cli, "create_bedrock_capture", lambda *_args, **_kw: SimpleNamespace(
+        capture=lambda: frame, close=lambda: None,
+    ))
+    monkeypatch.setattr(cli, "live_control_arm_reason", lambda _frame: "world")
+    profile = SimpleNamespace(
+        profile_id="test-profile", pitch_counts_per_degree=3.5,
+        require_compatible=lambda **kw: compatibility.append(kw),
+    )
+    monkeypatch.setattr(cli, "load_camera_calibration", lambda *_args, **_kw: profile)
+    monkeypatch.setattr(cli, "read_bedrock_mouse_sensitivity", lambda _prefix: 50)
+    monkeypatch.setattr(cli, "app_paths", lambda: SimpleNamespace(data_dir=tmp_path))
+
+    def command(name, **_kwargs):
+        calls.append((name,))
+        if name == "attach-bedrock-x11":
+            return {"world_camera": {
+                "origin_calibrated": True, "calibration_id": profile.profile_id,
+                "pitch_counts_per_degree": profile.pitch_counts_per_degree,
+            }}
+        return {"lease": {"lease_id": "lease-test"}} if name == "arm" else {}
+
+    monkeypatch.setattr(cli, "_command", command)
+    monkeypatch.setattr(cli, "launch_agent_process", lambda **kw: (
+        launches.append(kw) or SimpleNamespace(pid=1234)
+    ))
+    return SimpleNamespace(
+        calls=calls, compatibility=compatibility, launches=launches,
+        default_path=default_path, default_bytes=default_bytes,
+    )
+
+
+def test_run_uses_one_resolved_config_for_calibration_and_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_config_launch,
+) -> None:
+    h = live_config_launch
+    selected = tmp_path / "selected.yaml"
+    selected.write_text(
+        "policy:\n  enabled: true\n  camera_scale: 2.75\n  camera_pitch_scale: 3.5\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli.app, ["run", "--live", "--config", "selected.yaml"])
+    assert result.exit_code == 0, result.output
+    assert h.calls[0] == ("load", selected.resolve())
+    assert [call for call in h.calls if call[0] == "load"] == [h.calls[0]]
+    assert ("default",) not in h.calls
+    assert h.compatibility[0]["configured_yaw_counts_per_degree"] == 2.75
+    assert h.compatibility[0]["configured_pitch_counts_per_degree"] == 3.5
+    assert h.launches[0]["config_file"] == selected.resolve()
+    assert h.default_path.read_bytes() == h.default_bytes
+
+
+def test_run_without_config_keeps_default_selection(live_config_launch) -> None:
+    h = live_config_launch
+    result = CliRunner().invoke(cli.app, ["run", "--live"])
+    assert result.exit_code == 0, result.output
+    assert h.calls[:2] == [("dirs",), ("default",)]
+    assert [call for call in h.calls if call[0] == "load"] == [("load", None)]
+    assert h.compatibility[0]["configured_yaw_counts_per_degree"] == 6.0
+    assert h.compatibility[0]["configured_pitch_counts_per_degree"] == 7.0
+    assert h.launches[0]["config_file"] is None
+
+
+def test_explicit_config_does_not_bypass_operator_pause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_config_launch,
+) -> None:
+    h = live_config_launch
+    selected = tmp_path / "selected.yaml"
+    selected.write_text("role: generalist\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "operator_pause_latched", lambda: True)
+    result = CliRunner().invoke(cli.app, ["run", "--live", "--config", str(selected)])
+    assert result.exit_code == 2, result.output
+    assert "pause" in result.output.casefold()
+    assert not h.launches and not h.compatibility
+    assert ("arm",) not in h.calls and ("attach-bedrock-x11",) not in h.calls
 
 
 def test_human_takeover_serializes_pause_revocation_and_preserves_service(

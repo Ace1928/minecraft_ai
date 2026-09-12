@@ -14,6 +14,7 @@ from pathlib import Path
 import typer
 from platformdirs import user_data_dir, user_runtime_dir
 from rich import print
+from yaml import YAMLError
 
 from .agent_lifecycle import (
     AGENT_FILE,
@@ -439,6 +440,7 @@ def _launch_realtime_agent_transaction(
     role: str,
     allow_host_capture: bool,
     capture_source: str,
+    config_file: Path | None = None,
 ) -> AgentProcess:
     """Serialize the final arm/activate/spawn boundary with operator intent."""
 
@@ -470,6 +472,7 @@ def _launch_realtime_agent_transaction(
                 role=role,
                 allow_host_capture=allow_host_capture,
                 capture_source=capture_source,
+                config_file=config_file,
             )
         except Exception as exc:
             try:
@@ -493,10 +496,31 @@ def run(
         "--capture-source",
         help="Capture source: pipewire (default) or x11 (window-targeted XGetImage).",
     ),
+    config_file: Path | None = typer.Option(
+        None,
+        "--config",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+        help="Runtime configuration file; leave the default configuration unchanged.",
+    ),
 ) -> None:
     """Start supervisor; with --live attach Bedrock and start the player loop."""
+    selected_config: Path | None = None
+    config = None
+    if config_file is not None:
+        try:
+            selected_config = config_file.expanduser().resolve(strict=True)
+            if not selected_config.is_file():
+                raise ValueError("configuration path must be a regular file")
+            config = load_config(selected_config)
+        except (OSError, ValueError, YAMLError) as exc:
+            raise typer.BadParameter(f"Cannot load the selected configuration: {exc}") from exc
     _ensure_dirs()
-    ensure_default_config()
+    if selected_config is None:
+        ensure_default_config()
     if role not in BUILTIN_ROLES:
         raise typer.BadParameter(f"unknown role {role!r}; see `minecraft-ai roles list`")
     if emergency_stop_latched():
@@ -615,7 +639,8 @@ def run(
         allow_host=allow_host,
         host_monitor_binding=None if host_binding is None else host_binding.payload(),
     )
-    config = load_config()
+    if config is None:
+        config = load_config()
     try:
         profile = load_camera_calibration(
             app_paths().data_dir,
@@ -672,6 +697,7 @@ def run(
         role=role,
         allow_host_capture=allow_host,
         capture_source=capture_source,
+        config_file=selected_config,
     )
     print(
         "[bold green]LIVE BEDROCK AGENT STARTED[/bold green] "
