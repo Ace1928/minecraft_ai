@@ -756,10 +756,12 @@ def test_recorded_zombie_at_stop_entry_uses_orphan_group_containment(
 
     assert lifecycle.stop_agent_process(timeout_s=2, planned=True)
 
+    # Windows has no SIGKILL: the fallback is SIGTERM, so this fake group's
+    # configured kill response already completes on the first group signal.
+    delayed_kill = [] if _SIGKILL == signal.SIGTERM else [("group", _SIGKILL, 1.5)]
     assert stop_harness.signals == [
         ("group", signal.SIGTERM, 0.0),
-        ("group", _SIGKILL, 1.5),
-    ]
+    ] + delayed_kill
     assert not stop_harness.descriptor.exists()
 
 
