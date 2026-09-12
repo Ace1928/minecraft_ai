@@ -95,7 +95,8 @@ live trace through the supervisor. Accepted inputs, observed displacement and
 successful gameplay remain different evidence gates.
 
 An optional `erais.native-minecraft-drain.v1` capability adds an explicit
-terminal checkpoint transaction. The parent binds the worker's READY session
+terminal checkpoint transaction over POSIX pipes; Windows rejects it before
+admission and retains its existing lifecycle. The parent binds the worker's READY session
 and checkpoint descriptor, retains the last flushed inference identity, and
 uses one deadline for command delivery, outstanding replies, a matching
 checkpoint acknowledgement and normal child exit. During drain it admits no

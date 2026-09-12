@@ -57,6 +57,16 @@ def test_external_command_keeps_parent_transport_and_identity(tmp_path):
     assert "--source-path" not in command and "--weights-path" not in command
 
 
+def test_terminal_drain_rejects_unsupported_platform_before_admission(tmp_path, monkeypatch):
+    client = TemporalPolicyClient(external_config(tmp_path), frame_provider=lambda: None)
+    monkeypatch.setattr(policy_service_module.sys, "platform", "win32")
+    with pytest.raises(RuntimeError, match="POSIX"):
+        client.drain(deadline_ns=time.monotonic_ns() + 1_000_000_000)
+    assert not client._draining and client._process is None
+    with pytest.raises(RuntimeError, match="POSIX"):
+        client._write_drain_request({}, deadline_ns=time.monotonic_ns() + 1_000_000_000)
+
+
 def test_external_import_root_precedes_editable_install_without_mutating_parent(
     tmp_path,
     monkeypatch,

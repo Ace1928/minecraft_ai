@@ -520,6 +520,8 @@ class TemporalPolicyClient:
         A receipt authenticates the worker's checkpoint report, not independent
         filesystem verification, parent recording durability or gameplay success.
         """
+        if sys.platform == "win32":
+            raise RuntimeError("worker drain requires POSIX pipe support")
         if self._draining:
             raise RuntimeError("worker drain is terminal and cannot be repeated")
         if type(deadline_ns) is not int or not time.monotonic_ns() < deadline_ns < 2**63:
@@ -590,6 +592,8 @@ class TemporalPolicyClient:
 
     def _write_drain_request(self, request: dict[str, Any], *, deadline_ns: int) -> None:
         """Bound even a wedged stdin write without another reader/thread."""
+        if sys.platform == "win32":
+            raise RuntimeError("worker drain requires POSIX pipe support")
         assert self._process is not None and self._process.stdin is not None
         encoded = (json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8")
         descriptor = self._process.stdin.fileno()
