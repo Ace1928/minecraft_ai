@@ -3657,8 +3657,8 @@ class AgentRuntime:
     def _advance_plan_on_step_complete(self, run: SkillRun) -> None:
         """Mark one persistent plan step done after a skill succeeds.
 
-        Most steps are short free-form plans, so a completed world skill consumes
-        the current position permissively. Modal inventory transitions are a
+        Bound graph nodes require their matching skill. Unbound free-form plans
+        retain permissive world-skill completion. Modal inventory transitions are a
         narrow exception: opening or closing a GUI is often prerequisite cleanup,
         and advances only an explicit matching GUI step. The last decision's goal
         remains a sanity gate so an off-plan operator task cannot eat plan progress.
@@ -3680,7 +3680,11 @@ class AgentRuntime:
             ):
                 return
         graph = getattr(self, "_plan_graph", None)
-        if graph is not None and graph.mark_succeeded(run.skill_id):
+        if graph is not None:
+            # The graph owns progress. An unrelated world success must not
+            # advance only its legacy projection and later rewind that index.
+            if not graph.mark_succeeded(run.skill_id, allow_unbound=True):
+                return
             self._plan_steps = graph.sequential_labels()
             self._plan_index = graph.cursor
         else:

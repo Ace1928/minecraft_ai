@@ -90,9 +90,12 @@ class PlanGraph(BaseModel):
             update={"state": PlanNodeState.RUNNING}
         )
 
-    def mark_succeeded(self, skill_id: str) -> bool:
+    def mark_succeeded(self, skill_id: str, *, allow_unbound: bool = False) -> bool:
+        """Complete a matching node, or caller-qualified legacy free-form prose."""
         node = self.current()
-        if node is None or not _same_skill(node, skill_id):
+        if node is None or not (
+            _same_skill(node, skill_id) or (allow_unbound and node.skill_id is None)
+        ):
             return False
         self.nodes[node.node_id] = node.model_copy(
             update={

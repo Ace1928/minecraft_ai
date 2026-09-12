@@ -2,6 +2,11 @@
 
 The roadmap is ordered by dependency and release gates. Later phases must not bypass earlier safety and observability requirements.
 
+## Latest execution checkpoint — 2026-09-12
+
+- [x] Prevent typed plan progress from diverging after an unrelated successful skill. Live telemetry showed the displayed index at 2 while the graph cursor stayed at 0; the regression reproduces a later matching success rewinding the index to 1. Bound nodes now require their matching skill, while explicitly allowed legacy prose advances both representations together after existing goal/GUI gates. Twenty-one focused regressions preserve terminal deduplication, failure/cancellation and plan-neutral handling. This corrects source bookkeeping, not resource acquisition or completed operator intent; an already-diverged live plan is not retroactively relabeled.
+- [ ] Qualify a bounded response to gathering that emits no useful input. The retained run `8a80f148d2c447e98e12cf008b69d287` timed out after 90.046 seconds: 519 supervisor-accepted records contained no key-down or button-down, 517 empty packets and two camera changes. The hotbar remained empty and prohibited inventory predictions were suppressed. This is not evidence that attack was released too early; do not lengthen mining holds, unmask inventory or force attack to conceal the failure.
+
 ## Current Bedrock execution checkpoint — 2026-09-08
 
 This is the immediate gameplay critical path, not a claim that whole phases below are complete.
