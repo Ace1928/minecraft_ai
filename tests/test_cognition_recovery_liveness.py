@@ -168,3 +168,45 @@ def test_explicit_prohibitions_stay_in_force_for_deliberated_recovery():
         board, context, allowed_skill_ids={"survey_surroundings"}
     )
     assert dict(bounds.required_action_constraints)["allow_attack"] is False
+
+
+def test_plan_owned_mobility_proof_releases_old_stall_but_unverified_success_does_not(tmp_path):
+    from minecraft_ai.outcome_verifier import (
+        OutcomeKind,
+        OutcomeSignal,
+        OutcomeStatus,
+        OutcomeVerification,
+    )
+    from minecraft_ai.storage import StateDatabase
+    from test_agent_core import _runtime_for_learning
+
+    with StateDatabase(tmp_path / "state.sqlite") as database:
+        runtime = _runtime_for_learning(database)
+        runtime.skills = build_bootstrap_skill_library()
+        runtime._traversal_escalation_pending = True
+        run = SkillRun(
+            run_id="plan-progress",
+            skill_id="traverse_visible_obstacle",
+            context_key="operator:walk",
+            started_ns=10,
+            ended_ns=100,
+            outcome=SkillOutcome.SUCCEEDED,
+        )
+        runtime._record_terminal_run(run)
+        assert runtime._traversal_escalation_pending
+        verified = run.model_copy(update={"run_id": "verified-progress"})
+        proof = OutcomeVerification(
+            run_id=verified.run_id,
+            kind=OutcomeKind.TRAVERSAL,
+            status=OutcomeStatus.PROGRESS,
+            signal=OutcomeSignal.LOCOMOTION_PROGRESS,
+            observed_ns=90,
+            confidence=0.95,
+            reason="action-bound traversal progress",
+        )
+        runtime._record_terminal_run(verified, outcome_verification=proof)
+        assert not runtime._traversal_escalation_pending
+        assert runtime._explore_keep_alive() is not None
+        runtime._traversal_escalation_pending = True
+        runtime._record_terminal_run(verified, outcome_verification=proof)
+        assert runtime._traversal_escalation_pending  # replay cannot clear a newer failure

@@ -4184,6 +4184,13 @@ class AgentRuntime:
         if matching_verification is not None and matching_verification.run_id != run.run_id:
             matching_verification = None
             logging.getLogger(__name__).error("Skill-terminal evidence rejected: ValueError")
+        if _verified_traversal_progress(ExecutionTick(
+            run=run, action=None, outcome_verification=matching_verification,
+        )):
+            # Plan-owned traversal can recover mobility without passing through
+            # a new scalar cognition skill. Its verified progress must release
+            # the old stall latch or an exhausted plan strands the motor again.
+            self._traversal_escalation_pending = False
         parents = getattr(self, "_mining_collection_parents", {})
         parent_id = parents.pop(run.run_id, None)
         parent_trial = (knowledge.trial(parent_id)
