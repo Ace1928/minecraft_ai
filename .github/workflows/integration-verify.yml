@@ -25,14 +25,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Build exact combined source tree
+      - name: Verify exact tree-equivalent ancestry reconciliation
         run: |
           set -euo pipefail
           git checkout --detach "$INTEGRATION_MAIN"
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' merge --no-ff --no-edit "$INTEGRATION_HEAD"
-          git diff --check "$INTEGRATION_MAIN" HEAD
-          git diff --name-only "$INTEGRATION_MAIN" HEAD > /tmp/integration-files.txt
-          diff -u <(printf '%s\n' src/minecraft_ai/safety.py tests/test_safety_numeric_bounds.py) /tmp/integration-files.txt
+          git diff --exit-code "$INTEGRATION_MAIN" HEAD
+          test -f tests/test_safety_numeric_bounds.py
           echo "TESTED_TREE=$(git rev-parse HEAD^{tree})"
       - uses: actions/setup-python@v5
         with:
@@ -57,12 +56,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Build exact combined source tree
+      - name: Verify exact tree-equivalent ancestry reconciliation
         run: |
           set -euo pipefail
           git checkout --detach "$INTEGRATION_MAIN"
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' merge --no-ff --no-edit "$INTEGRATION_HEAD"
-          git diff --check "$INTEGRATION_MAIN" HEAD
+          git diff --exit-code "$INTEGRATION_MAIN" HEAD
           echo "TESTED_TREE=$(git rev-parse HEAD^{tree})"
       - uses: actions/setup-java@v4
         with:
