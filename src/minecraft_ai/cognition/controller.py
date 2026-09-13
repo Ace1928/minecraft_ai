@@ -15,7 +15,9 @@ from minecraft_ai.model_requests import ModelRequestLifecycle
 from minecraft_ai.models import LanguageModel, ModelMessage, ModelRequestAttempt, ModelResponse
 from minecraft_ai.perception import CognitionReadView
 from minecraft_ai.skills import SkillFailureCode, SkillLibrary, SkillOutcome, SkillRun
+from minecraft_ai.skills.recovery import select_learned_recovery
 from minecraft_ai.social import (
+    OperatorMessage,
     OperatorMessageKind,
     OperatorMessageStatus,
 )
@@ -95,6 +97,11 @@ class HighLevelController:
             if operator_fast_path is not None:
                 self.metrics.last_error = None
                 return operator_fast_path
+            recovery = self._observed_locomotion_recovery(blackboard, context)
+            if recovery is not None:
+                self.metrics.fast_recoveries += 1
+                self.metrics.last_error = None
+                return recovery
             latest = blackboard.latest()
             active_operator = (
                 None
@@ -569,7 +576,79 @@ class HighLevelController:
             "last_latency_ms": round(self.metrics.last_latency_ms, 3),
             "last_error": self.metrics.last_error,
             "last_model": self.metrics.last_model,
+            "fast_recoveries": self.metrics.fast_recoveries,
         }
+
+    def _operator_method_choices(
+        self, active: OperatorMessage, context: CognitionContext,
+    ) -> tuple[str, ...]:
+        """Keep accepted intent while admitting its already-declared recovery methods.
+
+        Previously an acknowledged failed instruction still constrained the
+        grammar to its failed skill. Repair then removed that skill, leaving
+        only null and an endless expensive replan loop.
+        """
+        requested = _operator_requested_skill_ids(active.text)
+        if (active.kind != OperatorMessageKind.INSTRUCTION
+                or active.status != OperatorMessageStatus.ACKNOWLEDGED):
+            return requested
+        goal = f"operator:{active.message_id}"
+        methods = list(requested)
+        for skill_id in tuple(requested):
+            spec = self.skills.specs.get(skill_id)
+            if spec is not None:
+                methods.extend(spec.recovery_skills)
+        if not any(run.context_key == goal and run.skill_id in methods
+                   and run.outcome == SkillOutcome.FAILED
+                   and run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
+                   for run in context.recent_skill_runs):
+            return requested
+        return tuple(dict.fromkeys(methods))
+
+    def _observed_locomotion_recovery(
+        self, blackboard: CognitionReadView, context: CognitionContext,
+    ) -> CognitionDecision | None:
+        """Use measured recovery competence without waiting for another language call."""
+        if _urgent_safety_required(blackboard) or not context.operator_messages:
+            return None
+        active = context.operator_messages[0]
+        if (active.kind != OperatorMessageKind.INSTRUCTION
+                or active.status != OperatorMessageStatus.ACKNOWLEDGED):
+            return None
+        goal = f"operator:{active.message_id}"
+        if context.plan_goal_id not in {None, goal}:
+            return None
+        latest_run = max(
+            (run for run in context.recent_skill_runs if run.context_key == goal),
+            key=lambda run: run.ended_ns or run.started_ns, default=None,
+        )
+        if (latest_run is None or latest_run.outcome != SkillOutcome.FAILED
+                or latest_run.failure_code != SkillFailureCode.LOCOMOTION_STALLED):
+            return None
+        methods = self._operator_method_choices(active, context)
+        if latest_run.skill_id not in methods:
+            return None
+        for key, expected in (
+            ("scene.playable", True), ("scene.ui_overlay", False), ("scene.mode", "world"),
+        ):
+            fact = blackboard.fact(key, min_confidence=0.8)
+            if fact is None or type(fact.value) is not type(expected) or fact.value != expected:
+                return None
+        failed = self.skills.specs.get(latest_run.skill_id)
+        if failed is None:
+            return None
+        selected = select_learned_recovery(
+            self.skills, tuple(skill for skill in failed.recovery_skills if skill in methods),
+            blackboard, context_key=goal,
+        )
+        if selected is None:
+            return None
+        return CognitionDecision(
+            reasoning_summary="Using learned recovery after observed blocked movement.",
+            chosen_goal_id=goal, skill_id=selected.skill_id,
+            skill_parameters=dict(_explicit_action_constraints(active.text)),
+            instruction=selected.policy_instruction,
+        )
 
     def _feasible_skill_payloads(
         self,
@@ -720,7 +799,9 @@ class HighLevelController:
         constraints = (
             () if active is None else tuple(_explicit_action_constraints(active.text).items())
         )
-        requested_skill_ids = () if active is None else _operator_requested_skill_ids(active.text)
+        requested_skill_ids = (
+            () if active is None else self._operator_method_choices(active, context)
+        )
         return _DecisionRepairBounds(
             allowed_skills=allowed_skills,
             authority_goal_id=None if active is None else f"operator:{active.message_id}",

@@ -162,6 +162,7 @@ class HighLevelMetrics:
     last_latency_ms: float = 0.0
     last_error: str | None = None
     last_model: str | None = None
+    fast_recoveries: int = 0
 
 @dataclass(frozen=True)
 class _DecisionRepairBounds:
@@ -186,4 +187,3 @@ class _DecisionRepairBounds:
             payload["abstention_requires_perception_or_replan"] = True
             payload["requested_skill_ids"] = self.requested_skill_ids
         return payload
-

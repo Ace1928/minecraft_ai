@@ -5,14 +5,14 @@ from __future__ import annotations
 import math
 
 from minecraft_ai.execution import initiation_satisfied
-from minecraft_ai.perception import PerceptionBlackboard
+from minecraft_ai.perception import CognitionReadView
 from minecraft_ai.skills.library import SkillLibrary, SkillSpec, SkillStage
 
 
 def select_learned_recovery(
     skills: SkillLibrary,
     recovery_ids: tuple[str, ...],
-    blackboard: PerceptionBlackboard,
+    blackboard: CognitionReadView,
     *,
     context_key: str,
     max_context_failures: int = 2,
