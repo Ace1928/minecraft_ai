@@ -1781,15 +1781,13 @@ def test_nonmatching_failure_keeps_existing_gather_prerequisite_questions(
         {"plan_goal_id": None},
         {"plan_goal_id": "progress"},
         {"plan_goal_id": "operator:current"},
-        {"current_plan": ()},
         {"plan_index": -1},
-        {"plan_index": 2},
         {"plan_goal_id": "role:generalist:0:survive"},
     ],
-    ids=["no-goal", "not-role-goal", "operator-goal", "no-plan", "negative-cursor",
-         "finished-plan", "new-plan-context"],
+    ids=["no-goal", "not-role-goal", "operator-goal", "negative-cursor",
+         "new-plan-context"],
 )
-def test_stall_question_override_requires_same_unfinished_autonomous_plan(
+def test_stall_question_override_requires_same_goal_context(
     monkeypatch: pytest.MonkeyPatch, context_updates: dict[str, object],
 ) -> None:
     decision = _failed_gather_repair(monkeypatch, context_updates=context_updates)
@@ -1810,18 +1808,34 @@ def test_stall_question_override_cannot_reinterpret_another_selected_goal(
 
 
 @pytest.mark.parametrize("field_name", ["research_query", "say", "game_chat"])
-def test_raw_repair_research_or_conversation_does_not_buy_stall_observation(
+def test_stall_sensing_can_accompany_status_messages_but_preserves_research(
     monkeypatch: pytest.MonkeyPatch, field_name: str,
 ) -> None:
     decision = _failed_gather_repair(
         monkeypatch, repaired_updates={field_name: "Existing other request"},
     )
-    assert decision.ask_perception == ("target.visible", "target.near")
-    # Existing authority strips unsolicited say; its raw presence must still
-    # prevent repurposing that reply into the new autonomous observation.
+    assert decision.ask_perception == (
+        ("target.visible", "target.near") if field_name == "research_query"
+        else ("obstacle.ahead",)
+    )
+    # Informational chat does not suppress the missing diagnostic observation.
     assert getattr(decision, field_name) == (
         None if field_name == "say" else "Existing other request"
     )
+
+
+@pytest.mark.parametrize("goal", [_STALL_REPAIR_GOAL, "operator:completed-instruction"])
+@pytest.mark.parametrize("plan", [(), ("gather_nearby_wood", "craft_wood_planks")])
+def test_same_goal_stall_is_observed_after_plan_exhaustion(monkeypatch, goal, plan):
+    decision = _failed_gather_repair(
+        monkeypatch,
+        run_updates={"context_key": goal},
+        context_updates={"plan_goal_id": goal, "current_plan": plan, "plan_index": len(plan)},
+        original_updates={"chosen_goal_id": goal},
+        repaired_updates={"chosen_goal_id": goal, "game_chat": "Movement stalled."},
+    )
+    assert decision.ask_perception == ("obstacle.ahead",)
+    assert decision.skill_id is None
 
 
 @pytest.mark.parametrize("kind", list(OperatorMessageKind))

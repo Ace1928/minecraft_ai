@@ -812,9 +812,7 @@ class HighLevelController:
             blocked_skill_ids=tuple(sorted(blocked_skill_ids)),
         )
         repaired = self._complete(repair_messages, repair_bounds=repair_bounds)
-        repair_has_other_request = (
-            repaired.research_query is not None or bool(repaired.say) or bool(repaired.game_chat)
-        )
+        repair_has_other_request = repaired.research_query is not None
         repaired = self._apply_decision_authority(repaired, blackboard, context)
         if repaired.skill_id is None and repaired.request_replan:
             if not any(
@@ -827,8 +825,7 @@ class HighLevelController:
                     and blocked_run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
                     and not context.operator_messages
                     and context.plan_goal_id is not None
-                    and context.plan_goal_id.startswith("role:")
-                    and 0 <= context.plan_index < len(context.current_plan)
+                    and context.plan_index >= 0
                     and blocked_run.context_key == context.plan_goal_id
                     and decision.chosen_goal_id in {None, context.plan_goal_id}
                     and repaired.chosen_goal_id in {None, context.plan_goal_id}
@@ -837,6 +834,9 @@ class HighLevelController:
                     # Diagnose the typed movement failure, not the failed
                     # gathering skill's generic resource prerequisites. This
                     # fills an absent question; it does not authorize action.
+                    # A completed plan or an older operator-origin goal must not
+                    # leave a confirmed stall without a diagnostic observation.
+                    # Reporting the failure in chat does not replace sensing it.
                     questions = ("obstacle.ahead",)
                 repaired = repaired.model_copy(
                     update={"ask_perception": questions}
