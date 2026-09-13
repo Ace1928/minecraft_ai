@@ -210,16 +210,16 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert exploration.action_permissions.allow_attack is False
     assert exploration.action_permissions.allow_jump is True
     assert exploration.policy_instruction == "Run around and explore the Minecraft world."
-    assert exploration.version == 10
+    assert exploration.version == 12
     assert exploration.recovery_skills[-1] == "traverse_visible_obstacle"
     assert level_ground.policy_ref == "traverse_level_ground"
-    assert level_ground.version == 5
+    assert level_ground.version == 7
     assert level_ground.action_level == ActionLevel.MOTION
     assert level_ground.action_permissions.allow_jump is True
     assert level_ground.action_permissions.allow_attack is False
     assert level_ground.recovery_skills[-1] == "traverse_visible_obstacle"
     assert obstacle.policy_ref == "traverse_obstacle"
-    assert obstacle.version == 6
+    assert obstacle.version == 8
     assert obstacle.action_level == ActionLevel.LATENT
     assert obstacle.policy_instruction == "jump forward"
     assert obstacle.policy_condition_scale == 6.0
@@ -227,6 +227,10 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert obstacle.action_permissions.allow_jump is True
     assert obstacle.action_permissions.allow_attack is False
     assert obstacle.action_permissions.allow_use is False
+    for traversal in (exploration, level_ground, obstacle):
+        assert traversal.outcome_kind == "traversal"
+        assert traversal.parameters == ("allow_attack", "allow_use", "allow_jump")
+        assert "escape_confinement" in traversal.recovery_skills
     assert collect_drop.action_level == ActionLevel.LATENT
     assert collect_drop.policy_ref == "navigate"
     assert collect_drop.policy_instruction == "collect the dropped item"
