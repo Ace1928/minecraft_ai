@@ -383,6 +383,8 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
 
     if normalized in {"escape confinement", "escape confinement."}:
         return ("escape_confinement",)
+    if normalized in {"experiment interactions", "experiment with interactions"}:
+        return ("experiment_interactions",)
 
     if re.search(r"\b(?:respawn|come back to life)\b", normalized):
         add("respawn_after_death")

@@ -99,6 +99,21 @@ def test_guard_handoff_preserves_all_public_owners(environment) -> None:
     assert all(h == signal.SIG_DFL for h in environment.handlers.values())
 
 
+def test_explicit_policy_wrapper_keeps_the_original_body_owner(environment) -> None:
+    original = environment.kwargs["executor"].policy
+    runtime = FakeRuntime(**environment.kwargs)
+
+    def factory(**_kwargs):
+        runtime.executor.policy = SimpleNamespace(base_policy=original)
+        return runtime
+
+    environment.factory.side_effect = factory
+    config = environment.config.model_copy(update={"allow_policy_wrapper": True})
+    startup.run_agent_runtime(environment.kwargs, factory_config=config)
+    runtime.run_forever.assert_called_once()
+    assert runtime.executor.policy.base_policy is original
+
+
 def test_initial_rejected_lease_skips_even_external_import(environment, monkeypatch) -> None:
     send = Mock(side_effect=RuntimeError("lease expired"))
     monkeypatch.setattr(startup, "send_command", send)

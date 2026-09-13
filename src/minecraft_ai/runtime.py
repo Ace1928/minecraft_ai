@@ -2137,6 +2137,9 @@ class AgentRuntime:
                     self.trajectory_disabled_reason = reason
         self._sequence = action.sequence + 1
         self.metrics.motor_actions += 1
+        observer = getattr(self.executor.policy, "observe_accepted_action", None)
+        if callable(observer):
+            observer(action=action, capture=self.perception.last_capture)
 
     def _request_semantics_if_due(self, frame_id: int) -> None:
         # semantic_hz=0 is event-only active perception. Explicit questions from

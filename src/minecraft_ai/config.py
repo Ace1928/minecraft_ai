@@ -129,6 +129,7 @@ class RuntimeFactoryConfig(BaseModel):
         max_length=256,
     )
     startup_timeout_s: float = Field(default=120.0, ge=1.0, le=600.0)
+    allow_policy_wrapper: bool = False
 
 
 class RuntimeConfig(BaseModel):

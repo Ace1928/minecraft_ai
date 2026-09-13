@@ -1,6 +1,7 @@
 """Trusted optional runtime construction under an existing, bounded lease.
 
-This is not a plugin sandbox. Factories may replace cognition only and must not
+This is not a plugin sandbox. Factories may replace cognition and, with explicit
+configuration, wrap the supplied motor policy while retaining it. They must not
 start inference or inputs during assembly. Cancellation of import/native calls
 is cooperative; the guard bounds renewal, not arbitrary Python/C execution.
 """
@@ -108,7 +109,8 @@ def run_agent_runtime(
     """Keep canonical process identity and legacy construction unless opted in.
 
     External callable: factory(*, runtime_kwargs, cancel_event) -> AgentRuntime.
-    All supplied fields except high_level must be preserved by identity. A valid
+    All supplied fields except high_level must be preserved by identity. An opted-in
+    policy wrapper must retain the original as base_policy. A valid
     result also owns close_constructed_runtime() -> bool: stop/drain private
     owners, then call close_before_run(). True means all pre-run owners closed;
     False/exception prevents further teardown, including main's database close.
@@ -165,9 +167,12 @@ def run_agent_runtime(
                             f"runtime factory replaced protected field: {name}"
                         )
                 if getattr(runtime.executor, "policy", object()) is not supplied_policy:
-                    raise RuntimeStartupCleanupIncomplete(
-                        "runtime factory replaced protected executor policy"
-                    )
+                    wrapper = runtime.executor.policy
+                    if (not factory_config.allow_policy_wrapper
+                            or getattr(wrapper, "base_policy", None) is not supplied_policy):
+                        raise RuntimeStartupCleanupIncomplete(
+                            "runtime factory replaced protected executor policy"
+                        )
             finally:
                 # No simultaneous construction/runtime renewal owners at handoff.
                 guard.close()

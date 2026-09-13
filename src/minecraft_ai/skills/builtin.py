@@ -20,6 +20,27 @@ def build_bootstrap_skill_library() -> SkillLibrary:
     library = SkillLibrary()
     specs = (
         SkillSpec(
+            skill_id="experiment_interactions",
+            version=1,
+            name="Experiment with interactions",
+            description=(
+                "Try bounded interactions with the visible world and learn from actual outcomes. "
+                "This is experimental discovery, not merely walking to a new location."
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            parameters=("allow_attack", "allow_use", "allow_jump"),
+            preconditions=(SkillCondition(key="scene.playable", operator="truthy"),),
+            failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
+            max_duration_ms=30_000,
+            action_level=ActionLevel.RAW,
+            policy_ref="experiment_interactions",
+            policy_instruction="Experiment with visible objects and learn useful interactions.",
+            action_permissions=SkillActionPermissions(
+                allow_attack=True, allow_use=True, allow_jump=True,
+                allow_drop=False, allow_inventory=False, allow_hotbar=False,
+            ),
+        ),
+        SkillSpec(
             skill_id="survey_surroundings",
             version=2,
             name="Survey surroundings",
