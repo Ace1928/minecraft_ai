@@ -626,7 +626,7 @@ class HighLevelController:
                 or latest_run.failure_code != SkillFailureCode.LOCOMOTION_STALLED):
             return None
         methods = self._operator_method_choices(active, context)
-        if latest_run.skill_id not in methods:
+        if methods and latest_run.skill_id not in methods:
             return None
         for key, expected in (
             ("scene.playable", True), ("scene.ui_overlay", False), ("scene.mode", "world"),
@@ -638,7 +638,8 @@ class HighLevelController:
         if failed is None:
             return None
         selected = select_learned_recovery(
-            self.skills, tuple(skill for skill in failed.recovery_skills if skill in methods),
+            self.skills,
+            tuple(skill for skill in failed.recovery_skills if not methods or skill in methods),
             blackboard, context_key=goal,
         )
         if selected is None:

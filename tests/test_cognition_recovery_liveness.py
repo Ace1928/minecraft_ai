@@ -54,6 +54,7 @@ def setup():
     skills.stats[("traverse_visible_obstacle", goal)] = SkillStats(
         failures=3, consecutive_failures=3
     )
+    skills.stats[("backtrack_from_obstacle", goal)] = SkillStats(failures=3, consecutive_failures=3)
     message = OperatorMessage(
         message_id="walk",
         created_ns=1,
@@ -163,11 +164,50 @@ def test_explicit_prohibitions_stay_in_force_for_deliberated_recovery():
         update={"text": "explore forward; do not attack"}
     )
     context = replace(context, operator_messages=(message,))
-    assert controller._observed_locomotion_recovery(board, context) is None
+    decision = controller._observed_locomotion_recovery(board, context)
+    assert decision is not None and decision.skill_parameters["allow_attack"] is False
     bounds = controller._decision_repair_bounds(
         board, context, allowed_skill_ids={"survey_surroundings"}
     )
     assert dict(bounds.required_action_constraints)["allow_attack"] is False
+
+
+def test_new_learned_backtracking_method_is_available_after_failed_forward_methods():
+    controller, board, context = setup()
+    controller.skills.stats[("backtrack_from_obstacle", "operator:walk")] = SkillStats()
+    controller.skills.stats[("survey_surroundings", "operator:walk")] = SkillStats(
+        failures=3, consecutive_failures=3
+    )
+    decision = controller.decide(board, context)
+    assert decision.skill_id == "backtrack_from_obstacle"
+    assert controller.model.calls == 0
+
+
+def test_unexecutable_plan_can_be_refined_and_old_goal_failures_do_not_poison_new_goal(tmp_path):
+    from minecraft_ai.cognition import CognitionDecision
+    from minecraft_ai.plan_graph import sanitize_plan_steps
+    from minecraft_ai.storage import StateDatabase
+    from test_agent_core import _runtime_for_learning
+
+    assert sanitize_plan_steps(("continue_plan_execution", "next_step_if_successful")) == ()
+    with StateDatabase(tmp_path / "state.sqlite") as database:
+        runtime = _runtime_for_learning(database)
+        runtime.skills = build_bootstrap_skill_library()
+        runtime._plan_goal_id = "new-goal"
+        runtime._plan_steps = ("continue_plan_execution",)
+        runtime._adopt_plan_if_revised(
+            CognitionDecision(
+                chosen_goal_id="new-goal",
+                plan_steps=("traverse_level_ground",),
+                request_replan=True,
+            )
+        )
+        assert runtime._plan_steps == ("traverse_level_ground",)
+        runtime.skills.stats[("gather_nearby_wood", "old-goal")] = SkillStats(
+            failures=100,
+            consecutive_failures=100,
+        )
+        assert runtime._progression_goal().goal_id == "progression:gather_nearby_wood"
 
 
 def test_plan_owned_mobility_proof_releases_old_stall_but_unverified_success_does_not(tmp_path):

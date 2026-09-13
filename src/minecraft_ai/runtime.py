@@ -3859,7 +3859,15 @@ class AgentRuntime:
             and decision.chosen_goal_id != self._plan_goal_id
         )
         remaining = self._plan_steps[self._plan_index:]
-        if not goal_changed and remaining:
+        skills = getattr(self, "skills", None)
+        active = getattr(getattr(self, "executor", None), "run", None)
+        refines_unexecutable = bool(
+            remaining and skills is not None
+            and (active is None or active.outcome != SkillOutcome.RUNNING)
+            and bind_plan_step_skill(remaining[0], skills) is None
+            and any(bind_plan_step_skill(step, skills) is not None for step in steps)
+        )
+        if not goal_changed and remaining and not refines_unexecutable:
             if self._is_prefix(remaining, steps):
                 if steps != remaining:
                     self._plan_steps = steps
@@ -3872,7 +3880,7 @@ class AgentRuntime:
                     self._warm_plan_specialists()
                 return
             return
-        if goal_changed or not remaining:
+        if goal_changed or not remaining or refines_unexecutable:
             self._plan_steps = steps
             self._plan_goal_id = decision.chosen_goal_id
             self._plan_index = 0
@@ -4536,6 +4544,8 @@ class AgentRuntime:
         for run in recent:
             if run.outcome not in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
                 continue
+            if run.failure_code == SkillFailureCode.CONTROLLER_STARVATION:
+                continue
             if context_key is not None and run.context_key != context_key:
                 continue
             counts[run.skill_id] = counts.get(run.skill_id, 0) + 1
@@ -4557,7 +4567,9 @@ class AgentRuntime:
         skill_id = progression_skill_for_capabilities(
             self._observed_hotbar_inventory(),
             available_skill_ids=set(skills.specs),
-            recently_failed_skill_ids=self._recently_failed_skill_ids(),
+            recently_failed_skill_ids=(
+                self._recently_failed_skill_ids(context_key=self._plan_goal_id)
+            ),
         )
         if skill_id is None:
             return None

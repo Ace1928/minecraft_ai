@@ -246,7 +246,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="explore_forward",
-            version=10,
+            version=11,
             name="Explore forward",
             description=(
                 "Traverse visible open terrain to discover a genuinely new area, keep the view "
@@ -260,6 +260,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=(
                 "escape_submersion",
                 "retreat_from_danger",
+                "backtrack_from_obstacle",
                 "survey_surroundings",
                 "traverse_visible_obstacle",
             ),
@@ -280,7 +281,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="traverse_level_ground",
-            version=5,
+            version=6,
             name="Traverse level ground",
             description=(
                 "Use the fast learned motion expert to cross a short visible lane while "
@@ -294,6 +295,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=(
                 "escape_submersion",
                 "retreat_from_danger",
+                "backtrack_from_obstacle",
                 "survey_surroundings",
                 "traverse_visible_obstacle",
             ),
@@ -311,8 +313,33 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             ),
         ),
         SkillSpec(
+            skill_id="backtrack_from_obstacle",
+            version=1,
+            name="Backtrack from obstacle",
+            description=(
+                "Recover blocked movement by turning away and backing into "
+                "a different visible route."
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            outcome_kind="traversal",
+            preconditions=(SkillCondition(key="scene.playable", operator="truthy"),),
+            failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
+            expected_effects=("locomotion_progress",),
+            recovery_skills=("survey_surroundings", "traverse_level_ground"),
+            max_duration_ms=8_000,
+            action_level=ActionLevel.LATENT,
+            policy_ref="backtrack",
+            policy_instruction=(
+                "Turn around and walk away from the wall. Find a different open route."
+            ),
+            action_permissions=SkillActionPermissions(
+                allow_attack=False, allow_use=False, allow_jump=False,
+                allow_drop=False, allow_inventory=False, allow_hotbar=False,
+            ),
+        ),
+        SkillSpec(
             skill_id="traverse_visible_obstacle",
-            version=6,
+            version=7,
             name="Traverse visible obstacle",
             description=(
                 "Use learned short-horizon movement and camera control to jump over or climb "
@@ -323,7 +350,10 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             parameters=("allow_attack", "allow_use", "allow_jump"),
             failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
             expected_effects=("obstacle_crossed", "locomotion_progress"),
-            recovery_skills=("escape_submersion", "retreat_from_danger", "survey_surroundings"),
+            recovery_skills=(
+                "escape_submersion", "retreat_from_danger",
+                "backtrack_from_obstacle", "survey_surroundings",
+            ),
             max_duration_ms=8_000,
             # This escape needs the goal-conditioned STEVE body. The fast VPT
             # route cannot consume "jump forward" and may emit no locomotion at

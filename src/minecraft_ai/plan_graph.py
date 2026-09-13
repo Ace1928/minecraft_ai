@@ -29,6 +29,8 @@ _SENTINEL_PLAN_STEPS = frozenset(
         "--",
         ".",
         "...",
+        "continue plan execution",
+        "next step if successful",
     }
 )
 
