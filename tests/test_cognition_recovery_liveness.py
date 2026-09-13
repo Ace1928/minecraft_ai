@@ -190,6 +190,20 @@ def test_confinement_recovery_admits_native_attack_without_inventory_or_use():
     assert controller.model.calls == 0
 
 
+def test_literal_skill_command_keeps_the_trained_body_instruction():
+    controller, board, context = setup()
+    message = context.operator_messages[0].model_copy(update={
+        "text": "escape confinement", "status": OperatorMessageStatus.QUEUED,
+        "kind": OperatorMessageKind.CORRECTION,
+    })
+    decision = controller._operator_fast_path_decision(
+        board, replace(context, operator_messages=(message,)),
+    )
+    assert decision is not None and decision.skill_id == "escape_confinement"
+    assert decision.instruction == controller.skills.get("escape_confinement").policy_instruction
+    assert "Dig forward" in decision.instruction
+
+
 def test_new_learned_backtracking_method_is_available_after_failed_forward_methods():
     controller, board, context = setup()
     controller.skills.stats[("backtrack_from_obstacle", "operator:walk")] = SkillStats()

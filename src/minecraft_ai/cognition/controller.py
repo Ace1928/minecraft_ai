@@ -476,13 +476,24 @@ class HighLevelController:
         parameters: dict[str, str | int | float | bool] = dict(
             _explicit_action_constraints(active.text)
         )
+        selected_spec = self.skills.get(feasible_skill_ids[0])
+
+        def normalized_label(text: str) -> str:
+            words = text.casefold().replace("_", " ").replace("-", " ").split()
+            return " ".join(words).rstrip(".! ")
+
+        literal_option = normalized_label(active.text) in {
+            normalized_label(selected_spec.skill_id), normalized_label(selected_spec.name),
+        }
         decision = CognitionDecision(
             reasoning_summary="Following an explicit operator instruction.",
             chosen_goal_id=f"operator:{active.message_id}",
             skill_id=feasible_skill_ids[0],
             skill_parameters=parameters,
             say="Starting that now.",
-            instruction=active.text,
+            instruction=(
+                selected_spec.policy_instruction if literal_option else active.text
+            ),
         )
         return self._scope_operator_decision(decision, blackboard, context)
 
