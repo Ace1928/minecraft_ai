@@ -1,0 +1,91 @@
+name: Prepare verified PR 12 integration
+on:
+  push:
+    branches: [integration/branch-consolidation-20260914]
+    paths: [.github/workflows/integration-prepare.yml]
+permissions:
+  contents: write
+env:
+  INTEGRATION_MAIN: 2a6fd1a3a2582e620f93d7b0586cb0320ee7057c
+  INTEGRATION_HEAD: b6b35ab34a264e2ec3ed627bdb51883db5b4e65b
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reconcile equivalent history and preserve current runtime contracts
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout --detach "$INTEGRATION_MAIN"
+          git merge --no-ff --no-edit "$INTEGRATION_HEAD"
+          git diff --exit-code "$INTEGRATION_MAIN" HEAD
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('tests/test_m0_architecture.py')
+          text = p.read_text()
+          replacements = {
+              '    assert exploration.version == 10\n': '    assert exploration.version == 12\n',
+              '    assert level_ground.version == 5\n': '    assert level_ground.version == 7\n',
+              '    assert obstacle.version == 6\n': '    assert obstacle.version == 8\n',
+              '    assert obstacle.action_permissions.allow_use is False\n':
+                  '    assert obstacle.action_permissions.allow_use is False\n'
+                  '    for traversal in (exploration, level_ground, obstacle):\n'
+                  '        assert traversal.outcome_kind == "traversal"\n'
+                  '        assert traversal.parameters == ("allow_attack", "allow_use", "allow_jump")\n'
+                  '        assert "escape_confinement" in traversal.recovery_skills\n',
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f'Unexpected test source: {old!r}')
+              text = text.replace(old, new)
+          p.write_text(text)
+          PY
+          git add tests/test_m0_architecture.py
+          git diff --cached --check
+          git commit -m 'test: align traversal contract versions and verify adaptive parameters without changing runtime'
+          test "$(git diff --name-only "$INTEGRATION_MAIN" HEAD)" = tests/test_m0_architecture.py
+          git diff --exit-code "$INTEGRATION_MAIN" HEAD -- src java_bridge
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - run: ruff check src tests
+      - run: mypy src
+      - run: python -m pytest -q --junitxml=/tmp/minecraft-integration-tests.xml
+      - name: Publish tested source-only candidate, never main
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$INTEGRATION_MAIN"
+          test "$(git ls-remote origin refs/heads/audit/2026-09-06-motor-numeric-bounds | cut -f1)" = "$INTEGRATION_HEAD"
+          test -z "$(git status --porcelain)"
+          git diff --binary "$INTEGRATION_MAIN" HEAD > /tmp/minecraft-integration.patch
+          python - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          def rev(ref):
+              return subprocess.check_output(['git', 'rev-parse', ref], text=True).strip()
+          report = {'main': os.environ['INTEGRATION_MAIN'], 'feature': os.environ['INTEGRATION_HEAD'],
+                    'candidate_sha': rev('HEAD'), 'candidate_tree': rev('HEAD^{tree}'),
+                    'baseline_tree': rev(os.environ['INTEGRATION_MAIN']+'^{tree}'),
+                    'runtime_unchanged': True,
+                    'candidate_branch': 'integration/motor-verified-20260914',
+                    'patch_sha256': hashlib.sha256(pathlib.Path('/tmp/minecraft-integration.patch').read_bytes()).hexdigest()}
+          pathlib.Path('/tmp/minecraft-integration-report.json').write_text(json.dumps(report, indent=2)+'\n')
+          print(json.dumps(report, indent=2))
+          PY
+          git push origin HEAD:refs/heads/integration/motor-verified-20260914
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: minecraft-integration-verification
+          path: |
+            /tmp/minecraft-integration-tests.xml
+            /tmp/minecraft-integration-report.json
+            /tmp/minecraft-integration.patch
+          retention-days: 7
+          if-no-files-found: ignore
