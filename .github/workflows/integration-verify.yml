@@ -1,0 +1,76 @@
+name: Verify PR 12 integration
+on:
+  push:
+    branches: [integration/branch-consolidation-20260914]
+    paths: [.github/workflows/integration-verify.yml]
+permissions:
+  contents: read
+env:
+  INTEGRATION_MAIN: 2a6fd1a3a2582e620f93d7b0586cb0320ee7057c
+  INTEGRATION_HEAD: b6b35ab34a264e2ec3ed627bdb51883db5b4e65b
+jobs:
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.11', '3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build exact combined source tree
+        run: |
+          set -euo pipefail
+          git checkout --detach "$INTEGRATION_MAIN"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' merge --no-ff --no-edit "$INTEGRATION_HEAD"
+          git diff --check "$INTEGRATION_MAIN" HEAD
+          git diff --name-only "$INTEGRATION_MAIN" HEAD > /tmp/integration-files.txt
+          diff -u <(printf '%s\n' src/minecraft_ai/safety.py tests/test_safety_numeric_bounds.py) /tmp/integration-files.txt
+          echo "TESTED_TREE=$(git rev-parse HEAD^{tree})"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install -e '.[dev]'
+      - run: ruff check src tests
+      - run: mypy src
+      - run: python -m pytest -q --junitxml=integration-tests.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-${{ matrix.os }}-${{ matrix.python-version }}
+          path: integration-tests.xml
+          if-no-files-found: ignore
+          retention-days: 7
+  java-bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build exact combined source tree
+        run: |
+          set -euo pipefail
+          git checkout --detach "$INTEGRATION_MAIN"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' merge --no-ff --no-edit "$INTEGRATION_HEAD"
+          git diff --check "$INTEGRATION_MAIN" HEAD
+          echo "TESTED_TREE=$(git rev-parse HEAD^{tree})"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - name: Build scoped Fabric bridge
+        working-directory: java_bridge
+        run: gradle --no-daemon build
