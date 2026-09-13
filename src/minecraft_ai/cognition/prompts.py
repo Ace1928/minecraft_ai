@@ -381,6 +381,9 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
         if skill_id not in requested:
             requested.append(skill_id)
 
+    if normalized in {"escape confinement", "escape confinement."}:
+        return ("escape_confinement",)
+
     if re.search(r"\b(?:respawn|come back to life)\b", normalized):
         add("respawn_after_death")
     if re.search(r"\b(?:away|afk|jump back)\b", normalized):

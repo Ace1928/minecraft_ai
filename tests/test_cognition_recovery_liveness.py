@@ -50,6 +50,9 @@ def setup():
     )
     skills = build_bootstrap_skill_library()
     goal = "operator:walk"
+    skills.stats[("escape_confinement", goal)] = SkillStats(
+        failures=3, consecutive_failures=3
+    )
     skills.stats[("explore_forward", goal)] = SkillStats(failures=3, consecutive_failures=3)
     skills.stats[("traverse_visible_obstacle", goal)] = SkillStats(
         failures=3, consecutive_failures=3
@@ -170,6 +173,21 @@ def test_explicit_prohibitions_stay_in_force_for_deliberated_recovery():
         board, context, allowed_skill_ids={"survey_surroundings"}
     )
     assert dict(bounds.required_action_constraints)["allow_attack"] is False
+
+
+def test_confinement_recovery_admits_native_attack_without_inventory_or_use():
+    from minecraft_ai.action_levels import ActionLevel
+
+    controller, board, context = setup()
+    controller.skills.stats[("escape_confinement", "operator:walk")] = SkillStats()
+    selected = controller.decide(board, context)
+    assert selected.skill_id == "escape_confinement"
+    spec = controller.skills.get(selected.skill_id)
+    assert spec.action_level == ActionLevel.RAW
+    assert spec.action_permissions.allow_attack
+    assert not spec.action_permissions.allow_use
+    assert not spec.action_permissions.allow_inventory
+    assert controller.model.calls == 0
 
 
 def test_new_learned_backtracking_method_is_available_after_failed_forward_methods():

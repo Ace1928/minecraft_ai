@@ -246,7 +246,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="explore_forward",
-            version=11,
+            version=12,
             name="Explore forward",
             description=(
                 "Traverse visible open terrain to discover a genuinely new area, keep the view "
@@ -260,6 +260,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=(
                 "escape_submersion",
                 "retreat_from_danger",
+                "escape_confinement",
                 "backtrack_from_obstacle",
                 "survey_surroundings",
                 "traverse_visible_obstacle",
@@ -281,7 +282,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="traverse_level_ground",
-            version=6,
+            version=7,
             name="Traverse level ground",
             description=(
                 "Use the fast learned motion expert to cross a short visible lane while "
@@ -295,6 +296,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             recovery_skills=(
                 "escape_submersion",
                 "retreat_from_danger",
+                "escape_confinement",
                 "backtrack_from_obstacle",
                 "survey_surroundings",
                 "traverse_visible_obstacle",
@@ -310,6 +312,30 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 allow_drop=False,
                 allow_inventory=False,
                 allow_hotbar=False,
+            ),
+        ),
+        SkillSpec(
+            skill_id="escape_confinement",
+            version=1,
+            name="Escape confinement",
+            description=(
+                "Use the fast learned body to clear an immediate terrain obstruction "
+                "and move out of confinement. Preserve operator action prohibitions."
+            ),
+            stage=SkillStage.EXPERIMENTAL,
+            outcome_kind="traversal",
+            parameters=("allow_attack", "allow_use", "allow_jump"),
+            preconditions=(SkillCondition(key="scene.playable", operator="truthy"),),
+            failure_conditions=(SkillCondition(key="danger.immediate", operator="truthy"),),
+            expected_effects=("locomotion_progress",),
+            recovery_skills=("backtrack_from_obstacle", "survey_surroundings"),
+            max_duration_ms=15_000,
+            action_level=ActionLevel.RAW,
+            policy_ref="escape_confinement",
+            policy_instruction="Clear the blocking terrain and move out of the confined space.",
+            action_permissions=SkillActionPermissions(
+                allow_attack=True, allow_use=False, allow_jump=True,
+                allow_drop=False, allow_inventory=False, allow_hotbar=False,
             ),
         ),
         SkillSpec(
@@ -339,7 +365,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="traverse_visible_obstacle",
-            version=7,
+            version=8,
             name="Traverse visible obstacle",
             description=(
                 "Use learned short-horizon movement and camera control to jump over or climb "
@@ -352,6 +378,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             expected_effects=("obstacle_crossed", "locomotion_progress"),
             recovery_skills=(
                 "escape_submersion", "retreat_from_danger",
+                "escape_confinement",
                 "backtrack_from_obstacle", "survey_surroundings",
             ),
             max_duration_ms=8_000,
