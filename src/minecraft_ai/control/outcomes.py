@@ -172,6 +172,7 @@ class _TraversalState:
     commanded_movement_ns: int = 0
     # Startup evidence survives the progress-window reset for this run only.
     lifetime_commanded_movement_ns: int = 0
+    last_interaction_ns: int = -1
     commanded_since_luma_ns: int = 0
     progress_samples: int = 0
     static_samples: int = 0
@@ -578,9 +579,11 @@ class TemporalOutcomeVerifier:
 
         if delta.camera_changed:
             state.last_camera_ns = now_ns
+        if delta.attack_active or delta.attack_released:
+            state.last_interaction_ns = now_ns
 
         if (
-            now_ns - self._started_ns
+            now_ns - max(self._started_ns, state.last_interaction_ns)
             >= self.config.traversal_controller_starvation_ms * 1_000_000
             and state.lifetime_commanded_movement_ns
             < self.config.traversal_min_commanded_ms * 1_000_000

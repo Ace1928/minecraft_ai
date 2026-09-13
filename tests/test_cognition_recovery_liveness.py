@@ -183,7 +183,7 @@ def test_confinement_recovery_admits_native_attack_without_inventory_or_use():
     selected = controller.decide(board, context)
     assert selected.skill_id == "escape_confinement"
     spec = controller.skills.get(selected.skill_id)
-    assert spec.action_level == ActionLevel.RAW
+    assert spec.action_level == ActionLevel.LATENT
     assert spec.action_permissions.allow_attack
     assert not spec.action_permissions.allow_use
     assert not spec.action_permissions.allow_inventory

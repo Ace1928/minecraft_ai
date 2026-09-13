@@ -1244,6 +1244,28 @@ def test_camera_rebaseline_does_not_erase_accumulated_no_progress() -> None:
     assert verdict.signal == OutcomeSignal.LOCOMOTION_STALLED
 
 
+def test_active_block_clearing_is_not_controller_starvation_or_fake_movement() -> None:
+    now = time.monotonic_ns()
+    board = _board(now)
+    _publish_hashes(board, now, frame_hash=_HASH_B, luma_grid=_LUMA_A)
+    verifier = TemporalOutcomeVerifier(
+        OutcomeVerifierConfig(traversal_controller_starvation_ms=600)
+    )
+    verifier.begin("clear-and-walk", OutcomeKind.TRAVERSAL, board, now_ns=now)
+    verifier.observe(board, action=MotorAction(sequence=1, buttons_down=("left",)), now_ns=now)
+    for elapsed in (700, 1400, 2100):
+        current = now + elapsed * 1_000_000
+        _publish_hashes(board, current, frame_hash=_HASH_B, luma_grid=_LUMA_B)
+        result = verifier.observe(board, now_ns=current)
+        assert result.signal != OutcomeSignal.CONTROLLER_STARVATION
+        assert result.signal != OutcomeSignal.LOCOMOTION_PROGRESS
+    released = now + 2_200_000_000
+    verifier.observe(board, action=MotorAction(sequence=2, buttons_up=("left",)), now_ns=released)
+    current = released + 700_000_000
+    _publish_hashes(board, current, frame_hash=_HASH_B, luma_grid=_LUMA_B)
+    assert verifier.observe(board, now_ns=current).signal == OutcomeSignal.CONTROLLER_STARVATION
+
+
 def test_controller_without_locomotion_reports_starvation_not_collision() -> None:
     now = time.monotonic_ns()
     board = _board(now)

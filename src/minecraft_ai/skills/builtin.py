@@ -316,10 +316,10 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="escape_confinement",
-            version=1,
+            version=2,
             name="Escape confinement",
             description=(
-                "Use the fast learned body to clear an immediate terrain obstruction "
+                "Use the goal-conditioned learned body to clear an immediate terrain obstruction "
                 "and move out of confinement. Preserve operator action prohibitions."
             ),
             stage=SkillStage.EXPERIMENTAL,
@@ -330,9 +330,12 @@ def build_bootstrap_skill_library() -> SkillLibrary:
             expected_effects=("locomotion_progress",),
             recovery_skills=("backtrack_from_obstacle", "survey_surroundings"),
             max_duration_ms=15_000,
-            action_level=ActionLevel.RAW,
+            action_level=ActionLevel.LATENT,
             policy_ref="escape_confinement",
-            policy_instruction="Clear the blocking terrain and move out of the confined space.",
+            policy_instruction=(
+                "Dig forward. Break the blocks in front of you and move out of the hole."
+            ),
+            policy_condition_scale=6.0,
             action_permissions=SkillActionPermissions(
                 allow_attack=True, allow_use=False, allow_jump=True,
                 allow_drop=False, allow_inventory=False, allow_hotbar=False,
