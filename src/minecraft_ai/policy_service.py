@@ -1037,7 +1037,7 @@ class TemporalPolicyClient:
         *,
         request_context: _PolicyRequestContext | None = None,
     ) -> MotorAction:
-        if self.config.provider == "external":
+        if self.config.provider == "external" and not self.config.external_goal_conditioned:
             _validate_external_raw_output(output)
         self._action_hold.observe(output.inference_ns)
         self._record_learned_action(output)
@@ -2300,8 +2300,6 @@ def _validate_external_ready(config: PolicyConfig, ready: dict[str, Any]) -> fro
 
 def _validate_policy_config(config: PolicyConfig) -> None:
     if config.provider == "external":
-        if config.external_goal_conditioned:
-            raise ValueError("external worker admission currently supports raw motion only")
         if (
             not config.external_module
             or not all(part.isidentifier() for part in config.external_module.split("."))

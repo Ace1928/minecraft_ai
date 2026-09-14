@@ -80,9 +80,38 @@ def test_external_import_root_precedes_editable_install_without_mutating_parent(
     assert _external_worker_environment(config)["PYTHONPATH"] == config.source_path
 
 
-def test_external_goal_conditioning_is_not_silently_admitted(tmp_path):
-    with pytest.raises(ValueError, match="raw motion only"):
-        _validate_policy_config(external_config(tmp_path, external_goal_conditioned=True))
+def test_external_goal_conditioning_is_admitted(tmp_path):
+    config = external_config(tmp_path, external_goal_conditioned=True)
+    _validate_policy_config(config)
+    assert config.external_goal_conditioned is True
+
+
+def test_external_goal_conditioned_output_accepts_semantic_observations(tmp_path):
+    client = TemporalPolicyClient(
+        config=external_config(tmp_path, external_goal_conditioned=True),
+        frame_provider=lambda: None,
+    )
+    client._consumed_frame_captured_ns = time.monotonic_ns()
+    output = LearnedPolicyOutput(
+        keys=("w",),
+        buttons=("left",),
+        mouse_dx=8,
+        mouse_dy=2,
+        camera_semantics="world",
+        inference_ns=1,
+        model_version=client.config.model_version,
+        target_exists_probability=0.85,
+        scene_mode="world",
+        scene_playable=True,
+        scene_confidence=0.92,
+    )
+    action = client._output_action(output, sequence=1)
+    assert action.keys_down == ("w",)
+    assert client.target_observation() is not None
+    assert client.target_observation().probability == 0.85
+    assert client.scene_observation() is not None
+    assert client.scene_observation().mode == "world"
+    assert client._accepted_predictions == 1
 
 
 @pytest.mark.parametrize(
