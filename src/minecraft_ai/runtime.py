@@ -2079,15 +2079,13 @@ class AgentRuntime:
             raise
         self._note_keepalive_prediction(execution, action, provenance)
         if (
-            execution is not None
-            and execution.action_origin in {ActionOrigin.SYNTHETIC, ActionOrigin.RESET}
-            and action.camera_semantics == "world"
+            action.camera_semantics == "world"
+            and callable(getattr(self.executor.policy, "restore_world_camera_state", None))
         ):
-            # Learned policy clients integrate their requested camera delta
-            # before the mining/GUI guards can suppress or replace it. Rebind
-            # every guarded or reset world-camera result to the physical
-            # supervisor after acceptance so later routes never inherit an
-            # unsent pitch.
+            # Wrappers may emit their own camera deltas, while learned clients
+            # may pre-integrate a proposal later changed by execution guards.
+            # Reconcile every accepted world action to the supervisor, regardless
+            # of its producer. Cursor-only actions never change world pitch.
             accepted_camera = accepted.get("world_camera")
             physical_pitch = (
                 accepted_camera.get("estimated_pitch_units")

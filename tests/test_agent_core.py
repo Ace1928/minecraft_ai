@@ -1036,7 +1036,7 @@ def test_runtime_preserves_policy_sequence_ahead_of_wire_counter(
     assert trajectory.accepted_calls == 1
 
 
-@pytest.mark.parametrize("origin", (ActionOrigin.SYNTHETIC, ActionOrigin.RESET))
+@pytest.mark.parametrize("origin", tuple(ActionOrigin))
 def test_non_policy_world_action_rebinds_policy_to_physical_camera(
     monkeypatch: pytest.MonkeyPatch,
     origin: ActionOrigin,
@@ -1070,7 +1070,7 @@ def test_non_policy_world_action_rebinds_policy_to_physical_camera(
     assert trajectory.accepted_calls == 1
 
 
-def test_non_policy_world_action_uses_atomic_accepted_camera_state(
+def test_policy_world_action_uses_atomic_accepted_camera_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime, _ = _motor_shutdown_runtime()
@@ -1099,12 +1099,28 @@ def test_non_policy_world_action_uses_atomic_accepted_camera_state(
     execution = ExecutionTick(
         run=SkillRun(run_id="atomic-camera", skill_id="mine_visible_block", started_ns=1),
         action=action,
-        action_origin=ActionOrigin.RESET,
+        action_origin=ActionOrigin.POLICY,
     )
 
     runtime._send_motor(action, execution=execution)
 
     assert restored == [73]
+
+
+def test_cursor_action_does_not_rebind_world_camera(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime, _ = _motor_shutdown_runtime()
+    restored = []
+    runtime.executor.policy = SimpleNamespace(
+        policy_id="learned:test",
+        restore_world_camera_state=lambda **value: restored.append(value),
+    )
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+    monkeypatch.setattr("minecraft_ai.runtime.send_command", lambda *_args, **_kw: {
+        "accepted_sequence": 7,
+        "world_camera": {"estimated_pitch_units": 73, "origin_calibrated": True},
+    })
+    runtime._send_motor(MotorAction(sequence=7, mouse_dy=10, camera_semantics="cursor"))
+    assert not restored
 
 
 def test_motor_send_treats_transient_stop_during_ipc_as_expected_shutdown(
