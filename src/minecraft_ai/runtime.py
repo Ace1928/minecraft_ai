@@ -3539,8 +3539,16 @@ class AgentRuntime:
         skill_origin = self._skill_decision_origin(record, decision)
         operator_acknowledged = False
         if self.state_db is not None and self._pending_operator_message_ids:
-            if (selected_message_id is not None and not decision.request_replan
-                    and not missing_target_referent):
+            if (
+                selected_message_id is not None
+                and not missing_target_referent
+                and (
+                    not decision.request_replan
+                    or decision.skill_id is not None
+                    or bool(decision.plan_steps)
+                    or bool(decision.say)
+                )
+            ):
                 response = decision.say or decision.reasoning_summary
                 operator_acknowledged = self._persist_operator_message_status(
                     selected_message_id,

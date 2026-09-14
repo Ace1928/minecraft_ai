@@ -309,3 +309,38 @@ def test_runtime_rechecks_selected_skill_and_active_directive(tmp_path, skill_id
 def test_operator_requested_skill_ids_traversal_specialization(text, expected):
     assert _operator_requested_skill_ids(text) == expected
 
+
+def test_compound_inventory_directive_skill_ids_and_constraints():
+    text = "open inventory, observe it, close it; no movement or attack"
+    skills = _operator_requested_skill_ids(text)
+    assert skills == ("open_inventory", "close_open_inventory")
+    constraints = _explicit_action_constraints(text)
+    assert constraints == {"allow_attack": False}
+
+
+def test_operator_message_acknowledged_even_if_request_replan(tmp_path):
+    context = _context(status=OperatorMessageStatus.DELIVERED)
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        database.save_operator_message(context.operator_messages[0])
+        runtime = _runtime_with_completed_decision(
+            CognitionDecision(
+                skill_id="open_inventory",
+                chosen_goal_id="operator:inventory-check",
+                instruction="open inventory",
+                request_replan=True,  # e.g. Gemma-4 naturally sets request_replan=True
+            ),
+            database=database,
+            pending_message_ids=("inventory-check",),
+        )
+        runtime.skills = build_bootstrap_skill_library()
+        runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+        runtime._planks_retry_requires_wood = lambda: False
+        runtime._cognition_context = lambda: context
+
+        runtime._consume_cognition()
+
+        assert runtime.executor.run is not None
+        assert runtime.executor.run.skill_id == "open_inventory"
+        saved = database.load_operator_messages(limit=1)[0]
+        assert saved.status == OperatorMessageStatus.ACKNOWLEDGED
+

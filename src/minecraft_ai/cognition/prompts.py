@@ -324,7 +324,7 @@ def _explicit_action_constraints(text: str) -> dict[str, bool]:
     constraints: dict[str, bool] = {}
     normalized = text.casefold().replace("’", "'")
     for match in re.finditer(
-        r"\b(?:do\s+not|don't|never|without)\b(?P<scope>[^.!?;]{0,160})",
+        r"\b(?:do\s+not|don't|never|without|no)\b(?P<scope>[^.!?;]{0,160})",
         normalized,
     ):
         scope = match.group("scope")
@@ -390,20 +390,28 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
         add("respawn_after_death")
     if re.search(r"\b(?:away|afk|jump back)\b", normalized):
         add("dismiss_away_overlay")
-    if re.search(r"\b(?:close|exit|leave) (?:the )?(?:inventory|menu)\b", normalized):
-        add("close_open_inventory")
-    elif re.search(
+    if re.search(
         r"\b(?:open|inspect|check|audit|view) (?:the )?inventory\b",
         normalized,
     ):
         add("open_inventory")
+    if (
+        re.search(r"\b(?:close|exit|leave) (?:the )?(?:inventory|menu)\b", normalized)
+        or (
+            "inventory" in normalized
+            and re.search(r"\b(?:close|exit|leave)\s+it\b", normalized)
+        )
+    ):
+        add("close_open_inventory")
     if re.search(r"\b(?:click|activate|press)\b.*\b(?:button|control|menu)\b", normalized):
         add("activate_visible_gui_control")
     if re.search(r"\b(?:swim|surface|escape)\b.*\b(?:water|underwater|submersion)\b", normalized):
         add("escape_submersion")
     if re.search(r"\b(?:back away|escape|flee|retreat)\b", normalized):
         add("retreat_from_danger")
-    if re.search(r"\b(?:attack|fight|kill)\b", normalized):
+    if re.search(r"\b(?:attack|fight|kill)\b", normalized) and not re.search(
+        r"\b(?:no|without)\s+(?:\w+\s+)*(?:attack|fight|kill)\b", normalized
+    ):
         add("attack_visible_hostile")
     if re.search(
         r"\b(?:gather|collect|chop|harvest|mine)\b.*\b(?:log|logs|tree|wood)\b", normalized
