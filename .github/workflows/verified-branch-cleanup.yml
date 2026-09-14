@@ -1,0 +1,164 @@
+name: Remove verified merged branches
+on:
+  push:
+    branches: [integration/branch-consolidation-20260914]
+    paths: [.github/workflows/verified-branch-cleanup.yml]
+permissions:
+  contents: write
+  pull-requests: read
+concurrency:
+  group: verified-branch-cleanup
+  cancel-in-progress: false
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify ancestry and atomically remove pinned merged refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import datetime, json, os, pathlib, subprocess
+          repo = 'Ace1928/minecraft_ai'
+          expected_id = 1354294188
+          milestone = '633979d6b15a9e165fc0aa0863123bf8b494d3ad'
+          approved = {
+              'agent-upgrade/verified-mining-20260912': 'b1e2cb2eac093cdf02abb96df6a30d36da7c0261',
+              'agent-upgrade/verified-traversal-20260912': 'ab39636f8b84ce7adb9e5666e9ef4b84e9ddd107',
+              'audit/2026-09-06-motor-numeric-bounds': '34e410b3d357372771a501fadf49b131a30f0325',
+              'integration/motor-verified-20260914': '34e410b3d357372771a501fadf49b131a30f0325',
+          }
+          zero = '0' * 40
+          report = {'repository': repo, 'status': 'checking', 'deleted': [], 'eligible': [], 'retained': []}
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'branch-cleanup-report.json'
+          def save():
+              output.write_text(json.dumps(report, indent=2) + '\n')
+          def api(path, payload=None):
+              cmd = ['gh', 'api', '--hostname', 'github.com', path]
+              if payload is not None:
+                  cmd += ['--method', 'POST', '--input', '-']
+              p = subprocess.run(cmd, input=None if payload is None else json.dumps(payload),
+                                 capture_output=True, text=True, timeout=90)
+              if p.returncode:
+                  raise RuntimeError(f'GitHub request failed: {path}: {p.stderr}')
+              value = json.loads(p.stdout)
+              if isinstance(value, dict) and value.get('errors'):
+                  raise RuntimeError(f"GraphQL rejected transaction: {value['errors']}")
+              return value
+          def items(path):
+              result = []
+              sep = '&' if '?' in path else '?'
+              for page in range(1, 101):
+                  batch = api(f'{path}{sep}per_page=100&page={page}')
+                  if not isinstance(batch, list):
+                      raise RuntimeError('Unexpected collection')
+                  result.extend(batch)
+                  if len(batch) < 100:
+                      return result
+              raise RuntimeError('Incomplete pagination')
+          def branches():
+              return {b['name']: b for b in items(f'repos/{repo}/branches')}
+          def busy_refs():
+              refs = set()
+              for pr in items(f'repos/{repo}/pulls?state=open'):
+                  for side in ('head', 'base'):
+                      p = pr[side]
+                      if (p.get('repo') or {}).get('full_name') == repo:
+                          refs.add(p['ref'])
+              return refs
+          def compare(main, sha):
+              c = api(f'repos/{repo}/compare/{main}...{sha}')
+              return {'status': c['status'], 'ahead': c['ahead_by'], 'behind': c['behind_by'],
+                      'merge_base': c['merge_base_commit']['sha'],
+                      'ancestor': c['status'] in ('behind', 'identical') and c['ahead_by'] == 0
+                                  and c['merge_base_commit']['sha'] == sha}
+          try:
+              if os.environ['GITHUB_REPOSITORY'] != repo:
+                  raise RuntimeError('Wrong execution repository')
+              meta = api(f'repos/{repo}')
+              if (meta['full_name'] != repo or meta['id'] != expected_id
+                      or meta['default_branch'] != 'main' or meta['archived']):
+                  raise RuntimeError('Repository identity or state changed')
+              before = branches()
+              main = before['main']['commit']['sha']
+              report['main_before'] = main
+              report['integration_milestone'] = {'sha': milestone, **compare(main, milestone)}
+              if not report['integration_milestone']['ancestor']:
+                  raise RuntimeError('Main lost the verified integration milestone')
+              busy = busy_refs()
+              for name, item in sorted(before.items()):
+                  if name == 'main':
+                      continue
+                  sha = item['commit']['sha']
+                  row = {'branch': name, 'sha': sha, **compare(main, sha)}
+                  if name not in approved:
+                      row['reason'] = 'Not approved for deletion; retain transport or alternate history'
+                  elif sha != approved[name]:
+                      row['reason'] = 'Tip changed since audit; preserve newer work'
+                  elif item['protected'] or name in busy:
+                      row['reason'] = 'Protected or referenced by an open pull request'
+                  elif not row['ancestor']:
+                      row['reason'] = 'Not an ancestor of current main'
+                  else:
+                      report['eligible'].append(row)
+                      continue
+                  report['retained'].append(row)
+              report['already_absent'] = sorted(set(approved) - set(before))
+              report['status'] = 'qualified'
+              save()
+              print('QUALIFIED=' + json.dumps(report, sort_keys=True), flush=True)
+              if report['eligible']:
+                  fresh, busy = branches(), busy_refs()
+                  if fresh['main']['commit']['sha'] != main:
+                      raise RuntimeError('Main changed during audit; stop before deletion')
+                  for row in report['eligible']:
+                      name = row['branch']
+                      item = fresh.get(name)
+                      if (not item or item['commit']['sha'] != row['sha']
+                              or item['protected'] or name in busy):
+                          raise RuntimeError(f'Eligibility changed: {name}')
+                  # GitHub updateRefs evaluates ALL beforeOid values atomically.
+                  # The main entry is deliberately a no-op, never a content update.
+                  updates = [{'name': 'refs/heads/main', 'beforeOid': main, 'afterOid': main, 'force': False}]
+                  updates += [{'name': 'refs/heads/' + r['branch'], 'beforeOid': r['sha'],
+                               'afterOid': zero, 'force': False} for r in report['eligible']]
+                  report['atomic_ref_updates'] = updates
+                  report['status'] = 'submitting-atomic-transaction'
+                  save()
+                  response = api('graphql', {
+                      'query': 'mutation($input:UpdateRefsInput!){updateRefs(input:$input){clientMutationId}}',
+                      'variables': {'input': {'repositoryId': meta['node_id'], 'refUpdates': updates,
+                                             'clientMutationId': 'verified-cleanup-20260914'}}})
+                  if not isinstance((response.get('data') or {}).get('updateRefs'), dict):
+                      raise RuntimeError('No mutation acknowledgement; re-read before retrying')
+                  report['deleted'] = [{'branch': r['branch'], 'sha': r['sha']} for r in report['eligible']]
+                  report['status'] = 'deleted-awaiting-verification'
+                  save()
+              after = branches()
+              report['main_after'] = after['main']['commit']['sha']
+              report['remaining_branches'] = {n: b['commit']['sha'] for n, b in sorted(after.items())}
+              removed = {r['branch'] for r in report['deleted']}
+              if report['main_after'] != main or removed.intersection(after):
+                  raise RuntimeError('Post-delete state changed concurrently; inspect receipt')
+              for name, item in before.items():
+                  if name not in removed and (name not in after or after[name]['commit']['sha'] != item['commit']['sha']):
+                      raise RuntimeError(f'Retained branch changed concurrently: {name}')
+              report['status'] = 'verified' if removed else 'nothing-to-delete'
+          except Exception as exc:
+              report['status'] = 'stopped'
+              report['error'] = str(exc)
+              raise
+          finally:
+              report['finished_utc'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+              save()
+              print('CLEANUP_RESULT=' + json.dumps(report, sort_keys=True), flush=True)
+          PY
+      - name: Retain deletion receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-branch-cleanup
+          path: ${{ runner.temp }}/branch-cleanup-report.json
+          retention-days: 30
+          if-no-files-found: error
