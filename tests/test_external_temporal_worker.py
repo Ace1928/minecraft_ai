@@ -57,6 +57,15 @@ def test_external_command_keeps_parent_transport_and_identity(tmp_path):
     assert "--source-path" not in command and "--weights-path" not in command
 
 
+def test_external_command_appends_stochastic_and_deterministic_flags(tmp_path):
+    config = external_config(tmp_path, stochastic=True, deterministic_condition=True)
+    _validate_policy_config(config)
+    command = _external_worker_command(config, "owned-memory")
+    assert "--stochastic" in command
+    assert "--deterministic-condition" in command
+
+
+
 def test_terminal_drain_rejects_unsupported_platform_before_admission(tmp_path, monkeypatch):
     client = TemporalPolicyClient(external_config(tmp_path), frame_provider=lambda: None)
     monkeypatch.setattr(policy_service_module.sys, "platform", "win32")

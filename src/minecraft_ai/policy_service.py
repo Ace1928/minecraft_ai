@@ -2250,12 +2250,18 @@ def _external_worker_command(config: PolicyConfig, memory_name: str) -> list[str
             or (option.startswith("--") and any(name.startswith(option[2:]) for name in reserved))
         ):
             raise ValueError("external worker arguments cannot override parent-owned options")
+    flags: list[str] = []
+    if config.stochastic:
+        flags.append("--stochastic")
+    if config.deterministic_condition:
+        flags.append("--deterministic-condition")
     return [
         config.python_path,
         "-m",
         config.external_module,
         *config.external_args,
         *(item for name, value in controlled.items() for item in ("--" + name, value)),
+        *flags,
     ]
 
 
