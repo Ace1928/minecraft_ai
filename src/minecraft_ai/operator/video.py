@@ -222,7 +222,7 @@ def ffmpeg_command(
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
         "-filter_threads", "1",
-        "-thread_queue_size", "8", "-f", "x11grab", "-framerate", "24",
+        "-thread_queue_size", "8",         "-f", "x11grab", "-framerate", "30",
         "-video_size", f"{game.width}x{game.height}",
         "-window_id", str(game.window_id), "-draw_mouse", "0", "-i", game.display,
         "-thread_queue_size", "64", "-f", "pulse", "-server", PULSE_SERVER,
@@ -232,7 +232,7 @@ def ffmpeg_command(
         "-vf", "scale=1280:720:flags=fast_bilinear",
         "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
         "-threads", "2", "-pix_fmt", "yuv420p", "-b:v", "2000k",
-        "-maxrate", "2400k", "-bufsize", "4800k", "-g", "48", "-keyint_min", "48",
+        "-maxrate", "2400k", "-bufsize", "4800k", "-g", "60", "-keyint_min", "60",
         "-sc_threshold", "0", "-c:a", "aac", "-b:a", "96k", "-ar", "48000", "-ac", "2",
         "-t", str(duration_s), "-f", "hls", "-hls_time", "2", "-hls_list_size", "6",
         "-hls_delete_threshold", "2", "-hls_start_number_source", "epoch_us",
