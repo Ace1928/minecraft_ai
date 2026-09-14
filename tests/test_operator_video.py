@@ -158,7 +158,9 @@ def test_command_is_window_scoped_and_uses_bounded_cpu_hls(game, tmp_path):
     assert command[command.index("-thread_queue_size") + 1] == "8"
     assert command[command.index("-c:v") + 1] == "libx264"
     assert command[command.index("-c:a") + 1] == "aac"
-    assert command[command.index("-framerate") + 1] == "24"
+    assert command[command.index("-framerate") + 1] == "30"
+    assert command[command.index("-g") + 1] == "60"
+    assert command[command.index("-keyint_min") + 1] == "60"
     assert command[command.index("-vf") + 1].startswith("scale=1280:720:")
     assert command[command.index("-hls_list_size") + 1] == "6"
     assert "temp_file" in command[command.index("-hls_flags") + 1]

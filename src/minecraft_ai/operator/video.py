@@ -222,7 +222,7 @@ def ffmpeg_command(
     return [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
         "-filter_threads", "1",
-        "-thread_queue_size", "8",         "-f", "x11grab", "-framerate", "30",
+        "-thread_queue_size", "8", "-f", "x11grab", "-framerate", "30",
         "-video_size", f"{game.width}x{game.height}",
         "-window_id", str(game.window_id), "-draw_mouse", "0", "-i", game.display,
         "-thread_queue_size", "64", "-f", "pulse", "-server", PULSE_SERVER,
