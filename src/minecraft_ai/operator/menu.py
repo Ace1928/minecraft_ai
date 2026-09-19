@@ -4,6 +4,8 @@ import csv
 import io
 import ipaddress
 import json
+import math
+import os
 import re
 import shutil
 import subprocess
@@ -35,6 +37,7 @@ class MenuNavigationError(RuntimeError):
 class MenuStage(StrEnum):
     AWAY = "away"
     STARTUP_POPUP = "startup-popup"
+    UPDATE_NOTICE = "update-notice"
     TITLE = "title"
     PLAY_TABS = "play-tabs"
     PLAY_SERVERS = "play-servers"
@@ -161,7 +164,29 @@ class TesseractMenuTextReader:
             )
             if _away_overlay_visible(frame, away_lines):
                 return away_lines
-        lines = self._read_image(image)
+        lines: tuple[OcrLine, ...] = ()
+        if _find_dense_green_control(
+            frame, region=(0.05, 0.72, 0.97, 0.90),
+            minimum_width_fraction=0.65, minimum_height_fraction=0.035,
+            description="possible update continuation control",
+        ) is not None:
+            left, top = int(frame.width * 0.60), int(frame.height * 0.20)
+            panel = image.crop((left, top, int(frame.width * 0.94), int(frame.height * 0.56)))
+            lines = tuple(
+                replace(line, left=line.left + left, top=line.top + top)
+                for line in self._read_image(panel, input_scale=1)
+            )
+        if not _update_notice_visible(frame, lines):
+            lines = self._read_image(image)
+        if _update_notice_visible(frame, lines):
+            # Read the caption without the wide button border that sparse OCR
+            # mistakes for a table. Coordinates still come from observed text.
+            left, top = int(frame.width * 0.30), int(frame.height * 0.785)
+            caption = image.crop((left, top, int(frame.width * 0.70), int(frame.height * 0.835)))
+            return lines + tuple(
+                replace(line, left=line.left + left, top=line.top + top)
+                for line in self._read_image(caption, input_scale=1)
+            )
         # Sparse full-frame OCR can miss every dark label inside BedrockConnect
         # while recognizing only its ping icon. At native scale its title is
         # readable; then isolated caption bands avoid the button borders that
@@ -223,6 +248,7 @@ class TesseractMenuTextReader:
                 input=encoded.getvalue(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env={**os.environ, "OMP_THREAD_LIMIT": "1"},
                 timeout=self.timeout_s,
                 check=False,
             )
@@ -266,6 +292,7 @@ class NestedXTestMenuInput:
         self.target_window_id = target_window_id
         self._input_permitted = input_permitted
         try:
+            self._game_process_identity = self._game_identity()
             self._window = _largest_minecraft_drawable(self._display, target_window_id)
             self.input_window_id = int(self._window.id)
             geometry = self._window.get_geometry()
@@ -275,7 +302,36 @@ class NestedXTestMenuInput:
             self.close()
             raise
 
+    def _game_identity(self) -> tuple[int, int]:
+        from minecraft_ai.agent_lifecycle import _linux_process_identity
+
+        window = self._display.create_resource_object("window", self.target_window_id)
+        owner = window.get_full_property(
+            self._display.intern_atom("_NET_WM_PID"), self._x.AnyPropertyType,
+        )
+        if owner is None or len(owner.value) != 1:
+            raise IsolationError("Minecraft menu window has no unique process owner")
+        pid = int(owner.value[0])
+        identity = _linux_process_identity(pid)
+        if identity is None:
+            raise IsolationError("Minecraft menu process identity is unavailable")
+        return pid, identity[0]
+
     def click(self, frame: CapturedFrame, x: int, y: int) -> None:
+        if (not self._input_permitted()
+                or self._game_identity() != self._game_process_identity):
+            raise MenuNavigationError("menu input interlock is not clear; no click was sent")
+        now_ns = time.monotonic_ns()
+        if (
+            not 0 <= now_ns - frame.captured_ns <= 15_000_000_000
+            or frame.captured_ns <= getattr(self, "_last_clicked_capture_ns", 0)
+        ):
+            raise MenuNavigationError("stale or replayed menu frame; no click was sent")
+        last_click_ns = getattr(self, "_last_click_ns", None)
+        if last_click_ns is not None and now_ns - last_click_ns < 250_000_000:
+            raise MenuNavigationError("menu click rate bound exceeded")
+        if type(x) is not int or type(y) is not int:
+            raise MenuNavigationError("menu coordinates must be integers")
         geometry = self._window.get_geometry()
         width = int(geometry.width)
         height = int(geometry.height)
@@ -308,15 +364,25 @@ class NestedXTestMenuInput:
             # title UI is animating. Give focus and the pointer a moment to
             # settle, then hold the button for a short human-scale interval.
             time.sleep(0.03)
-            if not self._input_permitted():
+            if (
+                not self._input_permitted()
+                or self._game_identity() != self._game_process_identity
+                or not 0 <= time.monotonic_ns() - frame.captured_ns <= 15_000_000_000
+                or self._window.get_geometry().width != width
+                or self._window.get_geometry().height != height
+            ):
                 raise MenuNavigationError(
                     "menu input interlock is not clear; no click was sent"
                 )
-            self._xtest.fake_input(self._display, self._x.ButtonPress, 1)
-            self._display.sync()
-            time.sleep(0.075)
-            self._xtest.fake_input(self._display, self._x.ButtonRelease, 1)
-            self._display.sync()
+            self._last_clicked_capture_ns = frame.captured_ns
+            self._last_click_ns = time.monotonic_ns()
+            try:
+                self._xtest.fake_input(self._display, self._x.ButtonPress, 1)
+                self._display.sync()
+                time.sleep(0.075)
+            finally:
+                self._xtest.fake_input(self._display, self._x.ButtonRelease, 1)
+                self._display.sync()
         except MenuNavigationError:
             raise
         except Exception as exc:
@@ -364,10 +430,13 @@ class BedrockMenuNavigator:
         sleep: Callable[[float], None] = time.sleep,
         hud_detector: Callable[[CapturedFrame], bool] = bedrock_in_world_hud_present,
         input_permitted: Callable[[], bool] = lambda: True,
+        observation_sink: Callable[[MenuObservation], None] | None = None,
     ) -> None:
         if not lan_name.strip():
             raise ValueError("LAN world name is required")
-        if timeout_s <= 0 or response_timeout_s <= 0 or poll_interval_s < 0:
+        if (not all(math.isfinite(value) for value in (
+                timeout_s, response_timeout_s, poll_interval_s,
+            )) or timeout_s <= 0 or response_timeout_s <= 0 or poll_interval_s < 0):
             raise ValueError("menu navigation timing must be positive")
         if max_retries < 1 or max_retries > 5:
             raise ValueError("menu navigation retries must be in [1, 5]")
@@ -384,6 +453,7 @@ class BedrockMenuNavigator:
         self.sleep = sleep
         self.hud_detector = hud_detector
         self.input_permitted = input_permitted
+        self.observation_sink = observation_sink
 
     def run(self) -> MenuNavigationResult:
         started = self.clock()
@@ -398,6 +468,8 @@ class BedrockMenuNavigator:
             visited.append(observation.stage)
 
         while observation.stage != MenuStage.IN_WORLD:
+            if actions >= 12 or self.clock() >= deadline:
+                raise MenuNavigationError("menu navigation action/time budget exhausted")
             if observation.stage == MenuStage.PLAY_TABS:
                 # LAN discovery can finish after the Worlds tab first renders.
                 # Wait for the configured entry, never create another world.
@@ -434,6 +506,11 @@ class BedrockMenuNavigator:
         )
 
     def _transition_for(self, observation: MenuObservation) -> _Transition:
+        if observation.stage == MenuStage.UPDATE_NOTICE:
+            return _Transition(
+                target_text=("play now",), destination=MenuStage.TITLE,
+                region=(0.05, 0.72, 0.97, 0.90),
+            )
         if observation.stage == MenuStage.STARTUP_POPUP:
             return _Transition(
                 target_text=(
@@ -495,18 +572,35 @@ class BedrockMenuNavigator:
         deadline: float,
     ) -> tuple[MenuObservation, int]:
         source = observation.stage
-        for attempt in range(1, self.max_retries + 1):
+        attempts = 1 if source == MenuStage.UPDATE_NOTICE else self.max_retries
+        for attempt in range(1, attempts + 1):
             if self.clock() >= deadline:
                 raise MenuNavigationError("Bedrock menu navigation timed out")
             self._require_input_permitted()
+            if source == MenuStage.UPDATE_NOTICE:
+                observation = self._refresh_update_notice(observation)
+                if self.clock() >= deadline:
+                    raise MenuNavigationError("Bedrock menu navigation timed out")
             line = _transition_click_target(observation, transition)
             x, y = line.center
+            clicked_frame = observation.frame
             self.click_backend.click(observation.frame, x, y)
-            response_deadline = min(deadline, self.clock() + self.response_timeout_s)
+            response_timeout = (
+                max(20.0, self.response_timeout_s)
+                if source == MenuStage.UPDATE_NOTICE else self.response_timeout_s
+            )
+            response_deadline = min(deadline, self.clock() + response_timeout)
             while self.clock() < deadline:
                 self.sleep(self.poll_interval_s)
                 self._require_input_permitted()
                 current = self._observe()
+                if (
+                    current.frame.frame_id <= clicked_frame.frame_id
+                    or current.frame.captured_ns <= clicked_frame.captured_ns
+                ):
+                    if self.clock() >= response_deadline:
+                        raise MenuNavigationError("no fresh post-click menu frame; no retry sent")
+                    continue
                 if (
                     source == MenuStage.BEDROCK_CONNECT
                     and transition.destination == MenuStage.IN_WORLD
@@ -520,7 +614,7 @@ class BedrockMenuNavigator:
                     # It never permits another click or changes other screens.
                     response_deadline = deadline
                 if current.stage == transition.destination or (
-                    source == MenuStage.DISCONNECTED
+                    source in {MenuStage.DISCONNECTED, MenuStage.UPDATE_NOTICE}
                     and current.stage in {
                         MenuStage.PLAY, MenuStage.PLAY_TABS, MenuStage.PLAY_SERVERS,
                     }
@@ -532,6 +626,9 @@ class BedrockMenuNavigator:
                     return current, attempt
                 if current.stage == MenuStage.LOADING:
                     current = self._wait_loading(deadline)
+                    if (current.frame.frame_id <= clicked_frame.frame_id
+                            or current.frame.captured_ns <= clicked_frame.captured_ns):
+                        continue
                     if current.stage == transition.destination:
                         return current, attempt
                     if (
@@ -561,7 +658,7 @@ class BedrockMenuNavigator:
                 self._raise_unexpected(source, transition.destination, current)
         raise MenuNavigationError(
             f"{source.value} did not transition to {transition.destination.value} "
-            f"after {self.max_retries} bounded attempts"
+            f"after {attempts} bounded attempts"
         )
 
     def _require_input_permitted(self) -> None:
@@ -630,8 +727,10 @@ class BedrockMenuNavigator:
         )
 
     def _observe(self) -> MenuObservation:
+        self._require_input_permitted()
         frame = self.capture.capture()
         lines = self.text_reader.read(frame)
+        self._require_input_permitted()
         stage = classify_menu_stage(
             frame,
             lines,
@@ -639,7 +738,32 @@ class BedrockMenuNavigator:
             server_name=self.server.name,
             hud_detector=self.hud_detector,
         )
-        return MenuObservation(frame=frame, lines=lines, stage=stage)
+        observation = MenuObservation(frame=frame, lines=lines, stage=stage)
+        if self.observation_sink is not None:
+            self.observation_sink(observation)
+        return observation
+
+    def _refresh_update_notice(self, observation: MenuObservation) -> MenuObservation:
+        """Rebind slow OCR to unchanged notice text/control pixels, never VLM coordinates."""
+        _update_play_control(observation)
+        fresh = self.capture.capture()
+        old = observation.frame
+        if ((fresh.width, fresh.height) != (old.width, old.height)
+                or fresh.frame_id <= old.frame_id or fresh.captured_ns <= old.captured_ns):
+            raise MenuNavigationError("update notice capture identity/geometry changed")
+        images = [Image.frombytes("RGB", (frame.width, frame.height), frame.bgra, "raw", "BGRX")
+                  for frame in (old, fresh)]
+        for region in ((0.60, 0.20, 0.94, 0.56), (0.05, 0.77, 0.97, 0.86)):
+            x0, y0, x1, y1 = region
+            bounds = (int(x0 * old.width), int(y0 * old.height),
+                      int(x1 * old.width), int(y1 * old.height))
+            if images[0].crop(bounds).tobytes() != images[1].crop(bounds).tobytes():
+                raise MenuNavigationError("update notice changed after recognition; no click sent")
+        self._require_input_permitted()
+        rebound = replace(observation, frame=fresh)
+        if self.observation_sink is not None:
+            self.observation_sink(rebound)
+        return rebound
 
 
 def classify_menu_stage(
@@ -672,6 +796,9 @@ def classify_menu_stage(
 
     if _away_overlay_visible(frame, lines):
         return MenuStage.AWAY
+
+    if _update_notice_visible(frame, lines):
+        return MenuStage.UPDATE_NOTICE
 
     # Tesseract commonly renders Bedrock's block-font "YOU" as "TOU". Keep
     # the heading constrained to the upper screen so a chat message containing
@@ -807,6 +934,47 @@ def _away_overlay_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> b
     ))
 
 
+def _update_notice_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
+    """Require three independent, positioned anchors from the retained update notice."""
+    if frame.width <= 0 or frame.height <= 0:
+        return False
+    selected = tuple(line for line in lines if math.isfinite(line.confidence)
+                     and line.confidence >= 70
+                     and frame.width * 0.60 <= line.left < line.left + line.width
+                     <= frame.width * 0.94
+                     and line.height > 0)
+    return all(sum(
+        y0 <= line.center[1] / frame.height <= y1 and bool(pattern.fullmatch(
+            _normalized_text(line.text),
+        )) for line in selected
+    ) == 1 for pattern, y0, y1 in (
+        (re.compile(r"wilderness (?:bound|eound|edund)"), 0.20, 0.29),
+        (re.compile(r"(?:[mh]inecraft )?\d{1,3}(?: \d{1,3}){1,3} update"), 0.29, 0.36),
+        (re.compile(r"wilderness bound sets off on"), 0.36, 0.42),
+    ))
+
+
+def _update_play_control(observation: MenuObservation) -> OcrLine:
+    if not _update_notice_visible(observation.frame, observation.lines):
+        raise MenuNavigationError("update notice anchors are not verified")
+    control = _find_dense_green_control(
+        observation.frame, region=(0.05, 0.72, 0.97, 0.90),
+        minimum_width_fraction=0.65, minimum_height_fraction=0.035,
+        description="update continuation control",
+    )
+    captions = tuple(line for line in observation.lines
+                     if _normalized_text(line.text) == "play now"
+                     and math.isfinite(line.confidence) and line.confidence >= 70)
+    if control is not None and control.height <= observation.frame.height * 0.12:
+        if len(captions) == 1:
+            line = captions[0]
+            if (control.left <= line.left < line.left + line.width <= control.left + control.width
+                    and control.top <= line.top < line.top + line.height
+                    <= control.top + control.height):
+                return line
+    raise MenuNavigationError("update Play now caption/control is not uniquely verified")
+
+
 def _disconnected_dialog_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
     """Recognize the retained dialog; only its Back to menu action is allowed."""
     return all(
@@ -908,7 +1076,7 @@ def _parse_tesseract_tsv(
     if coordinate_scale < 1:
         raise ValueError("OCR coordinate scale must be positive")
     grouped: dict[tuple[int, int, int, int], list[tuple[int, str, int, int, int, int, float]]] = {}
-    reader = csv.DictReader(io.StringIO(payload), delimiter="\t")
+    reader = csv.DictReader(io.StringIO(payload), delimiter="\t", quoting=csv.QUOTE_NONE)
     try:
         for row in reader:
             if row.get("level") != "5":
@@ -995,6 +1163,8 @@ def _transition_click_target(
     observation: MenuObservation,
     transition: _Transition,
 ) -> OcrLine:
+    if observation.stage == MenuStage.UPDATE_NOTICE:
+        return _update_play_control(observation)
     try:
         return _find_click_target(
             observation,

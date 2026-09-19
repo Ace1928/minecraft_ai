@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import platform
@@ -31,6 +32,7 @@ from .camera_calibration import (
 from .bedrock_menu import (
     DEFAULT_BEDROCK_CONNECT_SERVERS,
     BedrockMenuNavigator,
+    MenuObservation,
     MenuNavigationError,
     NestedXTestMenuInput,
     TesseractMenuTextReader,
@@ -1491,6 +1493,10 @@ def bedrock_navigate(
     ),
     timeout_s: float = typer.Option(120.0, "--timeout-s", min=10.0, max=600.0),
     retries: int = typer.Option(2, "--retries", min=1, max=5),
+    evidence_dir: Path | None = typer.Option(
+        None, "--evidence-dir",
+        help="New private directory for scoped frames and observation receipts.",
+    ),
 ) -> None:
     """Navigate a managed nested Bedrock client into its configured local server."""
     if emergency_stop_latched():
@@ -1504,19 +1510,65 @@ def bedrock_navigate(
     if not bedrock_session_alive(session):
         raise typer.BadParameter("The managed Bedrock session is not alive.")
     _require_autonomous_isolated_session(session)
+    if agent_alive() or current_control_owner_state() not in {"absent", "dead", "mismatch"}:
+        raise typer.BadParameter("Stop the gameplay controller before bounded menu navigation.")
     server = load_configured_local_server(custom_servers, requested_name=server_name)
     window_id = wait_for_minecraft_window(session, timeout_s=30.0)
 
+    def input_permitted() -> bool:
+        try:
+            if (emergency_stop_latched() or operator_pause_latched() or agent_alive()
+                    or current_control_owner_state() not in {"absent", "dead", "mismatch"}):
+                return False
+            current = BedrockSession.load()
+            if current != session or not bedrock_session_alive(current):
+                return False
+            require_autonomous_input_isolation(current)
+            return current.find_window() == window_id
+        except (IsolationError, OSError, ValueError, TypeError, KeyError):
+            return False
+
+    evidence_count = 0
+
+    def retain_observation(observation: MenuObservation) -> None:
+        from PIL import Image
+
+        nonlocal evidence_count
+        assert evidence_dir is not None
+        if evidence_count >= 64:
+            raise MenuNavigationError("menu evidence budget exhausted")
+        evidence_count += 1
+        frame = observation.frame
+        stem = f"{evidence_count:03d}-{observation.stage.value}"
+        image = Image.frombytes("RGB", (frame.width, frame.height), frame.bgra, "raw", "BGRX")
+        with (evidence_dir / f"{stem}.png").open("xb") as output:
+            image.save(output, format="PNG")
+        record = {
+            "stage": observation.stage.value, "frame_id": frame.frame_id,
+            "captured_ns": frame.captured_ns, "width": frame.width, "height": frame.height,
+            "bgra_sha256": hashlib.sha256(frame.bgra).hexdigest(),
+            "display": session.display, "window_id": window_id,
+            "session_created_ns": session.created_ns,
+            "xserver_pid": session.xserver_pid, "launcher_pid": session.launcher_pid,
+            "recognized_text": observation.summary(limit=2000),
+        }
+        with (evidence_dir / f"{stem}.json").open("x") as output:
+            json.dump(record, output, indent=2)
+
     input_backend: NestedXTestMenuInput | None = None
     capture: IsolatedX11Capture | None = None
+    ownership = ExitStack()
     try:
+        ownership.enter_context(bedrock_lifecycle_lock())
+        if not input_permitted():
+            raise MenuNavigationError("menu session/control binding changed before navigation")
+        if evidence_dir is not None:
+            evidence_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
         input_backend = NestedXTestMenuInput(
             session.display,
             window_id,
             host_display=session.host_display,
-            input_permitted=lambda: (
-                not emergency_stop_latched() and not operator_pause_latched()
-            ),
+            input_permitted=input_permitted,
         )
         capture = IsolatedX11Capture(
             session.display,
@@ -1531,10 +1583,10 @@ def bedrock_navigate(
             lan_name=lan_name,
             server=server,
             timeout_s=timeout_s,
+            response_timeout_s=30.0,
             max_retries=retries,
-            input_permitted=lambda: (
-                not emergency_stop_latched() and not operator_pause_latched()
-            ),
+            input_permitted=input_permitted,
+            observation_sink=None if evidence_dir is None else retain_observation,
         )
         result = navigator.run()
     except (IsolationError, MenuNavigationError, OSError, ValueError) as exc:
@@ -1544,6 +1596,7 @@ def bedrock_navigate(
             capture.close()
         if input_backend is not None:
             input_backend.close()
+        ownership.close()
     print(json.dumps(result.payload(), indent=2, sort_keys=True))
 
 

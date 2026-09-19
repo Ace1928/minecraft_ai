@@ -17,6 +17,64 @@ from minecraft_ai.platforms.capture_source import BedrockCaptureSource
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
+@pytest.mark.parametrize("change", (
+    "session", "window", "isolation", "agent", "pause", "emergency",
+))
+def test_menu_navigation_rechecks_bound_session_and_control_before_input(monkeypatch, change):
+    session = SimpleNamespace(display=":2", host_display=":0")
+    current = [session]
+    window = [42]
+    blocked = {"isolation": False, "agent": False, "pause": False, "emergency": False}
+    session.find_window = lambda: window[0]
+    monkeypatch.setattr(cli, "BedrockSession", SimpleNamespace(load=lambda: current[0]))
+    monkeypatch.setattr(cli, "bedrock_session_alive", lambda value: True)
+    monkeypatch.setattr(cli, "_require_autonomous_isolated_session", lambda value: None)
+    monkeypatch.setattr(cli, "wait_for_minecraft_window", lambda *args, **kwargs: 42)
+    monkeypatch.setattr(cli, "load_configured_local_server", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "agent_alive", lambda: blocked["agent"])
+    monkeypatch.setattr(cli, "operator_pause_latched", lambda: blocked["pause"])
+    monkeypatch.setattr(cli, "emergency_stop_latched", lambda: blocked["emergency"])
+    monkeypatch.setattr(cli, "current_control_owner_state", lambda: "absent")
+    monkeypatch.setattr(cli, "bedrock_lifecycle_lock", nullcontext)
+
+    def isolation(value):
+        if blocked["isolation"]:
+            raise cli.IsolationError("changed isolated display ownership")
+
+    monkeypatch.setattr(cli, "require_autonomous_input_isolation", isolation)
+    closed = []
+    monkeypatch.setattr(cli, "NestedXTestMenuInput", lambda *args, **kwargs: SimpleNamespace(
+        input_window_id=42, close=lambda: closed.append("input"),
+    ))
+    monkeypatch.setattr(cli, "IsolatedX11Capture", lambda *args, **kwargs: SimpleNamespace(
+        close=lambda: closed.append("capture"),
+    ))
+    monkeypatch.setattr(cli, "TesseractMenuTextReader", lambda: object())
+
+    def navigator(**kwargs):
+        assert kwargs["response_timeout_s"] == 30.0
+        permitted = kwargs["input_permitted"]
+        assert permitted()
+        if change == "session":
+            current[0] = SimpleNamespace(display=":3")
+        elif change == "window":
+            window[0] = 43
+        else:
+            blocked[change] = True
+        assert not permitted()
+
+        def run():
+            raise cli.MenuNavigationError("menu input interlock is not clear")
+
+        return SimpleNamespace(run=run)
+
+    monkeypatch.setattr(cli, "BedrockMenuNavigator", navigator)
+    result = CliRunner().invoke(cli.app, ["bedrock", "navigate"])
+    assert result.exit_code != 0
+    assert "interlock" in result.output
+    assert closed == ["capture", "input"]
+
+
 def _clean_cli_output(output: str) -> str:
     return _ANSI_RE.sub("", output)
 

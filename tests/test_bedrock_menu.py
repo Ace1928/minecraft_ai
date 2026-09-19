@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -64,7 +65,6 @@ def test_tesseract_coordinates_are_mapped_back_from_scaled_input() -> None:
         "5\t1\t1\t1\t1\t2\t1160\t880\t190\t80\t95\tLocal\n"
         "5\t1\t1\t1\t1\t3\t1360\t880\t300\t80\t94\tBedrock\n"
     )
-
     assert _parse_tesseract_tsv(payload, coordinate_scale=2) == (
         OcrLine(
             text="Eidos Local Bedrock",
@@ -76,6 +76,22 @@ def test_tesseract_coordinates_are_mapped_back_from_scaled_input() -> None:
         ),
     )
 
+
+def test_menu_ocr_bounds_its_own_threads_without_mutating_parent(monkeypatch):
+    import os
+    from PIL import Image
+
+    monkeypatch.setenv("OMP_THREAD_LIMIT", "8")
+
+    def run(command, **kwargs):
+        assert kwargs["env"]["OMP_THREAD_LIMIT"] == "1"
+        assert kwargs["timeout"] == 8.0
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("minecraft_ai.bedrock_menu.subprocess.run", run)
+    reader = TesseractMenuTextReader(executable="unused-test-tesseract")
+    assert reader._read_image(Image.new("RGB", (32, 32))) == ()
+    assert os.environ["OMP_THREAD_LIMIT"] == "8"
 
 class _SequenceCapture:
     def __init__(self, frames: list[CapturedFrame]) -> None:
@@ -693,6 +709,31 @@ def test_in_world_hud_needs_no_menu_input() -> None:
     assert clicks.clicks == []
 
 
+def test_loading_cannot_complete_a_transition_with_a_replayed_hud():
+    class Reader:
+        def __init__(self):
+            self.lines = iter((
+                _lines("ServerList", "Eidos Local Bedrock"),
+                _lines("Loading resource packs"), (), (),
+            ))
+
+        def read(self, frame):
+            return next(self.lines)
+
+    clicks = _RecordingClicks()
+    retained = []
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([_frame(1), _frame(2), _frame(1), _frame(3)]),
+        text_reader=Reader(), click_backend=clicks, lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "127.0.0.1", 19133),
+        poll_interval_s=0, sleep=lambda seconds: None,
+        hud_detector=lambda frame: True, observation_sink=retained.append,
+    )
+    assert navigator.run().actions == 1
+    assert retained[-1].frame.frame_id == 3
+    assert clicks.clicks == [(1, 500, 200)]
+
+
 def test_error_text_takes_priority_over_background_hud() -> None:
     frame = _frame(1)
     stage = classify_menu_stage(
@@ -1094,6 +1135,7 @@ def test_nested_menu_click_translates_drawable_point_into_private_root(
     focused: list[tuple[int, int]] = []
     sleeps: list[float] = []
     monkeypatch.setattr("minecraft_ai.bedrock_menu.time.sleep", sleeps.append)
+    monkeypatch.setattr("minecraft_ai.bedrock_menu.time.monotonic_ns", lambda: 1)
     window = SimpleNamespace(
         get_geometry=lambda: SimpleNamespace(width=1000, height=600),
         get_attributes=lambda: SimpleNamespace(),
@@ -1119,6 +1161,8 @@ def test_nested_menu_click_translates_drawable_point_into_private_root(
     backend._display = display
     backend._xtest = xtest
     backend._input_permitted = lambda: True
+    backend._game_process_identity = (123, 456)
+    backend._game_identity = lambda: (123, 456)
     backend._x = SimpleNamespace(
         RevertToParent=1,
         CurrentTime=0,
@@ -1145,6 +1189,7 @@ def test_nested_menu_click_rechecks_interlock_at_button_press(
         permitted = False
 
     monkeypatch.setattr("minecraft_ai.bedrock_menu.time.sleep", sleep)
+    monkeypatch.setattr("minecraft_ai.bedrock_menu.time.monotonic_ns", lambda: 1)
     window = SimpleNamespace(
         get_geometry=lambda: SimpleNamespace(width=1000, height=600),
         get_attributes=lambda: SimpleNamespace(),
@@ -1164,6 +1209,8 @@ def test_nested_menu_click_rechecks_interlock_at_button_press(
     backend._display = display
     backend._xtest = xtest
     backend._input_permitted = lambda: permitted
+    backend._game_process_identity = (123, 456)
+    backend._game_identity = lambda: (123, 456)
     backend._x = SimpleNamespace(
         RevertToParent=1,
         CurrentTime=0,
@@ -1274,3 +1321,227 @@ def test_load_configured_local_server_requires_name_when_ambiguous(tmp_path: Pat
     with pytest.raises(MenuNavigationError, match="exactly one"):
         load_configured_local_server(path)
     assert load_configured_local_server(path, requested_name="Two").name == "Two"
+
+
+def _update_lines() -> tuple[OcrLine, ...]:
+    return (
+        OcrLine("WILDERNESS EOUND", 675, 148, 200, 18, 84),
+        OcrLine("26.56 update", 762, 185, 110, 16, 92),
+        OcrLine("Wilderness Bound sets off on", 645, 220, 250, 16, 95),
+        OcrLine("Play now", 470, 480, 70, 16, 91),
+    )
+
+
+def _update_frame(frame_id: int) -> CapturedFrame:
+    return _pixel_frame(frame_id, width=1000, height=600, green_box=(55, 465, 955, 511))
+
+
+@pytest.mark.parametrize("heading", ("WILDERNESS BOUND", "WILDERNESS EOUND", "WILDERNESS EDUND"))
+def test_update_heading_retained_ocr_variants_require_other_anchors(heading):
+    lines = (replace(_update_lines()[0], text=heading), *_update_lines()[1:])
+    assert classify_menu_stage(
+        _update_frame(1), lines, lan_name="BedrockConnect", server_name="Eidos Local Bedrock",
+        hud_detector=lambda frame: True,
+    ) == MenuStage.UPDATE_NOTICE
+
+
+def test_update_ocr_uses_bounded_native_scale_panel_and_caption(monkeypatch):
+    reader = TesseractMenuTextReader(executable="unused-test-tesseract")
+    calls = []
+
+    def read_image(image, *, input_scale=None):
+        calls.append((image.size, input_scale))
+        if len(calls) == 1:  # Existing away-notice crop.
+            return ()
+        if len(calls) == 2:
+            return tuple(replace(line, left=line.left - 600, top=line.top - 120)
+                         for line in _update_lines()[:3])
+        return (replace(_update_lines()[3], left=170, top=9),)
+
+    monkeypatch.setattr(reader, "_read_image", read_image)
+    lines = reader.read(_update_frame(1))
+    assert calls == [((320, 102), None), ((340, 216), 1), ((400, 30), 1)]
+    assert lines == _update_lines()
+
+
+@pytest.mark.parametrize("invalid", (
+    "missing", "low_confidence", "nan_confidence", "chat", "duplicate", "different_update",
+))
+def test_update_notice_requires_independent_positioned_ocr_anchors(invalid):
+    lines = list(_update_lines())
+    if invalid == "missing":
+        lines.pop(2)
+    elif invalid in {"low_confidence", "nan_confidence"}:
+        lines[0] = replace(lines[0], confidence=69 if invalid == "low_confidence" else float("nan"))
+    elif invalid == "chat":
+        lines = [replace(line, left=0, top=0) for line in lines]
+    elif invalid == "duplicate":
+        lines.append(lines[0])
+    else:
+        lines[1] = replace(lines[1], text="Buy a marketplace world")
+    assert classify_menu_stage(
+        _update_frame(1), tuple(lines), lan_name="BedrockConnect",
+        server_name="Eidos Local Bedrock",
+        hud_detector=lambda frame: False,
+    ) == MenuStage.UNKNOWN
+
+
+@pytest.mark.parametrize("invalid", (
+    "missing", "low_confidence", "outside", "duplicate", "no_green",
+))
+def test_update_notice_refuses_unverified_play_control(invalid):
+    lines = list(_update_lines())
+    frame = _update_frame(1)
+    if invalid == "missing":
+        lines.pop()
+    elif invalid == "low_confidence":
+        lines[-1] = replace(lines[-1], confidence=69)
+    elif invalid == "outside":
+        lines[-1] = replace(lines[-1], left=5, top=5)
+    elif invalid == "duplicate":
+        lines.append(lines[-1])
+    else:
+        frame = _pixel_frame(1, width=1000, height=600)
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([frame]), text_reader=_MappedTextReader({1: tuple(lines)}),
+        click_backend=clicks, lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "127.0.0.1", 19133),
+        hud_detector=lambda frame: False,
+    )
+    with pytest.raises(MenuNavigationError, match="uniquely verified"):
+        navigator.run()
+    assert not clicks.clicks
+
+
+def test_update_recovery_rebinds_fresh_pixels_then_joins_only_existing_server():
+    clicks = _RecordingClicks()
+    retained = []
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([
+            _update_frame(1), _update_frame(2), _frame(2),
+            *(_frame(index) for index in range(3, 7)),
+        ]),
+        text_reader=_MappedTextReader({
+            1: _update_lines(), 2: _lines("Minecraft", "Play", "Settings"),
+            3: _lines("Minecraft", "Play", "Settings"),
+            4: _lines("Play", "Worlds", "LAN Games", "BedrockConnect"),
+            5: _lines("ServerList", "Eidos Local Bedrock"),
+        }),
+        click_backend=clicks, lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "127.0.0.1", 19133),
+        poll_interval_s=0, sleep=lambda seconds: None,
+        hud_detector=lambda frame: frame.frame_id == 6, observation_sink=retained.append,
+    )
+    result = navigator.run()
+    assert result.visited == (
+        MenuStage.UPDATE_NOTICE, MenuStage.TITLE, MenuStage.PLAY,
+        MenuStage.BEDROCK_CONNECT, MenuStage.IN_WORLD,
+    )
+    assert result.actions == 4
+    assert clicks.clicks == [(2, 505, 488), (3, 500, 200), (4, 500, 320), (5, 500, 200)]
+    assert retained[0].stage == MenuStage.UPDATE_NOTICE
+    assert retained[-1].stage == MenuStage.IN_WORLD
+
+
+@pytest.mark.parametrize("change", ("pixels", "geometry", "replay", "pause"))
+def test_update_click_refuses_changed_or_stale_capture_and_late_pause(change):
+    original = _update_frame(1)
+    fresh = _update_frame(2)
+    if change == "pixels":
+        fresh = _pixel_frame(2, width=1000, height=600)
+    elif change == "geometry":
+        fresh = _pixel_frame(2, width=800, height=600)
+    elif change == "replay":
+        fresh = original
+    permitted = True
+
+    class Capture(_SequenceCapture):
+        def capture(self):
+            nonlocal permitted
+            frame = super().capture()
+            if change == "pause" and frame.frame_id == 2:
+                permitted = False
+            return frame
+
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=Capture([original, fresh]), text_reader=_MappedTextReader({1: _update_lines()}),
+        click_backend=clicks, lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "127.0.0.1", 19133),
+        input_permitted=lambda: permitted, hud_detector=lambda frame: False,
+    )
+    with pytest.raises(MenuNavigationError):
+        navigator.run()
+    assert not clicks.clicks
+
+
+def test_update_retry_budget_does_not_repeatedly_click_an_unchanged_notice():
+    clock = [0.0]
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([_update_frame(index) for index in range(1, 6)]),
+        text_reader=_MappedTextReader({index: _update_lines() for index in range(1, 6)}),
+        click_backend=clicks, lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "127.0.0.1", 19133),
+        timeout_s=0.3, response_timeout_s=0.1, poll_interval_s=0.1, max_retries=2,
+        clock=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+        hud_detector=lambda frame: False,
+    )
+    with pytest.raises(MenuNavigationError, match="after 1 bounded attempts"):
+        navigator.run()
+    assert clicks.clicks == [(2, 505, 488)]
+
+
+def test_update_play_now_can_open_the_existing_world_browser_directly():
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([_update_frame(1), _update_frame(2),
+                                  *(_frame(index) for index in range(3, 6))]),
+        text_reader=_MappedTextReader({
+            1: _update_lines(),
+            3: _lines("Play", "Worlds", "LAN Games", "BedrockConnect"),
+            4: _lines("ServerList", "Eidos Local Bedrock"),
+        }),
+        click_backend=clicks, lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "127.0.0.1", 19133),
+        poll_interval_s=0, sleep=lambda seconds: None,
+        hud_detector=lambda frame: frame.frame_id == 5,
+    )
+    result = navigator.run()
+    assert result.visited == (
+        MenuStage.UPDATE_NOTICE, MenuStage.PLAY, MenuStage.BEDROCK_CONNECT, MenuStage.IN_WORLD,
+    )
+    assert clicks.clicks == [(2, 505, 488), (3, 500, 320), (4, 500, 200)]
+
+
+def test_literal_ocr_quotes_cannot_swallow_later_control_rows():
+    payload = (
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\t"
+        "width\theight\tconf\ttext\n"
+        "5\t1\t1\t1\t1\t1\t10\t10\t20\t20\t90\t\"artwork\n"
+        "5\t1\t2\t1\t1\t1\t400\t500\t100\t20\t95\tPlay now\n"
+    )
+    assert tuple(line.text for line in _parse_tesseract_tsv(payload)) == ('"artwork', "Play now")
+
+
+@pytest.mark.parametrize("condition", ("stale", "future", "replayed", "process", "pause", "rate"))
+def test_menu_backend_refuses_before_any_pointer_or_button_input(monkeypatch, condition):
+    backend = object.__new__(NestedXTestMenuInput)
+    backend._input_permitted = lambda: condition != "pause"
+    backend._game_process_identity = (123, 456)
+    backend._game_identity = lambda: (123, 999 if condition == "process" else 456)
+    now = 20_000_000_000
+    monkeypatch.setattr("minecraft_ai.bedrock_menu.time.monotonic_ns", lambda: now)
+    frame = replace(_frame(1), captured_ns=now)
+    if condition == "stale":
+        frame = replace(frame, captured_ns=1)
+    elif condition == "future":
+        frame = replace(frame, captured_ns=now + 1)
+    elif condition == "replayed":
+        backend._last_clicked_capture_ns = now
+    elif condition == "rate":
+        backend._last_click_ns = now - 100_000_000
+    # No display/window exists: reaching even a geometry query fails this test.
+    with pytest.raises(MenuNavigationError):
+        backend.click(frame, 500, 405)
