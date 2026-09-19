@@ -35,7 +35,7 @@ def mock_supervisor():
 
 
 @pytest.fixture
-def gateway(tmp_path, mock_supervisor):
+def unqualified_gateway(tmp_path, mock_supervisor):
     db_path = tmp_path / "state.sqlite3"
     return DirectionsGateway(
         db_path,
@@ -43,6 +43,45 @@ def gateway(tmp_path, mock_supervisor):
         queue_capacity=4,
         per_member_limit=2,
     )
+
+
+@pytest.fixture
+def gateway(unqualified_gateway, monkeypatch):
+    """Exercise legacy receipt mechanics without enabling production admission."""
+    discover = unqualified_gateway.discover
+
+    def synthetic_discovery():
+        result = discover()
+        if result.readiness_reason == "execution_contract_unqualified":
+            return result.model_copy(update={"available": True, "readiness_reason": None})
+        return result
+
+    monkeypatch.setattr(unqualified_gateway, "discover", synthetic_discovery)
+    return unqualified_gateway
+
+
+@pytest.mark.parametrize("instruction_id", (
+    "open_observe_close_inventory", "observe_inventory", "explore_forward",
+))
+@pytest.mark.parametrize("text", (None, "open inventory; attack and destroy everything"))
+def test_unqualified_gateway_refuses_ready_admission_without_dispatch(
+    unqualified_gateway, instruction_id, text,
+):
+    adapter = MinecraftDirectionsAdapter(unqualified_gateway.db_path, gateway=unqualified_gateway)
+    discovery = adapter.discover()
+    assert discovery.motor_lease_active
+    assert not discovery.available
+    assert discovery.readiness_reason == "execution_contract_unqualified"
+    request = DirectionsRequest(
+        request_id="unqualified", member_id="member", server_id=discovery.server_id,
+        expected_session_id=discovery.session_id, expected_epoch=discovery.control_epoch,
+        instruction_id=instruction_id, instruction_text=text,
+    )
+    with pytest.raises(ControlUnavailableError, match="execution_contract_unqualified"):
+        unqualified_gateway.submit(request)
+    with StateDatabase(unqualified_gateway.db_path) as db:
+        assert db.load_operator_messages() == ()
+        assert db.connection.execute("SELECT COUNT(*) FROM paid_directions").fetchone()[0] == 0
 
 
 def test_discovery_reports_correct_readiness_and_epoch(gateway, mock_supervisor):
@@ -226,7 +265,9 @@ def test_outcome_verification_success(gateway):
     # Simulate runtime recording successful events
     with StateDatabase(gateway.db_path) as db:
         db.connection.execute(
-            "INSERT INTO trajectories(trajectory_id, started_ns, source_type, game_version, payload) VALUES ('traj-1', 1, 'agent', '1.26', '{}')"
+            "INSERT INTO trajectories(trajectory_id, started_ns, source_type, game_version, "
+            "payload) "
+            "VALUES ('traj-1', 1, 'agent', '1.26', '{}')"
         )
         db.connection.commit()
         # Event 1: open_inventory succeeded

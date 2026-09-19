@@ -58,7 +58,8 @@ SUPPORTED_INSTRUCTIONS: tuple[SupportedInstruction, ...] = (
         name="Open, Observe, and Close Inventory",
         description=(
             "Atomically opens the Bedrock inventory, verifies the inventory overlay detector, "
-            "and safely closes the menu to restore playable world view without any movement or attack."
+            "and safely closes the menu to restore playable world view "
+            "without any movement or attack."
         ),
         canonical_text="open inventory, observe it, close it; no movement or attack",
         prohibited_actions=("allow_attack", "allow_jump", "allow_use"),
@@ -69,7 +70,10 @@ SUPPORTED_INSTRUCTIONS: tuple[SupportedInstruction, ...] = (
     SupportedInstruction(
         instruction_id="observe_inventory",
         name="Observe Inventory Contents",
-        description="Opens the inventory overlay to inspect current slots and items without attack or movement.",
+        description=(
+            "Opens the inventory overlay to inspect current slots and items "
+            "without attack or movement."
+        ),
         canonical_text="open inventory once, observe it; no movement or attack",
         prohibited_actions=("allow_attack", "allow_jump", "allow_use"),
         timeout_s=20.0,
@@ -101,7 +105,9 @@ CREATE TABLE IF NOT EXISTS paid_directions (
     instruction_text TEXT NOT NULL,
     arguments_json TEXT NOT NULL,
     fingerprint TEXT NOT NULL,
-    state TEXT NOT NULL CHECK(state IN ('queued', 'running', 'succeeded', 'failed', 'cancelled', 'expired', 'unknown')),
+    state TEXT NOT NULL CHECK(state IN (
+        'queued', 'running', 'succeeded', 'failed', 'cancelled', 'expired', 'unknown'
+    )),
     message_id TEXT,
     attempt_id TEXT,
     created_ns INTEGER NOT NULL,
@@ -203,8 +209,9 @@ class DirectionsGateway:
 
         agent_info = sup.get("agent") or {}
         return DirectionsDiscovery(
-            available=available,
-            readiness_reason=reason,
+            # Receipt atomicity, cancellation and outcome attribution are not qualified.
+            available=False,
+            readiness_reason=reason or "execution_contract_unqualified",
             server_id=sup.get("motor_target_instance")
             or agent_info.get("instance_id")
             or "bedrock-local",
@@ -237,11 +244,13 @@ class DirectionsGateway:
             )
         if discovery.session_id != request.expected_session_id:
             raise ControlUnavailableError(
-                f"Session mismatch: requested {request.expected_session_id!r}, live is {discovery.session_id!r}"
+                f"Session mismatch: requested {request.expected_session_id!r}, "
+                f"live is {discovery.session_id!r}"
             )
         if discovery.control_epoch != request.expected_epoch:
             raise ControlUnavailableError(
-                f"Control epoch mismatch: requested {request.expected_epoch}, live is {discovery.control_epoch}"
+                f"Control epoch mismatch: requested {request.expected_epoch}, "
+                f"live is {discovery.control_epoch}"
             )
 
         with StateDatabase(self.db_path) as sdb:
@@ -257,7 +266,8 @@ class DirectionsGateway:
             if existing is not None:
                 if existing["fingerprint"] != fingerprint:
                     raise ConflictError(
-                        f"Request ID {request.request_id!r} already exists with a different payload."
+                        f"Request ID {request.request_id!r} already exists "
+                        "with a different payload."
                     )
                 receipt = self._row_to_receipt(existing)
                 return receipt.model_copy(update={"replayed": True})
@@ -484,7 +494,7 @@ class DirectionsGateway:
         spec: SupportedInstruction,
         events: tuple[Any, ...],
     ) -> DirectionsOutcome | None:
-        """Prove that required skills succeeded within attempt context and no prohibitions violated."""
+        """Evaluate legacy skill labels; this is not qualified paid execution proof."""
         message_id = row["message_id"]
         attempt_id = row["attempt_id"]
         expected_context = f"operator:{message_id}"
