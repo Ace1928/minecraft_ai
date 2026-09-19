@@ -328,6 +328,11 @@ def _explicit_action_constraints(text: str) -> dict[str, bool]:
         normalized,
     ):
         scope = match.group("scope")
+        if re.search(
+            r"\b(?:move|moving|movement|walk|walking|run|running|sprint|sprinting|"
+            r"strafe|strafing|locomotion)\b", scope,
+        ):
+            constraints["allow_movement"] = False
         if re.search(r"\b(?:attack|attacking|hit|hitting|fight|fighting)\b", scope):
             constraints["allow_attack"] = False
         if re.search(r"\b(?:use|using|interact|interacting)\b", scope):

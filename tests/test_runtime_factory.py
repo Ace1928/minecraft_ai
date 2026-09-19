@@ -318,6 +318,7 @@ def test_unjoined_construction_worker_retains_resources_and_blocks_handoff(envir
 @pytest.mark.parametrize("incomplete", [False, True])
 def test_main_database_cleanup_respects_pre_run_owner_failure(monkeypatch, incomplete):
     database = Mock()
+    monkeypatch.setattr(agent_process, "send_command", Mock(return_value={}))
     monkeypatch.setattr(agent_process, "StateDatabase", lambda *_: database)
     monkeypatch.setattr(agent_process, "load_config", lambda *_: RuntimeConfig())
     failure = (startup.RuntimeStartupCleanupIncomplete("still owned") if incomplete

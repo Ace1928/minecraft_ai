@@ -79,6 +79,15 @@ class ActionProvenance(BaseModel):
     latent_id: str | None = Field(default=None, min_length=1, max_length=256)
     target_track_id: str | None = Field(default=None, min_length=1, max_length=512)
 
+    def validate_skill_binding(self, *, skill_id: str | None, skill_run_id: str | None) -> None:
+        """Check execution ownership before sending input and again before recording it."""
+        condition_skill_id = _condition_text(self.condition, "skill_id")
+        condition_run_id = _condition_text(self.condition, "episode_id")
+        if skill_id is not None and condition_skill_id not in {None, skill_id}:
+            raise ValueError("skill_id does not match the accepted action condition")
+        if skill_run_id is not None and condition_run_id not in {None, skill_run_id}:
+            raise ValueError("skill_run_id does not match the accepted action condition")
+
     @model_validator(mode="after")
     def validate_condition_identity(self) -> ActionProvenance:
         if (self.source_frame_id is None) != (self.source_captured_ns is None):
@@ -516,6 +525,7 @@ class TrajectoryRecorder:
             not isinstance(accepted_ns, int) or accepted_ns < frame.captured_ns
         ):
             raise ValueError("supervisor acceptance timestamp precedes captured frame")
+        provenance.validate_skill_binding(skill_id=skill_id, skill_run_id=skill_run_id)
         encoded_frame = _encode_compact_frame(
             frame,
             max_width=self.frame_max_width,
@@ -531,10 +541,6 @@ class TrajectoryRecorder:
         blackboard_hash = hashlib.sha256(blackboard_json).hexdigest()
         condition_skill_id = _condition_text(provenance.condition, "skill_id")
         condition_run_id = _condition_text(provenance.condition, "episode_id")
-        if skill_id is not None and condition_skill_id not in {None, skill_id}:
-            raise ValueError("skill_id does not match the accepted action condition")
-        if skill_run_id is not None and condition_run_id not in {None, skill_run_id}:
-            raise ValueError("skill_run_id does not match the accepted action condition")
         accepted_skill_id = skill_id if skill_id is not None else condition_skill_id
         accepted_skill_run_id = skill_run_id if skill_run_id is not None else condition_run_id
         sample_key = f"{self._step_index:012d}"

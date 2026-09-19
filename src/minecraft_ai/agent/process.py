@@ -87,6 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Cover preparation before the factory/runtime heartbeat takes ownership.
+    # A revoked or expired launch lease must fail before capture or database work.
+    send_command("renew", lease_id=args.lease_id, ttl_ms=5_000)
     config_path = None if args.config is None else Path(args.config)
     config = load_config(config_path)
     if args.role is not None:

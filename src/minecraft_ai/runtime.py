@@ -3995,17 +3995,11 @@ class AgentRuntime:
             self._plan_step_completed_ns = time.monotonic_ns()
             self._cognition_requested = True
             return False
-        start_kwargs: dict[str, Any] = {}
-        if spec.outcome_kind == "traversal":
-            start_kwargs["complete_on_locomotion_progress"] = True
-            start_kwargs["locomotion_progress_events_required"] = 3
-            start_kwargs["locomotion_progress_min_ms"] = 750
         self._start_skill(
             spec,
             source=SkillStartSource.PLAN,
             run_id=uuid.uuid4().hex,
             context_key=context_key,
-            **start_kwargs,
         )
         return True
 
@@ -4700,13 +4694,19 @@ class AgentRuntime:
         *,
         plan_neutral: bool = False,
     ) -> SkillRun:
+        parameters = _compatible_recovery_parameters(parent, recovery)
+        # Actuator prohibitions survive recovery even when they are not task parameters.
+        parameters.update({
+            name: False for name in recovery.action_permissions.model_dump()
+            if parent.parameters.get(name) is False
+        })
         run = self._start_skill(
             recovery,
             source=SkillStartSource.RECOVERY,
             parent_run_id=parent.run_id,
             run_id=uuid.uuid4().hex,
             context_key=parent.context_key,
-            parameters=_compatible_recovery_parameters(parent, recovery),
+            parameters=parameters,
         )
         if plan_neutral or (
             parent.skill_id == "craft_wood_planks"

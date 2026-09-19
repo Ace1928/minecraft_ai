@@ -2379,11 +2379,13 @@ def test_planks_retry_rejects_untrusted_or_stale_positive_evidence(
     ],
 )
 def test_planks_retry_positive_global_count_requires_its_gui_evidence(
-    tmp_path: Path, evidence_kind: str, clears: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, evidence_kind: str, clears: bool,
 ) -> None:
     with StateDatabase(tmp_path / "state.sqlite3") as database:
         runtime = _runtime_for_learning(database)
         now = time.monotonic_ns()
+        # SQLite scheduling must not consume this fixture's 250 ms evidence lifetime.
+        monkeypatch.setattr(time, "monotonic_ns", lambda: now)
         runtime._record_terminal_run(
             SkillRun(
                 run_id="no-logs", skill_id="craft_wood_planks",

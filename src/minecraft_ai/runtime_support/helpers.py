@@ -526,6 +526,15 @@ def _accepted_action_provenance(
 
     status = {} if execution is None else execution.policy_status
     is_reset = execution is not None and execution.action_origin == ActionOrigin.RESET
+    synthetic_owner = bool(
+        execution is None or (
+            execution.action_origin == ActionOrigin.SYNTHETIC and execution.policy_proposal is None
+        )
+    )
+    if synthetic_owner:
+        # A controller-generated action did not consume the policy's diagnostic
+        # snapshot. Only a guarded, explicitly retained proposal has that ancestry.
+        status = {"policy_id": "runtime:synthetic-control", "active_route": "synthetic"}
     route_value = "reset" if is_reset else status.get("active_route", "direct")
     route_id = route_value if isinstance(route_value, str) and route_value else "direct"
     component_key = "primary" if route_id == "semantic" else route_id
@@ -540,7 +549,7 @@ def _accepted_action_provenance(
     version_value = selected.get("model_version")
     model_version = version_value if isinstance(version_value, str) and version_value else None
     prediction = selected.get("last_prediction")
-    prediction_fields = prediction if isinstance(prediction, dict) else {}
+    prediction_fields = prediction if isinstance(prediction, dict) and not is_reset else {}
     behavior_value = causal_fields.get(
         "behavior_token",
         prediction_fields.get("behavior_token"),
@@ -566,7 +575,7 @@ def _accepted_action_provenance(
     prediction_id = (
         prediction_value if isinstance(prediction_value, str) and prediction_value else None
     )
-    origin = ActionOrigin.POLICY if execution is None else execution.action_origin
+    origin = ActionOrigin.SYNTHETIC if execution is None else execution.action_origin
     source_frame_id = None
     source_captured_ns = None
     source_frame_value = causal_fields.get("source_frame_id")
@@ -599,6 +608,8 @@ def _accepted_action_provenance(
         target_track_id = (
             causal_target if isinstance(causal_target, str) and causal_target else None
         )
+    elif synthetic_owner:
+        target_track_id = None if intent is None else intent.target_track_id
     else:
         target_track_id = _condition_target_track_id(intent, blackboard)
     causal_version = causal_fields.get("model_version")
@@ -614,7 +625,7 @@ def _accepted_action_provenance(
         )
     )
     action_level = _reported_action_level(execution, status, causal_fields)
-    return ActionProvenance(
+    provenance = ActionProvenance(
         policy_id=policy_id,
         model_version=model_version,
         route_id=route_id,
@@ -631,6 +642,11 @@ def _accepted_action_provenance(
         latent_id=latent_id,
         target_track_id=target_track_id,
     )
+    if execution is not None:
+        provenance.validate_skill_binding(
+            skill_id=execution.run.skill_id, skill_run_id=execution.run.run_id,
+        )
+    return provenance
 
 def _trajectory_outcome_annotations(
     execution: ExecutionTick | None,
@@ -1201,4 +1217,3 @@ def _authorized_game_chat(
             continue
         return decision.game_chat
     return None
-

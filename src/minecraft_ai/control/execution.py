@@ -49,6 +49,7 @@ class ExecutionTick:
     policy_status: dict[str, object] = field(default_factory=dict)
     action_origin: ActionOrigin = ActionOrigin.POLICY
     outcome_verification: OutcomeVerification | None = None
+    policy_proposal: MotorAction | None = None
 
 
 @dataclass(frozen=True)
@@ -319,7 +320,7 @@ class SkillExecutor:
         parameters: dict[str, str | int | float | bool] | None = None,
         now_ns: int | None = None,
         instruction: str | None = None,
-        complete_on_locomotion_progress: bool = False,
+        complete_on_locomotion_progress: bool | None = None,
         locomotion_progress_events_required: int = 1,
         locomotion_progress_min_ms: int = 0,
         collection_hotbar_log_baseline: PerceptionFact | None = None,
@@ -351,6 +352,13 @@ class SkillExecutor:
             <= _GATHER_ACQUISITIONS_REQUIRED
         ):
             raise ValueError("gather_acquisitions_remaining must be between 1 and 3")
+        # Typed traversal contracts share completion semantics across ordinary,
+        # recovery and nested starts. Explicit caller overrides remain authoritative.
+        if complete_on_locomotion_progress is None:
+            complete_on_locomotion_progress = spec.outcome_kind == "traversal"
+            if complete_on_locomotion_progress:
+                locomotion_progress_events_required = max(3, locomotion_progress_events_required)
+                locomotion_progress_min_ms = max(750, locomotion_progress_min_ms)
         started = time.monotonic_ns() if now_ns is None else now_ns
         self._spec = spec
         self._last_active_input_ns = started
@@ -875,6 +883,7 @@ class SkillExecutor:
             run=self._run,
             action=mining.action,
             motor_intent=intent,
+            policy_proposal=proposed,
             policy_status=_policy_status_snapshot(self.policy),
             action_origin=(
                 ActionOrigin.SYNTHETIC

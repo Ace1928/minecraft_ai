@@ -162,7 +162,7 @@ def test_three_predictions_rotate_once_without_reclassifying_starvation(monkeypa
     "missing-route", "foreign-component", "actual-movement",
 ))
 def test_unqualified_starvation_cannot_rotate(monkeypatch, variant: str) -> None:
-    runtime, clock, _ = _runtime(monkeypatch)
+    runtime, clock, accepted = _runtime(monkeypatch)
     _start(runtime)
     if variant == "other-route":
         _prediction(runtime, clock, "initial")
@@ -177,6 +177,10 @@ def test_unqualified_starvation_cannot_rotate(monkeypatch, variant: str) -> None
         if variant == "rejected":
             with pytest.raises(RuntimeError, match="supervisor rejected"):
                 _prediction(runtime, clock, str(index))
+        elif variant in {"old-episode", "wrong-skill"}:
+            with pytest.raises(ValueError, match="skill_.*does not match"):
+                _prediction(runtime, clock, str(index), variant=pred_variant)
+            assert not accepted  # Reject mismatched ownership before actuation, not after it.
         else:
             _prediction(runtime, clock, "repeated" if variant == "same-id" else str(index),
                         variant=pred_variant)

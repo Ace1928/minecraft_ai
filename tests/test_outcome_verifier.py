@@ -1266,6 +1266,67 @@ def test_active_block_clearing_is_not_controller_starvation_or_fake_movement() -
     assert verifier.observe(board, now_ns=current).signal == OutcomeSignal.CONTROLLER_STARVATION
 
 
+@pytest.mark.parametrize("external_release", (False, True))
+def test_attack_while_walking_requires_new_post_settle_translation(external_release):
+    now = time.monotonic_ns()
+    board = _board(now)
+    _publish_hashes(board, now, frame_hash=_HASH_B, luma_grid=_LUMA_A)
+    verifier = TemporalOutcomeVerifier()
+    verifier.begin("dig-and-walk", OutcomeKind.TRAVERSAL, board, now_ns=now)
+    verifier.observe(board, action=MotorAction(sequence=1, keys_down=("w",)), now_ns=now)
+    _publish_hashes(board, now + 300_000_000, frame_hash=_HASH_B, luma_grid=_LUMA_B)
+    verifier.observe(board, now_ns=now + 300_000_000)
+    assert verifier._state.progress_samples == 1
+
+    for index, elapsed_ms in enumerate((500, 800, 1100, 1400, 1700, 2000)):
+        current = now + elapsed_ms * 1_000_000
+        _publish_hashes(board, current, frame_hash=_HASH_B,
+                        luma_grid=_LUMA_C if index % 2 else _LUMA_B)
+        result = verifier.observe(
+            board, action=MotorAction(sequence=index + 2, buttons_down=("left",)), now_ns=current,
+        )
+        assert result.status == OutcomeStatus.PENDING
+        assert verifier._state.progress_samples == 0
+
+    released = now + 2_200_000_000
+    if external_release:
+        verifier.notify_inputs_released(now_ns=released)
+    else:
+        verifier.observe(
+            board, action=MotorAction(sequence=9, buttons_up=("left",)), now_ns=released,
+        )
+    # Delayed delivery is not a post-settle capture, despite the later observation call.
+    _publish_hashes(board, released + 50_000_000, frame_hash=_HASH_B, luma_grid=_LUMA_A)
+    assert verifier.observe(board, now_ns=now + 3_000_000_000).signal == OutcomeSignal.NONE
+    _publish_hashes(board, now + 3_100_000_000, frame_hash=_HASH_B, luma_grid=_LUMA_C)
+    assert verifier.observe(board, action=MotorAction(sequence=10, keys_down=("w",)),
+                            now_ns=now + 3_100_000_000).signal == OutcomeSignal.NONE
+    for elapsed_ms, luma, expected in (
+        (3500, _LUMA_B, OutcomeSignal.NONE),
+        (3900, _LUMA_C, OutcomeSignal.LOCOMOTION_PROGRESS),
+    ):
+        current = now + elapsed_ms * 1_000_000
+        _publish_hashes(board, current, frame_hash=_HASH_B, luma_grid=luma)
+        assert verifier.observe(board, now_ns=current).signal == expected
+
+
+def test_atomic_attack_pulses_cannot_supply_traversal_progress():
+    now = time.monotonic_ns()
+    board = _board(now)
+    _publish_hashes(board, now, frame_hash=_HASH_B, luma_grid=_LUMA_A)
+    verifier = TemporalOutcomeVerifier()
+    verifier.begin("pulse-and-walk", OutcomeKind.TRAVERSAL, board, now_ns=now)
+    for index in range(6):
+        current = now + index * 400_000_000
+        _publish_hashes(board, current, frame_hash=_HASH_B,
+                        luma_grid=_LUMA_B if index % 2 else _LUMA_C)
+        result = verifier.observe(board, now_ns=current, action=MotorAction(
+            sequence=index, keys_down=("w",), buttons_down=("left",), buttons_up=("left",),
+        ))
+        assert result.status == OutcomeStatus.PENDING
+        assert result.signal == OutcomeSignal.NONE
+
+
 def test_controller_without_locomotion_reports_starvation_not_collision() -> None:
     now = time.monotonic_ns()
     board = _board(now)

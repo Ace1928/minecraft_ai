@@ -312,15 +312,22 @@ class TemporalOutcomeVerifier:
             state.luma_candidate_samples = 0
             state.target_loss_samples = 0
             state.target_loss_source = None
-        elif isinstance(state, _TraversalState) and self._held_keys & _MOVEMENT_KEYS:
-            elapsed_ns = max(0, now - state.last_observe_ns)
-            state.commanded_movement_ns += elapsed_ns
-            state.lifetime_commanded_movement_ns += elapsed_ns
-            state.commanded_since_luma_ns += elapsed_ns
-            state.last_observe_ns = max(state.last_observe_ns, now)
-            # Preserve observed evidence, but do not attribute pixels across an
-            # unobserved release gap to movement. A fresh image closes the gap.
-            state.release_luma_after_ns = now
+        elif isinstance(state, _TraversalState):
+            if self._held_keys & _MOVEMENT_KEYS:
+                elapsed_ns = max(0, now - state.last_observe_ns)
+                state.commanded_movement_ns += elapsed_ns
+                state.lifetime_commanded_movement_ns += elapsed_ns
+                state.commanded_since_luma_ns += elapsed_ns
+                state.last_observe_ns = max(state.last_observe_ns, now)
+                # A release cannot shorten a pending post-interaction settling interval.
+                state.release_luma_after_ns = max(state.release_luma_after_ns or 0, now)
+            if "left" in self._held_buttons:
+                state.last_interaction_ns = max(state.last_interaction_ns, now)
+                state.progress_samples = 0
+                state.release_luma_after_ns = max(
+                    state.release_luma_after_ns or 0,
+                    now + self.config.mining_post_release_settle_ms * 1_000_000,
+                )
         self._held_keys.clear()
         self._held_buttons.clear()
 
@@ -579,8 +586,14 @@ class TemporalOutcomeVerifier:
 
         if delta.camera_changed:
             state.last_camera_ns = now_ns
-        if delta.attack_active or delta.attack_released:
+        if delta.attack_active or delta.attack_released or delta.interaction:
             state.last_interaction_ns = now_ns
+            # Damage animation and its disappearance are not translation, even
+            # while forward is held. Include atomic button pulses in this fence.
+            state.progress_samples = 0
+            state.release_luma_after_ns = (
+                now_ns + self.config.mining_post_release_settle_ms * 1_000_000
+            )
 
         if (
             now_ns - max(self._started_ns, state.last_interaction_ns)

@@ -343,6 +343,22 @@ def test_traversal_nonmovement_release_does_not_create_commanded_time() -> None:
     assert not verifier._held_buttons
 
 
+def test_movement_release_does_not_shorten_attack_settling_fence() -> None:
+    verifier, board = _begin(OutcomeKind.TRAVERSAL)
+    verifier.observe(board, action=MotorAction(
+        sequence=1, keys_down=("w",), buttons_down=("left",),
+    ), now_ns=_START)
+    verifier.observe(board, action=MotorAction(sequence=2, buttons_up=("left",)),
+                     now_ns=_START + 500 * _MS)
+    state = verifier._state
+    cutoff = state.release_luma_after_ns
+    verifier.notify_inputs_released(now_ns=_START + 600 * _MS)
+    assert state.release_luma_after_ns == cutoff == _START + 800 * _MS
+    _sample(board, _START + 700 * _MS, luma=128)
+    assert verifier.observe(board, now_ns=_START + 1_000 * _MS).signal == OutcomeSignal.NONE
+    assert state.release_luma_after_ns == cutoff
+
+
 def test_default_release_timestamp_uses_monotonic_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     verifier, board = _begin(OutcomeKind.MINING)
     verifier.observe(

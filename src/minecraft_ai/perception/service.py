@@ -1956,10 +1956,9 @@ def _sampled_neutral_ratio(
     if pixels is not None:
         roi = pixels[y0:y1:y_step, x0:x1:x_step, :3].astype("int32")
         blue, green, red = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
-        high = roi.max(axis=2)
-        low = roi.min(axis=2)
+        spread = _channel_spread(roi)
         luma = (29 * blue + 150 * green + 77 * red) // 256
-        selected = (high - low <= 18) & (luma >= luma_min) & (luma <= luma_max)
+        selected = (spread <= 18) & (luma >= luma_min) & (luma <= luma_max)
         return float(selected.mean()) if selected.size else 0.0
     source = memoryview(frame.bgra)
     matched = 0
@@ -2146,9 +2145,7 @@ def _hud_palette_ratio(
         if palette == "heart":
             selected = (red >= 175) & (red >= green * 1.35) & (red >= blue * 1.25)
         else:
-            high = roi.max(axis=2).astype("int16")
-            low = roi.min(axis=2).astype("int16")
-            selected = (high - low <= 18) & (red >= 85) & (red <= 235)
+            selected = (_channel_spread(roi) <= 18) & (red >= 85) & (red <= 235)
         return float(selected.mean()) if selected.size else 0.0
     source = memoryview(frame.bgra)
     matched = 0
@@ -2284,6 +2281,8 @@ def _death_control_pair_present(
         palette="primary",
         pixels=pixels,
     )
+    if primary_ratio < 0.70:
+        return False
     secondary_ratio = _region_palette_ratio(
         frame,
         x_start=sx0,
@@ -2293,7 +2292,7 @@ def _death_control_pair_present(
         palette="secondary",
         pixels=pixels,
     )
-    return primary_ratio >= 0.70 and secondary_ratio >= 0.75
+    return secondary_ratio >= 0.75
 
 
 def _scan_death_primary_band(
@@ -2342,9 +2341,7 @@ def _region_palette_ratio(
         if palette == "primary":
             selected = (green >= 90) & (green >= red * 1.18) & (green >= blue * 1.05)
         else:
-            high = roi.max(axis=2).astype("int16")
-            low = roi.min(axis=2).astype("int16")
-            selected = (high - low <= 18) & (red >= 100) & (red <= 230)
+            selected = (_channel_spread(roi) <= 18) & (red >= 100) & (red <= 230)
         return float(selected.mean()) if selected.size else 0.0
     source = memoryview(frame.bgra)
     matched = 0
@@ -2360,6 +2357,15 @@ def _region_palette_ratio(
             matched += int(selected)
             sampled += 1
     return matched / sampled if sampled else 0.0
+
+
+def _channel_spread(pixels: Any) -> Any:
+    """Exact three-channel range without a generic per-pixel axis reduction."""
+    numpy = importlib.import_module("numpy")
+    blue, green, red = pixels[..., 0], pixels[..., 1], pixels[..., 2]
+    high = numpy.maximum(numpy.maximum(blue, green), red).astype("int16")
+    low = numpy.minimum(numpy.minimum(blue, green), red).astype("int16")
+    return high - low
 
 
 def _numpy_bgra(frame: CapturedFrame) -> Any | None:

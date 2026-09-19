@@ -212,7 +212,8 @@ def test_running_skill_emits_bounded_motor_action() -> None:
     assert abs(tick.action.mouse_dy) <= policy.max_mouse_step
 
 
-def test_open_inventory_success_requires_calibrated_inventory_overlay() -> None:
+def test_open_inventory_success_requires_calibrated_inventory_overlay(monkeypatch) -> None:
+    monkeypatch.setattr("time.monotonic_ns", lambda: 100)
     spec = build_bootstrap_skill_library().get("open_inventory")
 
     assert conditions_satisfied(
@@ -862,7 +863,8 @@ def test_skill_action_permissions_bound_learned_policy_without_replacing_it() ->
     assert executor.policy_parameters == policy.intent.parameters
 
 
-def test_skill_success_releases_held_input() -> None:
+def test_skill_success_releases_held_input(monkeypatch) -> None:
+    monkeypatch.setattr("time.monotonic_ns", lambda: 200)
     policy = BootstrapMotorPolicy()
     executor = SkillExecutor(policy)
     spec = SkillSpec(
@@ -1029,7 +1031,8 @@ def test_target_tracking_is_deadbanded_and_acceleration_limited() -> None:
     assert max(map(abs, deltas)) <= policy.max_mouse_step
 
 
-def test_explicit_unplayable_scene_releases_movement() -> None:
+def test_explicit_unplayable_scene_releases_movement(monkeypatch) -> None:
+    monkeypatch.setattr("time.monotonic_ns", lambda: 100)
     policy = BootstrapMotorPolicy()
     intent = MotorIntent(skill_id="explore", mode="explore")
     moving = policy.act(_board(), intent, sequence=0)

@@ -227,6 +227,7 @@ def test_candidate_does_not_force_skill_or_remove_observation_and_replan(
     assert decision.request_replan == replan
     assert decision.chosen_goal_id == "operator:inventory-check"
     assert decision.skill_parameters["allow_attack"] is False
+    assert decision.skill_parameters["allow_movement"] is False
     assert len(model.calls) == 1
     payload = json.loads(model.calls[0][0][1].content)
     assert payload["planks_retry_requires_wood"] is True
@@ -315,7 +316,34 @@ def test_compound_inventory_directive_skill_ids_and_constraints():
     skills = _operator_requested_skill_ids(text)
     assert skills == ("open_inventory", "close_open_inventory")
     constraints = _explicit_action_constraints(text)
-    assert constraints == {"allow_attack": False}
+    assert constraints == {"allow_movement": False, "allow_attack": False}
+
+
+@pytest.mark.parametrize("text", (
+    "Do not move or attack.", "Inspect inventory without moving.", "Don't walk.",
+    "Never run.", "No movement or attack.", "No strafing.", "Do not sprint.",
+))
+def test_literal_movement_prohibitions_reach_the_physical_envelope(text):
+    from minecraft_ai.control.action_envelope import constrain_action
+    from minecraft_ai.safety import MotorAction
+
+    constraints = _explicit_action_constraints(text)
+    assert constraints["allow_movement"] is False
+    action = constrain_action(
+        MotorAction(sequence=1, keys_down=("w", "space"), mouse_dx=12), constraints,
+        held_keys=("a", "ctrl"),
+    )
+    assert not action.keys_down
+    assert set(action.keys_up) == {"a", "ctrl", "w", "space"}
+    assert action.mouse_dx == 12
+
+
+@pytest.mark.parametrize("text", (
+    "Move forward. No attack.", "Do not attack; walk forward.",
+    "No jumping! Continue walking.", "Run forward and observe movement.",
+))
+def test_movement_permission_is_not_removed_outside_a_prohibition(text):
+    assert "allow_movement" not in _explicit_action_constraints(text)
 
 
 def test_operator_message_acknowledged_even_if_request_replan(tmp_path):
@@ -343,4 +371,3 @@ def test_operator_message_acknowledged_even_if_request_replan(tmp_path):
         assert runtime.executor.run.skill_id == "open_inventory"
         saved = database.load_operator_messages(limit=1)[0]
         assert saved.status == OperatorMessageStatus.ACKNOWLEDGED
-
