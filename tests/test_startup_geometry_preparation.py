@@ -102,6 +102,57 @@ def test_delayed_exact_drawable_discovery_does_not_repair_prematurely(
     assert len(state.changes) == 2
 
 
+@pytest.mark.parametrize("discovery_s", [90.0, None])
+def test_default_preparation_budget_covers_cold_boot_but_stays_bounded(
+    monkeypatch: pytest.MonkeyPatch, discovery_s: float | None,
+) -> None:
+    state = _preparation(monkeypatch)
+    resolve = x11._new_wine_geometry
+
+    def cold_boot(display: Any) -> Any:
+        if discovery_s is None or state.clock < discovery_s:
+            assert state.changes == []
+            raise x11.IsolationError("drawable not ready")
+        return resolve(display)
+
+    monkeypatch.setattr(x11, "_new_wine_geometry", cold_boot)
+
+    if discovery_s is None:
+        with pytest.raises(x11.IsolationError, match="timed out"):
+            x11._prepare_new_isolated_window_geometry(
+                ":71", ":0", preparation_permitted=lambda: True,
+            )
+        assert state.clock == 180
+        assert state.changes == []
+    else:
+        x11._prepare_new_isolated_window_geometry(
+            ":71", ":0", preparation_permitted=lambda: True,
+        )
+        assert discovery_s < state.clock < 180
+        assert len(state.changes) == 2
+    assert state.closed
+
+
+def test_cold_boot_wait_stops_promptly_when_launch_authority_is_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _preparation(monkeypatch)
+
+    def missing(_display: Any) -> Any:
+        raise x11.IsolationError("drawable not ready")
+
+    monkeypatch.setattr(x11, "_new_wine_geometry", missing)
+
+    with pytest.raises(x11.IsolationError, match="lost launch authority"):
+        x11._prepare_new_isolated_window_geometry(
+            ":71", ":0", preparation_permitted=lambda: state.clock < 45,
+        )
+
+    assert state.clock == 45
+    assert state.changes == []
+    assert state.closed
+
+
 def test_failed_correction_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
     state = _preparation(monkeypatch)
     minecraft = SimpleNamespace(configure=lambda **kw: state.changes.append(("window", kw)))

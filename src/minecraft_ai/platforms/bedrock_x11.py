@@ -1428,10 +1428,12 @@ def _prepare_new_isolated_window_geometry(
     host_display: str,
     *,
     preparation_permitted: Callable[[], bool],
-    timeout_s: float = 30.0,
+    timeout_s: float = 180.0,
 ) -> None:
     """Prepare a newly owned launch once, before its session is published.
 
+    Cold encrypted packages need time to decrypt before Wine creates a window;
+    the bounded wait covers that startup, not just geometry settling.
     Never call from capture, status, menu input or an existing-session attach.
     Wait for stable identity/geometry, make at most one horizontal correction
     and one client fit, then verify containment without further mutations.
