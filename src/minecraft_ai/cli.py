@@ -104,8 +104,10 @@ from .supervisor import (
 )
 from .trajectory import TrajectoryReader
 from .wiki import WikiService
+from .agent.upgrade import upgrade_command
 
 app = typer.Typer(help="Minecraft AI lifecycle and tooling CLI.")
+app.command("upgrade")(upgrade_command)
 knowledge_app = typer.Typer(help="Versioned game knowledge commands.")
 bedrock_app = typer.Typer(help="BedrockOnLinux isolated-session commands.")
 roles_app = typer.Typer(help="Agent role/archetype commands.")
