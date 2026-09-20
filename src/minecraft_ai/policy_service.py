@@ -1376,6 +1376,30 @@ class GroundedPolicyRouter:
         self._last_sequence = sequence
         if self._retiring:
             return MotorAction(sequence=sequence)
+        episode_id = intent.episode_id or f"legacy:{intent.skill_id}"
+        if episode_id != self._episode_id:
+            selected, _, _ = self._body_for_level(intent.action_level)
+            observer = (
+                self.grounded if intent.action_level == ActionLevel.GROUNDED
+                else self.gui if intent.action_level == ActionLevel.GUI else None
+            )
+            with self._warm_lock:
+                warming = {key for key, thread in self._warming.items() if thread.is_alive()}
+                unavailable = any(
+                    id(policy) in warming or id(policy) in self._warm_failed
+                    for policy in (selected, observer) if policy is not None
+                )
+            if unavailable:
+                # Anticipatory loading must never turn option binding into a
+                # blocking wait on the motor thread. Do not reset its worker.
+                pending_release = MotorAction(sequence=sequence)
+                if id(self._active) not in warming:
+                    pending_release = _merge_policy_release(pending_release, self._active.reset())
+                if id(self.grounded) not in warming:
+                    self._deactivate_grounding()
+                self._episode_id = None
+                self._episode_level = None
+                return pending_release
         release = self._bind_episode(intent)
         grounding_bound = self._episode_level == ActionLevel.GROUNDED and (
             self._bind_grounded_target(blackboard, intent)

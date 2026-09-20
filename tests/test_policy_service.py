@@ -342,6 +342,78 @@ def test_failed_warmup_does_not_admit_a_specialist() -> None:
     with pytest.raises(RuntimeError, match="previously failed"):
         router._ensure_warm(gui)
 
+    action = router.act(
+        PerceptionBlackboard(),
+        MotorIntent(skill_id="inspect_inventory", mode="gui", episode_id="rejected",
+                    action_level=ActionLevel.GUI),
+        sequence=1,
+    )
+    assert action.keys_down == action.buttons_down == ()
+    assert gui.calls == 0
+    assert router.status()["episode_id"] is None
+
+
+@pytest.mark.parametrize("level", [ActionLevel.GUI, ActionLevel.LATENT])
+def test_episode_binding_does_not_wait_or_reset_a_warming_worker(level: ActionLevel) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+
+    class LoadingPolicy(_RoutingPolicy):
+        def warmup(self) -> None:
+            super().warmup()
+            entered.set()
+            release.wait()
+
+        def reset(self) -> MotorAction:
+            assert release.is_set(), "the warmup owner still owns this worker"
+            return super().reset()
+
+    loading = LoadingPolicy("loading", key="e")
+    primary = _RoutingPolicy("primary", key="w")
+    router = GroundedPolicyRouter(
+        primary if level == ActionLevel.GUI else loading,
+        gui=loading if level == ActionLevel.GUI else None,
+    )
+    if level == ActionLevel.GUI:
+        router.act(PerceptionBlackboard(), MotorIntent(
+            skill_id="explore", mode="explore", episode_id="old", action_level=ActionLevel.LATENT,
+        ), sequence=1)
+    router.request_warm(level)
+    assert entered.wait(2)
+    result: list[MotorAction] = []
+    errors: list[BaseException] = []
+    intent = MotorIntent(skill_id="inspect", mode="inspect", episode_id="new", action_level=level)
+
+    def act() -> None:
+        try:
+            result.append(router.act(PerceptionBlackboard(), intent, sequence=2))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            returned.set()
+
+    caller = threading.Thread(target=act, daemon=True)
+    caller.start()
+    try:
+        assert returned.wait(2), "episode binding blocked the motor loop on warmup"
+        assert not errors
+        assert result[0].sequence == 2
+        assert result[0].keys_down == result[0].buttons_down == ()
+        assert result[0].keys_up == (("w",) if level == ActionLevel.GUI else ())
+        assert router.status()["episode_id"] is None
+        assert loading.calls == loading.resets == 0
+    finally:
+        release.set()
+        caller.join(timeout=2)
+        router._ensure_warm(loading)
+
+    action = router.act(PerceptionBlackboard(), intent, sequence=3)
+    assert action.keys_down == ("e",)
+    assert router.status()["episode_id"] == "new"
+    assert loading.warmups == 1
+    router.close()
+
 
 def test_router_binds_raw_motion_without_a_grounded_observer() -> None:
     primary = _RoutingPolicy("steve", key="w")
