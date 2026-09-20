@@ -310,14 +310,11 @@ start_live_runtime() {
     # A live launcher intentionally owns the GPU marker, so Doctor reports it
     # as busy. Run the host preflight only when a fresh GPU launch is needed.
     if ! bedrock_session_alive && ! bedrock-on-linux doctor; then
-        # A supervised stop can be interrupted after Wine dies but before the
-        # launch marker is removed. BOL's dedicated recovery action only
-        # clears an exact dead same-boot marker under its global launch lock;
-        # it cannot acknowledge previous-boot driver incidents.
-        if ! bedrock-on-linux doctor --recover-interrupted-launch; then
-            echo "BedrockOnLinux preflight is blocked; automatic launch retries are suspended." >&2
-            return 67
-        fi
+        # GPU incidents require operator review, not an automatic acknowledgement.
+        echo "BedrockOnLinux preflight is blocked; automatic launch retries are suspended." >&2
+        echo "Inspect Doctor and the graphics driver. If an acknowledgement is appropriate," \
+            "an operator must explicitly run: bedrock-on-linux doctor --acknowledge-gpu-crash" >&2
+        return 67
     fi
 
     if ! stop_runtime_required; then

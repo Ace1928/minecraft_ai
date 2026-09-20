@@ -139,6 +139,12 @@ physical horizon; that retained-image qualification remains open. Reattaching to
 the same physical target preserves the command origin; changing targets
 invalidates it, as does starting a new calibration attempt.
 
+If BedrockOnLinux Doctor blocks a fresh GPU launch, persistent startup stops
+instead of acknowledging the incident automatically. Inspect Doctor and the
+graphics driver first. Only an operator, after that review, may request the
+launcher's guarded `bedrock-on-linux doctor --acknowledge-gpu-crash` action.
+An already-live managed client does not need a fresh-launch Doctor check.
+
 Observe the headless client through the captured-frame dashboard. For a configured
 local BedrockConnect server, `minecraft-ai bedrock navigate` performs bounded,
 screenshot-bound menu navigation (see `--help` for exact server selection). It is

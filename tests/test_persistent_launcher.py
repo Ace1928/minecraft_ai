@@ -81,7 +81,13 @@ case "${1:-}" in
         ;;
     bedrock)
         if [ "${2:-}" = status ]; then
-            printf '{"alive": true}\n'
+            if [ "${TEST_BEDROCK_ALIVE:-1}" = 1 ] || [ -e "$TEST_STATE/bedrock-started" ]; then
+                printf '{"alive": true}\n'
+            else
+                printf '{"alive": false}\n'
+            fi
+        elif [ "${2:-}" = launch ]; then
+            : > "$TEST_STATE/bedrock-started"
         fi
         exit 0
         ;;
@@ -249,6 +255,38 @@ def test_recovery_reloads_current_configured_role(tmp_path: Path) -> None:
     assert all(not call.endswith(" creative_builder") for call in run_calls)
     assert all(not call.startswith("config show") for call in cli_calls)
     assert "Recovering the isolated Bedrock session and agent." in result.stdout
+
+
+@pytest.mark.parametrize("existing,blocked", [(False, True), (False, False), (True, True)])
+def test_gpu_preflight_never_automatically_recovers_or_acknowledges(
+    tmp_path: Path, existing: bool, blocked: bool,
+) -> None:
+    root, env, state = _launcher_harness(tmp_path, constant_role="generalist")
+    env.update(TEST_BEDROCK_ALIVE=str(int(existing)), STOP_AFTER_RUNS="1")
+    _write_executable(
+        root / "bin" / "bedrock-on-linux",
+        "#!/usr/bin/env bash\n"
+        'printf "%s\\n" "$*" >> "$TEST_STATE/doctor-calls"\n'
+        f'if [ "$*" = doctor ]; then exit {int(blocked)}; fi\n'
+        "exit 0\n",
+    )
+
+    result = _run_launcher(root, env)
+
+    calls = state / "doctor-calls"
+    assert (calls.read_text().splitlines() if calls.exists() else []) == (
+        [] if existing else ["doctor"]
+    )
+    if blocked and not existing:
+        assert result.returncode == 67, result.stderr
+        assert "operator must explicitly run" in result.stderr
+        assert "--acknowledge-gpu-crash" in result.stderr
+        assert "automatic launch retries are suspended" in result.stderr
+        assert "bedrock launch" not in (state / "cli-calls").read_text().splitlines()
+        assert not (state / "run-roles").exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert (state / "run-roles").read_text().splitlines() == ["generalist"]
 
 
 def test_new_healthy_agent_generation_gets_bounded_warmup_grace(tmp_path: Path) -> None:
