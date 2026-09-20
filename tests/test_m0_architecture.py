@@ -190,7 +190,10 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     collect_drop = skills.get("collect_recent_drop")
 
     assert "visible trunk" in gather.description
-    assert gather.version == 8
+    assert gather.version == 9
+    assert {"explore_forward", "backtrack_from_obstacle", "survey_surroundings"}.issubset(
+        gather.recovery_skills
+    )
     assert gather.parameters == ()
     assert gather.description.startswith("Acquire exactly three new oak logs")
     assert "each executor attempt" in gather.description.casefold()
