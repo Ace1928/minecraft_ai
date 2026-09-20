@@ -66,6 +66,7 @@ from minecraft_ai.supervisor import (
     supervisor_alive,
 )
 from minecraft_ai.telemetry import read_telemetry
+from minecraft_ai.operator.observation import SOURCES, STREAM, read_observation
 
 
 MAX_BODY_BYTES = 16 * 1024
@@ -722,6 +723,17 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             self._send_bytes(HTTPStatus.OK, DASHBOARD_HTML.encode(), "text/html; charset=utf-8")
         elif path == "/api/status":
             self._send_json(HTTPStatus.OK, operator_status())
+        elif path == "/api/observation":
+            query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            source = query.get("source", ["association-brain"])[0]
+            stream = query.get("stream_id", [""])[0]
+            if (set(query) - {"source", "stream_id"} or any(len(v) != 1 for v in query.values())
+                    or source not in SOURCES or (stream and not STREAM.fullmatch(stream))):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid observation preference"})
+                return
+            observation = read_observation(preferred_source=source, stream_id=stream)
+            self._send_json(HTTPStatus.OK if observation["online"] else HTTPStatus.SERVICE_UNAVAILABLE,
+                            observation)
         elif path == "/api/messages":
             with StateDatabase(app_paths().state_db) as database:
                 messages = database.load_operator_messages(limit=100)
