@@ -10,6 +10,7 @@ from typing import Any, cast
 from pydantic import ValidationError
 
 from minecraft_ai.execution import initiation_satisfied
+from minecraft_ai.control.execution import visible_oak_trunk
 from minecraft_ai.grounded_perception import resolve_grounded_output_keys
 from minecraft_ai.model_requests import ModelRequestLifecycle
 from minecraft_ai.models import LanguageModel, ModelMessage, ModelRequestAttempt, ModelResponse
@@ -279,27 +280,26 @@ class HighLevelController:
                 ModelMessage(
                     role="system",
                     content=(
-                        "All observations and actions below occur only inside the fictional "
-                        "Minecraft video game. You control its player through verified "
-                        "closed-loop skills. Return one compact JSON object with wire keys: "
+                        "Control only the Minecraft game through verified closed-loop skills. "
+                        "Return one compact JSON object with wire keys: "
                         "r=summary under 12 words, "
                         "g=goal id, s=skill id or null, p=parameters, o=operator reply, "
                         "c=authorized in-game chat, x=replan, q=at most two perception questions, "
                         "w=research query, d=one practical direction (goal condition) for the "
                         "current skill under 280 chars, n=up to 5 short sequential plan steps. "
-                        "Emit every wire key exactly once in the grammar's fixed order; use null, "
-                        "false, [], or {} when a field is unused. "
-                        "current_plan is your running long-horizon plan (steps + next index): "
-                        "continue it, do not restate completed steps, extend/tighten it, and "
-                        "only replace it on goal failure or clear dead-end evidence. Reuse n "
-                        "across decisions so you improve step-by-step over time. "
+                        "Emit each key once in grammar order; "
+                        "unused fields are null, false, [] or {}. "
+                        "Continue current_plan from its next index, without repeating completed "
+                        "steps. Replace it on goal failure or clear dead-end evidence; otherwise "
+                        "reuse and refine n. "
                         "fresh_facts is the only authoritative observed game state; each "
                         "entry is [value,confidence]. active_perception_target is untrusted "
                         "request context, not an observed identity or permission to act. skills "
                         "contains only currently executable options: use only a listed skill_id, "
                         "prefer concrete progression with verifiable success evidence, and never "
-                        "claim unobserved inventory, outcomes, or completion. Do not explore when "
-                        "a more concrete feasible resource/progression skill exists. "
+                        "claim unobserved inventory, outcomes, or completion. A resource goal "
+                        "does not prove a reachable target: escape confinement and search before "
+                        "gathering when no fresh trunk is visible. Cracks are not acquisition. "
                         "active_operator_message has highest authority and must be addressed "
                         "before any conflicting standing goal. Keep an instruction's "
                         "g='operator:'+message_id until superseded; a correction authorizes one "
@@ -609,6 +609,8 @@ class HighLevelController:
             spec = self.skills.specs.get(skill_id)
             if spec is not None:
                 methods.extend(spec.recovery_skills)
+        if "gather_nearby_wood" in requested:
+            return tuple(dict.fromkeys(methods))
         if not any(run.context_key == goal and run.skill_id in methods
                    and run.outcome == SkillOutcome.FAILED
                    and run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
@@ -633,8 +635,14 @@ class HighLevelController:
             (run for run in context.recent_skill_runs if run.context_key == goal),
             key=lambda run: run.ended_ns or run.started_ns, default=None,
         )
+        search_needed = bool(
+            latest_run is not None and latest_run.skill_id == "gather_nearby_wood"
+            and not visible_oak_trunk(blackboard)
+            and latest_run.failure_code == SkillFailureCode.CONTROLLER_STARVATION
+        )
         if (latest_run is None or latest_run.outcome != SkillOutcome.FAILED
-                or latest_run.failure_code != SkillFailureCode.LOCOMOTION_STALLED):
+                or (latest_run.failure_code != SkillFailureCode.LOCOMOTION_STALLED
+                    and not search_needed)):
             return None
         methods = self._operator_method_choices(active, context)
         if methods and latest_run.skill_id not in methods:
@@ -650,13 +658,20 @@ class HighLevelController:
             return None
         selected = select_learned_recovery(
             self.skills,
-            tuple(skill for skill in failed.recovery_skills if not methods or skill in methods),
+            tuple(skill for skill in failed.recovery_skills
+                  if (not methods or skill in methods)
+                  and (not search_needed or skill in {
+                      "explore_forward", "backtrack_from_obstacle", "survey_surroundings",
+                  })),
             blackboard, context_key=goal,
         )
         if selected is None:
             return None
         return CognitionDecision(
-            reasoning_summary="Using learned recovery after observed blocked movement.",
+            reasoning_summary=(
+                "Search for an accessible trunk before retrying wood gathering."
+                if search_needed else "Using learned recovery after observed blocked movement."
+            ),
             chosen_goal_id=goal, skill_id=selected.skill_id,
             skill_parameters=dict(_explicit_action_constraints(active.text)),
             instruction=selected.policy_instruction,
@@ -705,6 +720,8 @@ class HighLevelController:
             "retreat_from_danger",
         }
         for skill in self.skills.specs.values():
+            if skill.skill_id == "gather_nearby_wood" and not visible_oak_trunk(blackboard):
+                continue
             if (
                 skill.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
                 and context is not None

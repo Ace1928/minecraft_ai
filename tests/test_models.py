@@ -118,4 +118,5 @@ def test_local_model_uses_native_grammar_for_constrained_completion(
     )
 
     assert state["json"]["grammar"] == 'root ::= "{}"'
+    assert state["json"]["cache_prompt"] is True
     assert "response_format" not in state["json"]

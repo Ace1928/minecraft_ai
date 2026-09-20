@@ -862,12 +862,8 @@ def test_high_level_prompt_reserves_interaction_and_skill_evidence_facts() -> No
     assert "social.player_message" in strategic
     assert "target.visible" in strategic
     assert "inventory.hotbar.logs" in strategic
-    gather = next(
-        skill for skill in payload["skills"]
-        if skill["skill_id"] == "gather_nearby_wood"
-    )
-    assert gather["description"].startswith("Acquire exactly three new oak logs")
-    assert gather["success_evidence"] == []
+    # A generic visible target does not establish an accessible oak trunk.
+    assert "gather_nearby_wood" not in {skill["skill_id"] for skill in payload["skills"]}
 
 
 def test_high_level_goal_shortlist_keeps_custom_goal_after_role_standing_goals() -> None:

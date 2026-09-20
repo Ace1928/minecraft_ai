@@ -30,6 +30,7 @@ from .daemon_executor import SingleWorkerDaemonExecutor
 from .episodes import RuntimeEvent
 from .emergency import emergency_stop_latched
 from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
+from .control.execution import visible_oak_trunk
 from .grounded_perception import (
     _bounded_json_string,
     crosshair_block_pixel_sha256,
@@ -968,9 +969,18 @@ class AgentRuntime:
                 except RuntimeError:
                     pass
                 return
+            recovery_ids = result.recovery_skills
+            if (result.run.skill_id == "gather_nearby_wood"
+                    and not visible_oak_trunk(self.blackboard)):
+                # A missing trunk calls for a search, not another attack or a
+                # reacquisition loop against the same ungrounded stone wall.
+                recovery_ids = tuple(skill for skill in recovery_ids if skill in {
+                    "escape_submersion", "retreat_from_danger", "explore_forward",
+                    "backtrack_from_obstacle", "survey_surroundings",
+                })
             recovery = select_learned_recovery(
                 self.skills,
-                result.recovery_skills,
+                recovery_ids,
                 self.blackboard,
                 context_key=result.run.context_key,
             )
@@ -3963,6 +3973,20 @@ class AgentRuntime:
         if skill_id is None or skill_id not in skills.specs:
             return False
         context_key = self._plan_goal_id or "default"
+        recent = next((run for run in getattr(self, "_recent_skill_runs", ())
+                       if run.context_key == context_key and run.skill_id == skill_id), None)
+        if (recent is not None
+                and recent.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}
+                and (recent.failure_code == SkillFailureCode.CONTROLLER_STARVATION
+                     or getattr(self, "_pending_decision", None) is not None)):
+            # Infrastructure starvation is not a physical competence penalty.
+            # It still requires fresh admission instead of continually restarting
+            # the failed method and invalidating the planner's snapshot.
+            self._cognition_requested = True
+            return False
+        if skill_id == "gather_nearby_wood" and not visible_oak_trunk(self.blackboard):
+            self._cognition_requested = True
+            return False
         if skills.is_contextually_blocked(skill_id, context_key):
             graph = getattr(self, "_plan_graph", None)
             if graph is not None:
@@ -4000,6 +4024,9 @@ class AgentRuntime:
             source=SkillStartSource.PLAN,
             run_id=uuid.uuid4().hex,
             context_key=context_key,
+            parameters={key: value for key, value in (
+                getattr(getattr(self, "_last_decision", None), "skill_parameters", {})
+            ).items() if key.startswith("allow_") and value is False},
         )
         return True
 

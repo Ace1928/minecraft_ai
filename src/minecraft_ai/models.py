@@ -207,6 +207,9 @@ class OpenAICompatibleLocalModel:
             payload["response_format"] = response_format
         if grammar is not None:
             payload["grammar"] = grammar
+            # Native constrained text requests may reuse identical prompt-prefix
+            # KV, not past decisions. Changed facts/authority remain new input.
+            payload["cache_prompt"] = True
         # Multiple local llama.cpp servers may share one GPU. Concurrent VLM
         # prefill and strategic decoding caused both requests to take roughly
         # six times longer on the managed machine. Serialize local inference

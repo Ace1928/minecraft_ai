@@ -134,6 +134,19 @@ class _OptionFrame:
     locomotion_progress_min_ms: int
 
 
+def visible_oak_trunk(blackboard: CognitionReadView) -> bool:
+    """A search prerequisite, not permission to mine or evidence of possession."""
+    frame = blackboard.latest()
+    return frame is not None and any(
+        track.confidence >= 0.7
+        and track.label.casefold().replace(" ", "_").removeprefix("minecraft:")
+        in {"oak_log", "oak_trunk"}
+        and 0 <= frame.captured_ns - track.last_seen_ns <= 2_000_000_000
+        and not str(track.attributes.get("source", "")).startswith("bootstrap")
+        for track in frame.tracks
+    )
+
+
 def _exact_hotbar_log_fact(
     fact: PerceptionFact,
     *,

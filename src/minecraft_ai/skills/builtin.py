@@ -570,7 +570,7 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="gather_nearby_wood",
-            version=8,
+            version=9,
             name="Gather nearby wood",
             description=(
                 "Acquire exactly three new oak logs as three verified break-and-pickup "
@@ -593,6 +593,9 @@ def build_bootstrap_skill_library() -> SkillLibrary:
                 "escape_submersion",
                 "retreat_from_danger",
                 "reacquire_target",
+                "explore_forward",
+                "backtrack_from_obstacle",
+                "survey_surroundings",
             ),
             max_duration_ms=90_000,
             action_level=ActionLevel.GROUNDED,
