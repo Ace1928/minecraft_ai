@@ -24,6 +24,7 @@ from .cognition import (
     cognition_decision_sha256,
     planks_retry_requires_wood,
 )
+from .cognition.prompts import _explicit_action_constraints
 from .action_levels import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
 from .daemon_executor import SingleWorkerDaemonExecutor
@@ -1142,6 +1143,15 @@ class AgentRuntime:
             return True
 
         if not _verified_obstacle_stall(result):
+            return False
+        non_destructive = tuple(skill for skill in result.recovery_skills if skill in {
+            "backtrack_from_obstacle", "survey_surroundings",
+        })
+        if select_learned_recovery(
+            self.skills, non_destructive, self.blackboard, context_key=result.run.context_key,
+        ) is not None:
+            # Try declared mobility/sensing alternatives before freezing the
+            # player for an expensive block classifier and a possible dig.
             return False
         if (
             not self._headroom_scene_is_safe()
@@ -4019,14 +4029,30 @@ class AgentRuntime:
             self._plan_step_completed_ns = time.monotonic_ns()
             self._cognition_requested = True
             return False
+        constraints: dict[str, bool] = {key: value for key, value in (
+            getattr(getattr(self, "_last_decision", None), "skill_parameters", {})
+        ).items() if key.startswith("allow_") and value is False}
+        database = getattr(self, "state_db", None)
+        if database is not None and context_key.startswith("operator:"):
+            try:
+                messages = database.load_operator_messages(
+                    statuses={OperatorMessageStatus.ACKNOWLEDGED}, limit=20,
+                )
+            except sqlite3.Error:
+                self._cognition_requested = True
+                return False
+            owner = next((message for message in _active_operator_messages(messages)
+                          if context_key == f"operator:{message.message_id}"), None)
+            if owner is not None:
+                # A model's one-option choice not to jump is not an operator
+                # prohibition on jumping in the next climbing option.
+                constraints = _explicit_action_constraints(owner.text)
         self._start_skill(
             spec,
             source=SkillStartSource.PLAN,
             run_id=uuid.uuid4().hex,
             context_key=context_key,
-            parameters={key: value for key, value in (
-                getattr(getattr(self, "_last_decision", None), "skill_parameters", {})
-            ).items() if key.startswith("allow_") and value is False},
+            parameters=constraints,
         )
         return True
 

@@ -88,3 +88,50 @@ def test_plan_continuation_preserves_explicit_action_prohibitions():
     assert runtime._start_current_plan_skill()
     assert runtime.executor.parameters["allow_movement"] is False
     assert runtime.executor.parameters["allow_attack"] is False
+
+
+def test_model_one_option_no_jump_does_not_disable_next_climbing_step(tmp_path):
+    from minecraft_ai.storage import StateDatabase
+    from minecraft_ai.social import OperatorMessage, OperatorMessageStatus
+
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        database.save_operator_message(OperatorMessage(
+            message_id="climb", created_ns=1, text="Climb the ledges; do not attack.",
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ))
+        runtime = _runtime_with_completed_decision(CognitionDecision(
+            chosen_goal_id="operator:climb", skill_id="explore_forward",
+            skill_parameters={"allow_jump": False, "allow_attack": False},
+        ), database=database)
+        runtime.skills = build_bootstrap_skill_library()
+        runtime.executor = SkillExecutor(BootstrapMotorPolicy())
+        runtime._last_decision = runtime._pending_decision.result()
+        runtime._plan_steps = ("traverse_visible_obstacle",)
+        runtime._plan_index = 0
+        runtime._plan_goal_id = "operator:climb"
+        assert runtime._start_current_plan_skill()
+        assert runtime.executor.policy_parameters["allow_jump"] is True
+        assert runtime.executor.policy_parameters["allow_attack"] is False
+
+
+def test_declared_backtracking_precedes_slow_clearance_inspection():
+    from test_headroom_recovery import _stall_result
+
+    runtime = _runtime_with_completed_decision(CognitionDecision())
+    runtime.skills = build_bootstrap_skill_library()
+    _, runtime.blackboard, _ = setup()
+    result = replace(_stall_result(), recovery_skills=("backtrack_from_obstacle",))
+    assert not runtime._route_headroom_terminal(result)
+    assert getattr(runtime, "_headroom_recovery", None) is None
+
+
+def test_literal_backtracking_uses_existing_zero_model_latency_path():
+    from minecraft_ai.social import OperatorMessageStatus
+
+    controller, board, context = setup()
+    message = context.operator_messages[0].model_copy(update={
+        "text": "backtrack_from_obstacle", "status": OperatorMessageStatus.QUEUED,
+    })
+    decision = controller.decide(board, replace(context, operator_messages=(message,)))
+    assert decision.skill_id == "backtrack_from_obstacle"
+    assert controller.model.calls == 0
