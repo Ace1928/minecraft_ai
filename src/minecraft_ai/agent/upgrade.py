@@ -68,6 +68,13 @@ def _sources(root: Path) -> tuple[Path, ...]:
     )))
 
 
+def _bundle_files(root: Path) -> tuple[Path, ...]:
+    paths = tuple(sorted(path for path in root.rglob("*") if path.is_file()))
+    if not paths or any(not path.resolve().is_relative_to(root.resolve()) for path in paths):
+        raise UpgradeError("invalid-artifact-bundle")
+    return paths
+
+
 @dataclass
 class UpgradePlan:
     candidate: RuntimeConfig = field(repr=False)
@@ -76,10 +83,12 @@ class UpgradePlan:
     files: dict[Path, tuple[int, ...]] = field(repr=False)
     roots: dict[Path, tuple[Path, ...]] = field(repr=False)
     receipt: dict[str, Any]
+    bundles: dict[Path, tuple[Path, ...]] = field(default_factory=dict, repr=False)
 
     def check_unchanged(self) -> None:
         if (any(_stamp(path) != stamp for path, stamp in self.files.items())
-                or any(_sources(root) != paths for root, paths in self.roots.items())):
+                or any(_sources(root) != paths for root, paths in self.roots.items())
+                or any(_bundle_files(root) != paths for root, paths in self.bundles.items())):
             raise UpgradeError("pinned-input-changed")
 
 
@@ -93,6 +102,9 @@ def prepare_upgrade(candidate_path: Path, previous_path: Path) -> UpgradePlan:
     files: dict[Path, tuple[int, ...]] = {}
     roots: dict[Path, tuple[Path, ...]] = {}
     identities: dict[str, str] = {}
+    runtime_sources: dict[str, str] = {}
+    source_declarations: list[dict[str, Any]] = []
+    bundles: dict[Path, tuple[Path, ...]] = {}
 
     def pin(path: Path, *, syntax: bool = False) -> str:
         path = path.absolute()
@@ -171,8 +183,8 @@ def prepare_upgrade(candidate_path: Path, previous_path: Path) -> UpgradePlan:
 
     from minecraft_ai.policy_service import _validate_policy_config
 
-    for policy in (candidate.policy, candidate.grounded_policy, candidate.gui_policy,
-                   candidate.raw_motion_policy):
+    for slot in ("policy", "grounded_policy", "gui_policy", "raw_motion_policy"):
+        policy = getattr(candidate, slot)
         if policy is None or not policy.enabled:
             continue
         _validate_policy_config(policy)
@@ -181,13 +193,35 @@ def prepare_upgrade(candidate_path: Path, previous_path: Path) -> UpgradePlan:
             ["git", "-C", str(root), "rev-parse", "HEAD"], check=True,
             capture_output=True, text=True, timeout=5.0,
         )
-        if completed.stdout.strip() != policy.source_commit:
-            raise UpgradeError("policy-source-commit-mismatch")
+        head = completed.stdout.strip()
+        if len(head) != 40 or any(char not in "0123456789abcdef" for char in head):
+            raise UpgradeError("invalid-runtime-source-commit")
+        # source_commit predates handover and can describe historical provider
+        # provenance. Preserve it verbatim in the private config snapshot, never
+        # relabel it as current runtime or model-training provenance.
+        source_declarations.append({
+            "slot": slot, "declared_source_commit_sha256": _digest(policy.source_commit),
+            "runtime_commit": head, "declaration_matches_runtime": head == policy.source_commit,
+        })
         source_roots.add(root)
         pin(Path(policy.python_path))
+        model_path, weights_path = Path(policy.model_path), Path(policy.weights_path)
+        if model_path.is_dir():
+            # External workers may bind an opaque bundle by its explicitly
+            # configured descriptor. Hash every member; format/lineage validation
+            # remains the worker's contract, not a public model-specific loader.
+            if (policy.provider != "external" or not weights_path.is_file()
+                    or not weights_path.resolve().is_relative_to(model_path.resolve())
+                    or policy.model_sha256 != policy.weights_sha256):
+                raise UpgradeError("unbound-artifact-bundle")
+            bundles[model_path] = _bundle_files(model_path)
+            for member in bundles[model_path]:
+                pin(member)
         for location, expected in ((policy.model_path, policy.model_sha256),
                                    (policy.weights_path, policy.weights_sha256),
                                    (policy.scene_model_path, policy.scene_model_sha256)):
+            if location == policy.model_path and model_path.is_dir():
+                continue
             if location and pin(Path(location)) != expected:
                 raise UpgradeError("artifact-digest-mismatch")
 
@@ -196,7 +230,7 @@ def prepare_upgrade(candidate_path: Path, previous_path: Path) -> UpgradePlan:
         if root.is_dir():
             roots[root] = paths
         for path in paths:
-            pin(path, syntax=path.suffix == ".py")
+            runtime_sources[str(path)] = pin(path, syntax=path.suffix == ".py")
     pin(Path(sys.executable))
     receipt = {
         "schema_version": 1,
@@ -204,6 +238,16 @@ def prepare_upgrade(candidate_path: Path, previous_path: Path) -> UpgradePlan:
         "candidate_config_sha256": _digest(candidate.model_dump(mode="json")),
         "previous_config_sha256": _digest(previous.model_dump(mode="json")),
         "source_and_artifacts_sha256": _digest(identities),
+        "runtime_source_sha256": _digest({
+            "files": runtime_sources, "declarations": source_declarations,
+            "import_path": sys.path, "pythonpath": os.environ.get("PYTHONPATH", ""),
+        }),
+        "source_declarations": source_declarations,
+        "source_review_required": any(
+            not declaration["declaration_matches_runtime"] for declaration in source_declarations
+        ),
+        "artifact_bundles": len(bundles),
+        "bundle_verification": "descriptor-pinned-members-plan-bound-worker-validates-format",
         "prewarm": "unsupported-without-live-lease",
         "rollback_scope": "previous-profile-on-pinned-current-source",
         "checkpoint": "unverified-not-promoted",
@@ -214,7 +258,7 @@ def prepare_upgrade(candidate_path: Path, previous_path: Path) -> UpgradePlan:
         **receipt, "interpreter": sys.executable, "prefix": sys.prefix,
         "import_path": sys.path, "pythonpath": os.environ.get("PYTHONPATH", ""),
     })
-    plan = UpgradePlan(candidate, previous, previous_path, files, roots, receipt)
+    plan = UpgradePlan(candidate, previous, previous_path, files, roots, receipt, bundles)
     plan.check_unchanged()
     return plan
 
@@ -262,6 +306,15 @@ def _launcher_barrier(pid: int | None) -> str:
     children = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
     for child in children:
         child_command = lifecycle._linux_process_identity(int(child))
+        if child_command is None:
+            try:
+                child_stat = Path(f"/proc/{child}/stat").read_text().rsplit(")", 1)[1].split()
+            except FileNotFoundError:
+                continue
+            # A stopped shell cannot reap its finished sleep child. An exact
+            # dead child is not an active recovery operation or a reason to thaw.
+            if child_stat[0] in {"Z", "X"} and int(child_stat[1]) == pid:
+                continue
         sleep = shutil.which("sleep")
         if (child_command is None or Path(child_command[1][0]).name != "sleep"
                 or sleep is None or Path(f"/proc/{child}/exe").resolve() != Path(sleep).resolve()
@@ -311,6 +364,7 @@ def activate_upgrade(
     plan: UpgradePlan, *, expected_plan: str, drain_timeout_s: float = 25.0,
     startup_timeout_s: float = 120.0, launcher_pid: int | None = None,
     cancel: threading.Event | None = None,
+    reviewed_source_sha256: str = "",
 ) -> dict[str, Any]:
     """Bound explicit waits; fail closed if containment or intent is ambiguous.
 
@@ -320,6 +374,11 @@ def activate_upgrade(
     """
     if expected_plan != plan.receipt["plan_sha256"]:
         raise UpgradeError("dry-run-plan-mismatch")
+    if (plan.receipt.get("source_review_required") or reviewed_source_sha256) and (
+        not reviewed_source_sha256
+        or reviewed_source_sha256 != plan.receipt.get("runtime_source_sha256")
+    ):
+        raise UpgradeError("exact-reviewed-runtime-source-required")
     if not 0.1 <= drain_timeout_s <= 25.0 or not 0.1 <= startup_timeout_s <= 600.0:
         raise UpgradeError("invalid-wait-budget")
     cancel = threading.Event() if cancel is None else cancel
@@ -327,6 +386,7 @@ def activate_upgrade(
                "phase": "preflight", "events": [], "before": None, "after": None,
                "drain_timeout_s": drain_timeout_s, "startup_timeout_s": startup_timeout_s,
                "downtime_s": None, "old_group_contained": False}
+    receipt["reviewed_source_sha256"] = reviewed_source_sha256 or None
     directory = app_paths().data_dir / "upgrades" / receipt["transaction_id"]
     latest = lifecycle.RUNTIME_DIR / "upgrade.json"
     endpoint: supervisor.ControlEndpoint | None = None
@@ -614,6 +674,10 @@ def upgrade_command(
     expect_plan: str = typer.Option(
         "", "--expect-plan", help="plan_sha256 from an offline dry run.",
     ),
+    reviewed_source_sha256: str = typer.Option(
+        "", "--reviewed-source-sha256",
+        help="Explicitly admit this exact reviewed runtime_source_sha256; never repin provenance.",
+    ),
     drain_timeout_s: float = typer.Option(25.0, "--drain-timeout", min=0.1, max=25.0),
     startup_timeout_s: float = typer.Option(120.0, "--startup-timeout", min=0.1, max=600.0),
     launcher_pid: int | None = typer.Option(
@@ -630,7 +694,7 @@ def upgrade_command(
     """
     try:
         if status:
-            if config or previous_config or dry_run or expect_plan:
+            if config or previous_config or dry_run or expect_plan or reviewed_source_sha256:
                 raise UpgradeError("status-cannot-be-combined-with-upgrade")
             path = lifecycle.RUNTIME_DIR / "upgrade.json"
             typer.echo(path.read_text() if path.exists() else '{"phase": "no-upgrade-receipt"}')
@@ -639,7 +703,15 @@ def upgrade_command(
             raise UpgradeError("config-and-previous-config-required")
         plan = prepare_upgrade(config, previous_config)
         if dry_run:
-            typer.echo(json.dumps({**plan.receipt, "phase": "validated-offline"}, sort_keys=True))
+            needs_review = plan.receipt["source_review_required"] and not reviewed_source_sha256
+            if (reviewed_source_sha256
+                    and reviewed_source_sha256 != plan.receipt["runtime_source_sha256"]):
+                raise UpgradeError("exact-reviewed-runtime-source-required")
+            typer.echo(json.dumps({**plan.receipt, "phase": (
+                "source-review-required" if needs_review else "validated-offline"
+            )}, sort_keys=True))
+            if needs_review:
+                raise typer.Exit(2)
             return
         cancel = threading.Event()
         originals = {}
@@ -649,6 +721,7 @@ def upgrade_command(
             receipt = activate_upgrade(
                 plan, expected_plan=expect_plan, drain_timeout_s=drain_timeout_s,
                 startup_timeout_s=startup_timeout_s, launcher_pid=launcher_pid, cancel=cancel,
+                reviewed_source_sha256=reviewed_source_sha256,
             )
         finally:
             for sig, handler in originals.items():

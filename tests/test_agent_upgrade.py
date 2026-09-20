@@ -593,18 +593,92 @@ def test_policy_pins_are_checked_as_bytes_without_loading_models(tmp_path, monke
     ))
     profile = tmp_path / "profile.json"
     profile.write_text(json.dumps({"policy": policy}))
-    if bad:
+    if bad == "weights":
         with pytest.raises(u.UpgradeError, match="mismatch"):
             u.prepare_upgrade(profile, profile)
     else:
         plan = u.prepare_upgrade(profile, profile)
+        assert plan.receipt["source_review_required"] is (bad == "commit")
+        if bad == "commit":
+            with pytest.raises(u.UpgradeError, match="exact-reviewed-runtime-source-required"):
+                u.activate_upgrade(plan, expected_plan=plan.receipt["plan_sha256"])
         assert model in plan.files and weights in plan.files
         weights.write_bytes(b"changed after validation")
         with pytest.raises(u.UpgradeError, match="pinned-input-changed"):
             plan.check_unchanged()
 
 
-@pytest.mark.parametrize("fault", [None, "running", "child", "mainpid", "service-transition"])
+def test_source_admission_requires_exact_digest_and_preserves_profile(handover):
+    h = handover
+    h.plan.receipt.update(source_review_required=True, runtime_source_sha256="b" * 64)
+    for acknowledgement in ("", "latest", "c" * 64):
+        with pytest.raises(u.UpgradeError, match="exact-reviewed-runtime-source-required"):
+            h.apply(reviewed_source_sha256=acknowledgement)
+    assert not h.events
+    receipt = h.apply(reviewed_source_sha256="b" * 64)
+    assert receipt["phase"] == "upgraded"
+    assert receipt["reviewed_source_sha256"] == "b" * 64
+    assert json.loads(h.launches[0]["config_file"].read_text()) == h.plan.candidate.model_dump(
+        mode="json",
+    )
+
+
+@pytest.mark.parametrize("drift", ["source", "provenance"])
+def test_previous_source_acknowledgement_cannot_admit_changed_plan(profiles, drift):
+    previous, candidate, module = profiles
+    plan = u.prepare_upgrade(candidate, previous)
+    old_digest = plan.receipt["runtime_source_sha256"]
+    if drift == "source":
+        module.write_text("raise RuntimeError('different source')\n")
+    else:
+        # The caller cannot forge review by replacing the recorded declaration.
+        plan.receipt["source_declarations"] = [{"declaration_matches_runtime": False}]
+        plan.receipt["runtime_source_sha256"] = "f" * 64
+    changed = u.prepare_upgrade(candidate, previous) if drift == "source" else plan
+    with pytest.raises(u.UpgradeError, match="exact-reviewed-runtime-source-required"):
+        u.activate_upgrade(changed, expected_plan=changed.receipt["plan_sha256"],
+                           reviewed_source_sha256=old_digest)
+
+
+def test_external_bundle_is_descriptor_pinned_without_deserialization(tmp_path, monkeypatch):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    descriptor = bundle / "index.json"
+    descriptor.write_text('{"opaque_provider_descriptor": true}')
+    weights = bundle / "opaque.weights"
+    weights.write_bytes(b"opaque test weights, not a model")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "worker.py").write_text("raise AssertionError('do not import')\n")
+    digest = hashlib.sha256(descriptor.read_bytes()).hexdigest()
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"policy": {
+        "enabled": True, "provider": "external", "external_module": "worker",
+        "external_architecture": "opaque-example", "source_path": str(source),
+        "python_path": sys.executable, "model_path": str(bundle),
+        "weights_path": str(descriptor), "model_sha256": digest, "weights_sha256": digest,
+        "source_commit": "a" * 40, "license": "mit", "model_version": "unchanged-v1",
+    }}))
+    monkeypatch.setattr(u.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout="b" * 40))
+    plan = u.prepare_upgrade(profile, profile)
+    assert plan.receipt["artifact_bundles"] == 1
+    assert plan.candidate.policy.source_commit == "a" * 40
+    assert plan.candidate.policy.model_version == "unchanged-v1"
+    assert descriptor in plan.files and weights in plan.files
+    result = CliRunner().invoke(cli.app, [
+        "upgrade", "--dry-run", "--config", str(profile), "--previous-config", str(profile),
+    ])
+    assert result.exit_code == 2
+    assert json.loads(result.output)["phase"] == "source-review-required"
+    assert "runtime_source_sha256" in result.output and str(tmp_path) not in result.output
+    (bundle / "added.weights").write_bytes(b"not previously qualified")
+    with pytest.raises(u.UpgradeError, match="pinned-input-changed"):
+        plan.check_unchanged()
+
+
+@pytest.mark.parametrize("fault", [
+    None, "zombie", "running", "child", "mainpid", "service-transition", "unverifiable-child",
+])
 @pytest.mark.skipif(os.name != "posix", reason="launcher barrier uses POSIX proc paths")
 def test_parent_held_launcher_requires_exact_quiescent_shell(monkeypatch, fault):
     monkeypatch.setattr(u, "persistent_agent_service_load_state", lambda: "loaded")
@@ -614,7 +688,9 @@ def test_parent_held_launcher_requires_exact_quiescent_shell(monkeypatch, fault)
     monkeypatch.setattr(u.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
         stdout="2" if fault == "mainpid" else "10001",
     ))
-    monkeypatch.setattr(lifecycle, "_linux_process_identity", lambda pid: (
+    monkeypatch.setattr(lifecycle, "_linux_process_identity", lambda pid: None if (
+        pid == 10002 and fault in {"zombie", "unverifiable-child"}
+    ) else (
         9, ("bash", "launcher.sh") if pid == 10001 else (
             "python" if fault == "child" else "sleep", "10",
         ),
@@ -625,6 +701,9 @@ def test_parent_held_launcher_requires_exact_quiescent_shell(monkeypatch, fault)
             "/proc/10001/stat": "10001 (bash) " + ("S" if fault == "running" else "T"),
             "/proc/10001/task/10001/children": "10002",
             "/proc/10002/task/10002/children": "",
+            "/proc/10002/stat": "10002 (sleep) " + (
+                "Z" if fault == "zombie" else "S"
+            ) + " 10001",
         }
         return fake[str(path)] if str(path) in fake else original_read(path, *args, **kwargs)
     monkeypatch.setattr(Path, "read_text", read)
@@ -634,7 +713,7 @@ def test_parent_held_launcher_requires_exact_quiescent_shell(monkeypatch, fault)
         else original_resolve(path, *args, **kwargs)
     ))
     monkeypatch.setattr(u.os, "kill", lambda *args: pytest.fail("barrier must not signal"))
-    if fault:
+    if fault not in {None, "zombie"}:
         with pytest.raises(u.UpgradeError):
             u._launcher_barrier(10001)
     else:
