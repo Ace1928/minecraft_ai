@@ -1,4 +1,5 @@
 import hashlib
+import threading
 import time
 from pathlib import Path
 
@@ -281,6 +282,65 @@ def test_router_anticipatory_warm_loads_specialist_before_bind() -> None:
         sequence=1,
     )
     assert grounded.warmups == 1
+
+
+@pytest.mark.parametrize("blocking", [False, True])
+def test_repeated_warm_request_only_waits_when_blocking(blocking: bool) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+
+    class SlowPolicy(_RoutingPolicy):
+        def warmup(self) -> None:
+            super().warmup()
+            entered.set()
+            release.wait()
+
+    gui = SlowPolicy("slow-gui", key="e")
+    router = GroundedPolicyRouter(_RoutingPolicy("primary", key="w"), gui=gui)
+    router._begin_warm(gui, blocking=False)
+    assert entered.wait(2)
+
+    def request_again() -> None:
+        if blocking:
+            router._ensure_warm(gui)
+        else:
+            router.request_warm(ActionLevel.GUI)
+        returned.set()
+
+    caller = threading.Thread(target=request_again, daemon=True)
+    caller.start()
+    try:
+        assert returned.wait(0.2 if blocking else 2) is not blocking
+        assert gui.warmups == 1
+        assert not router.specialist_ready(ActionLevel.GUI)
+    finally:
+        release.set()
+        caller.join(timeout=2)
+        router.close()
+
+    assert returned.is_set()
+
+
+def test_failed_warmup_does_not_admit_a_specialist() -> None:
+    class RejectedPolicy(_RoutingPolicy):
+        def warmup(self) -> None:
+            super().warmup()
+            raise RuntimeError("checkpoint identity rejected")
+
+    gui = RejectedPolicy("rejected-gui", key="e")
+    router = GroundedPolicyRouter(_RoutingPolicy("primary", key="w"), gui=gui)
+
+    with pytest.raises(RuntimeError, match="identity rejected"):
+        router._ensure_warm(gui)
+
+    assert not router.specialist_ready(ActionLevel.GUI)
+    assert id(gui) not in router._warming
+    assert router.status()["failed_warmup_policy_ids"] == ["rejected-gui"]
+    router.request_warm(ActionLevel.GUI)
+    assert gui.warmups == 1
+    with pytest.raises(RuntimeError, match="previously failed"):
+        router._ensure_warm(gui)
 
 
 def test_router_binds_raw_motion_without_a_grounded_observer() -> None:

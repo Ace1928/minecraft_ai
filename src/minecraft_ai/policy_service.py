@@ -1334,6 +1334,7 @@ class GroundedPolicyRouter:
         init=False,
     )
     _warmed: set[int] = field(default_factory=set, init=False)
+    _warm_failed: set[int] = field(default_factory=set, init=False)
     _warm_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     _warming: dict[int, threading.Thread] = field(default_factory=dict, init=False)
     _retiring: bool = field(default=False, init=False)
@@ -1561,6 +1562,7 @@ class GroundedPolicyRouter:
         for thread in threads:
             thread.join(timeout=30)
         self._warmed.clear()
+        self._warm_failed.clear()
         self._warming.clear()
         for policy in self._policies():
             close = getattr(policy, "close", None)
@@ -1687,8 +1689,14 @@ class GroundedPolicyRouter:
                 raise RuntimeError("cannot warm a terminally retiring router")
             if key in self._warmed:
                 return
+            if key in self._warm_failed:
+                if blocking:
+                    raise RuntimeError(f"policy warmup previously failed: {policy.policy_id}")
+                return
             existing = self._warming.get(key)
             if existing is not None and existing.is_alive():
+                if not blocking:
+                    return
                 wait_for = existing
             elif blocking:
                 start_inline = True
@@ -1706,6 +1714,9 @@ class GroundedPolicyRouter:
         if wait_for is not None:
             if not self._wait_for_warm_owner(key, wait_for):
                 raise RuntimeError("cannot wait recursively for this policy warmup")
+            with self._warm_lock:
+                if key not in self._warmed:
+                    raise RuntimeError(f"policy warmup failed or was retired: {policy.policy_id}")
             return
         if start_inline:
             self._warm_policy(policy)
@@ -1731,14 +1742,17 @@ class GroundedPolicyRouter:
 
     def _warm_policy(self, policy: MotorPolicy) -> None:
         key = id(policy)
+        succeeded = False
         try:
             warmup = getattr(policy, "warmup", None)
             if callable(warmup):
                 warmup()
+            succeeded = True
         finally:
             with self._warm_lock:
                 if not self._retiring:
-                    self._warmed.add(key)
+                    # A completed attempt is not proof that the worker is ready.
+                    (self._warmed if succeeded else self._warm_failed).add(key)
                 self._warming.pop(key, None)
 
     def status(self) -> dict[str, object]:
@@ -1752,6 +1766,9 @@ class GroundedPolicyRouter:
             "provider": "grounded-router",
             "active_route": self._active_route,
             "switches": self._switches,
+            "failed_warmup_policy_ids": [
+                policy.policy_id for policy in self._policies() if id(policy) in self._warm_failed
+            ],
             "episode_id": self._episode_id,
             "episode_action_level": (
                 None if self._episode_level is None else self._episode_level.value
