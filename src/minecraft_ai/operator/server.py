@@ -67,6 +67,7 @@ from minecraft_ai.supervisor import (
 )
 from minecraft_ai.telemetry import read_telemetry
 from minecraft_ai.operator.observation import SOURCES, STREAM, read_observation
+from minecraft_ai.operator.topology import build_topology
 
 
 MAX_BODY_BYTES = 16 * 1024
@@ -734,6 +735,16 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             observation = read_observation(preferred_source=source, stream_id=stream)
             self._send_json(HTTPStatus.OK if observation["online"] else HTTPStatus.SERVICE_UNAVAILABLE,
                             observation)
+        elif path == "/api/topology":
+            query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            source = query.get("source", ["association-brain"])[0]
+            stream = query.get("stream_id", [""])[0]
+            if (set(query) - {"source", "stream_id"} or any(len(v) != 1 for v in query.values())
+                    or source not in SOURCES or (stream and not STREAM.fullmatch(stream))):
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid topology preference"})
+                return
+            observation = read_observation(preferred_source=source, stream_id=stream)
+            self._send_json(HTTPStatus.OK, build_topology(operator_status(), observation))
         elif path == "/api/messages":
             with StateDatabase(app_paths().state_db) as database:
                 messages = database.load_operator_messages(limit=100)
@@ -1234,6 +1245,13 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 .prediction{position:absolute;border:2px dashed var(--amber);background:#ffc76618;box-shadow:0 0 12px #ffc76688;display:none;pointer-events:none}
 .target-review{display:flex;align-items:center;gap:12px;margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:9px;background:#09130f}.target-review[hidden]{display:none}.target-review canvas{width:160px;height:90px;object-fit:contain;background:#020403;border:1px solid #31483e;border-radius:6px}.target-review b,.target-review span{display:block}.target-review span{color:var(--muted);font-size:12px;margin-top:4px}
 .ok{color:var(--green)}.bad{color:var(--red)}.amber{color:var(--amber)}#notice{min-height:20px;margin-top:9px;color:var(--muted)}
+.topo-wrap{position:relative;border:1px solid var(--line);border-radius:12px;background:radial-gradient(circle at 50% 0%,#0d241b,#030705 72%);overflow:hidden}
+.topo-wrap canvas{display:block;width:100%;height:auto;touch-action:none;cursor:grab}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.chip{border:1px solid var(--line);border-radius:999px;padding:4px 10px;color:var(--muted);font-size:11px}
+.chip b{color:var(--text)}
+#modelMeta{flex:2;text-align:right}
+section+section{margin-top:13px}
 @media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}.wide{grid-column:span 2}.metrics{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:540px){main{padding:16px}.grid{grid-template-columns:1fr}.wide,.full{grid-column:1}.row{flex-direction:column}.live{display:none}}
 </style></head>
@@ -1252,6 +1270,8 @@ button:hover{filter:brightness(1.13)}.feed{max-height:330px;overflow:auto}.msg{b
 <div class="target-review" id="targetReview" hidden><canvas id="targetPreview" width="320" height="180"></canvas><div><b>Exact target pixels</b><span>This frame is frozen until you arm or clear the selection. Confirm the crop matches the label.</span></div></div>
 <div class="row"><input id="targetLabel" maxlength="80" value="log" aria-label="Target label"><button id="setTarget">Run ROCKET-2 on selection</button><button class="secondary" id="clearTarget">Clear target</button></div><div id="targetNotice" class="label">Drag a tight box around the object, then submit it as ROCKET-2's cross-view reference.</div></section>
 <section class="card"><h2>Fresh learned perception</h2><pre class="facts" id="facts">Waiting for perception facts.</pre></section>
+<section class="card"><h2>System topology</h2><div class="topo-wrap"><canvas id="topoCanvas" width="1280" height="520" aria-label="Live Minecraft AI part topology"></canvas></div><div class="chips" id="topoChips"></div></section>
+<section class="card"><h2>Observed model topology</h2><div class="row"><select id="modelPick" aria-label="Observed model"></select><span class="label" id="modelMeta">Waiting for a bound model population.</span></div><div class="topo-wrap"><canvas id="brainCanvas" width="1280" height="620" aria-label="Observed model population; drag to orbit"></canvas></div><div class="chips" id="brainChips"></div></section>
 <section class="two"><div class="card"><h2>Talk to the high-level agent</h2><textarea id="text" maxlength="2000" placeholder="Give an instruction, ask a question, provide feedback, or correct its current approach…"></textarea>
 <div class="row"><select id="kind"><option value="instruction">Instruction</option><option value="question">Question</option><option value="feedback">Feedback</option><option value="correction">Correction</option></select>
 <select id="priority"><option value="0.8">High priority</option><option value="0.55">Normal priority</option><option value="1">Urgent</option></select><button id="send">Send to agent</button></div>
@@ -1294,5 +1314,33 @@ $('setTarget').onclick=async()=>{if(!targetBox||targetBox.width<.005||targetBox.
 $('clearTarget').onclick=async()=>{try{await api('/api/target/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;$('targetNotice').textContent='Grounded target cleared.';refreshFrame()}catch(e){$('targetNotice').textContent=e.message}};
 $('pause').onclick=async()=>{try{await api('/api/control/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('notice').textContent='Agent paused; motor capability revoked.';refresh()}catch(e){$('notice').textContent=e.message}};
 $('resume').onclick=async()=>{try{await api('/api/control/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('notice').textContent='Supervisor returned to safe idle. Live control was not armed.';refresh()}catch(e){$('notice').textContent=e.message}};
-refresh();messages();refreshFrame();setInterval(refresh,500);setInterval(messages,2000);setInterval(refreshFrame,80);
+const topoCanvas=$('topoCanvas'),topoCtx=topoCanvas.getContext('2d'),brainCanvas=$('brainCanvas'),brainCtx=brainCanvas.getContext('2d');
+const PALETTE=['#5ce58c','#70d7e8','#ffc766','#ff9e7a','#c792ea','#8ab4ff','#7ef0c0','#ffd6f5'];
+const TOPO_LAYOUT={capture:[170,120],perception:[430,86],policy:[700,96],skills:[950,168],bedrock:[1120,330],supervisor:[890,458],agent:[610,400],native_policy:[330,436],association_brain:[130,336],memory:[440,256]};
+let topology=null,topoLoading=false,brainYaw=.55,brainPitch=-.2,brainDrag=null,selectedModel=0,frameTick=0;
+function roundRect(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.arcTo(x,y,x+w,y,r);c.closePath()}
+const partColour=s=>s==='live'?'#5ce58c':s==='idle'?'#ffc766':'#5a6b63';
+async function refreshTopology(){if(topoLoading)return;topoLoading=true;try{topology=await api('/api/topology');drawSystemTopology();drawBrain()}catch(e){topology=null}finally{topoLoading=false}}
+function drawSystemTopology(){const c=topoCtx,w=topoCanvas.width,h=topoCanvas.height,t=performance.now()/1000;c.clearRect(0,0,w,h);c.strokeStyle='#12241c';c.lineWidth=1;for(let x=0;x<w;x+=64){c.beginPath();c.moveTo(x,0);c.lineTo(x,h);c.stroke()}for(let y=0;y<h;y+=64){c.beginPath();c.moveTo(0,y);c.lineTo(w,y);c.stroke()}
+const parts=topology?topology.parts:[];const positions={};for(const part of parts){const base=TOPO_LAYOUT[part.id]||[w/2,h/2];positions[part.id]=[base[0],base[1]+Math.sin(t*1.3+part.label.length)*3]}
+for(const edge of (topology?topology.edges:[])){const a=positions[edge.source],b=positions[edge.target];if(!a||!b)continue;const flow=edge.flow;c.strokeStyle=flow>0.05?'rgba(92,229,140,'+(0.22+0.55*flow)+')':'rgba(90,120,105,.32)';c.lineWidth=flow>0.05?2.2:1.2;c.setLineDash(flow>0.05?[10,12]:[]);c.lineDashOffset=flow>0.05?-t*90*flow:0;c.beginPath();c.moveTo(a[0],a[1]);c.quadraticCurveTo((a[0]+b[0])/2,(a[1]+b[1])/2-54,b[0],b[1]);c.stroke()}c.setLineDash([]);
+for(const part of parts){const p=positions[part.id],colour=partColour(part.state),pulse=0.5+0.5*Math.sin(t*2.2+part.label.length);c.shadowColor=colour;c.shadowBlur=part.state==='live'?16+10*pulse:6;c.fillStyle='#0d1b16';roundRect(c,p[0]-94,p[1]-27,188,54,13);c.fill();c.shadowBlur=0;c.strokeStyle=colour;c.lineWidth=1.4;roundRect(c,p[0]-94,p[1]-27,188,54,13);c.stroke();c.fillStyle='#ecf8f1';c.font='600 15px ui-monospace,monospace';c.textAlign='center';c.fillText(part.label,p[0],p[1]-5);c.fillStyle=colour;c.font='10.5px ui-monospace,monospace';c.fillText(String(part.detail||part.state).slice(0,28),p[0],p[1]+13);c.beginPath();c.arc(p[0]+80,p[1]-15,3.5+2.5*part.activity*pulse,0,7);c.fillStyle=colour;c.fill()}
+c.shadowBlur=0;c.textAlign='left';c.fillStyle='#95aa9f';c.font='12px ui-monospace,monospace';const o=topology&&topology.observation;c.fillText(o?(o.online?('observation '+o.source_id+' · seq '+o.sequence+' · '+(o.frame_age_ms||0).toFixed(0)+' ms · action '+((o.action&&o.action.kind)||'none')):'observation unavailable'):'waiting for live topology',20,28);
+const chips=$('topoChips');chips.replaceChildren();for(const part of parts){const el=document.createElement('span');el.className='chip';el.innerHTML='<b style="color:'+partColour(part.state)+'">●</b> '+part.label+' · '+part.state+' · '+Math.round(part.activity*100)+'%';chips.append(el)}}
+function drawBrain(){const c=brainCtx,w=brainCanvas.width,h=brainCanvas.height;c.clearRect(0,0,w,h);const pops=(topology&&topology.populations)||[];if(!pops.length){c.fillStyle='#95aa9f';c.font='15px ui-monospace,monospace';c.fillText('No bound model population in the current observation.',24,46);c.font='12px ui-monospace,monospace';c.fillText('Populations appear when a producer publishes an allowlisted packet with a bound model.',24,70);$('modelMeta').textContent='Waiting for a bound model population.';$('brainChips').replaceChildren();return}
+selectedModel=Math.min(selectedModel,pops.length-1);const pop=pops[selectedModel];const pick=$('modelPick');if(pick.options.length!==pops.length||pick.dataset.models!==pops.map(p=>p.model).join(',')){pick.replaceChildren();pick.dataset.models=pops.map(p=>p.model).join(',');pops.forEach((p,i)=>{const o=document.createElement('option');o.value=String(i);o.textContent=p.model;pick.append(o)});pick.onchange=()=>{selectedModel=Number(pick.value);drawBrain()}}pick.value=String(selectedModel);
+$('modelMeta').textContent=pop.unit_count+' units · '+pop.total_edges+' edges'+(pop.edges_complete?' · complete':'')+' · '+pop.calls+' calls · '+(pop.activity||[]).length+' active now';
+const pos=pop.positions,layers=pop.layer_sizes||[pop.unit_count],n=pos.length;const layerOf=i=>{let acc=0;for(let L=0;L<layers.length;L++){acc+=layers[L];if(i<acc)return L}return layers.length-1};
+const act=new Float32Array(n);for(const pair of (pop.activity||[]))act[pair[0]]=Math.max(0,Math.min(1,Number(pair[1])));
+let extent=1;for(const p of pos){extent=Math.max(extent,Math.abs(Number(p[0])||0),Math.abs(Number(p[1])||0),Math.abs(Number(p[2])||0))}
+const scale=Math.min(w,h)*0.42/extent;const cy=Math.cos(brainYaw),sy=Math.sin(brainYaw),cp=Math.cos(brainPitch),sp=Math.sin(brainPitch);const proj=[];
+for(let i=0;i<n;i++){const p=pos[i],x=Number(p[0])||0,y=Number(p[1])||0,z=Number(p[2])||0;const x1=x*cy+z*sy,z1=-x*sy+z*cy,y1=y*cp-z1*sp,z2=y*sp+z1*cp;const depth=1/(1+(z2+extent)*0.10);proj.push([w/2+x1*scale*depth,h/2-y1*scale*depth,depth,i])}
+const edges=pop.edges||[];const stride=edges.length>1600?Math.ceil(edges.length/1600):1;c.lineWidth=0.6;for(let e=0;e<edges.length;e+=stride){const a=proj[edges[e][0]],b=proj[edges[e][1]];if(!a||!b)continue;c.strokeStyle='rgba(112,215,232,'+(0.04+0.1*Math.min(a[2],b[2])).toFixed(3)+')';c.beginPath();c.moveTo(a[0],a[1]);c.lineTo(b[0],b[1]);c.stroke()}
+proj.sort((a,b)=>a[2]-b[2]);for(const [x,y,depth,i] of proj){const colour=PALETTE[layerOf(i)%PALETTE.length],a=act[i];const r=(a>0.02?2.6+4.6*a:1.5)*depth;if(a>0.02){c.shadowColor=colour;c.shadowBlur=15*a;c.fillStyle=colour}else{c.shadowBlur=0;c.fillStyle='rgba(150,190,170,'+(0.22+0.45*depth).toFixed(3)+')'}c.beginPath();c.arc(x,y,Math.max(0.7,r),0,7);c.fill()}
+c.shadowBlur=0;const chips=$('brainChips');chips.replaceChildren();const c1=document.createElement('span');c1.className='chip';c1.innerHTML='<b>'+(pop.activity||[]).length+'</b> active of '+n+' units';const c2=document.createElement('span');c2.className='chip';c2.innerHTML='<b>'+layers.length+'</b> layers · identity '+String(pop.identity).slice(0,12)+'…';const c3=document.createElement('span');c3.className='chip';c3.innerHTML='activity basis <b>'+String(pop.activity_basis||'observed-activation')+'</b>';chips.append(c1,c2,c3)}
+brainCanvas.onpointerdown=e=>{brainDrag={x:e.clientX,y:e.clientY};brainCanvas.setPointerCapture(e.pointerId)};
+brainCanvas.onpointermove=e=>{if(!brainDrag)return;brainYaw+=(e.clientX-brainDrag.x)*0.008;brainPitch=Math.max(-1.2,Math.min(1.2,brainPitch+(e.clientY-brainDrag.y)*0.006));brainDrag={x:e.clientX,y:e.clientY};drawBrain()};
+brainCanvas.onpointerup=e=>{brainDrag=null;brainCanvas.releasePointerCapture(e.pointerId)};
+(function animateTopology(){frameTick++;if(!document.hidden&&topology){drawSystemTopology();if(!brainDrag&&frameTick%3===0)drawBrain()}requestAnimationFrame(animateTopology)})();
+refresh();messages();refreshFrame();refreshTopology();setInterval(refresh,500);setInterval(messages,2000);setInterval(refreshFrame,80);setInterval(refreshTopology,600);
 </script></body></html>"""
