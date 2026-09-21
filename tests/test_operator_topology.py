@@ -4,6 +4,9 @@ import base64
 import hashlib
 import io
 import json
+import time
+
+import numpy as np
 import threading
 import urllib.error
 import urllib.request
@@ -119,3 +122,52 @@ def test_topology_route_is_get_only_and_validates_preferences(monkeypatch):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+def _association_packet():
+    """The shape the ERAIS association publisher emits (576-unit population)."""
+    stream = "b" * 32
+    inputs = np.zeros((2048, 6), np.float32)
+    for kc in range(0, 2048, 4):
+        inputs[kc, :3] = [1, 5, 9]
+    selected = list(range(0, 2048, 4))
+    positions = [[(i % 8 - 3.5) / 5, (i // 8 - 3.5) / 5, -.6, 0] for i in range(64)]
+    positions += [[(i % 32 - 15.5) / 18, (i // 32 - 7.5) / 10, .6, 1] for i in range(512)]
+    edges = [[int(pn), 64 + i] for i, kc in enumerate(selected) for pn in inputs[kc, :3]]
+    return {
+        "schema": observation.SCHEMA, "source_id": "association-brain", "stream_id": stream,
+        "sequence": 3, "source_frame_id": 17, "source_captured_ns": str(time.monotonic_ns()),
+        "safety": {"game_only": True, "chat_free": False}, "input": None,
+        "reconstruction": None,
+        "consumed_rgb_sha256": "c" * 64,
+        "receptive_fields": {"source_count": 64, "scope": "sparse-luminance-8x8", "samples": [
+            {"index": i, "value": .5, "box": [.2 + (i % 8) * .05, .2 + (i // 8) * .05,
+                                              1 / 1280, 1 / 720]} for i in range(64)]},
+        "models": {
+            "native_policy": {"available": False, "calls": 0, "binding_sha256": None,
+                              "source_unit_count": 0, "population": None},
+            "association_brain": {"available": True, "calls": 1, "binding_sha256": "d" * 64,
+                "source_unit_count": 2112, "activity_basis": "readout-input",
+                "activity_reused": False, "source_kc_count": 2048, "source_active_kcs": 512,
+                "population": {"identity": "e" * 64, "implementation_sha256": "f" * 64,
+                    "unit_count": 576, "layer_sizes": [64, 512], "positions": positions,
+                    "edges": edges, "total_edges": 2048 * 6,
+                    "source_indices": list(range(64)) + [64 + i for i in range(512)],
+                    "activity": [[i, .5] for i in range(64)]}},
+        },
+        "action": None,
+    }
+
+
+def test_viewer_renders_the_association_producer_population():
+    projected = observation.project_observation(
+        _association_packet(), preferred_source="association-brain")
+    topology = build_topology({}, projected)
+    assert len(topology["populations"]) == 1
+    population = topology["populations"][0]
+    assert population["model"] == "association_brain" and population["unit_count"] == 576
+    assert population["layer_sizes"] == [64, 512]
+    assert len(population["positions"]) == 576 and len(population["activity"]) == 64
+    assert any(part["id"] == "association_brain" and part["state"] == "live"
+               for part in topology["parts"])
+    assert topology["observation"]["source_id"] == "association-brain"
