@@ -125,6 +125,19 @@ class HighLevelController:
                 query_text=planning_query,
                 context=context,
             )
+            # A skill with repeated consecutive failures in this context is not
+            # a real option for this decision. Exclude it up front instead of
+            # paying a second model round-trip for the identical bounded
+            # correction. Urgent safety and a fresh explicit operator retry
+            # keep their existing exceptions; the repair path below remains the
+            # fallback if the model still proposes one.
+            if not _urgent_safety_required(blackboard) and not self._fresh_operator_retry(context):
+                blocked_skill_ids = self._recently_blocked_skill_ids(context)
+                if blocked_skill_ids:
+                    feasible_skill_payloads = [
+                        payload for payload in feasible_skill_payloads
+                        if str(payload["skill_id"]) not in blocked_skill_ids
+                    ]
             # The canonical visible log count is strategic state even though
             # exact gather completion is a three-event transaction rather than
             # an absolute SkillCondition.
@@ -862,6 +875,14 @@ class HighLevelController:
             if stats is not None and stats.consecutive_failures >= 2:
                 return recent
         return None
+
+    @staticmethod
+    def _fresh_operator_retry(context: CognitionContext) -> bool:
+        """A fresh explicit operator retry keeps its one evidence-producing attempt."""
+        return bool(context.operator_messages) and context.operator_messages[0].status in {
+            OperatorMessageStatus.QUEUED,
+            OperatorMessageStatus.DELIVERED,
+        }
 
     def _recently_blocked_skill_ids(self, context: CognitionContext) -> set[str]:
         blocked: set[str] = set()

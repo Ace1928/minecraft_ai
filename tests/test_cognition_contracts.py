@@ -1934,3 +1934,41 @@ def test_repair_cannot_alternate_between_two_recently_failed_options() -> None:
     assert model.calls == 2
     assert controller.metrics.retry_repairs == 1
     assert controller.metrics.last_error == "repeated-option-blocked:explore_forward"
+
+
+def test_recently_blocked_skill_is_excluded_from_the_first_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    library = build_bootstrap_skill_library()
+    run = SkillRun(
+        run_id="blocked-1",
+        skill_id="explore_forward",
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.TIMED_OUT,
+        failure_reason="skill-timeout",
+    )
+    library.record(run)
+    library.record(run.model_copy(update={"run_id": "blocked-2"}))
+    context = _context()
+    context.recent_skill_runs = (run,)
+    controller = HighLevelController(_IdleCapturingModel(), library)
+    offered: list[dict[str, object]] = []
+
+    def complete(messages: object, *, repair_bounds: object) -> CognitionDecision:
+        del repair_bounds
+        offered.append(json.loads(messages[1].content))  # type: ignore[index,union-attr]
+        return CognitionDecision(skill_id=None, request_replan=True)
+
+    monkeypatch.setattr(controller, "_complete", complete)
+
+    decision = controller.decide(_board(), context)
+
+    # One model round-trip: the blocked skill is absent from its options rather
+    # than offered and then corrected by a second call.
+    assert len(offered) == 1
+    assert "explore_forward" not in {
+        skill["skill_id"] for skill in offered[0]["skills"]  # type: ignore[index]
+    }
+    assert decision.skill_id is None and decision.request_replan is True
+    assert controller.metrics.retry_repairs == 0
