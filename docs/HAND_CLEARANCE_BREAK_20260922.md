@@ -10,17 +10,20 @@ VLM stayed running:
 |---|---|---|---|---|---|
 | 1 | 2026-09-22 23:06:01 | `ee0822d83d104711bedcff98be1ec03d` | `stone` | `block_broken` | 0.84 |
 | 2 | 2026-09-22 23:09:35 | `5d39e6fc57e446a180635558168d959e` | `stone` | `block_broken` | 0.84 |
+| 3 | 2026-09-22 23:28:25 | `fefd87238cfa41a88ce772c68d113023` | `stone` | `block_broken` | 0.84 |
 
-Both came from `mine_visible_block` runs owned by the traversal headroom
+All three came from `mine_visible_block` runs owned by the traversal headroom
 recovery, bound to fresh VLM crosshair receipts, and were verified by the
 existing temporal visual verifier ("stationary sustained attack traversed
 multiple damage phases and settled on a stable changed luma grid after
-release"). The second event repeats the first with a different query id.
+release"). Each used a distinct crosshair-probe query id, so the break repeats
+across independent transactions rather than replaying one attempt.
 
 Trajectory: `bedrock-agent-20260922T125332Z-62c252164cd2` (shard-000001,
-run 1 steps 405-483; shard-000002/3, run 2 steps 681-783).
+run 1 steps 405-483; shard-000002/3, run 2 steps 681-783; the third run is in
+a later shard of the same session).
 
-No `resource_acquired` event was produced. That remaining gap is analysed at
+No `resource_acquired` event was produced (checked again after the third break). That remaining gap is analysed at
 the end of this document.
 
 ## Live state before the change
