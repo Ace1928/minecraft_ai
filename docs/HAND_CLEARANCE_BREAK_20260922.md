@@ -153,12 +153,16 @@ The second stall then produced run `5d39e6fc...` (query
    `inventory.hotbar.logs` (pinned oak-log template). Stone drops nothing by
    hand, and the crosshair classified `stone`, `stone_bricks` and `unknown` -
    never a log - so the existing `collect_recent_drop` path had no eligible
-   break. Next concrete step: wire the already-calibrated dirt template
-   (`_CLASSIC_HOTBAR_DIRT_RGB_5X13`, currently only used to keep the log count
-   well-defined) into a strict `inventory.hotbar.dirt` count and generalise
-   `collect_recent_drop` to the verified break's item kind; or let the now
-   digging-capable agent reach an oak trunk, where the existing break ->
-   collect -> hotbar +1 chain already works unchanged.
+   break. Follow-up (2026-09-23, commit `94ac0f7`): the already-calibrated
+   dirt template (`_CLASSIC_HOTBAR_DIRT_RGB_5X13`) is now a strict
+   `inventory.hotbar.dirt` count and `collect_recent_drop` /
+   `_observe_collection_possession` are generalised to the verified break's
+   item kind (log family, dirt, grass_block; everything else fails closed).
+   A 30-minute live attempt produced a verified stone-class break but no dirt
+   was under the crosshair and the hotbar had picked up uncalibrated
+   cobblestone, which makes every canonical count abstain. The measured
+   blockers and next steps are in
+   [`DIRT_POSSESSION_GENERALIZATION_20260923.md`](DIRT_POSSESSION_GENERALIZATION_20260923.md).
 2. **VLM abstention in dark/unclear views** (`unknown` 0.5) still ends a
    recovery with no target; that is a perception limit, not a guard.
 3. **Native policy workers** (`native-steve`, `native-rocket`) fail warmup in
