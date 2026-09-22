@@ -1,5 +1,12 @@
 # Live observation publication, planning latency and gameplay evidence (2026-09-22)
 
+> Follow-up (same day, evening): the observation producer now heartbeats
+> the last real consumed sample inside the freshness window and the reader
+> reports an expired sample as a last-seen gap with its phase. See
+> `LIVE_OBSERVATION_CONTINUITY_20260922.md`. The statements below about
+> `source_unavailable` gaps and fabricated idle packets describe the state
+> before that follow-up.
+
 Scope: private exporter -> `/api/observation` -> public publisher -> site, the
 high-level planner prompt budget, the adaptive interaction policy's movement
 handling, and observation-side resource bounds. All numbers below are measured
