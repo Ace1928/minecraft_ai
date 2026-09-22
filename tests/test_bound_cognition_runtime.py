@@ -1203,3 +1203,10 @@ def test_full_consume_legacy_authority_retains_crafting_close_shortcut(
         assert harness.runtime._last_decision is None and not harness.adopted
         assert not harness.adapter.published and not harness.adapter.discarded
         assert not harness.runtime._bound_cognition_requests
+
+
+def test_cognition_request_deadline_covers_one_local_repair() -> None:
+    """A slow local VLM decision plus one bounded repair must not be discarded."""
+    default = AgentRuntime.__dataclass_fields__["cognition_request_timeout_ms"].default
+    assert default >= 120_000
+    assert default <= 300_000

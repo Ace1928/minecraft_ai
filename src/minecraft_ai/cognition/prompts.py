@@ -38,6 +38,37 @@ def _cognition_perception_keys() -> tuple[str, ...]:
     return _grounded_claim_keys((), set(EvidenceRegion))
 
 
+def _perception_key_summary() -> str:
+    """Brace-compacted form of the sampler-enforced perception key enum.
+
+    The grammar already restricts q to the exact literal keys. Enumerating all
+    51 keys verbatim in the system message costs roughly a quarter of the
+    planner prompt, so the grouped form preserves every key name while the
+    sampler keeps the vocabulary literal.
+    """
+    grouped: dict[str, list[str]] = {"target": [], "inventory": [], "player": []}
+    singles: list[str] = []
+    hotbar: list[str] = []
+    for key in _cognition_perception_keys():
+        if key.startswith("hotbar.slot."):
+            leaf = key.rsplit(".", 1)[1]
+            if leaf not in hotbar:
+                hotbar.append(leaf)
+            continue
+        prefix = key.split(".", 1)[0]
+        if prefix in grouped:
+            grouped[prefix].append(key.split(".", 1)[1])
+            continue
+        singles.append(key)
+    parts = list(singles)
+    for prefix in ("target", "inventory", "player"):
+        if grouped[prefix]:
+            parts.append(f"{prefix}.{{{','.join(grouped[prefix])}}}")
+    if hotbar:
+        parts.append("hotbar.slot.{0..8}.{" + ",".join(hotbar) + "}")
+    return ", ".join(parts)
+
+
 def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
     """Build a compact sampler-enforced grammar for one decision boundary.
 

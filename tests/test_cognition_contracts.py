@@ -8,6 +8,7 @@ import pytest
 
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.cognition import CognitionContext, CognitionDecision, HighLevelController
+from minecraft_ai.cognition.prompts import _perception_key_summary
 from minecraft_ai.grounded_perception import _grounded_claim_keys, resolve_grounded_output_keys
 from minecraft_ai.models import ModelMessage, ModelResponse
 from minecraft_ai.planning import Goal, GoalSource
@@ -521,6 +522,25 @@ def _grammar_perception_keys(grammar: str) -> set[str]:
     return {json.loads(json.loads(literal)) for literal in rule.split("::=", 1)[1].split(" | ")}
 
 
+def _expand_perception_summary(summary: str) -> set[str]:
+    """Expand the compact brace summary back to the exact literal key set."""
+    keys: set[str] = set()
+    for part in summary.split(", "):
+        if part.startswith("hotbar.slot."):
+            slots, leaves = part[len("hotbar.slot."):].split("}.", 1)
+            first, last = (int(value) for value in slots.lstrip("{").split(".."))
+            for slot in range(first, last + 1):
+                for leaf in leaves.strip("{}").split(","):
+                    keys.add(f"hotbar.slot.{slot}.{leaf}")
+        elif "{" in part:
+            prefix, body = part.split("{", 1)
+            for leaf in body.rstrip("}").split(","):
+                keys.add(prefix + leaf)
+        else:
+            keys.add(part)
+    return keys
+
+
 def test_cognition_sampler_questions_use_exact_existing_grounding_vocabulary() -> None:
     model = _GrammarCapturingModel(skill_id=None)
     controller = HighLevelController(model, build_bootstrap_skill_library())
@@ -538,9 +558,26 @@ def test_cognition_sampler_questions_use_exact_existing_grounding_vocabulary() -
     assert {"player.position", "environment.nearby_exit"}.isdisjoint(expected)
     assert all(resolve_grounded_output_keys((), key) == (key,) for key in expected)
     prompt = model.messages[0].content
-    assert all(key in prompt for key in expected)
+    summary = _perception_key_summary()
+    assert summary in prompt
+    assert _expand_perception_summary(summary) == expected
     assert "player.position" not in prompt and "environment.nearby_exit" not in prompt
     assert decision.skill_id is None and decision.ask_perception == ()
+
+
+def test_high_level_system_prompt_stays_within_compact_budget() -> None:
+    model = _GrammarCapturingModel(skill_id=None)
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+
+    controller.decide(_board(), _context())
+
+    prompt = model.messages[0].content
+    summary = _perception_key_summary()
+    assert len(prompt) < 3_000
+    assert len(summary) < 500
+    assert _expand_perception_summary(summary) == set(
+        _grounded_claim_keys((), set(EvidenceRegion))
+    )
 
 
 def test_json_repair_reuses_constrained_perception_vocabulary() -> None:

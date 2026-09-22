@@ -278,7 +278,10 @@ class AgentRuntime:
     mining_ruleset_id: str | None = None
     motor_hz: float = 20.0
     cognition_hz: float = 0.5
-    cognition_request_timeout_ms: int = 60_000
+    # A local VLM decision plus one bounded semantic repair can exceed a minute
+    # on the managed machine; a shorter deadline silently discards completed
+    # decisions and re-enters planning, which starves every skill.
+    cognition_request_timeout_ms: int = 120_000
     semantic_hz: float = 2.0
     lease_renew_ms: int = 500
     stale_frame_consecutive_limit: int = 3
