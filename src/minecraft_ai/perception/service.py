@@ -64,6 +64,9 @@ BEDROCK_INVENTORY_ZERO_SOURCE = (
 BEDROCK_HOTBAR_LOG_COUNT_SOURCE = (
     "deterministic:bedrock-1.26.45.1-classic-hud-hotbar-oak-logs-v2:not-training-label"
 )
+BEDROCK_HOTBAR_DIRT_COUNT_SOURCE = (
+    "deterministic:bedrock-1.26.45.1-classic-hud-hotbar-dirt-v1:not-training-label"
+)
 BEDROCK_HUD_SAFETY_SOURCE = "safety:bedrock-hud-v1:not-training-label"
 
 
@@ -831,24 +834,28 @@ class BootstrapFastPerception:
                 geometry = _classic_hotbar_geometry(pixels)
                 if geometry is not None:
                     self._hotbar_geometry_cache[(frame.width, frame.height)] = geometry
-            hotbar_logs = (
+            hotbar_counts = (
                 None
                 if pixels is None or geometry is None
-                else _classic_hotbar_log_count(pixels, geometry=geometry)
+                else _classic_hotbar_item_counts(pixels, geometry=geometry)
             )
-            if hotbar_logs is not None:
-                facts.append(
-                    PerceptionFact(
-                        key="inventory.hotbar.logs",
-                        value=hotbar_logs,
-                        confidence=0.995,
-                        # Bind possession to these captured pixels, not the
-                        # later inference clock used by diagnostic facts.
-                        observed_ns=frame.captured_ns,
-                        source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
-                        expires_after_ms=250,
+            if hotbar_counts is not None:
+                for kind, key, item_source in (
+                    ("log", "inventory.hotbar.logs", BEDROCK_HOTBAR_LOG_COUNT_SOURCE),
+                    ("dirt", "inventory.hotbar.dirt", BEDROCK_HOTBAR_DIRT_COUNT_SOURCE),
+                ):
+                    facts.append(
+                        PerceptionFact(
+                            key=key,
+                            value=hotbar_counts[kind],
+                            confidence=0.995,
+                            # Bind possession to these captured pixels, not the
+                            # later inference clock used by diagnostic facts.
+                            observed_ns=frame.captured_ns,
+                            source=item_source,
+                            expires_after_ms=250,
+                        )
                     )
-                )
         if inventory_overlay:
             inventory_slots = _bedrock_inventory_slot_observation(frame)
             if inventory_slots is not None and inventory_slots.wood_absence_certified:
@@ -1202,6 +1209,9 @@ _CLASSIC_HOTBAR_DIGITS_5X7 = {
     9: (".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.."),
 }
 _CLASSIC_HOTBAR_MAX_VERIFIED_COUNT = 16
+# Every calibrated item kind is counted together over one slot classification
+# pass. A new kind must ship its own pinned template and source identity.
+_CLASSIC_HOTBAR_ITEM_KINDS = ("log", "dirt")
 
 
 def bedrock_hotbar_log_count(frame: CapturedFrame) -> int | None:
@@ -1214,6 +1224,25 @@ def bedrock_hotbar_log_count(frame: CapturedFrame) -> int | None:
     from 2 through 16. This counts only the visible hotbar, never hidden inventory. Any UI
     scale, geometry, icon, or count uncertainty returns ``None``.
     """
+    counts = _bedrock_classic_hotbar_item_counts(frame)
+    return None if counts is None else counts["log"]
+
+
+def bedrock_hotbar_dirt_count(frame: CapturedFrame) -> int | None:
+    """Read exact visible dirt stacks from the pinned classic hotbar.
+
+    The same calibrated template observer as the oak-log count, using the
+    pinned dirt item bitmap: unknown icons, glyphs, geometry, scale or any
+    hidden-inventory claim still returns ``None``. Dirt is the first drop
+    kind beyond logs with canonical possession evidence.
+    """
+    counts = _bedrock_classic_hotbar_item_counts(frame)
+    return None if counts is None else counts["dirt"]
+
+
+def _bedrock_classic_hotbar_item_counts(
+    frame: CapturedFrame,
+) -> dict[str, int] | None:
     if not frame.bgra or frame.width < 1280 or frame.height < 700:
         return None
     if not bedrock_in_world_hud_present(frame):
@@ -1224,7 +1253,33 @@ def bedrock_hotbar_log_count(frame: CapturedFrame) -> int | None:
     geometry = _classic_hotbar_geometry(pixels)
     if geometry is None:
         return None
-    return _classic_hotbar_log_count(pixels, geometry=geometry)
+    return _classic_hotbar_item_counts(pixels, geometry=geometry)
+
+
+def _classic_hotbar_item_counts(
+    pixels: Any,
+    *,
+    geometry: tuple[int, int],
+) -> dict[str, int] | None:
+    """Count each calibrated hotbar item kind over one exact validated grid.
+
+    A single ambiguous slot abstains for every kind at once, so no count can
+    be published while part of the hotbar is unreadable.
+    """
+    first_slot_x, rail_y = geometry
+    totals = {kind: 0 for kind in _CLASSIC_HOTBAR_ITEM_KINDS}
+    for slot in range(9):
+        slot_x = first_slot_x + slot * _CLASSIC_HOTBAR_SLOT_PITCH
+        classification = _classic_hotbar_slot_kind(pixels, slot_x=slot_x, rail_y=rail_y)
+        if classification == "ambiguous":
+            return None
+        if classification not in totals:
+            continue
+        count = _classic_hotbar_stack_count(pixels, slot_x=slot_x, rail_y=rail_y)
+        if count is None:
+            return None
+        totals[classification] += count
+    return totals
 
 
 def _classic_hotbar_log_count(
@@ -1232,20 +1287,17 @@ def _classic_hotbar_log_count(
     *,
     geometry: tuple[int, int],
 ) -> int | None:
-    first_slot_x, rail_y = geometry
-    total = 0
-    for slot in range(9):
-        slot_x = first_slot_x + slot * _CLASSIC_HOTBAR_SLOT_PITCH
-        classification = _classic_hotbar_slot_kind(pixels, slot_x=slot_x, rail_y=rail_y)
-        if classification == "ambiguous":
-            return None
-        if classification != "log":
-            continue
-        count = _classic_hotbar_stack_count(pixels, slot_x=slot_x, rail_y=rail_y)
-        if count is None:
-            return None
-        total += count
-    return total
+    counts = _classic_hotbar_item_counts(pixels, geometry=geometry)
+    return None if counts is None else counts["log"]
+
+
+def _classic_hotbar_dirt_count(
+    pixels: Any,
+    *,
+    geometry: tuple[int, int],
+) -> int | None:
+    counts = _classic_hotbar_item_counts(pixels, geometry=geometry)
+    return None if counts is None else counts["dirt"]
 
 
 def _classic_hotbar_geometry_matches(
@@ -1458,7 +1510,7 @@ def _classic_hotbar_slot_kind(
     *,
     slot_x: int,
     rail_y: int,
-) -> Literal["log", "other", "ambiguous"]:
+) -> Literal["log", "dirt", "other", "ambiguous"]:
     numpy = importlib.import_module("numpy")
     patch = pixels[rail_y + 18 : rail_y + 38, slot_x + 20 : slot_x + 72, :3]
     if patch.shape != (20, 52, 3):
@@ -1487,7 +1539,7 @@ def _classic_hotbar_slot_kind(
         float(dirt_difference.mean()) <= 4.0
         and float(numpy.percentile(dirt_difference.max(axis=2), 95)) <= 14.0
     ):
-        return "other"
+        return "dirt"
     if _classic_hotbar_slot_empty(pixels, slot_x=slot_x, rail_y=rail_y):
         return "other"
     return "ambiguous"

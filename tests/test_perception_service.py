@@ -27,6 +27,7 @@ from minecraft_ai.perception import (
     Track,
 )
 from minecraft_ai.perception_service import (
+    BEDROCK_HOTBAR_DIRT_COUNT_SOURCE,
     BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
     BEDROCK_INVENTORY_ZERO_SOURCE,
     ActiveVLMWorker,
@@ -39,6 +40,7 @@ from minecraft_ai.perception_service import (
     bedrock_away_overlay_present,
     bedrock_creative_hud_present,
     bedrock_death_screen_present,
+    bedrock_hotbar_dirt_count,
     bedrock_hotbar_log_count,
     bedrock_inventory_overlay_present,
     bedrock_inventory_slot_observation,
@@ -309,24 +311,13 @@ _HOTBAR_DIGITS = {
 }
 
 
-def _classic_hotbar_frame(
+def _paint_classic_hotbar_occupant(
+    draw: ImageDraw.ImageDraw,
     *,
-    occupant: str = "empty",
-    count: int = 1,
-    slot: int = 0,
-    selected_slot: int | None = None,
-) -> CapturedFrame:
-    width, height = 1920, 1054
-    image = Image.new("RGB", (width, height), (20, 20, 20))
-    draw = ImageDraw.Draw(image)
-    # A direct survival HUD signature plus the version-pinned four-pixel
-    # classic-hotbar rail and vertical slot dividers.
-    draw.rectangle((560, 870, 760, 900), fill=(230, 25, 25))
-    draw.rectangle((688, 966, 1319, 969), fill=(140, 140, 140))
-    for x in range(594, 1315, 80):
-        draw.rectangle((x, 974, x + 3, 1053), fill=(140, 140, 140))
-    draw.rectangle((688, 1045, 1319, 1048), fill=(140, 140, 140))
-
+    occupant: str,
+    count: int,
+    slot: int,
+) -> None:
     slot_x = 594 + slot * 80
     template_bytes = (
         _VERIFIED_HOTBAR_DIRT_RGB_5X13
@@ -363,7 +354,7 @@ def _classic_hotbar_frame(
     elif occupant != "empty":
         raise AssertionError(f"unsupported synthetic hotbar occupant {occupant!r}")
 
-    if occupant == "log" and count > 1:
+    if occupant in {"log", "dirt"} and count > 1:
         digits = str(count)
         starts = (58,) if len(digits) == 1 else (34, 58)
         for digit, start in zip(digits, starts, strict=True):
@@ -380,6 +371,35 @@ def _classic_hotbar_frame(
                             ),
                             fill=(255, 255, 255),
                         )
+
+
+def _classic_hotbar_frame(
+    *,
+    occupant: str = "empty",
+    count: int = 1,
+    slot: int = 0,
+    selected_slot: int | None = None,
+    extra_occupants: tuple[tuple[str, int, int], ...] = (),
+) -> CapturedFrame:
+    width, height = 1920, 1054
+    image = Image.new("RGB", (width, height), (20, 20, 20))
+    draw = ImageDraw.Draw(image)
+    # A direct survival HUD signature plus the version-pinned four-pixel
+    # classic-hotbar rail and vertical slot dividers.
+    draw.rectangle((560, 870, 760, 900), fill=(230, 25, 25))
+    draw.rectangle((688, 966, 1319, 969), fill=(140, 140, 140))
+    for x in range(594, 1315, 80):
+        draw.rectangle((x, 974, x + 3, 1053), fill=(140, 140, 140))
+    draw.rectangle((688, 1045, 1319, 1048), fill=(140, 140, 140))
+
+    _paint_classic_hotbar_occupant(draw, occupant=occupant, count=count, slot=slot)
+    for extra_occupant, extra_count, extra_slot in extra_occupants:
+        _paint_classic_hotbar_occupant(
+            draw,
+            occupant=extra_occupant,
+            count=extra_count,
+            slot=extra_slot,
+        )
     if selected_slot is not None:
         draw.rectangle((600, 966, 1319, 969), fill=(140, 140, 140))
         selection_x = 592 + selected_slot * 80
@@ -907,10 +927,58 @@ def test_classic_hotbar_certifies_zero_for_dirt_and_empty_peers() -> None:
     frame = _classic_hotbar_frame(occupant="dirt")
 
     assert bedrock_hotbar_log_count(frame) == 0
+    assert bedrock_hotbar_dirt_count(frame) == 1
     facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
     assert facts["inventory.hotbar.logs"].value == 0
     assert facts["inventory.hotbar.logs"].source == BEDROCK_HOTBAR_LOG_COUNT_SOURCE
+    assert facts["inventory.hotbar.dirt"].value == 1
     assert "inventory.logs" not in facts
+    assert "inventory.dirt" not in facts
+
+
+@pytest.mark.parametrize("count", range(1, 17))
+def test_classic_hotbar_reads_only_calibrated_dirt_stack_counts(count: int) -> None:
+    frame = _classic_hotbar_frame(occupant="dirt", count=count, slot=2)
+
+    assert bedrock_hotbar_dirt_count(frame) == count
+    assert bedrock_hotbar_log_count(frame) == 0
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["inventory.hotbar.dirt"].value == count
+    assert facts["inventory.hotbar.dirt"].source == BEDROCK_HOTBAR_DIRT_COUNT_SOURCE
+    assert facts["inventory.hotbar.dirt"].confidence == 0.995
+    assert facts["inventory.hotbar.dirt"].expires_after_ms == 250
+    assert facts["inventory.hotbar.logs"].value == 0
+    assert "inventory.dirt" not in facts
+
+
+def test_classic_hotbar_counts_each_calibrated_kind_independently() -> None:
+    frame = _classic_hotbar_frame(
+        occupant="dirt",
+        count=4,
+        slot=1,
+        extra_occupants=(("log", 7, 5),),
+    )
+
+    assert bedrock_hotbar_dirt_count(frame) == 4
+    assert bedrock_hotbar_log_count(frame) == 7
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["inventory.hotbar.dirt"].value == 4
+    assert facts["inventory.hotbar.logs"].value == 7
+
+
+def test_classic_hotbar_dirt_count_abstains_on_uncalibrated_peer_icon() -> None:
+    frame = _classic_hotbar_frame(
+        occupant="dirt",
+        count=4,
+        slot=1,
+        extra_occupants=(("unrecognized_log", 1, 5),),
+    )
+
+    assert bedrock_hotbar_dirt_count(frame) is None
+    assert bedrock_hotbar_log_count(frame) is None
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert "inventory.hotbar.dirt" not in facts
+    assert "inventory.hotbar.logs" not in facts
 
 
 def test_classic_hotbar_zero_does_not_erase_full_inventory_possession() -> None:

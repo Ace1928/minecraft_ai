@@ -15,7 +15,11 @@ from minecraft_ai.cognition import (
 )
 from minecraft_ai.action_levels import ActionLevel
 from minecraft_ai.episodes import RuntimeEvent, RuntimeEventKind
-from minecraft_ai.execution import ExecutionTick, initiation_satisfied
+from minecraft_ai.execution import (
+    ExecutionTick,
+    drop_item_kind_for_break_kind,
+    initiation_satisfied,
+)
 from minecraft_ai.grounded_perception import (
     CROSSHAIR_BLOCK_FAST_SOURCE,
     crosshair_block_crop_dimensions,
@@ -257,6 +261,27 @@ def _verified_log_break(verification: OutcomeVerification | None) -> bool:
         return False
     target = verification.target_kind.casefold().removeprefix("minecraft:")
     return target == "log" or target.endswith("_log")
+
+_COLLECTABLE_DROP_KINDS = frozenset({"log", "dirt"})
+
+def _verified_collectable_break(verification: OutcomeVerification | None) -> str | None:
+    """Return the exact drop item kind for a verified break, else ``None``.
+
+    Only item kinds with a pinned calibrated hotbar observer and an explicit
+    vanilla drop mapping are collectable. Unknown block kinds fail closed
+    instead of starting a generic pickup attempt.
+    """
+
+    if (
+        verification is None
+        or verification.kind != OutcomeKind.MINING
+        or verification.status != OutcomeStatus.SUCCEEDED
+        or verification.signal != OutcomeSignal.BLOCK_BROKEN
+        or not isinstance(verification.target_kind, str)
+    ):
+        return None
+    kind = drop_item_kind_for_break_kind(verification.target_kind)
+    return kind if kind in _COLLECTABLE_DROP_KINDS else None
 
 def _verified_oak_log_break(verification: OutcomeVerification | None) -> bool:
     """Accept only the oak species covered by the deterministic count observer."""

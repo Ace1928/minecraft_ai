@@ -50,6 +50,7 @@ from minecraft_ai.runtime import (
     _headroom_reorient_mouse_dy,
     _headroom_retry_advances_plan,
     _restore_policy_world_camera,
+    _verified_collectable_break,
     _verified_headroom_retry,
     _verified_obstacle_stall,
 )
@@ -491,6 +492,66 @@ def test_headroom_target_admits_hand_clearable_blocks_without_tool(kind: str) ->
 
     assert target is not None
     assert target.kind == kind
+
+
+@pytest.mark.parametrize(
+    ("target_kind", "expected"),
+    (
+        ("oak_log", "log"),
+        ("birch_log", "log"),
+        ("dirt", "dirt"),
+        ("grass_block", "dirt"),
+        ("sand", None),
+        ("stone", None),
+        ("coarse_dirt", None),
+        ("unknown", None),
+        (None, None),
+    ),
+)
+def test_verified_collectable_break_maps_only_calibrated_drop_items(
+    target_kind: str | None,
+    expected: str | None,
+) -> None:
+    verification = OutcomeVerification(
+        run_id="break",
+        kind=OutcomeKind.MINING,
+        status=OutcomeStatus.SUCCEEDED,
+        signal=OutcomeSignal.BLOCK_BROKEN,
+        observed_ns=1,
+        confidence=0.9,
+        reason="verified break",
+        target_kind=target_kind,
+    )
+
+    assert _verified_collectable_break(verification) == expected
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "signal"),
+    (
+        (OutcomeKind.TRAVERSAL, OutcomeStatus.SUCCEEDED, OutcomeSignal.LOCOMOTION_PROGRESS),
+        (OutcomeKind.MINING, OutcomeStatus.STALLED, OutcomeSignal.BLOCK_BROKEN),
+        (OutcomeKind.MINING, OutcomeStatus.SUCCEEDED, OutcomeSignal.RESOURCE_ACQUIRED),
+    ),
+)
+def test_verified_collectable_break_requires_a_succeeded_mining_break(
+    kind: OutcomeKind,
+    status: OutcomeStatus,
+    signal: OutcomeSignal,
+) -> None:
+    verification = OutcomeVerification(
+        run_id="break",
+        kind=kind,
+        status=status,
+        signal=signal,
+        observed_ns=1,
+        confidence=0.9,
+        reason="x",
+        target_kind="dirt",
+    )
+
+    assert _verified_collectable_break(verification) is None
+    assert _verified_collectable_break(None) is None
 
 
 @pytest.mark.parametrize("defect", ("source", "crop_hash", "region", "pixel_sha", "future"))

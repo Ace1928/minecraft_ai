@@ -169,16 +169,17 @@ def build_bootstrap_skill_library() -> SkillLibrary:
         ),
         SkillSpec(
             skill_id="collect_recent_drop",
-            version=2,
+            version=3,
             name="Collect recent drop",
             description=(
-                "For a few seconds after a verified log break, move over the nearby dropped "
-                "item without attacking, using, dropping, opening inventory, or switching slots"
+                "For a few seconds after a verified break of a collectable block, move over "
+                "the nearby dropped item kind without attacking, using, dropping, opening "
+                "inventory, or switching slots"
             ),
             stage=SkillStage.EXPERIMENTAL,
             preconditions=(
                 SkillCondition(
-                    key="collection.recent_log_break",
+                    key="collection.recent_break",
                     operator="truthy",
                     min_confidence=0.99,
                 ),

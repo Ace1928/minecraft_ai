@@ -6,7 +6,7 @@ from typing import Any, cast
 import pytest
 
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
-from minecraft_ai.execution import SkillExecutor
+from minecraft_ai.execution import SkillExecutor, drop_item_kind_for_break_kind
 from minecraft_ai.mining_control import MiningGuardDecision
 from minecraft_ai.motor import MotorIntent
 from minecraft_ai.outcome_verifier import OutcomeKind, OutcomeSignal, OutcomeStatus
@@ -17,7 +17,10 @@ from minecraft_ai.perception import (
     ScreenRegion,
     Track,
 )
-from minecraft_ai.perception_service import BEDROCK_HOTBAR_LOG_COUNT_SOURCE
+from minecraft_ai.perception_service import (
+    BEDROCK_HOTBAR_DIRT_COUNT_SOURCE,
+    BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+)
 from minecraft_ai.safety import MotorAction
 from minecraft_ai.skills import SkillCondition, SkillFailureCode, SkillOutcome, SkillSpec
 from minecraft_ai.trajectory import ActionOrigin
@@ -458,6 +461,67 @@ def test_mining_does_not_reuse_recent_hotbar_fact_when_current_frame_abstains() 
     assert executor.mining_hotbar_log_baseline is None
 
 
+def test_mining_freezes_only_the_matching_pre_attack_drop_baseline() -> None:
+    now = time.monotonic_ns()
+    executor, _ = _executor(now, None)
+    executor._parameters = {"target": "dirt"}
+    dirt = PerceptionFact(
+        key="inventory.hotbar.dirt",
+        value=2,
+        confidence=0.995,
+        observed_ns=now,
+        source=BEDROCK_HOTBAR_DIRT_COUNT_SOURCE,
+        expires_after_ms=250,
+    )
+    log = PerceptionFact(
+        key="inventory.hotbar.logs",
+        value=5,
+        confidence=0.995,
+        observed_ns=now,
+        source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+        expires_after_ms=250,
+    )
+    board = _board(
+        now,
+        crosshair_hash=_HASH_A,
+        target_visible=True,
+        target_kind="dirt",
+        extra_facts=(dirt, log),
+    )
+
+    first = executor.tick(board, sequence=1, now_ns=now)
+
+    assert first.action is not None and "left" in first.action.buttons_down
+    assert executor.mining_drop_kind == "dirt"
+    assert executor.mining_drop_baseline == dirt
+    # The legacy log baseline freeze is retained for gather/log hand-offs.
+    assert executor.mining_hotbar_log_baseline == log
+
+
+@pytest.mark.parametrize(
+    ("break_kind", "expected"),
+    (
+        ("oak_log", "log"),
+        ("minecraft:oak_log", "log"),
+        ("birch_log", "log"),
+        ("log", "log"),
+        ("dirt", "dirt"),
+        ("minecraft:dirt", "dirt"),
+        ("grass_block", "dirt"),
+        ("coarse_dirt", None),
+        ("sand", None),
+        ("stone", None),
+        ("stone_bricks", None),
+        ("unknown", None),
+    ),
+)
+def test_drop_item_kind_for_break_kind_is_explicit_and_fail_closed(
+    break_kind: str,
+    expected: str | None,
+) -> None:
+    assert drop_item_kind_for_break_kind(break_kind) == expected
+
+
 @pytest.mark.parametrize(
     ("fact_update", "expected_count"),
     (
@@ -597,7 +661,7 @@ def test_collection_exposes_only_the_stably_verified_post_motion_count() -> None
         build_bootstrap_skill_library().get("collect_recent_drop"),
         run_id="collection-count-accessor",
         now_ns=started_ns,
-        collection_hotbar_log_baseline=_hotbar_log_fact(
+        collection_hotbar_baseline=_hotbar_log_fact(
             3,
             now_ns=started_ns - 1_000_000,
         ),
@@ -607,7 +671,7 @@ def test_collection_exposes_only_the_stably_verified_post_motion_count() -> None
         instance_id="bedrock:test",
         facts=(
             _fact(
-                "collection.recent_log_break",
+                "collection.recent_break",
                 True,
                 now_ns=started_ns + 10_000_000,
                 source="verified:test:block-broken",

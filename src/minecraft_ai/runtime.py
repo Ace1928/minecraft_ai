@@ -153,6 +153,7 @@ from minecraft_ai.runtime_support.helpers import (
     _terminal_run_memory,
     _trajectory_outcome_annotations,
     _verified_block_break,
+    _verified_collectable_break,
     _verified_gather_acquisition,
     _verified_headroom_retry,
     _verified_log_break,
@@ -238,6 +239,7 @@ __all__ = [
     '_terminal_run_memory',
     '_trajectory_outcome_annotations',
     '_verified_block_break',
+    '_verified_collectable_break',
     '_verified_gather_acquisition',
     '_verified_headroom_retry',
     '_verified_log_break',
@@ -842,10 +844,15 @@ class AgentRuntime:
             and result.run.run_id
             in getattr(self, "_plan_neutral_recovery_runs", set())
         )
+        collect_drop_kind = (
+            _verified_collectable_break(result.outcome_verification)
+            if result.run.skill_id == "mine_visible_block"
+            else None
+        )
         collect_recent_drop = bool(
             result.run.outcome == SkillOutcome.SUCCEEDED
             and result.run.skill_id == "mine_visible_block"
-            and _verified_log_break(result.outcome_verification)
+            and collect_drop_kind is not None
             and "collect_recent_drop" in self.skills.specs
         )
         headroom_child = bool(
@@ -927,7 +934,8 @@ class AgentRuntime:
                     )
                 collection_run = self._start_drop_collection(
                     result.run,
-                    frozen_gather_baseline,
+                    drop_kind="log",
+                    baseline=frozen_gather_baseline,
                 )
                 continuation.active_run_id = collection_run.run_id
                 self._gather_acquisition_continuation = continuation
@@ -960,9 +968,15 @@ class AgentRuntime:
                 continuation.active_run_id = gather_run_id
                 return
             if collect_recent_drop:
+                assert collect_drop_kind is not None
                 self._start_drop_collection(
                     result.run,
-                    self.executor.mining_hotbar_log_baseline,
+                    drop_kind=collect_drop_kind,
+                    baseline=(
+                        self.executor.mining_drop_baseline
+                        if self.executor.mining_drop_kind == collect_drop_kind
+                        else None
+                    ),
                 )
                 return
             if self._route_headroom_terminal(result):
@@ -1010,16 +1024,18 @@ class AgentRuntime:
     def _start_drop_collection(
         self,
         broken_run: SkillRun,
+        *,
+        drop_kind: str,
         baseline: PerceptionFact | None,
     ) -> SkillRun:
         self.blackboard.merge_semantics(
             instance_id=self.perception.instance_id,
             facts=(PerceptionFact(
-                key="collection.recent_log_break",
-                value=True,
+                key="collection.recent_break",
+                value=drop_kind,
                 confidence=0.995,
                 observed_ns=time.monotonic_ns(),
-                source=f"verified:{broken_run.run_id}:block-broken",
+                source=f"verified:{broken_run.run_id}:block-broken:{drop_kind}",
                 expires_after_ms=6_000,
             ),),
         )
@@ -1029,7 +1045,8 @@ class AgentRuntime:
             parent_run_id=broken_run.run_id,
             run_id=uuid.uuid4().hex,
             context_key=broken_run.context_key,
-            collection_hotbar_log_baseline=baseline,
+            collection_hotbar_baseline=baseline,
+            collection_drop_kind=drop_kind,
         )
         if not hasattr(self, "_mining_collection_parents"):
             self._mining_collection_parents = {}
@@ -1050,7 +1067,7 @@ class AgentRuntime:
             instance_id=instance_id,
             facts=(
                 PerceptionFact(
-                    key="collection.recent_log_break",
+                    key="collection.recent_break",
                     value=False,
                     confidence=0.995,
                     observed_ns=time.monotonic_ns(),

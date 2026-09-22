@@ -237,7 +237,7 @@ def test_progression_skills_are_goal_conditioned_contracts_not_key_scripts() -> 
     assert collect_drop.action_level == ActionLevel.LATENT
     assert collect_drop.policy_ref == "navigate"
     assert collect_drop.policy_instruction == "collect the dropped item"
-    assert collect_drop.preconditions[0].key == "collection.recent_log_break"
+    assert collect_drop.preconditions[0].key == "collection.recent_break"
     assert collect_drop.max_duration_ms == 5_000
     assert collect_drop.action_permissions.allow_attack is False
     assert collect_drop.action_permissions.allow_use is False

@@ -38,6 +38,7 @@ from minecraft_ai.planning import Goal, GoalScorer, GoalSource
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.perception_service import (
+    BEDROCK_HOTBAR_DIRT_COUNT_SOURCE,
     BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
     BEDROCK_HUD_SAFETY_SOURCE,
 )
@@ -2213,7 +2214,7 @@ def test_cancelled_collection_revokes_recent_break_authorization(
             instance_id="bedrock:test",
             facts=(
                 PerceptionFact(
-                    key="collection.recent_log_break",
+                    key="collection.recent_break",
                     value=True,
                     confidence=0.995,
                     observed_ns=time.monotonic_ns(),
@@ -2233,7 +2234,7 @@ def test_cancelled_collection_revokes_recent_break_authorization(
         runtime._record_terminal_run(cancelled, advance_plan=False)
 
         authorization = runtime.blackboard.fact(
-            "collection.recent_log_break",
+            "collection.recent_break",
             now_ns=time.monotonic_ns(),
         )
         assert authorization is not None
@@ -2634,9 +2635,21 @@ def test_collection_success_persists_resource_event_and_advances_plan_once(tmp_p
 
 
 @pytest.mark.parametrize("stop_during_send", (False, True))
+@pytest.mark.parametrize(
+    ("target_kind", "drop_kind", "baseline_key", "baseline_source"),
+    (
+        ("oak_log", "log", "inventory.hotbar.logs", BEDROCK_HOTBAR_LOG_COUNT_SOURCE),
+        ("dirt", "dirt", "inventory.hotbar.dirt", BEDROCK_HOTBAR_DIRT_COUNT_SOURCE),
+        ("grass_block", "dirt", "inventory.hotbar.dirt", BEDROCK_HOTBAR_DIRT_COUNT_SOURCE),
+    ),
+)
 def test_runtime_transfers_prebreak_baseline_only_when_send_keeps_runtime_live(
     monkeypatch: pytest.MonkeyPatch,
     stop_during_send: bool,
+    target_kind: str,
+    drop_kind: str,
+    baseline_key: str,
+    baseline_source: str,
 ) -> None:
     now = time.monotonic_ns()
     order: list[str] = []
@@ -2647,11 +2660,14 @@ def test_runtime_transfers_prebreak_baseline_only_when_send_keeps_runtime_live(
     runtime.executor = SkillExecutor(BootstrapMotorPolicy())
     runtime.executor.start(runtime.skills.get("mine_visible_block"), run_id="break-bound")
     baseline = PerceptionFact(
-        key="inventory.hotbar.logs", value=0, confidence=0.995,
-        observed_ns=now - 5_000_000_000, source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+        key=baseline_key, value=0, confidence=0.995,
+        observed_ns=now - 5_000_000_000, source=baseline_source,
         expires_after_ms=250,
     )
-    runtime.executor._mining_hotbar_log_baseline = baseline
+    if drop_kind == "log":
+        runtime.executor._mining_hotbar_log_baseline = baseline
+    runtime.executor._mining_drop_baseline = baseline
+    runtime.executor._mining_drop_kind = drop_kind
     runtime.blackboard = PerceptionBlackboard()
     runtime.blackboard.publish(
         FrameState(
@@ -2677,7 +2693,7 @@ def test_runtime_transfers_prebreak_baseline_only_when_send_keeps_runtime_live(
             outcome_verification=OutcomeVerification(
                 run_id=run.run_id, kind=OutcomeKind.MINING, status=OutcomeStatus.SUCCEEDED,
                 signal=OutcomeSignal.BLOCK_BROKEN, observed_ns=now, confidence=0.99,
-                reason="verified log break", target_kind="oak_log",
+                reason=f"verified {target_kind} break", target_kind=target_kind,
             ),
         )
 
@@ -2717,6 +2733,7 @@ def test_runtime_transfers_prebreak_baseline_only_when_send_keeps_runtime_live(
         assert runtime.executor.run.run_id == "break-bound"
         return
     assert runtime.executor.run.skill_id == "collect_recent_drop"
+    assert runtime.executor._collection_possession.drop_kind == drop_kind
     assert runtime.executor._collection_possession.baseline_count == 0
     assert runtime.executor._collection_possession.baseline_observed_ns == baseline.observed_ns
 
@@ -2907,7 +2924,7 @@ def test_pending_cognition_cannot_replace_atomic_collection() -> None:
             height=720,
             facts=(
                 PerceptionFact(
-                    key="collection.recent_log_break",
+                    key="collection.recent_break",
                     value=True,
                     confidence=1.0,
                     observed_ns=time.monotonic_ns(),

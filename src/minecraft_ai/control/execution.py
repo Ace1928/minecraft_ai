@@ -23,6 +23,7 @@ from minecraft_ai.outcome_verifier import (
 )
 from minecraft_ai.perception import PerceptionBlackboard, PerceptionFact
 from minecraft_ai.perception_service import (
+    BEDROCK_HOTBAR_DIRT_COUNT_SOURCE,
     BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
     away_overlay_click_center,
     death_respawn_control_center,
@@ -62,12 +63,42 @@ class _PendingMiningVerification:
 class _CollectionPossessionState:
     """Pre-break hotbar baseline and post-action evidence for one collection run."""
 
+    drop_kind: str | None = None
     baseline_count: int | None = None
     baseline_observed_ns: int = -1
     motion_started_ns: int | None = None
     candidate_count: int | None = None
     candidate_first_ns: int = -1
     candidate_last_ns: int = -1
+
+
+# The only hotbar item kinds with a pinned, calibrated observer and an exact
+# source identity. Unknown kinds never gain possession evidence.
+_HOTBAR_ITEM_OBSERVERS: dict[str, tuple[str, str]] = {
+    "log": ("inventory.hotbar.logs", BEDROCK_HOTBAR_LOG_COUNT_SOURCE),
+    "dirt": ("inventory.hotbar.dirt", BEDROCK_HOTBAR_DIRT_COUNT_SOURCE),
+}
+# Verified-break block kinds mapped to the exact item they drop by hand. Only
+# explicit vanilla mechanics live here; everything else stays uncollectable
+# until a calibrated observer for its item exists.
+_BREAK_KIND_DROP_ITEMS: dict[str, str] = {
+    "dirt": "dirt",
+    "grass_block": "dirt",
+}
+
+
+def drop_item_kind_for_break_kind(break_kind: str) -> str | None:
+    """Return the canonical drop item kind for a break, never a generic guess.
+
+    Logs share the pinned oak-log observer, so any recognized log-family block
+    maps to ``log``. Every other mapping is explicit and fail-closed.
+    """
+    normalized = break_kind.strip().casefold().replace(" ", "_")
+    if normalized.startswith("minecraft:"):
+        normalized = normalized.removeprefix("minecraft:")
+    if normalized == "log" or normalized.endswith("_log"):
+        return "log"
+    return _BREAK_KIND_DROP_ITEMS.get(normalized)
 
 
 _MINING_POST_RELEASE_VERIFY_MS = 5_000
@@ -122,11 +153,15 @@ class _OptionFrame:
     away_dismiss_sent: bool
     collection_possession: _CollectionPossessionState
     mining_hotbar_log_baseline: PerceptionFact | None
+    mining_drop_baseline: PerceptionFact | None
+    mining_drop_kind: str | None
     mining_attack_started: bool
     mining_damage_progress_observed: bool
     gather_mining_started: bool
     gather_acquisitions_remaining: int
     verified_collection_hotbar_log_count: int | None
+    verified_collection_hotbar_item_count: int | None
+    verified_collection_hotbar_item_kind: str | None
     complete_on_locomotion_progress: bool
     locomotion_progress_events: int
     locomotion_progress_first_ns: int | None
@@ -147,14 +182,21 @@ def visible_oak_trunk(blackboard: CognitionReadView) -> bool:
     )
 
 
-def _exact_hotbar_log_fact(
+def _exact_hotbar_item_fact(
     fact: PerceptionFact,
     *,
+    item_kind: str,
     now_ns: int | None = None,
 ) -> bool:
+    """Accept only the pinned calibrated observer for one exact item kind."""
+
+    observer = _HOTBAR_ITEM_OBSERVERS.get(item_kind)
+    if observer is None:
+        return False
+    key, item_source = observer
     return (
-        fact.key == "inventory.hotbar.logs"
-        and fact.source == BEDROCK_HOTBAR_LOG_COUNT_SOURCE
+        fact.key == key
+        and fact.source == item_source
         and fact.confidence >= 0.99
         and isinstance(fact.value, int)
         and not isinstance(fact.value, bool)
@@ -167,21 +209,25 @@ def _exact_hotbar_log_fact(
     )
 
 
-def _current_frame_hotbar_log_fact(
+def _current_frame_hotbar_item_fact(
     blackboard: PerceptionBlackboard,
     *,
+    item_kind: str,
     now_ns: int,
 ) -> PerceptionFact | None:
-    """Return the exact canonical log count bound to the latest captured frame."""
+    """Return the exact canonical count for one item kind on the latest frame."""
+    observer = _HOTBAR_ITEM_OBSERVERS.get(item_kind)
+    if observer is None:
+        return None
     frame = blackboard.raw_latest()
-    fact = blackboard.fact("inventory.hotbar.logs", now_ns=now_ns)
+    fact = blackboard.fact(observer[0], now_ns=now_ns)
     return (
         fact
         if (
             frame is not None
             and fact is not None
             and fact.observed_ns == frame.captured_ns
-            and _exact_hotbar_log_fact(fact, now_ns=now_ns)
+            and _exact_hotbar_item_fact(fact, item_kind=item_kind, now_ns=now_ns)
         )
         else None
     )
@@ -210,11 +256,15 @@ class SkillExecutor:
         self._away_dismiss_sent = False
         self._collection_possession = _CollectionPossessionState()
         self._mining_hotbar_log_baseline: PerceptionFact | None = None
+        self._mining_drop_baseline: PerceptionFact | None = None
+        self._mining_drop_kind: str | None = None
         self._mining_attack_started = False
         self._mining_damage_progress_observed = False
         self._gather_mining_started = False
         self._gather_acquisitions_remaining = _GATHER_ACQUISITIONS_REQUIRED
         self._verified_collection_hotbar_log_count: int | None = None
+        self._verified_collection_hotbar_item_count: int | None = None
+        self._verified_collection_hotbar_item_kind: str | None = None
         self._complete_on_locomotion_progress = False
         self._locomotion_progress_events = 0
         self._locomotion_progress_first_ns: int | None = None
@@ -282,9 +332,29 @@ class SkillExecutor:
         return self._mining_hotbar_log_baseline
 
     @property
+    def mining_drop_baseline(self) -> PerceptionFact | None:
+        """Exact pre-attack count for the item kind this mining target drops."""
+        return self._mining_drop_baseline
+
+    @property
+    def mining_drop_kind(self) -> str | None:
+        """Canonical drop item kind bound to the frozen pre-attack baseline."""
+        return self._mining_drop_kind
+
+    @property
     def verified_collection_hotbar_log_count(self) -> int | None:
         """Stable exact post-motion log count accepted by collection verification."""
         return self._verified_collection_hotbar_log_count
+
+    @property
+    def verified_collection_hotbar_item_count(self) -> int | None:
+        """Stable exact post-motion count for the verified collection item kind."""
+        return self._verified_collection_hotbar_item_count
+
+    @property
+    def verified_collection_hotbar_item_kind(self) -> str | None:
+        """Canonical item kind whose hotbar count collection verification accepted."""
+        return self._verified_collection_hotbar_item_kind
 
     @property
     def policy_parameters(self) -> dict[str, str | int | float | bool]:
@@ -336,7 +406,8 @@ class SkillExecutor:
         complete_on_locomotion_progress: bool | None = None,
         locomotion_progress_events_required: int = 1,
         locomotion_progress_min_ms: int = 0,
-        collection_hotbar_log_baseline: PerceptionFact | None = None,
+        collection_hotbar_baseline: PerceptionFact | None = None,
+        collection_drop_kind: str = "log",
         gather_acquisitions_remaining: int = _GATHER_ACQUISITIONS_REQUIRED,
     ) -> SkillRun:
         if self._run is not None and self._run.outcome == SkillOutcome.RUNNING:
@@ -392,24 +463,33 @@ class SkillExecutor:
         self._collection_possession = _CollectionPossessionState()
         if (
             spec.skill_id == "collect_recent_drop"
-            and collection_hotbar_log_baseline is not None
-            and _exact_hotbar_log_fact(collection_hotbar_log_baseline)
-            and collection_hotbar_log_baseline.observed_ns <= started
+            and collection_drop_kind in _HOTBAR_ITEM_OBSERVERS
+            and collection_hotbar_baseline is not None
+            and _exact_hotbar_item_fact(
+                collection_hotbar_baseline,
+                item_kind=collection_drop_kind,
+            )
+            and collection_hotbar_baseline.observed_ns <= started
         ):
             # This historical snapshot was fresh before mining's first attack;
             # do not expire it or replace it with an already-collected frame.
+            self._collection_possession.drop_kind = collection_drop_kind
             self._collection_possession.baseline_count = int(
-                collection_hotbar_log_baseline.value
+                collection_hotbar_baseline.value
             )
             self._collection_possession.baseline_observed_ns = (
-                collection_hotbar_log_baseline.observed_ns
+                collection_hotbar_baseline.observed_ns
             )
         self._mining_hotbar_log_baseline = None
+        self._mining_drop_baseline = None
+        self._mining_drop_kind = None
         self._mining_attack_started = False
         self._mining_damage_progress_observed = False
         self._gather_mining_started = False
         self._gather_acquisitions_remaining = gather_acquisitions_remaining
         self._verified_collection_hotbar_log_count = None
+        self._verified_collection_hotbar_item_count = None
+        self._verified_collection_hotbar_item_kind = None
         self._complete_on_locomotion_progress = complete_on_locomotion_progress
         self._locomotion_progress_events = 0
         self._locomotion_progress_first_ns = None
@@ -500,11 +580,15 @@ class SkillExecutor:
             away_dismiss_sent=self._away_dismiss_sent,
             collection_possession=self._collection_possession,
             mining_hotbar_log_baseline=self._mining_hotbar_log_baseline,
+            mining_drop_baseline=self._mining_drop_baseline,
+            mining_drop_kind=self._mining_drop_kind,
             mining_attack_started=self._mining_attack_started,
             mining_damage_progress_observed=self._mining_damage_progress_observed,
             gather_mining_started=self._gather_mining_started,
             gather_acquisitions_remaining=self._gather_acquisitions_remaining,
             verified_collection_hotbar_log_count=self._verified_collection_hotbar_log_count,
+            verified_collection_hotbar_item_count=self._verified_collection_hotbar_item_count,
+            verified_collection_hotbar_item_kind=self._verified_collection_hotbar_item_kind,
             complete_on_locomotion_progress=self._complete_on_locomotion_progress,
             locomotion_progress_events=self._locomotion_progress_events,
             locomotion_progress_first_ns=self._locomotion_progress_first_ns,
@@ -530,11 +614,15 @@ class SkillExecutor:
         self._away_dismiss_sent = frame.away_dismiss_sent
         self._collection_possession = frame.collection_possession
         self._mining_hotbar_log_baseline = frame.mining_hotbar_log_baseline
+        self._mining_drop_baseline = frame.mining_drop_baseline
+        self._mining_drop_kind = frame.mining_drop_kind
         self._mining_attack_started = frame.mining_attack_started
         self._mining_damage_progress_observed = frame.mining_damage_progress_observed
         self._gather_mining_started = frame.gather_mining_started
         self._gather_acquisitions_remaining = frame.gather_acquisitions_remaining
         self._verified_collection_hotbar_log_count = frame.verified_collection_hotbar_log_count
+        self._verified_collection_hotbar_item_count = frame.verified_collection_hotbar_item_count
+        self._verified_collection_hotbar_item_kind = frame.verified_collection_hotbar_item_kind
         self._complete_on_locomotion_progress = frame.complete_on_locomotion_progress
         self._locomotion_progress_events = frame.locomotion_progress_events
         self._locomotion_progress_first_ns = frame.locomotion_progress_first_ns
@@ -660,12 +748,27 @@ class SkillExecutor:
                     fact is not None
                     and frame is not None
                     and fact.observed_ns == frame.captured_ns
-                    and _exact_hotbar_log_fact(fact, now_ns=now)
+                    and _exact_hotbar_item_fact(fact, item_kind="log", now_ns=now)
                 )
                 else None
             )
+            requested = self._parameters.get("target")
+            self._mining_drop_kind = (
+                drop_item_kind_for_break_kind(requested)
+                if isinstance(requested, str) and requested.strip()
+                else None
+            )
+            self._mining_drop_baseline = (
+                None
+                if self._mining_drop_kind is None
+                else _current_frame_hotbar_item_fact(
+                    blackboard,
+                    item_kind=self._mining_drop_kind,
+                    now_ns=now,
+                )
+            )
         gather_hotbar_log_baseline = (
-            _current_frame_hotbar_log_fact(blackboard, now_ns=now)
+            _current_frame_hotbar_item_fact(blackboard, item_kind="log", now_ns=now)
             if (
                 self._spec.skill_id == "gather_nearby_wood"
                 and not self._gather_mining_started
@@ -916,17 +1019,28 @@ class SkillExecutor:
         *,
         now_ns: int,
     ) -> OutcomeVerification | None:
-        """Require fresh post-action hotbar +1 against the preserved pre-break count."""
+        """Require fresh post-action hotbar +1 for this run's exact item kind."""
         if self._run is None or self._spec is None:
             return None
         if self._spec.skill_id != "collect_recent_drop":
             return None
         state = self._collection_possession
-        fact = blackboard.fact("inventory.hotbar.logs", now_ns=now_ns)
+        observer = _HOTBAR_ITEM_OBSERVERS.get(state.drop_kind or "")
+        if observer is None:
+            # An unknown or unbound item kind can never produce possession
+            # evidence, even if some unrelated hotbar fact is fresh.
+            state.candidate_count = None
+            state.candidate_first_ns = -1
+            state.candidate_last_ns = -1
+            return None
+        item_kind = state.drop_kind
+        assert item_kind is not None
+        fact_key, _item_source = observer
+        fact = blackboard.fact(fact_key, now_ns=now_ns)
         if (
             state.baseline_count is None
             or fact is None
-            or not _exact_hotbar_log_fact(fact, now_ns=now_ns)
+            or not _exact_hotbar_item_fact(fact, item_kind=item_kind, now_ns=now_ns)
             or fact.observed_ns <= self._run.started_ns
         ):
             state.candidate_count = None
@@ -957,7 +1071,10 @@ class SkillExecutor:
         state.candidate_last_ns = fact.observed_ns
         if fact.observed_ns - state.candidate_first_ns < _COLLECTION_STABLE_NS:
             return None
-        self._verified_collection_hotbar_log_count = count
+        if item_kind == "log":
+            self._verified_collection_hotbar_log_count = count
+        self._verified_collection_hotbar_item_count = count
+        self._verified_collection_hotbar_item_kind = item_kind
         return OutcomeVerification(
             run_id=self._run.run_id,
             kind=OutcomeKind.RESOURCE_ACQUISITION,
@@ -965,9 +1082,9 @@ class SkillExecutor:
             signal=OutcomeSignal.RESOURCE_ACQUIRED,
             observed_ns=fact.observed_ns,
             confidence=fact.confidence,
-            reason="stable post-action hotbar log count increased by one",
-            evidence_keys=("inventory.hotbar.logs",),
-            target_kind="log",
+            reason=f"stable post-action hotbar {item_kind} count increased by one",
+            evidence_keys=(fact_key,),
+            target_kind=item_kind,
         )
 
     def _tick_plank_crafting(

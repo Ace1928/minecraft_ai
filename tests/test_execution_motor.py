@@ -17,7 +17,10 @@ from minecraft_ai.perception import (
     Track,
 )
 from minecraft_ai.safety import MotorAction
-from minecraft_ai.perception_service import BEDROCK_HOTBAR_LOG_COUNT_SOURCE
+from minecraft_ai.perception_service import (
+    BEDROCK_HOTBAR_DIRT_COUNT_SOURCE,
+    BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+)
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.skills import (
     SkillActionPermissions,
@@ -107,6 +110,23 @@ def _hotbar_log_fact(
 ) -> PerceptionFact:
     return PerceptionFact(
         key="inventory.hotbar.logs",
+        value=count,
+        confidence=0.995,
+        observed_ns=observed_ns,
+        source=source,
+        expires_after_ms=expires_after_ms,
+    )
+
+
+def _hotbar_dirt_fact(
+    count: int,
+    *,
+    observed_ns: int,
+    source: str = BEDROCK_HOTBAR_DIRT_COUNT_SOURCE,
+    expires_after_ms: int = 250,
+) -> PerceptionFact:
+    return PerceptionFact(
+        key="inventory.hotbar.dirt",
         value=count,
         confidence=0.995,
         observed_ns=observed_ns,
@@ -435,7 +455,7 @@ def test_collect_recent_drop_is_bounded_and_disables_interactions() -> None:
     policy = _IntentCapturePolicy()
     executor = SkillExecutor(policy)
     spec = build_bootstrap_skill_library().get("collect_recent_drop")
-    board = _board(_fact("collection.recent_log_break", True))
+    board = _board(_fact("collection.recent_break", True))
     executor.start(spec, run_id="collect-log", now_ns=100)
 
     running = executor.tick(board, sequence=1, now_ns=200)
@@ -483,7 +503,7 @@ def test_collect_recent_drop_requires_stable_post_action_log_increment(
     executor = SkillExecutor(policy)
     spec = build_bootstrap_skill_library().get("collect_recent_drop")
     board = _board(
-        _fact("collection.recent_log_break", True),
+        _fact("collection.recent_break", True),
         # The drop was automatically picked up before collection began. This
         # first post-start frame must not overwrite the pre-break baseline.
         _hotbar_log_fact(after, observed_ns=started_ns + 10_000_000),
@@ -492,7 +512,7 @@ def test_collect_recent_drop_requires_stable_post_action_log_increment(
         spec,
         run_id="collect-verified",
         now_ns=started_ns,
-        collection_hotbar_log_baseline=_hotbar_log_fact(
+        collection_hotbar_baseline=_hotbar_log_fact(
             before, observed_ns=started_ns - 3_000_000
         ),
     )
@@ -535,14 +555,14 @@ def test_collect_recent_drop_rejects_unbound_or_noncanonical_increments() -> Non
     executor = SkillExecutor(policy)
     spec = build_bootstrap_skill_library().get("collect_recent_drop")
     board = _board(
-        _fact("collection.recent_log_break", True),
+        _fact("collection.recent_break", True),
         _hotbar_log_fact(0, observed_ns=started_ns + 10_000_000),
     )
     executor.start(
         spec,
         run_id="collect-no-motion",
         now_ns=started_ns,
-        collection_hotbar_log_baseline=_hotbar_log_fact(
+        collection_hotbar_baseline=_hotbar_log_fact(
             0, observed_ns=started_ns - 1_000_000
         ),
     )
@@ -570,14 +590,14 @@ def test_collect_recent_drop_rejects_vlm_stale_unchanged_and_multi_item_counts()
     executor = SkillExecutor(policy)
     spec = build_bootstrap_skill_library().get("collect_recent_drop")
     board = _board(
-        _fact("collection.recent_log_break", True),
+        _fact("collection.recent_break", True),
         _hotbar_log_fact(0, observed_ns=started_ns + 10_000_000),
     )
     executor.start(
         spec,
         run_id="collect-reject",
         now_ns=started_ns,
-        collection_hotbar_log_baseline=_hotbar_log_fact(
+        collection_hotbar_baseline=_hotbar_log_fact(
             0, observed_ns=started_ns - 1_000_000
         ),
     )
@@ -638,9 +658,9 @@ def test_collect_recent_drop_never_invents_a_missing_prebreak_baseline(
         build_bootstrap_skill_library().get("collect_recent_drop"),
         run_id="no-prebreak-evidence",
         now_ns=started_ns,
-        collection_hotbar_log_baseline=baseline,
+        collection_hotbar_baseline=baseline,
     )
-    board = _board(_fact("collection.recent_log_break", True))
+    board = _board(_fact("collection.recent_break", True))
     for sequence, count, offset_ns in (
         (1, 0, 10_000_000), (2, 1, 100_000_000), (3, 1, 400_000_000)
     ):
@@ -652,6 +672,209 @@ def test_collect_recent_drop_never_invents_a_missing_prebreak_baseline(
             board, sequence=sequence, now_ns=started_ns + offset_ns + 1_000_000
         )
         assert result.run.outcome == SkillOutcome.RUNNING
+    terminal = executor.tick(board, sequence=4, now_ns=started_ns + 5_000_000_001)
+    assert terminal.run.failure_code == SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED
+
+
+def test_collect_recent_drop_verifies_only_the_bound_dirt_increment() -> None:
+    started_ns = 6_000_000_000
+    executor = SkillExecutor(_MovingIntentCapturePolicy())
+    spec = build_bootstrap_skill_library().get("collect_recent_drop")
+    board = _board(
+        _fact("collection.recent_break", "dirt"),
+        _hotbar_dirt_fact(3, observed_ns=started_ns + 10_000_000),
+        # A fresh canonical log count must not stand in for dirt.
+        _hotbar_log_fact(99, observed_ns=started_ns + 10_000_000),
+    )
+    executor.start(
+        spec,
+        run_id="collect-dirt",
+        now_ns=started_ns,
+        collection_hotbar_baseline=_hotbar_dirt_fact(
+            2, observed_ns=started_ns - 3_000_000
+        ),
+        collection_drop_kind="dirt",
+    )
+
+    baseline = executor.tick(board, sequence=1, now_ns=started_ns + 20_000_000)
+    assert baseline.run.outcome == SkillOutcome.RUNNING
+    assert baseline.action is not None and baseline.action.keys_down == ("w",)
+
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(_hotbar_dirt_fact(3, observed_ns=started_ns + 100_000_000),),
+    )
+    first_positive = executor.tick(board, sequence=2, now_ns=started_ns + 110_000_000)
+    assert first_positive.run.outcome == SkillOutcome.RUNNING
+    assert executor.verified_collection_hotbar_item_count is None
+
+    board.merge_semantics(
+        instance_id="bedrock:test",
+        facts=(_hotbar_dirt_fact(3, observed_ns=started_ns + 360_000_000),),
+    )
+    terminal = executor.tick(board, sequence=3, now_ns=started_ns + 370_000_000)
+
+    assert terminal.run.outcome == SkillOutcome.SUCCEEDED
+    assert terminal.outcome_verification is not None
+    assert terminal.outcome_verification.kind == OutcomeKind.RESOURCE_ACQUISITION
+    assert terminal.outcome_verification.status == OutcomeStatus.SUCCEEDED
+    assert terminal.outcome_verification.signal == OutcomeSignal.RESOURCE_ACQUIRED
+    assert terminal.outcome_verification.target_kind == "dirt"
+    assert terminal.outcome_verification.evidence_keys == ("inventory.hotbar.dirt",)
+    assert executor.verified_collection_hotbar_item_kind == "dirt"
+    assert executor.verified_collection_hotbar_item_count == 3
+    # The log-specific accessor must never claim a dirt increment.
+    assert executor.verified_collection_hotbar_log_count is None
+
+
+def test_collect_recent_drop_fails_closed_for_uncalibrated_drop_kind() -> None:
+    started_ns = 7_000_000_000
+    executor = SkillExecutor(_MovingIntentCapturePolicy())
+    spec = build_bootstrap_skill_library().get("collect_recent_drop")
+    sand_fact = PerceptionFact(
+        key="inventory.hotbar.sand",
+        value=1,
+        confidence=0.995,
+        observed_ns=started_ns - 1_000_000,
+        source="deterministic:bedrock:classic-hud-hotbar-sand-v1:not-training-label",
+        expires_after_ms=250,
+    )
+    board = _board(
+        _fact("collection.recent_break", "sand"),
+        PerceptionFact(
+            key="inventory.hotbar.sand",
+            value=1,
+            confidence=0.995,
+            observed_ns=started_ns + 10_000_000,
+            source=sand_fact.source,
+            expires_after_ms=250,
+        ),
+    )
+    executor.start(
+        spec,
+        run_id="collect-sand",
+        now_ns=started_ns,
+        collection_hotbar_baseline=sand_fact,
+        collection_drop_kind="sand",
+    )
+
+    executor.tick(board, sequence=1, now_ns=started_ns + 20_000_000)
+    for sequence, offset_ns in ((2, 100_000_000), (3, 400_000_000)):
+        board.merge_semantics(
+            instance_id="bedrock:test",
+            facts=(
+                PerceptionFact(
+                    key="inventory.hotbar.sand",
+                    value=2,
+                    confidence=0.995,
+                    observed_ns=started_ns + offset_ns,
+                    source=sand_fact.source,
+                    expires_after_ms=250,
+                ),
+            ),
+        )
+        tick = executor.tick(
+            board, sequence=sequence, now_ns=started_ns + offset_ns + 10_000_000
+        )
+        assert tick.run.outcome == SkillOutcome.RUNNING
+
+    terminal = executor.tick(board, sequence=4, now_ns=started_ns + 5_000_000_001)
+    assert terminal.run.outcome == SkillOutcome.FAILED
+    assert terminal.run.failure_code == SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED
+    assert executor.verified_collection_hotbar_item_count is None
+
+
+@pytest.mark.parametrize(
+    "baseline_kind",
+    ["log", "wrong-source", "missing"],
+)
+def test_collect_recent_drop_rejects_a_baseline_for_another_item_identity(
+    baseline_kind: str,
+) -> None:
+    started_ns = 8_000_000_000
+    executor = SkillExecutor(_MovingIntentCapturePolicy())
+    baseline: PerceptionFact | None
+    if baseline_kind == "log":
+        baseline = _hotbar_log_fact(2, observed_ns=started_ns - 1_000_000)
+    elif baseline_kind == "wrong-source":
+        baseline = _hotbar_dirt_fact(
+            2,
+            observed_ns=started_ns - 1_000_000,
+            source="vlm:test:inventory-query",
+        )
+    else:
+        baseline = None
+    executor.start(
+        build_bootstrap_skill_library().get("collect_recent_drop"),
+        run_id=f"collect-wrong-baseline-{baseline_kind}",
+        now_ns=started_ns,
+        collection_hotbar_baseline=baseline,
+        collection_drop_kind="dirt",
+    )
+
+    state = executor._collection_possession
+    assert state.drop_kind is None
+    assert state.baseline_count is None
+
+    board = _board(_fact("collection.recent_break", "dirt"))
+    for sequence, count, offset_ns in (
+        (1, 2, 10_000_000), (2, 3, 100_000_000), (3, 3, 400_000_000)
+    ):
+        board.merge_semantics(
+            instance_id="bedrock:test",
+            facts=(_hotbar_dirt_fact(count, observed_ns=started_ns + offset_ns),),
+        )
+        tick = executor.tick(
+            board, sequence=sequence, now_ns=started_ns + offset_ns + 1_000_000
+        )
+        assert tick.run.outcome == SkillOutcome.RUNNING
+    terminal = executor.tick(board, sequence=4, now_ns=started_ns + 5_000_000_001)
+    assert terminal.run.outcome == SkillOutcome.FAILED
+    assert terminal.run.failure_code == SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED
+
+
+@pytest.mark.parametrize(
+    "rejected",
+    [
+        _hotbar_dirt_fact(3, observed_ns=1, source="vlm:test:inventory-query"),
+        _hotbar_dirt_fact(1, observed_ns=1),
+        _hotbar_dirt_fact(4, observed_ns=1),
+    ],
+    ids=["generic-source", "unchanged-count", "multi-item-count"],
+)
+def test_collect_recent_drop_rejects_noncanonical_dirt_evidence(
+    rejected: PerceptionFact,
+) -> None:
+    started_ns = 9_000_000_000
+    executor = SkillExecutor(_MovingIntentCapturePolicy())
+    executor.start(
+        build_bootstrap_skill_library().get("collect_recent_drop"),
+        run_id="collect-dirt-reject",
+        now_ns=started_ns,
+        collection_hotbar_baseline=_hotbar_dirt_fact(
+            2, observed_ns=started_ns - 1_000_000
+        ),
+        collection_drop_kind="dirt",
+    )
+    board = _board(
+        _fact("collection.recent_break", "dirt"),
+        _hotbar_dirt_fact(2, observed_ns=started_ns + 10_000_000),
+    )
+    executor.tick(board, sequence=1, now_ns=started_ns + 20_000_000)
+
+    for sequence, offset_ns in ((2, 100_000_000), (3, 400_000_000)):
+        board.merge_semantics(
+            instance_id="bedrock:test",
+            facts=(
+                rejected.model_copy(
+                    update={"observed_ns": started_ns + offset_ns}
+                ),
+            ),
+        )
+        tick = executor.tick(
+            board, sequence=sequence, now_ns=started_ns + offset_ns + 1_000_000
+        )
+        assert tick.run.outcome == SkillOutcome.RUNNING
     terminal = executor.tick(board, sequence=4, now_ns=started_ns + 5_000_000_001)
     assert terminal.run.failure_code == SkillFailureCode.RESOURCE_PICKUP_UNVERIFIED
 
