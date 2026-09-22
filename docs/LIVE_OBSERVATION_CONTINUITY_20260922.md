@@ -41,25 +41,28 @@ Verified live examples (private `http://127.0.0.1:8775/api/observation`):
 | 19:29:36-19:31 | `online: false, reason: sample_expired, state: reasoning, last_seen_age_ms: 31816 -> 119389` |
 
 Availability after deployment, private route, strict post-deploy window
-18:53:27-19:32:48 AEST (sampled every 2 s, 939 samples, 39.4 min):
+18:53:27-19:41:59 AEST (sampled every 2 s, 1186 samples, 48.5 min; two agent
+generations ended by capture-stale crashes and were recovered by start.sh):
 
 | metric | before (morning baseline, no heartbeat) | after (this window) |
 | --- | --- | --- |
-| online samples | 51.1% | 38.3% (360/939) |
-| same window without the heartbeat (replayed samples removed) | n/a | 26.3% (247/939) |
-| heartbeat contribution | none | +12.0 pp (+45% relative), 113 replayed packets |
-| longest labelled gap | 172 s | 212 s |
+| online samples | 51.1% | 37.3% (442/1186) |
+| same window without the heartbeat (replayed samples removed) | n/a | 23.2% (275/1186) |
+| heartbeat contribution | none | +14.1 pp (+61% relative), 167 replayed packets |
+| longest labelled gap | 172 s | 212 s (15 gaps) |
 | gap carries | `source_unavailable` only | `reason: sample_expired`, `state`, `last_seen_age_ms`, frame/sequence identity |
-| online phase mix | n/a (no state field) | 230 `acting`, 129 `reasoning`, 1 legacy packet |
-| host context | quiet window | load average ~30, 3 capture-stale agent restarts, VLM shared with image perception |
+| online phase mix | n/a (no state field) | 255 `acting`, 186 `reasoning`, 1 legacy packet |
+| host context | quiet window | load average ~30, 2 agent restarts, VLM shared with image perception |
 
 The raw after percentage is lower than the quiet morning window because the
 same host now runs the Doom/flylab jobs at load ~30 and every planner call
-takes ~44 s of server time; the contract change is measured by the 113
-replayed packets (12 percentage points that were offline before) and by the
-facts carried in each gap, not by the raw percentage alone. All 579 gap
-samples were genuine observation gaps (the dashboard answered every status
-probe; there were zero dashboard-unresponsive samples in the window).
+takes ~44 s of server time; the contract change is measured by the 167
+replayed packets (14 percentage points that were offline before) and by the
+facts carried in each gap, not by the raw percentage alone. All gap samples
+were genuine observation gaps (the dashboard answered every status probe;
+there were zero dashboard-unresponsive samples in the window), and the
+last-seen age advanced in real time while the frame id and sequence stayed
+frozen (observed: seq 725 / frame 14679 / `last_seen_age_ms` 42597 -> 67531).
 
 ## 2. Planner profile and the duplicate-call fix
 
@@ -87,11 +90,12 @@ offered and then corrected. The existing semantic repair remains as the
 fallback for urgent safety and fresh operator retries, and the repair path is
 still exercised by `test_repair_cannot_alternate_between_two_recently_failed_options`.
 
-After deployment (18:53-20:10 AEST): 25 calls, 2 repairs (2 retry repairs)
-across the restarted generations, i.e. 1.09 calls per decision vs 1.82
-before. Estimated model time per decision: 46.1 s + 0.78 x 26.5 s ~= 66.8 s
-before, 44.4 s + 0.09 x 26.5 s ~= 46.8 s after (-30%). The single-call p50 is
-unchanged (44.4 s vs 46.1 s); the win is fewer calls, not a faster model.
+After deployment (18:53-19:42 AEST, same window as section 1): 34 calls,
+4 repairs (4 retry repairs) across the restarted generations, i.e. ~1.13
+calls per decision vs 1.82 before. Estimated model time per decision:
+46.1 s + 0.78 x 26.5 s ~= 66.8 s before, 44.4 s + 0.13 x 26.5 s ~= 47.9 s
+after (-28%). The single-call p50 is unchanged (44.4 s vs 46.1 s); the win is
+fewer calls, not a faster model.
 
 Plan quality comparison on three fixed observations (stone pit blocked, oak
 trunk visible, four logs in hand; exact system message from the committed
@@ -167,15 +171,17 @@ database is older); the plan is still working traversal nodes toward the oak
 logs, so break/pickup remains the honest blocker.
 
 Operational incidents during the window, reported not hidden:
-- three agent generations died with `capture stream is stale for 3 consecutive
-  frames` under host load average ~30 (the VLM, game, Doom and flylab jobs all
-  run on 8 cores); start.sh recovered each generation and preserved the world;
-- one earlier generation died with
-  `ValueError: skill_id does not match the accepted action condition`
-  (runtime.py:2083), also recovered;
-- the dashboard process (nice 19) was descheduled for 40-212 s at a time
-  under the same load, which the sampler records as transport timeouts rather
-  than observation gaps.
+- three agent generations ended unexpectedly during the evening: one
+  provenance assertion at 18:16
+  (`ValueError: skill_id does not match the accepted action condition`,
+  runtime.py:2083) before the rider changes were deployed, and two
+  `capture stream is stale for 3 consecutive frames` crashes at 18:56 and
+  19:06 under host load average ~30 (the VLM, game, Doom and flylab jobs all
+  run on 8 cores). start.sh recovered each generation and preserved the world;
+- the dashboard process (nice 19) answered every probe in the measured
+  window, but during the two crash transitions it served 503 gaps for the
+  capture-stale interval, which the sampler records as genuine observation
+  gaps rather than transport failures.
 
 ## 5. Site-side field report (no site repo edit performed)
 
