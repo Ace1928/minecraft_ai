@@ -282,3 +282,22 @@ def test_plan_owned_mobility_proof_releases_old_stall_but_unverified_success_doe
         runtime._traversal_escalation_pending = True
         runtime._record_terminal_run(verified, outcome_verification=proof)
         assert runtime._traversal_escalation_pending  # replay cannot clear a newer failure
+
+def test_bounded_null_replan_run_releases_the_escalation_guard(tmp_path):
+    from minecraft_ai.storage import StateDatabase
+    from test_agent_core import _runtime_for_learning
+
+    with StateDatabase(tmp_path / "state.sqlite") as database:
+        runtime = _runtime_for_learning(database)
+        runtime.skills = build_bootstrap_skill_library()
+        runtime._traversal_escalation_pending = True
+        runtime._note_null_replan()
+        assert runtime._traversal_escalation_pending  # one null replan still holds
+        runtime._note_null_replan()
+        assert not runtime._traversal_escalation_pending
+        assert runtime._traversal_escalation_release.startswith("bounded_keepalive_resume")
+        # The authorized, progress-verified keepalive rotation may resume.
+        assert runtime._explore_keep_alive() is not None
+        runtime._note_decision_started_skill()
+        assert runtime._null_replan_streak == 0
+        assert runtime._traversal_escalation_release is None

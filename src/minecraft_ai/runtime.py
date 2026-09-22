@@ -360,6 +360,8 @@ class AgentRuntime:
     _last_storage_retry_ns: int = field(default=0, init=False)
     _last_operator_storage_retry_ns: int = field(default=0, init=False)
     _traversal_escalation_pending: bool = field(default=False, init=False)
+    _traversal_escalation_release: str | None = field(default=None, init=False)
+    _null_replan_streak: int = field(default=0, init=False)
     _headroom_recovery: _HeadroomRecovery | None = field(default=None, init=False)
     _headroom_inspection_memory: MemoryRecord | None = field(default=None, init=False)
     _keepalive_prediction_evidence: _KeepalivePredictionEvidence | None = field(
@@ -1748,6 +1750,31 @@ class AgentRuntime:
         policy = None if executor is None else getattr(executor, "policy", None)
         _restore_policy_world_camera(policy, pitch_units=current_pitch + mouse_dy)
         return True
+
+    _NULL_REPLAN_RELEASE_AFTER = 2
+
+    def _note_decision_started_skill(self) -> None:
+        """A started decision skill supersedes any pending escalation release."""
+        self._null_replan_streak = 0
+        self._traversal_escalation_release = None
+
+    def _note_null_replan(self) -> None:
+        """A replan request without an executable plan must not strand the body.
+
+        The traversal escalation guard exists so a disposable walk cannot
+        invalidate a slow decision. After a bounded run of null replans the
+        guard is released so the authorized, progress-verified keepalive
+        rotation resumes; cognition retry pressure is unchanged and safety and
+        operator work still preempt.
+        """
+        self._null_replan_streak += 1
+        if (self._null_replan_streak >= self._NULL_REPLAN_RELEASE_AFTER
+                and self._traversal_escalation_pending):
+            self._traversal_escalation_pending = False
+            self._traversal_escalation_release = (
+                "bounded_keepalive_resume_after_"
+                f"{self._null_replan_streak}_null_replans")
+            self._null_replan_streak = 0
 
     def _explore_keep_alive(self) -> SkillSpec | None:
         """Pick a precondition-free option to keep motor busy while cognition decides.
@@ -3690,11 +3717,13 @@ class AgentRuntime:
                     instruction=decision.instruction,
                 )
             self._traversal_escalation_pending = False
+            self._note_decision_started_skill()
         operator_waiting = self._queued_operator_message_waiting()
         if perception_probe_started:
             self._clear_cognition_retry()
             self._cognition_requested = False
         elif decision.request_replan:
+            self._note_null_replan()
             self._schedule_cognition_retry(now_ns=now)
         elif operator_waiting and operator_acknowledged:
             self._schedule_operator_followup(now_ns=now)
@@ -4973,6 +5002,11 @@ class AgentRuntime:
             "stale_frame_skips": self.metrics.stale_frame_skips,
             "consecutive_stale_frames": self.metrics.consecutive_stale_frames,
             "input_release_pending": self._input_release_pending_ns is not None,
+            "traversal_escalation": {
+                "pending": bool(self._traversal_escalation_pending),
+                "null_replan_streak": int(self._null_replan_streak),
+                "release_reason": self._traversal_escalation_release,
+            },
             "storage_contentions": self.metrics.storage_contentions,
             "storage_backlog": (
                 len(self._pending_skill_stats)
