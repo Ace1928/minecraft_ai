@@ -24,7 +24,7 @@ from minecraft_ai.grounded_perception import (
 )
 from minecraft_ai.memory import MemoryKind, MemoryRecord
 from minecraft_ai.mining_control import (
-    is_hand_safe_soft_block,
+    is_hand_clearable_block,
     normalize_block_kind,
 )
 from minecraft_ai.motor import MotorIntent
@@ -124,7 +124,12 @@ _HEADROOM_TIMEOUT_MULTIPLIER = 5.0
 
 _HEADROOM_TIMEOUT_MARGIN_S = 5.0
 
-_HEADROOM_TRANSACTION_MAX_S = 180.0
+# The transaction must outlive a serialized local VLM answer and still leave
+# the guarded break attempt its own bounded hold. With a 180 s model timeout the
+# previous 180 s cap expired during classification, so a perfectly good answer
+# could never reach the mining guard. Keep the cap hard but large enough for
+# classification plus one clearance and one traversal retry.
+_HEADROOM_TRANSACTION_MAX_S = 420.0
 
 _HEADROOM_SETTLE_TIMEOUT_NS = 2_000_000_000
 
@@ -447,7 +452,9 @@ def _headroom_clear_target(
     ):
         return None
     normalized_kind = normalize_block_kind(block.value)
-    if not is_hand_safe_soft_block(normalized_kind):
+    if not is_hand_clearable_block(normalized_kind):
+        # Unfamiliar or too-slow families still need resolved capability or a
+        # learned break history before any clearance may be admitted.
         tool = _selected_item(blackboard, now_ns=now_ns, min_confidence=0.70)
         if tool is None or mining_knowledge is None:
             return None

@@ -155,6 +155,28 @@ _HAND_SAFE_FAMILIES = frozenset(
     }
 )
 
+# Vanilla survival allows breaking every non-unbreakable block by hand. These
+# families carry a bounded empty-hand clear budget: common terrain and wood
+# whose hand-break time fits inside the configured absolute input cap. Obsidian
+# and ancient debris stay excluded because their hand-break time does not.
+_HAND_CLEARABLE_FAMILIES = frozenset(
+    {
+        _BlockFamily.LOG,
+        _BlockFamily.WOOD,
+        _BlockFamily.SOFT,
+        _BlockFamily.PICKAXE,
+        _BlockFamily.DEEPSLATE,
+    }
+)
+
+_HAND_BREAK_BUDGET_MS = {
+    _BlockFamily.SOFT: 2_500,
+    _BlockFamily.LOG: 3_600,
+    _BlockFamily.WOOD: 3_600,
+    _BlockFamily.PICKAXE: 10_000,
+    _BlockFamily.DEEPSLATE: 16_000,
+}
+
 
 @dataclass(frozen=True)
 class _BlockRule:
@@ -169,6 +191,7 @@ class _VerifiedTarget:
     rule: _BlockRule
     selected_item: str
     lease_ms: int
+    hand_clearance: bool = False
 
 
 @dataclass
@@ -1184,6 +1207,7 @@ def _verified_target(
                        and knowledge.belief(kind, selected_item).breaks >= 3)
     resolved_breakable = bool(exact is not None and exact.can_break is True)
     probe = intent.parameters.get("allow_unknown_block_probe") is True
+    harvest_required = intent.parameters.get("harvest_required") is not False
     if exact is not None and exact.can_break is False:
         return SkillFailureCode.MINING_WRONG_TOOL
     rule = _block_rule(kind)
@@ -1191,6 +1215,10 @@ def _verified_target(
         if not (resolved_breakable or experienced or (probe and selected_item is not None)):
             return SkillFailureCode.MINING_TARGET_UNVERIFIED
         rule = _BlockRule(_BlockFamily.OBSERVED)
+    # An explicit clearance run may break a familiar vanilla block by hand even
+    # when the equipped tool cannot harvest it. The visual break verifier still
+    # decides success, and exact negative game rules above remain authoritative.
+    hand_clearance = bool(not harvest_required and _hand_break_ms(rule) is not None)
     if rule.family == _BlockFamily.UNBREAKABLE and not resolved_breakable:
         return SkillFailureCode.MINING_WRONG_TOOL
     if intent.mode.casefold() == "gather_wood" and rule.family != _BlockFamily.LOG:
@@ -1206,7 +1234,10 @@ def _verified_target(
     if mineable_is_bound and mineable is not None and mineable.value is not True:
         return SkillFailureCode.MINING_TARGET_UNVERIFIED
     inferred_hand_safe = current_grounding and (
-        rule.family in _HAND_SAFE_FAMILIES or resolved_breakable or experienced
+        rule.family in _HAND_SAFE_FAMILIES
+        or hand_clearance
+        or resolved_breakable
+        or experienced
     )
     if not inferred_hand_safe and (
         mineable is None
@@ -1232,11 +1263,10 @@ def _verified_target(
             return SkillFailureCode.MINING_TARGET_UNVERIFIED
 
     if selected_item is None:
-        if rule.family not in _HAND_SAFE_FAMILIES:
+        if rule.family not in _HAND_SAFE_FAMILIES and not hand_clearance:
             return SkillFailureCode.MINING_TOOL_UNVERIFIED
         selected_item = _UNVERIFIED_ITEM
     tool_tier = _tool_tier(selected_item, suffix="pickaxe")
-    harvest_required = intent.parameters.get("harvest_required") is not False
     if harvest_required and exact is not None and exact.can_harvest is False:
         return SkillFailureCode.MINING_WRONG_TOOL
     tool_resolved = bool(
@@ -1246,13 +1276,17 @@ def _verified_target(
     if not tool_resolved and rule.minimum_pick_tier is not None and (
         tool_tier is None or tool_tier < rule.minimum_pick_tier
     ):
-        return SkillFailureCode.MINING_WRONG_TOOL
+        # Only an actually empty hand may clear a tiered block for traversal.
+        # An equipped but insufficient tool still fails the capability gate.
+        if not (hand_clearance and tool_tier is None):
+            return SkillFailureCode.MINING_WRONG_TOOL
     return _VerifiedTarget(
         track_id=track.track_id,
         kind=kind,
         rule=rule,
         selected_item=selected_item,
         lease_ms=_lease_duration_ms(rule, selected_item),
+        hand_clearance=hand_clearance,
     )
 
 
@@ -1345,7 +1379,10 @@ def _continuation_target_failure(
         now_ns=now_ns,
         min_confidence=min_confidence,
     )
-    if selected_item is None and expected.rule.family not in _HAND_SAFE_FAMILIES:
+    if selected_item is None and (
+        expected.rule.family not in _HAND_SAFE_FAMILIES
+        and not expected.hand_clearance
+    ):
         return SkillFailureCode.MINING_TOOL_UNVERIFIED
     if (
         expected.selected_item != _UNVERIFIED_ITEM
@@ -1634,6 +1671,13 @@ def is_hand_safe_soft_block(value: str) -> bool:
     return rule is not None and rule.family == _BlockFamily.SOFT
 
 
+def is_hand_clearable_block(value: str) -> bool:
+    """Return whether an empty-hand clearance attempt has a bounded clear budget."""
+
+    rule = _block_rule(_normalize_name(value))
+    return rule is not None and _hand_break_ms(rule) is not None
+
+
 def _track_fresh(track: Track, *, now_ns: int, max_track_age_ms: int) -> bool:
     age_ns = now_ns - track.last_seen_ns
     return 0 <= age_ns <= max_track_age_ms * 1_000_000
@@ -1742,7 +1786,18 @@ def _block_rule(kind: str) -> _BlockRule | None:
     return _BlockRule(family, minimum_pick_tier=minimum_tier)
 
 
+def _hand_break_ms(rule: _BlockRule) -> int | None:
+    """Return the bounded empty-hand clear budget, or None when not hand-clearable."""
+
+    if rule.family not in _HAND_CLEARABLE_FAMILIES:
+        return None
+    return _HAND_BREAK_BUDGET_MS.get(rule.family)
+
+
 def _lease_duration_ms(rule: _BlockRule, selected_item: str) -> int:
+    hand_ms = _hand_break_ms(rule)
+    if hand_ms is not None and selected_item in _EMPTY_ITEMS | {_UNVERIFIED_ITEM}:
+        return hand_ms
     if rule.family == _BlockFamily.OBSERVED:
         return 5_000  # Cold-start probe, never a prediction of game mechanics.
     if rule.family in {_BlockFamily.LOG, _BlockFamily.WOOD}:

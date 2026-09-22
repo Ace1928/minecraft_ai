@@ -365,7 +365,18 @@ def test_headroom_deadline_respects_serialized_vlm_timeout_budget() -> None:
         model = _Model()
 
     now = 12_000
-    assert _headroom_deadline_ns(_Worker(), now_ns=now) == now + 180_000_000_000
+    # A 75 s model timeout keeps the full multiplier budget instead of the cap.
+    assert _headroom_deadline_ns(_Worker(), now_ns=now) == now + 380_000_000_000
+
+    class _SlowModel:
+        timeout_s = 180.0
+
+    class _SlowWorker:
+        model = _SlowModel()
+
+    # The hard cap must exceed the serialized VLM timeout so classification
+    # cannot consume the entire transaction before the clearance can run.
+    assert _headroom_deadline_ns(_SlowWorker(), now_ns=now) == now + 420_000_000_000
 
 
 def test_headroom_reorientation_targets_absolute_calibrated_pitch() -> None:
@@ -452,8 +463,8 @@ def test_headroom_authoritative_pitch_requires_calibrated_supervisor(
     assert runtime._authoritative_world_camera_pitch_units() is None
 
 
-@pytest.mark.parametrize("kind", ("stone", "bedrock", "oak_log", "unknown"))
-def test_headroom_target_abstains_on_hard_or_unknown_exact_center_block(kind: str) -> None:
+@pytest.mark.parametrize("kind", ("bedrock", "unknown"))
+def test_headroom_target_abstains_on_unbreakable_or_unknown_exact_center_block(kind: str) -> None:
     frame = _capture()
     board = _board(frame)
     recovery = _recovery_for_frame(frame)
@@ -465,6 +476,21 @@ def test_headroom_target_abstains_on_hard_or_unknown_exact_center_block(kind: st
         )
         is None
     )
+
+
+@pytest.mark.parametrize("kind", ("stone", "cobblestone", "deepslate", "oak_log", "dirt"))
+def test_headroom_target_admits_hand_clearable_blocks_without_tool(kind: str) -> None:
+    frame = _capture()
+    board = _board(frame)
+    recovery = _recovery_for_frame(frame)
+    _publish_headroom_answer(board, recovery, frame, kind=kind)
+
+    target = _headroom_clear_target(
+        board, recovery, now_ns=time.monotonic_ns(), current_frame=frame
+    )
+
+    assert target is not None
+    assert target.kind == kind
 
 
 @pytest.mark.parametrize("defect", ("source", "crop_hash", "region", "pixel_sha", "future"))
@@ -1086,7 +1112,7 @@ def test_crosshair_color_swap_after_acquisition_motion_never_starts_attack(
         assert "left" not in routed.action.buttons_down
 
 
-@pytest.mark.parametrize("kind", ("stone", "unknown"))
+@pytest.mark.parametrize("kind", ("bedrock", "unknown"))
 def test_hard_or_unknown_answer_gives_cognition_a_turn_after_one_query(kind: str) -> None:
     runtime, perception, sent = _runtime_for_probe()
     runtime._traversal_escalation_pending = True
@@ -1125,6 +1151,39 @@ def test_hard_or_unknown_answer_gives_cognition_a_turn_after_one_query(kind: str
         assert runtime._explore_keep_alive() is None
         runtime._advance_headroom_recovery()
     assert runtime._execution_revision == revision
+
+
+def test_exact_center_stone_answer_starts_empty_hand_clearance() -> None:
+    runtime, perception, sent = _runtime_for_probe()
+    runtime._traversal_escalation_pending = True
+    runtime._headroom_recovery = _HeadroomRecovery(
+        context_key="explore-keepalive",
+        traversal_parameters={},
+        deadline_ns=time.monotonic_ns() + 60_000_000_000,
+        phase="request",
+    )
+    runtime._advance_headroom_recovery()
+    recovery = runtime._headroom_recovery
+    assert recovery is not None and recovery.phase == "grounding"
+    assert perception.last_capture is not None
+    _publish_headroom_answer(
+        runtime.blackboard,
+        recovery,
+        perception.last_capture,
+        kind="stone",
+    )
+    perception.available = True
+
+    runtime._advance_headroom_recovery()
+
+    assert recovery.phase == "mining"
+    assert runtime.executor.run is not None
+    assert runtime.executor.run.skill_id == "mine_visible_block"
+    assert runtime.executor.parameters == {
+        "target": "stone",
+        "target_track_id": f"crosshair-probe:{recovery.query_id}",
+        "harvest_required": False,
+    }
 
 
 def _runtime_with_inspection_feedback() -> tuple[AgentRuntime, _Perception, list[MotorAction]]:

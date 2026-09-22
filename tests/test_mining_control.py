@@ -6,7 +6,11 @@ import pytest
 
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.execution import SkillExecutor, initiation_satisfied
-from minecraft_ai.mining_control import MiningLeaseGuard, is_hand_safe_soft_block
+from minecraft_ai.mining_control import (
+    MiningLeaseGuard,
+    is_hand_clearable_block,
+    is_hand_safe_soft_block,
+)
 from minecraft_ai.motor import MotorIntent
 from minecraft_ai.perception import (
     FrameState,
@@ -705,6 +709,76 @@ def test_verified_target_and_tool_gate(
         assert tick.run.failure_reason == expected_failure.value
         assert tick.action is not None and "left" in tick.action.buttons_up
         assert tick.recovery_skills == ("reacquire_target",)
+
+
+@pytest.mark.parametrize(
+    ("kind", "lease_ms"),
+    [
+        ("stone", 10_000),
+        ("cobblestone", 10_000),
+        ("deepslate", 16_000),
+        ("oak_log", 3_600),
+        ("dirt", 2_500),
+    ],
+)
+def test_empty_hand_clearance_verifies_and_holds_full_hand_budget(
+    kind: str,
+    lease_ms: int,
+) -> None:
+    now = time.monotonic_ns()
+    policy = _ScriptedPolicy(MotorAction(sequence=0, buttons_down=("left",)))
+    executor = _executor(
+        policy,
+        now_ns=now,
+        parameters={"target": kind, "harvest_required": False},
+    )
+
+    tick = executor.tick(
+        _mining_board(now_ns=now, kind=kind, item=None),
+        sequence=1,
+        now_ns=now,
+    )
+
+    assert tick.run.outcome == SkillOutcome.RUNNING
+    assert tick.action is not None and "left" in tick.action.buttons_down
+    attempt = executor._mining_guard.attempt
+    assert attempt is not None
+    assert attempt.target.hand_clearance is True
+    assert attempt.target.selected_item == "unverified_item"
+    assert attempt.target.lease_ms == lease_ms
+
+
+def test_clearance_keeps_capability_gate_for_equipped_insufficient_tool() -> None:
+    now = time.monotonic_ns()
+    policy = _ScriptedPolicy(MotorAction(sequence=0, buttons_down=("left",)))
+    executor = _executor(
+        policy,
+        now_ns=now,
+        parameters={"target": "iron_ore", "harvest_required": False},
+    )
+
+    tick = executor.tick(
+        _mining_board(
+            now_ns=now,
+            kind="iron_ore",
+            item="minecraft:wooden_pickaxe",
+        ),
+        sequence=1,
+        now_ns=now,
+    )
+
+    assert tick.run.outcome == SkillOutcome.FAILED
+    assert tick.run.failure_code == SkillFailureCode.MINING_WRONG_TOOL
+    assert tick.action is not None and "left" in tick.action.buttons_up
+
+
+def test_clearance_hand_budget_is_not_granted_to_unbreakable_or_unknown() -> None:
+    assert is_hand_clearable_block("stone")
+    assert is_hand_clearable_block("oak_log")
+    assert is_hand_clearable_block("dirt")
+    assert not is_hand_clearable_block("bedrock")
+    assert not is_hand_clearable_block("obsidian")
+    assert not is_hand_clearable_block("unknown")
 
 
 @pytest.mark.parametrize("kind", ["dirt", "leaves", "oak_leaves"])
