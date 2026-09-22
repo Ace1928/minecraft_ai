@@ -131,6 +131,77 @@ def test_success_requires_source_recorded_outcome_evidence():
         observation.project_observation(raw, now_ns=11_000_000_000)
 
 
+def test_phase_and_replay_fields_are_additive_and_default_honestly():
+    raw = packet()
+    legacy = observation.project_observation(raw, now_ns=11_000_000_000)
+    assert legacy["state"] == "acting" and legacy["sample_replayed"] is False
+    raw.update(state="reasoning", sample_replayed=True)
+    projected = observation.project_observation(raw, now_ns=11_000_000_000)
+    assert projected["state"] == "reasoning" and projected["sample_replayed"] is True
+    # A projected packet remains projectable without rewriting its fields.
+    assert observation.project_observation(projected, now_ns=11_000_000_000) == projected
+    for edit in (lambda r: r.update(state="invented"),
+                 lambda r: r.update(state=True),
+                 lambda r: r.update(sample_replayed=1)):
+        broken = packet()
+        edit(broken)
+        with pytest.raises(ValueError):
+            observation.project_observation(broken, now_ns=11_000_000_000)
+
+
+def test_expired_sample_reports_true_last_seen_gap_not_source_unavailable(tmp_path, monkeypatch):
+    path = tmp_path / "observation.json"
+    raw = packet()
+    raw["source_id"] = "association-brain"
+    # The producer's capture stamp is old; a stale packet must never look online.
+    monkeypatch.setattr(observation.time, "monotonic_ns", lambda: 11_000_000_000)
+    observation.publish_observation(raw, path=path)
+    live = observation.read_observation(
+        preferred_source="association-brain", path=path)
+    assert live["online"] is True and live["state"] == "acting"
+    # Now the same stored packet is read 31 s past its capture stamp.
+    monkeypatch.setattr(observation.time, "monotonic_ns", lambda: 41_000_000_000)
+    gap = observation.read_observation(
+        preferred_source="association-brain", path=path)
+    assert gap["online"] is False and gap["reason"] == "sample_expired"
+    assert gap["last_seen_age_ms"] == 31_000.0
+    assert gap["source_frame_id"] == raw["source_frame_id"]
+    # A different source or pinned stream must not learn another source's gap.
+    assert observation.read_observation(
+        preferred_source="native-policy", path=path)["reason"] == "source_unavailable"
+    assert observation.read_observation(
+        preferred_source="association-brain", stream_id="b" * 32,
+        path=path)["reason"] == "source_unavailable"
+
+
+def test_runtime_phase_hook_tracks_planner_state_without_owning_a_readout():
+    from types import SimpleNamespace
+
+    from minecraft_ai.runtime import AgentRuntime
+
+    seen: list[str] = []
+    runtime = SimpleNamespace(
+        executor=SimpleNamespace(policy=SimpleNamespace(note_observer_state=seen.append)),
+        _pending_decision=None,
+        _traversal_escalation_pending=False,
+    )
+    AgentRuntime._note_observer_phase(runtime, None)
+    assert seen == ["idle"]
+    runtime._traversal_escalation_pending = True
+    AgentRuntime._note_observer_phase(runtime, None)
+    assert seen[-1] == "replanning"
+    AgentRuntime._note_observer_phase(runtime, object())
+    assert seen[-1] == "acting"
+    runtime._pending_decision = object()
+    AgentRuntime._note_observer_phase(runtime, object())
+    assert seen[-1] == "reasoning"
+    # A producer fault must never fault the motor loop, and a policy without
+    # the opt-in hook is simply skipped.
+    runtime.executor.policy.note_observer_state = lambda phase: 1 / 0
+    AgentRuntime._note_observer_phase(runtime, None)
+    AgentRuntime._note_observer_phase(SimpleNamespace(executor=None), None)
+
+
 def test_operator_route_is_private_get_only_and_does_not_capture_or_actuate(monkeypatch):
     calls = []
     def read(**kwargs):

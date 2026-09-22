@@ -24,8 +24,12 @@ OBSERVATION_FILE = Path(user_runtime_dir("minecraft-ai")) / "public-observation.
 MAX_BYTES = 240_000
 FRESH_NS = 30_000_000_000
 SOURCES = {"native-policy", "association-brain"}
+# Producer phase labels. Missing state on a legacy producer packet means a real
+# sample was just consumed; it never means the producer is idle.
+STATES = {"acting", "idle", "reasoning", "replanning"}
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 STREAM = re.compile(r"[a-f0-9]{32}\Z")
+CAPTURE = re.compile(r"[1-9][0-9]{0,19}\Z")
 BUTTONS = {"forward", "back", "left", "right", "jump", "sneak", "sprint", "attack", "use"}
 
 
@@ -168,12 +172,19 @@ def project_observation(
     if not 0 <= age_ns < FRESH_NS:
         raise ValueError("observation expired")
     frame_id = _integer(raw["source_frame_id"])
+    state = raw.get("state", "acting")
+    if state not in STATES:
+        raise ValueError("invalid observation state")
+    replayed = raw.get("sample_replayed", False)
+    if type(replayed) is not bool:
+        raise ValueError("invalid sample replay flag")
     result = {
         "schema": SCHEMA, "online": True, "source_id": preferred_source,
         "safety": {"game_only": True, "chat_free": safety["chat_free"]},
         "stream_id": raw["stream_id"], "sequence": _integer(raw["sequence"], 10**12),
         "source_frame_id": frame_id, "source_captured_ns": captured,
         "frame_age_ms": age_ns / 1_000_000,
+        "state": state, "sample_replayed": replayed,
         "input": _image(raw.get("input")), "reconstruction": None,
     }
     if not safety["chat_free"] and (raw.get("input") is not None
@@ -252,6 +263,44 @@ def project_observation(
     return result
 
 
+def _stale_gap(
+    raw: Any, *, preferred_source: str, stream_id: str, now_ns: int,
+) -> dict[str, Any] | None:
+    """Describe the last real sample after it left the freshness window.
+
+    This never extends frame age: the stored capture stamp is reported as-is
+    with its true age plus the last explicit producer phase. Anything that is
+    not a valid last-seen candidate fails closed as source_unavailable.
+    """
+    if (not isinstance(raw, dict) or raw.get("schema") != SCHEMA
+            or raw.get("source_id") != preferred_source):
+        return None
+    stream = raw.get("stream_id")
+    if not isinstance(stream, str) or not STREAM.fullmatch(stream):
+        return None
+    if stream_id and stream_id != stream:
+        return None
+    captured = raw.get("source_captured_ns")
+    if not isinstance(captured, str) or not CAPTURE.fullmatch(captured):
+        return None
+    age_ns = now_ns - int(captured)
+    if not FRESH_NS <= age_ns < 2**63:
+        return None
+    state = raw.get("state", "acting")
+    if state not in STATES:
+        state = None
+    sequence, frame_id = raw.get("sequence"), raw.get("source_frame_id")
+    return {
+        "schema": SCHEMA, "online": False, "reason": "sample_expired",
+        "source_id": preferred_source, "stream_id": stream,
+        "sequence": sequence if type(sequence) is int and sequence >= 0 else None,
+        "source_frame_id": frame_id if type(frame_id) is int and frame_id >= 0 else None,
+        "source_captured_ns": captured,
+        "last_seen_age_ms": age_ns / 1_000_000,
+        "state": state,
+    }
+
+
 def publish_observation(raw: dict[str, Any], *, path: Path = OBSERVATION_FILE) -> None:
     """Optional producer hook; write only validated, public-safe data atomically.
 
@@ -279,7 +328,14 @@ def read_observation(*, preferred_source: str = "association-brain", stream_id: 
             data = handle.read(MAX_BYTES + 1)
         if len(data) > MAX_BYTES:
             raise ValueError("observation budget exceeded")
-        return project_observation(json.loads(data), preferred_source=preferred_source,
+        raw = json.loads(data)
+        gap = _stale_gap(raw, preferred_source=preferred_source, stream_id=stream_id,
+                         now_ns=time.monotonic_ns())
+        if gap is not None:
+            # A genuinely old sample is reported as a gap with its real age and
+            # last explicit phase, never as online and never as a generic error.
+            return gap
+        return project_observation(raw, preferred_source=preferred_source,
                                    stream_id=stream_id)
     except (OSError, ValueError, KeyError, TypeError, OverflowError, AssertionError, RecursionError,
             Image.DecompressionBombError):

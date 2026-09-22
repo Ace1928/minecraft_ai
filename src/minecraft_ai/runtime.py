@@ -4885,10 +4885,37 @@ class AgentRuntime:
             return False
         return True
 
+    def _note_observer_phase(self, running: object | None) -> None:
+        """Publish the current planner phase to an opt-in observation producer.
+
+        A private producer may heartbeat its last real consumed sample while
+        reasoning or idle; this only updates the phase label. It can never
+        create a readout or extend a capture stamp, and a producer fault must
+        not fault the motor loop.
+        """
+        executor = getattr(self, "executor", None)
+        policy = getattr(executor, "policy", None)
+        note = getattr(policy, "note_observer_state", None)
+        if not callable(note):
+            return
+        if getattr(self, "_pending_decision", None) is not None:
+            phase = "reasoning"
+        elif running is not None:
+            phase = "acting"
+        elif getattr(self, "_traversal_escalation_pending", False):
+            phase = "replanning"
+        else:
+            phase = "idle"
+        try:
+            note(phase)
+        except Exception:
+            pass
+
     def _telemetry_payload(self, *, state: str) -> dict[str, object]:
         running = self.executor.run
         if running is not None and running.outcome != SkillOutcome.RUNNING:
             running = None
+        self._note_observer_phase(running)
         decision = self._last_decision
         policy_status: dict[str, object] = {"policy_id": self.executor.policy.policy_id}
         status = getattr(self.executor.policy, "status", None)

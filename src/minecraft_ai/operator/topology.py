@@ -76,12 +76,22 @@ def _observation_summary(observation: dict[str, Any]) -> dict[str, Any]:
     online = observation.get("online") is True
     action = observation.get("action")
     receptive = observation.get("receptive_fields") or {}
+    state = observation.get("state")
+    if not isinstance(state, str):
+        state = None
     return {
         "online": online,
         "source_id": observation.get("source_id") if online else None,
         "stream_id": observation.get("stream_id") if online else None,
         "sequence": _integer(observation.get("sequence")) if online else None,
         "frame_age_ms": _number(observation.get("frame_age_ms")) if online else None,
+        # An expired sample is a normal gap, not a fake outage: carry the true
+        # last-seen age and the last explicit producer phase.
+        "state": state,
+        "last_seen_age_ms": (
+            None if online else _number(observation.get("last_seen_age_ms"))
+        ),
+        "reason": None if online else observation.get("reason"),
         "action": None if not isinstance(action, dict) else {
             "kind": action.get("kind"), "accepted": action.get("accepted") is True,
             "outcome": action.get("outcome"), "buttons": action.get("buttons") or [],
