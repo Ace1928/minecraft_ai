@@ -225,14 +225,14 @@ trap terminate INT TERM
 
 readiness_ok() {
     curl --fail --silent --show-error --max-time 5 \
-        http://127.0.0.1:8765/readyz >/dev/null \
+        ${MINECRAFT_OPERATOR_URL:-http://127.0.0.1:8765}/readyz >/dev/null \
         && curl --fail --silent --show-error --max-time 5 \
             http://127.0.0.1:8081/v1/models >/dev/null
 }
 
 runtime_health_ok() {
     curl --fail --silent --show-error --max-time 5 \
-        http://127.0.0.1:8765/livez >/dev/null \
+        ${MINECRAFT_OPERATOR_URL:-http://127.0.0.1:8765}/livez >/dev/null \
         && curl --fail --silent --show-error --max-time 5 \
             http://127.0.0.1:8081/v1/models >/dev/null
 }
