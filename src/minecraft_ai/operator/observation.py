@@ -22,7 +22,7 @@ from platformdirs import user_runtime_dir
 SCHEMA = "minecraft.observation.v1"
 OBSERVATION_FILE = Path(user_runtime_dir("minecraft-ai")) / "public-observation.json"
 MAX_BYTES = 240_000
-FRESH_NS = 5_000_000_000
+FRESH_NS = 30_000_000_000
 SOURCES = {"native-policy", "association-brain"}
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 STREAM = re.compile(r"[a-f0-9]{32}\Z")
