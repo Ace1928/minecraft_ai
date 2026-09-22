@@ -144,11 +144,27 @@ OOM the live game, so it was deliberately not capped. Measured agent RSS stayed
 at 127-165 MiB (well under 2G) across the session, and the VLM service was not
 touched.
 
-## 5. Honest limitations
+## 5. Honest limitations and the remaining blocker
 
-- Observation availability is duty-cycle bound by planner latency, not by the
-  transport chain.
+- Observation availability is duty-cycle bound by the planner, not by the
+  transport chain. The producer publishes only while the association policy
+  actually acts, so gaps are labelled `source_unavailable` instead of serving
+  stale data.
+- Remaining blocker (reported, not papered over): after repeated traversal
+  failures the runtime raises its traversal-escalation guard and stops starting
+  disposable keepalives; the planner then returns a replan (`s=null`, `x=true`)
+  with no executable plan, the persistent plan is cleared, and the body idles
+  until the next model cycle. Observed for 14+ minutes at 16:07-16:23 AEST:
+  `request_replan: true`, `plan: null`, zero skill events, and the observation
+  file unchanged. The VLM log shows the same loop (44 s planner call, 25 s
+  repair, then two 129-143 s calls). Breaking this loop requires changing when
+  the escalation guard clears or when a repair may fall back to a bounded
+  traversal retry; that was not done under time pressure because it changes
+  safety-relevant execution authority and needs its own qualification.
 - The public observation route rejects the default `python-urllib` user agent;
   this is site-side and was not modified.
 - The measured wall-clock prefill numbers were taken while the live agent was
   also calling the shared local model; only the token counts are load-free.
+- Two launcher recoveries in the after window (world preserved) were triggered
+  by a >5 s main-loop stall at 15:55 and 16:02; the stall did not recur in the
+  10 minutes after a stack watcher was armed and is not yet attributed.
