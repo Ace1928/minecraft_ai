@@ -264,6 +264,72 @@ def _bedrock_discovery_view() -> tuple[BedrockLinuxInstall | None, list[BedrockL
         return _discovery_cache
 
 
+def _reasoning_status_text(status: dict[str, object]) -> str:
+    """Do not describe persisted telemetry as the current agent's reasoning state."""
+    agent = status.get("agent") or {}
+    supervisor = status.get("supervisor") or {}
+    telemetry = status.get("telemetry") or {}
+    if not isinstance(agent, dict) or agent.get("alive") is not True:
+        return "Agent is not running. Reasoning standby is unconfirmed."
+    if (
+        not status.get("supervisor_reachable")
+        or not isinstance(supervisor, dict)
+        or supervisor.get("state") != "RUNNING"
+        or supervisor.get("motor_lease_active") is not True
+        or status.get("operator_pause_latched")
+        or supervisor.get("emergency_stop_latched")
+    ):
+        return "Autonomous control is unavailable. Reasoning standby is unconfirmed."
+    updated = telemetry.get("updated_monotonic_ns") if isinstance(telemetry, dict) else None
+    if (
+        type(updated) is not int
+        or not 0 <= time.monotonic_ns() - updated <= READINESS_TELEMETRY_MAX_AGE_NS
+        or telemetry.get("state") != "running"
+        or not isinstance(supervisor.get("motor_lease_id"), str)
+        or supervisor.get("motor_lease_id") != telemetry.get("lease_id")
+    ):
+        return "Reasoning state is unconfirmed; waiting for fresh agent telemetry."
+    standby = telemetry.get("reasoning_standby") or {}
+    state = standby.get("state") if isinstance(standby, dict) else None
+    if state == "off":
+        return "Reasoning standby is off; autonomous reasoning is enabled."
+    if state in {"draining", "standby"}:
+        prefix = "Draining existing inference" if state == "draining" else "Standby"
+        return f"{prefix} · {standby.get('remaining_seconds', '—')} seconds remaining"
+    return "Waiting for the agent to report its reasoning state."
+
+
+def _inventory_qualification_view(discovery, receipt):
+    reason = discovery.get("readiness_reason")
+    pending = bool(receipt and receipt.get("state") in {"queued", "running"})
+    ready = reason == "execution_contract_unqualified"
+    if ready:
+        availability = "Ready for a private inventory check. Paid commands remain held."
+    else:
+        explanation = {
+            "motor_lease_inactive": "the agent has no active control lease",
+            "emergency_stop_latched": "emergency stop is active",
+            "operator_paused": "the operator has paused control",
+            "live_incapable": "live game control is unavailable",
+        }.get(reason, (reason or "readiness is unconfirmed").replace("_", " "))
+        availability = f"Inventory check unavailable: {explanation}. Paid commands remain held."
+    summary = ""
+    if receipt:
+        summary = (
+            f"Check {receipt['state']} · {receipt.get('accepted_action_count', 0)} "
+            "inventory inputs accepted"
+        )
+        if receipt.get("reason_code"):
+            summary += f" · {receipt['reason_code']}"
+    return {
+        "can_start": ready and not pending,
+        "can_cancel": pending,
+        "status_text": summary if pending and ready else " · ".join(
+            part for part in (summary, availability) if part
+        ),
+    }
+
+
 def operator_status() -> dict[str, object]:
     reachable = supervisor_alive()
     if reachable:
@@ -277,7 +343,7 @@ def operator_status() -> dict[str, object]:
     install_raw, instances = _bedrock_discovery_view()
     install = install_raw if install_raw is not None else None
     build = None if install is None else install.selected_build
-    return {
+    status = {
         "server_time_ns": time.time_ns(),
         "supervisor": supervisor,
         "supervisor_reachable": reachable,
@@ -294,6 +360,8 @@ def operator_status() -> dict[str, object]:
         },
         "operator_pause_latched": operator_pause_latched(),
     }
+    status["reasoning_status_text"] = _reasoning_status_text(status)
+    return status
 
 
 def operator_readiness(
@@ -760,6 +828,7 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {
                 "commands_enabled": False, "discovery": discovery.model_dump(mode="json"),
                 "receipt": receipt,
+                **_inventory_qualification_view(discovery.model_dump(mode="json"), receipt),
             })
         elif path == "/api/messages":
             with StateDatabase(app_paths().state_db) as database:
@@ -1353,17 +1422,17 @@ $('skill').textContent=esc(t.active_skill);$('goal').textContent=esc(t.chosen_go
 $('plan').textContent=esc((t.plan_steps||[]).length?(t.plan_steps||[]).join(' → '):'No explicit plan yet.');
 $('instruction').textContent=esc(t.active_instruction||'Waiting for an executable option.');const params=t.active_skill_parameters||{},paramText=Object.entries(params).map(([k,v])=>k+'='+v).join(' · ');$('constraints').textContent=paramText?'active contract · '+paramText:'no explicit action constraints';const recent=(t.recent_skill_runs||[])[0];$('outcome').textContent=recent?'last option · '+recent.skill_id+' · '+recent.outcome+(recent.failure_reason?' · '+recent.failure_reason:''):'no terminal option evidence yet';const p=t.policy||{},bodyByRoute={raw_motion:p.raw_motion,gui:p.gui,semantic:p.primary,primary:p.primary},active=bodyByRoute[p.active_route]||p.primary||p,pred=active.last_prediction||{},counts=active.learned_action_counts||{},suppressed=(counts['constraint_suppressed.attack']||0)+(counts['constraint_suppressed.use']||0)+(counts['constraint_suppressed.jump']||0),grounding=p.grounding_active?' + ROCKET target '+(p.grounded_track_id||'pending'):'';$('policy').textContent=esc(active.model_version||p.policy_id);$('policyMetrics').textContent=(active.last_inference_ms??'—')+' ms · '+esc((p.active_route||active.grounding_mode)+grounding)+' · '+esc(active.accepted_predictions||0)+' learned · '+esc(counts.jump||0)+' jumps · '+esc(counts.camera||0)+' camera · '+suppressed+' constrained · target '+(pred.target_exists_probability==null?'—':Math.round(pred.target_exists_probability*100)+'%');
 const wc=s.supervisor.world_camera||{};$('camera').textContent=esc(active.estimated_pitch_units??wc.estimated_pitch_units??'—')+' / '+esc(active.camera_pitch_limit??'—');$('cameraMode').textContent=(wc.origin_calibrated?'command origin set':'command origin unset')+' · physical pose unverified · '+(active.camera_envelope_saturated?'envelope saturated':'normal learned control');$('camera').className='value '+(!wc.origin_calibrated?'bad':'amber');drawPrediction(pred.target_bbox_xyxy,pred.target_exists_probability);
-const standby=t.reasoning_standby||{};$('reasoningStatus').textContent=standby.state==='draining'?'Draining existing inference · '+standby.remaining_seconds+' seconds remaining':standby.state==='standby'?'Standby · '+standby.remaining_seconds+' seconds remaining · typed inventory available':'Autonomous reasoning enabled';
+$('reasoningStatus').textContent=s.reasoning_status_text||'Waiting for current agent reasoning state.';
 const pf=((t.perception||{}).fresh_facts)||{};$('facts').textContent=Object.keys(pf).length?JSON.stringify(pf,null,2):'No fresh semantic facts yet.';
 $('frames').textContent=esc(t.frames||0);$('actions').textContent=esc(t.motor_actions||0);$('capture').textContent=t.last_capture_ms==null?'—':t.last_capture_ms+' ms';
 const tr=t.trajectory_recording||{},recording=tr.enabled===true;$('recording').textContent=recording?'ON':'PAUSED';$('recording').className=recording?'ok':'amber';$('recordingDetail').textContent=recording?(esc(tr.written_steps||0)+' saved · '+esc(tr.queued_samples||0)+' queued'):esc(tr.disabled_reason||'not configured');
-}catch(e){$('dot').style.background='var(--red)';$('connection').textContent='Disconnected'}finally{statusLoading=false}}
+}catch(e){$('dot').style.background='var(--red)';$('connection').textContent='Disconnected';$('reasoningStatus').textContent='Connection lost. Reasoning standby is unconfirmed.'}finally{statusLoading=false}}
 async function messages(){if(messagesLoading)return;messagesLoading=true;try{const d=await api('/api/messages');const feed=$('feed');feed.replaceChildren();if(!d.messages.length){const x=document.createElement('div');x.className='label';x.textContent='No messages yet';feed.append(x);return}
 d.messages.forEach(m=>{const box=document.createElement('div');box.className='msg';const meta=document.createElement('div');meta.className='meta';const k=document.createElement('span');k.className='kind';k.textContent=m.kind;const when=document.createElement('span');when.textContent=new Date(m.created_ns/1e6).toLocaleTimeString();const status=document.createElement('span');status.textContent=m.status;meta.append(k,when,status);const text=document.createElement('div');text.className='text';text.textContent=m.text;box.append(meta,text);if(m.response_text){const reply=document.createElement('div');reply.className='text ok';reply.textContent='Agent: '+m.response_text;box.append(reply)}feed.append(box)})}catch(e){}finally{messagesLoading=false}}
 async function setStandby(enabled){try{await api('/api/control/reasoning-standby',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});$('reasoningStatus').textContent=enabled?'Standby requested; waiting for the runtime to drain.':'Resume requested.';refresh()}catch(e){$('reasoningStatus').textContent=e.message}}
 $('reasoningStandby').onclick=()=>setStandby(true);$('reasoningResume').onclick=()=>setStandby(false);
 let inventoryDiscovery=null,inventoryReceipt=null,inventoryLoading=false,inventorySubmitting=false;
-async function inventoryStatus(){if(inventoryLoading||inventorySubmitting)return;inventoryLoading=true;try{const d=await api('/api/directions/qualification');inventoryDiscovery=d.discovery;inventoryReceipt=d.receipt;const pending=inventoryReceipt&&['queued','running'].includes(inventoryReceipt.state);$('inventoryCheck').disabled=!!pending||d.discovery.readiness_reason!=='execution_contract_unqualified';$('inventoryCancel').disabled=!pending;$('inventoryStatus').textContent=inventoryReceipt?('Check '+inventoryReceipt.state+' · '+inventoryReceipt.accepted_action_count+' inventory inputs accepted'+(inventoryReceipt.reason_code?' · '+inventoryReceipt.reason_code:'')):'Ready for a private inventory check. Paid commands remain held.';$('inventoryReceipt').textContent=inventoryReceipt?JSON.stringify(inventoryReceipt,null,2):''}catch(e){$('inventoryStatus').textContent=e.message;$('inventoryCheck').disabled=true}finally{inventoryLoading=false}}
+async function inventoryStatus(){if(inventoryLoading||inventorySubmitting)return;inventoryLoading=true;try{const d=await api('/api/directions/qualification');inventoryDiscovery=d.discovery;inventoryReceipt=d.receipt;$('inventoryCheck').disabled=d.can_start!==true;$('inventoryCancel').disabled=d.can_cancel!==true;$('inventoryStatus').textContent=d.status_text||'Inventory check readiness is unconfirmed.';$('inventoryReceipt').textContent=inventoryReceipt?JSON.stringify(inventoryReceipt,null,2):''}catch(e){$('inventoryStatus').textContent=e.message;$('inventoryCheck').disabled=true}finally{inventoryLoading=false}}
 $('inventoryCheck').onclick=async()=>{if(!inventoryDiscovery||inventorySubmitting)return;inventorySubmitting=true;$('inventoryCheck').disabled=true;try{await api('/api/directions/qualification',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:crypto.randomUUID(),server_id:inventoryDiscovery.server_id,expected_session_id:inventoryDiscovery.session_id,expected_epoch:inventoryDiscovery.control_epoch})})}catch(e){$('inventoryStatus').textContent=e.message}finally{inventorySubmitting=false;inventoryStatus()}};
 $('inventoryCancel').onclick=async()=>{if(!inventoryReceipt)return;try{await api('/api/directions/qualification/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:inventoryReceipt.request_id})});inventoryStatus()}catch(e){$('inventoryStatus').textContent=e.message}};
 $('send').onclick=async()=>{const text=$('text').value.trim();if(!text)return;try{await api('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,kind:$('kind').value,priority:Number($('priority').value)})});$('text').value='';$('notice').textContent='Delivered to the durable cognition inbox.';messages()}catch(e){$('notice').textContent=e.message}};

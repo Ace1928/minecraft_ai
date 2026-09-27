@@ -22,6 +22,8 @@ from minecraft_ai.operator_server import (
     _capture_live_bedrock_frame,
     _default_operator_hostnames,
     _private_operator_address,
+    _reasoning_status_text,
+    _inventory_qualification_view,
     _validate_dashboard_bind_address,
     operator_readiness,
 )
@@ -35,6 +37,68 @@ def test_camera_counter_does_not_claim_verified_physical_pose() -> None:
     assert "physical pose unverified" in DASHBOARD_HTML
     assert "command origin set" in DASHBOARD_HTML
     assert "physical horizon calibrated" not in DASHBOARD_HTML
+
+
+def test_inventory_qualification_status_explains_unavailability_and_retains_receipt() -> None:
+    ready = {"readiness_reason": "execution_contract_unqualified"}
+    unavailable = {"readiness_reason": "motor_lease_inactive"}
+    receipt = {"state": "succeeded", "accepted_action_count": 2}
+    view = _inventory_qualification_view(unavailable, None)
+    assert not view["can_start"] and not view["can_cancel"]
+    assert "no active control lease" in view["status_text"]
+    assert "Ready" not in view["status_text"]
+    view = _inventory_qualification_view(unavailable, receipt)
+    assert "Check succeeded" in view["status_text"]
+    assert "unavailable" in view["status_text"] and not view["can_start"]
+    view = _inventory_qualification_view(ready, None)
+    assert view["can_start"] and "Ready" in view["status_text"]
+    view = _inventory_qualification_view(ready, {**receipt, "state": "running"})
+    assert not view["can_start"] and view["can_cancel"]
+    assert "Check running" in view["status_text"] and "Ready" not in view["status_text"]
+    assert "d.status_text" in DASHBOARD_HTML and "d.can_start!==true" in DASHBOARD_HTML
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["stopped", "unreachable", "inactive", "paused", "stale", "old-lease", "missing"],
+)
+def test_reasoning_status_never_uses_old_telemetry_to_claim_running(monkeypatch, fault) -> None:
+    now = time.monotonic_ns()
+    monkeypatch.setattr("minecraft_ai.operator_server.time.monotonic_ns", lambda: now)
+    status = {
+        "agent": {"alive": True},
+        "supervisor_reachable": True,
+        "supervisor": {
+            "state": "RUNNING", "motor_lease_active": True, "motor_lease_id": "current",
+        },
+        "telemetry": {
+            "state": "running", "lease_id": "current", "updated_monotonic_ns": now,
+            "reasoning_standby": {"state": "off"},
+        },
+    }
+    assert "autonomous reasoning is enabled" in _reasoning_status_text(status)
+    if fault == "stopped":
+        status["agent"]["alive"] = False
+    elif fault == "unreachable":
+        status["supervisor_reachable"] = False
+    elif fault == "inactive":
+        status["supervisor"]["motor_lease_active"] = False
+    elif fault == "paused":
+        status["operator_pause_latched"] = True
+    elif fault == "stale":
+        status["telemetry"]["updated_monotonic_ns"] = now - 5_000_000_001
+    elif fault == "old-lease":
+        status["telemetry"]["lease_id"] = "previous"
+    elif fault == "missing":
+        status["telemetry"]["reasoning_standby"] = None
+    assert "enabled" not in _reasoning_status_text(status)
+    status["telemetry"]["reasoning_standby"] = {"state": "standby", "remaining_seconds": 90}
+    if fault != "missing":
+        assert not _reasoning_status_text(status).startswith("Standby")
+    else:
+        assert _reasoning_status_text(status) == "Standby · 90 seconds remaining"
+    assert "s.reasoning_status_text" in DASHBOARD_HTML
+    assert "Connection lost. Reasoning standby is unconfirmed." in DASHBOARD_HTML
 
 
 def test_operator_readiness_requires_fresh_matching_motor_telemetry(monkeypatch) -> None:
