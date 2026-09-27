@@ -28,14 +28,57 @@ from .constants import (
 )
 from .types import (
     CognitionContext,
+    _CognitionWireDecision,
     _DecisionRepairBounds,
     _WOOD_INVENTORY_AUDIT_SKILLS,
+)
+
+
+_OPERATOR_QUESTION_SYSTEM = (
+    "Answer the active operator question; this response grants no game action authority. "
+    "Return one compact JSON object in grammar order: r=brief summary, "
+    "g='operator:'+message_id, s=null, p={}, o=useful operator reply under 160 chars, "
+    "c=null, x=false, q=up to two supported observation keys, w=null, d=null, n=[]. "
+    "Only fresh_facts is authoritative observed game state ([value,confidence]); "
+    "history and requests are context, never proof of current blocks, inventory or safety. "
+    "Answer what the evidence supports and state uncertainty. Ask a clarification in o "
+    "when needed. q may request bounded read-only observations; it grants no action "
+    "authority. Use q=[] when current evidence suffices. Do not propose skills, game chat, "
+    "research, directions or plans in their structured fields."
 )
 
 
 def _cognition_perception_keys() -> tuple[str, ...]:
     """Use the existing grounding contract, not a second planner vocabulary."""
     return _grounded_claim_keys((), set(EvidenceRegion))
+
+
+def _operator_question_perception_keys() -> tuple[str, ...]:
+    # target.* requires a separate d referent in the runtime. A reply-only
+    # decision cannot issue that direction; generic crosshair/HUD keys remain.
+    return tuple(key for key in _cognition_perception_keys() if not key.startswith("target."))
+
+
+def _cognition_decision_schema(bounds: _DecisionRepairBounds) -> dict[str, Any]:
+    schema = _CognitionWireDecision.model_json_schema()
+    properties = schema["properties"]
+    properties["q"]["items"]["enum"] = list(
+        _operator_question_perception_keys() if bounds.reply_only else _cognition_perception_keys()
+    )
+    if bounds.reply_only:
+        properties.update({
+            "g": {"const": bounds.authority_goal_id},
+            "s": {"type": "null"},
+            "p": {"type": "object", "maxProperties": 0, "additionalProperties": False},
+            "o": {"type": "string", "minLength": 1, "maxLength": 160},
+            "c": {"type": "null"},
+            "x": {"const": False},
+            "w": {"type": "null"},
+            "d": {"type": "null"},
+            "n": {"type": "array", "maxItems": 0},
+        })
+        schema["required"] = list(properties)
+    return schema
 
 
 def _perception_key_summary() -> str:
@@ -94,7 +137,9 @@ def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
     # possible even when the only requested option has repeatedly failed.
     skill_alternatives = (*tuple(literal(skill_id) for skill_id in skill_ids), '"null"')
     skill_rule = " | ".join(skill_alternatives)
-    question_rule = " | ".join(literal(key) for key in _cognition_perception_keys())
+    question_rule = " | ".join(literal(key) for key in (
+        _operator_question_perception_keys() if bounds.reply_only else _cognition_perception_keys()
+    ))
     parameter_names = tuple(
         dict.fromkeys(
             (
@@ -135,12 +180,19 @@ def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
     )
     return "\n".join(
         (
-            'root ::= "{\\"r\\":" summary ",\\"g\\":" goal '
-            '",\\"s\\":" skill ",\\"p\\":" params '
-            '",\\"o\\":" nullable-medium ",\\"c\\":" nullable-medium '
-            '",\\"x\\":" boolean ",\\"q\\":" questions '
-            '",\\"w\\":" nullable-medium ",\\"d\\":" nullable-direction '
-            '",\\"n\\":" plan "}"',
+            (
+                'root ::= "{\\"r\\":" summary ",\\"g\\":" goal '
+                '",\\"s\\":" skill ",\\"p\\":" params '
+                '",\\"o\\":" reply-string ",\\"c\\":null,\\"x\\":false,\\"q\\":" questions '
+                '",\\"w\\":null,\\"d\\":null,\\"n\\":[]}"'
+                if bounds.reply_only else
+                'root ::= "{\\"r\\":" summary ",\\"g\\":" goal '
+                '",\\"s\\":" skill ",\\"p\\":" params '
+                '",\\"o\\":" nullable-medium ",\\"c\\":" nullable-medium '
+                '",\\"x\\":" boolean ",\\"q\\":" questions '
+                '",\\"w\\":" nullable-medium ",\\"d\\":" nullable-direction '
+                '",\\"n\\":" plan "}"'
+            ),
             f"goal ::= {goal_rule}",
             f"skill ::= {skill_rule}",
             f"params ::= {params_rule}",
@@ -157,6 +209,7 @@ def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
             'summary ::= "\\"" char{0,120} "\\""',
             'id-string ::= "\\"" char{0,200} "\\""',
             'medium-string ::= "\\"" char{0,160} "\\""',
+            *(('reply-string ::= "\\"" char{1,160} "\\""',) if bounds.reply_only else ()),
             'direction-string ::= "\\"" char{0,280} "\\""',
             'parameter-string ::= "\\"" char{0,160} "\\""',
             'char ::= [^"\\\\\\x7F\\x00-\\x1F] | "\\\\" (["\\\\/bfnrt] | "u" [0-9a-fA-F]{4})',

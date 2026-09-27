@@ -172,6 +172,16 @@ class _DecisionRepairBounds:
     authority_goal_id: str | None = None
     required_action_constraints: tuple[tuple[str, bool], ...] = ()
     requested_skill_ids: tuple[str, ...] = ()
+    reply_only: bool = False
+
+    def __post_init__(self) -> None:
+        if self.reply_only and (
+            not self.authority_goal_id
+            or self.allowed_skills
+            or self.required_action_constraints
+            or self.requested_skill_ids
+        ):
+            raise ValueError("reply-only bounds require one operator goal and no action authority")
 
     def prompt_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -182,6 +192,8 @@ class _DecisionRepairBounds:
         }
         if self.authority_goal_id is not None:
             payload["authority_goal_id"] = self.authority_goal_id
+        if self.reply_only:
+            payload["reply_only"] = True
         if self.requested_skill_ids:
             payload["skill_required"] = False
             payload["abstention_requires_perception_or_replan"] = True

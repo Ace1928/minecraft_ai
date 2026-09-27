@@ -13,6 +13,7 @@ from .constants import (
     _MAX_REPAIR_REASON_CHARS,
     _SEMANTIC_REPAIR_SYSTEM,
 )
+from .prompts import _operator_question_perception_keys
 from .types import (
     CognitionDecision,
     DecisionModelOrigin,
@@ -91,6 +92,9 @@ def _enforce_repair_bounds(
     decision: CognitionDecision,
     bounds: _DecisionRepairBounds,
 ) -> CognitionDecision:
+    if bounds.reply_only:
+        _validate_reply_only_decision(decision, bounds)
+        return decision
     allowed_parameters = dict(bounds.allowed_skills)
     requested_skills = {
         skill_id for skill_id in bounds.requested_skill_ids if skill_id in allowed_parameters
@@ -132,6 +136,63 @@ def _enforce_repair_bounds(
             "skill_parameters": parameters,
         }
     )
+
+
+def _validate_reply_only_decision(
+    decision: CognitionDecision, bounds: _DecisionRepairBounds,
+) -> None:
+    if (
+        decision.chosen_goal_id != bounds.authority_goal_id
+        or decision.skill_id is not None
+        or decision.skill_parameters
+        or decision.game_chat is not None
+        or decision.request_replan
+        or decision.research_query is not None
+        or decision.instruction is not None
+        or decision.plan_steps
+        or not isinstance(decision.say, str)
+        or not decision.say.strip()
+        or len(decision.say) > 160
+        or len(decision.ask_perception) > 2
+        or any(key not in _operator_question_perception_keys() for key in decision.ask_perception)
+    ):
+        raise ValueError("operator_question_contract_failed")
+
+
+def _reply_only_decision_from_response(
+    response: ModelResponse, bounds: _DecisionRepairBounds,
+) -> CognitionDecision:
+    """Reject action fields before normalization or authority rewriting.
+
+    A valid question answer must not be manufactured by stripping a forbidden
+    field (including a plan sentinel normalized by the general planner parser).
+    Invalid question output has no automatic model repair round-trip.
+    """
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("operator_question_duplicate_field")
+            result[key] = value
+        return result
+
+    try:
+        raw = json.loads(response.text, object_pairs_hook=unique_object)
+    except ValueError as exc:
+        raise ValueError("operator_question_invalid_json") from exc
+    if not isinstance(raw, dict) or set(raw) != set("rgspocxqwdn"):
+        raise ValueError("operator_question_wire_fields")
+    if (
+        any(raw[key] is not None for key in ("s", "c", "w", "d"))
+        or raw["p"] != {}
+        or raw["n"] != []
+        or raw["x"] is not False
+        or not isinstance(raw["q"], list)
+    ):
+        raise ValueError("operator_question_forbidden_fields")
+    decision = _decision_from_response(response)
+    _validate_reply_only_decision(decision, bounds)
+    return decision
 
 def _bound_skill_parameters(
     decision: CognitionDecision,

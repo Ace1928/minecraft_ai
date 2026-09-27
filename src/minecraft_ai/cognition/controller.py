@@ -27,8 +27,9 @@ from minecraft_ai.social import (
 from .bootstrap import BootstrapCognitionPolicy
 from .constants import _MAX_OPERATOR_FAST_PATH_INSTRUCTION_CHARS
 from .prompts import (
+    _OPERATOR_QUESTION_SYSTEM,
     _cognition_decision_grammar,
-    _cognition_perception_keys,
+    _cognition_decision_schema,
     _compact_prompt_scalar,
     _perception_key_summary,
     _explicit_action_constraints,
@@ -47,13 +48,13 @@ from .repair import (
     _decision_from_response,
     _enforce_repair_bounds,
     _json_repair_messages,
+    _reply_only_decision_from_response,
     _semantic_repair_messages,
 )
 from .types import (
     CognitionContext,
     CognitionDecision,
     HighLevelMetrics,
-    _CognitionWireDecision,
     _DecisionRepairBounds,
     _WOOD_INVENTORY_AUDIT_SKILLS,
     _without_model_origin,
@@ -154,6 +155,8 @@ class HighLevelController:
                 context,
                 allowed_skill_ids={str(payload["skill_id"]) for payload in feasible_skill_payloads},
             )
+            if repair_bounds.reply_only:
+                feasible_skill_payloads = []
             facts = _high_level_fact_payload(
                 blackboard,
                 required_keys=required_fact_keys,
@@ -294,6 +297,7 @@ class HighLevelController:
                 ModelMessage(
                     role="system",
                     content=(
+                        _OPERATOR_QUESTION_SYSTEM if repair_bounds.reply_only else
                         "Control only the Minecraft game through verified closed-loop skills. "
                         "Return one compact JSON object, keys once in grammar order: "
                         "r=summary under 12 words, g=goal id, s=skill id or null, p=parameters, "
@@ -456,6 +460,8 @@ class HighLevelController:
         """Execute one literal, unambiguous operator option without model latency."""
         if _urgent_safety_required(blackboard):
             return None
+        if self._active_operator_question(context) is not None:
+            return None
         active = next(
             (
                 message
@@ -549,6 +555,10 @@ class HighLevelController:
             if decision.chosen_goal_id in operator_goal_ids:
                 updates["chosen_goal_id"] = None
             return decision.model_copy(update=updates)
+        if self._active_operator_question(context) is not None:
+            # The typed question already passed its exact-goal contract. A
+            # later queued instruction must not take over its reply authority.
+            return decision
         active = next(
             (
                 message
@@ -811,6 +821,12 @@ class HighLevelController:
     ) -> _DecisionRepairBounds:
         active = None
         if not _urgent_safety_required(blackboard):
+            question = self._active_operator_question(context)
+            if question is not None:
+                return _DecisionRepairBounds(
+                    allowed_skills=(), authority_goal_id=f"operator:{question.message_id}",
+                    reply_only=True,
+                )
             active = next(
                 (
                     message
@@ -845,6 +861,20 @@ class HighLevelController:
             required_action_constraints=constraints,
             requested_skill_ids=requested_skill_ids,
         )
+
+    @staticmethod
+    def _active_operator_question(context: CognitionContext) -> OperatorMessage | None:
+        # Only trusted queue metadata selects this mode, never words inside an
+        # operator prompt, memory, retrieved text or a model-generated response.
+        if (
+            context.operator_messages
+            and context.operator_messages[0].kind == OperatorMessageKind.QUESTION
+            and context.operator_messages[0].status in {
+                OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+            }
+        ):
+            return context.operator_messages[0]
+        return None
 
     def _blocking_skill_run(
         self,
@@ -1008,6 +1038,8 @@ class HighLevelController:
             name="cognition_decision",
             repair_bounds=repair_bounds,
         )
+        if repair_bounds.reply_only:
+            return _reply_only_decision_from_response(response, repair_bounds)
         try:
             return _decision_from_response(response)
         except (RuntimeError, ValidationError):
@@ -1041,11 +1073,9 @@ class HighLevelController:
         structured = getattr(self.model, "complete_structured", None)
         use_bound = request is not None and callable(bound)
         schema = (
-            _CognitionWireDecision.model_json_schema()
+            _cognition_decision_schema(repair_bounds)
             if use_bound or callable(constrained) or callable(structured) else {}
         )
-        if schema:
-            schema["properties"]["q"]["items"]["enum"] = list(_cognition_perception_keys())
         grammar = (
             _cognition_decision_grammar(repair_bounds)
             if use_bound or callable(constrained) else ""
