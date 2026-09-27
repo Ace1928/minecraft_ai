@@ -261,3 +261,61 @@ def test_stopped_generation_cannot_publish_over_replacement(monkeypatch, snapsho
         assert operator._latest_frame_snapshot is replacement
     finally:
         release_capture.set()
+
+
+def test_spectator_budget_spaces_capture_starts_without_catchup_or_timestamp_refresh(monkeypatch):
+    clock = [0]
+    starts = []
+    waits = []
+    costs_ns = [20_000_000, 310_000_000, 20_000_000]
+    mutex = threading.RLock()
+    monkeypatch.setattr(operator, "_frame_snapshot_mutex", mutex)
+    monkeypatch.setattr(operator, "_frame_snapshot_ready", threading.Condition(mutex))
+    monkeypatch.setattr(operator, "_latest_frame_snapshot", None)
+    monkeypatch.setattr(operator.time, "monotonic_ns", lambda: clock[0])
+    assert operator.FRAME_SERVICE_MAX_FPS == 4
+    assert operator.FRAME_SERVICE_TARGET_INTERVAL_S == .25
+
+    class Stop:
+        def is_set(self):
+            return len(starts) >= 3
+
+        def wait(self, seconds):
+            waits.append(seconds)
+            clock[0] += round(seconds * 1_000_000_000)
+            return False
+
+    def capture():
+        starts.append(clock[0])
+        return CapturedFrame(len(starts), clock[0], 1, 1, b"\0\0\0\xff")
+
+    def encode(frame):
+        clock[0] += costs_ns[frame.frame_id - 1]
+        return _snapshot(frame)
+
+    monkeypatch.setattr(operator, "_capture_live_bedrock_frame", capture)
+    monkeypatch.setattr(operator, "_build_frame_snapshot", encode)
+    operator._frame_snapshot_loop(Stop())
+    assert starts == [0, 250_000_000, 560_000_000]
+    assert waits == [pytest.approx(.23)]
+    assert operator._latest_frame_snapshot.captured_ns == 250_000_000
+    assert operator._latest_frame_snapshot.frame.frame_id == 2
+
+
+def test_many_viewers_reuse_snapshot_without_recapture_or_timestamp_refresh(monkeypatch):
+    frame = CapturedFrame(7, 1_000_000_000, 1, 1, b"\0\0\0\xff")
+    snapshot = _snapshot(frame)
+    monkeypatch.setattr(operator, "_latest_frame_snapshot", snapshot)
+    monkeypatch.setattr(operator, "_frame_snapshot_service_running", True)
+    monkeypatch.setattr(operator.time, "monotonic_ns", lambda: 1_100_000_000)
+    monkeypatch.setattr(
+        operator, "_capture_live_bedrock_frame", lambda: pytest.fail("extra capture")
+    )
+    monkeypatch.setattr(
+        operator, "_build_frame_snapshot", lambda *_args: pytest.fail("extra encode")
+    )
+    for _ in range(100):
+        result = operator._latest_frame_snapshot_or_none(0)
+        assert result is snapshot
+        assert result.captured_ns == 1_000_000_000
+        assert result.full_jpeg is snapshot.full_jpeg

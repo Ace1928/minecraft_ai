@@ -22,6 +22,7 @@ def test_current_values_are_cleared_on_stale_response_and_http_failure():
     )[0]
     script = r"""
 const assert=require('node:assert/strict');
+const document={hidden:false};
 const elements=new Map();
 const $=id=>{
  if(!elements.has(id))elements.set(id,{textContent:'',className:'',style:{}});
@@ -86,6 +87,7 @@ def test_topology_fetch_failure_repaints_cleared_state_instead_of_retaining_old_
     )[0]
     script = r"""
 const assert=require('node:assert/strict');
+const document={hidden:false};
 let topology={parts:['previous']},topoLoading=false;
 const rendered=[];
 const api=async()=>{throw Error('fixture HTTP503')};
@@ -98,6 +100,41 @@ const drawBrain=()=>rendered.push(['brain',topology]);
  await refreshTopology();
  assert.deepEqual(rendered,[['system',null],['brain',null]]);
  assert.equal(topoLoading,false);
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+
+
+def test_hidden_dashboard_suppresses_every_polling_family_before_network_or_decode():
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required for the isolated dashboard JavaScript test")
+    functions = [
+        ("refreshFrame", "\nasync function refresh()"),
+        ("refresh", "\nasync function messages()"),
+        ("messages", "\nasync function setStandby"),
+        ("inventoryStatus", "\n$('inventoryCheck').onclick"),
+        ("refreshTopology", "\nfunction drawSystemTopology()"),
+    ]
+    script = """
+const assert=require('node:assert/strict');const document={hidden:true};
+let statusLoading=false,messagesLoading=false,frameLoading=false,topoLoading=false;
+let inventoryLoading=false,inventorySubmitting=false,dragging=false,targetBox=null;
+let networkCalls=0;
+const api=async()=>{networkCalls++;throw Error('hidden network')};
+const fetch=api;
+const $=()=>{throw Error('hidden DOM processing')};
+"""
+    for name, end in functions:
+        body = DASHBOARD_HTML.split(f"async function {name}(){{", 1)[1].split(end, 1)[0]
+        script += f"\nasync function {name}(){{" + body
+    script += """
+(async()=>{
+ await refreshFrame();await refresh();await messages();
+ await inventoryStatus();await refreshTopology();
+ assert.equal(networkCalls,0);
+ assert.equal(statusLoading||messagesLoading||frameLoading||topoLoading||inventoryLoading,false);
 })().catch(error=>{console.error(error);process.exitCode=1});
 """
     result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=10)
