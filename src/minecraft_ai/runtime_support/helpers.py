@@ -792,6 +792,9 @@ def _terminal_run_event(
             separators=(",", ":"),
         ),
     }
+    for key in ("direction_request_id", "direction_attempt_id"):
+        if isinstance(run.parameters.get(key), str):
+            payload[key] = run.parameters[key]
     if run.ended_ns is not None:
         payload["ended_monotonic_ns"] = run.ended_ns
         payload["duration_ms"] = (run.ended_ns - run.started_ns) / 1_000_000
@@ -1178,6 +1181,9 @@ def _active_operator_messages(
     commitments belong in the goal portfolio rather than an ever-growing
     motor prompt.
     """
+    # Typed directions use the existing executor under their durable receipt,
+    # never free-form cognition or an acknowledged instruction replay.
+    messages = tuple(message for message in messages if message.direction_request_id is None)
     pending = tuple(
         message
         for message in messages

@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Callable
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, cast
@@ -701,6 +702,13 @@ class AgentRuntime:
         self._flush_pending_operator_status_updates()
         self.telemetry.publish(self._telemetry_payload(state="running"))
         self._publish_player_chat_facts()
+        from .operator.standby import apply_reasoning_standby
+        from .directions.runtime import tick_inventory_direction
+        reasoning_standby = apply_reasoning_standby(self)
+        if tick_inventory_direction(self):
+            return
+        if reasoning_standby:
+            return
         self._planks_retry_requires_wood()
         if self._yield_keepalive_to_operator():
             return
@@ -2129,12 +2137,27 @@ class AgentRuntime:
             self.blackboard,
             fallback_policy_id=self.executor.policy.policy_id,
         )
-        try:
-            accepted = send_command(
-                "motor-action",
-                lease_id=self.lease_id,
-                action=action.model_dump(mode="json"),
+        running = self.executor.run if execution is None else execution.run
+        direction_boundary = nullcontext(None)
+        if running is not None and running.parameters.get("direction_request_id"):
+            from .directions.gateway import ControlUnavailableError, DirectionsGateway
+            if self.state_db is None:
+                raise ControlUnavailableError("Direction dispatch requires durable authority.")
+            gateway = getattr(self, "_direction_gateway", None)
+            if gateway is None:
+                gateway = DirectionsGateway(self.state_db.path)
+            direction_boundary = gateway.motor_authority(
+                running, action, self.perception.last_capture,
             )
+        try:
+            with direction_boundary as record_direction_action:
+                accepted = send_command(
+                    "motor-action",
+                    lease_id=self.lease_id,
+                    action=action.model_dump(mode="json"),
+                )
+                if record_direction_action is not None:
+                    record_direction_action(accepted)
         except Exception:
             # Pause/stop can land after the preflight check while an already-running
             # tick is crossing the supervisor boundary. That revocation is an
@@ -4929,6 +4952,7 @@ class AgentRuntime:
             pass
 
     def _telemetry_payload(self, *, state: str) -> dict[str, object]:
+        from .operator.standby import standby_status
         running = self.executor.run
         if running is not None and running.outcome != SkillOutcome.RUNNING:
             running = None
@@ -5023,6 +5047,7 @@ class AgentRuntime:
         )
         return {
             "schema_version": 1,
+            "reasoning_standby": standby_status(self),
             "state": state,
             "role": self.role.role_id,
             "lease_id": self.lease_id,

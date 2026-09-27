@@ -74,7 +74,7 @@ class DirectionsDiscovery(BaseModel):
         default=None, description="Current supervisor session identifier."
     )
     control_epoch: int = Field(
-        default=1, description="Monotonically increasing control authority epoch."
+        default=1, description="Generation reference bound to the live session and motor lease."
     )
     motor_lease_active: bool = Field(
         description="Whether the agent currently holds an active motor lease."
@@ -115,7 +115,7 @@ class DirectionsRequest(BaseModel):
     instruction_id: str = Field(description="ID of the supported instruction to execute.")
     instruction_text: str | None = Field(
         default=None,
-        description="Optional custom text or override; defaults to canonical_text if omitted.",
+        description="Optional exact catalogue text; custom instructions are refused.",
     )
     arguments: dict[str, Any] = Field(
         default_factory=dict, description="Typed arguments for parameterized instructions."
@@ -189,3 +189,5 @@ class DirectionsReceipt(BaseModel):
     outcome: DirectionsOutcome | None = Field(
         default=None, description="Terminal outcome evidence once resolved."
     )
+    accepted_action_count: int = Field(default=0, ge=0,
+        description="Inventory toggles accepted before completion or cancellation.")

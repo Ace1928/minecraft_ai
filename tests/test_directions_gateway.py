@@ -249,7 +249,7 @@ def test_cancel_direction(gateway):
     assert receipt.reason_code == "cancelled_by_user"
 
 
-def test_outcome_verification_success(gateway):
+def test_legacy_skill_labels_and_scene_recovery_cannot_claim_paid_success(gateway):
     req = DirectionsRequest(
         request_id="req-verify-success",
         member_id="member-alpha",
@@ -305,13 +305,10 @@ def test_outcome_verification_success(gateway):
             )
         )
 
-    # Check status -> gateway should verify events and transition to SUCCEEDED
+    # Generic labels lack accepted-action and request/attempt-bound observations.
     updated = gateway.status("req-verify-success")
-    assert updated.state == DirectionsState.SUCCEEDED
-    assert updated.outcome is not None
-    assert updated.outcome.success is True
-    assert updated.outcome.duration_ms == 800.0
-    assert len(updated.outcome.observed_steps) == 2
+    assert updated.state == DirectionsState.QUEUED
+    assert updated.outcome is None
 
 
 def test_adapter_discovery_and_validation(gateway):

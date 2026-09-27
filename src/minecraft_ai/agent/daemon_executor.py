@@ -43,6 +43,7 @@ class SingleWorkerDaemonExecutor:
         self._condition = threading.Condition()
         self._work: deque[_WorkItem[Any]] = deque()
         self._shutdown = False
+        self._active = False
         self._thread = threading.Thread(
             target=self._worker,
             name=thread_name,
@@ -85,6 +86,11 @@ class SingleWorkerDaemonExecutor:
         self._thread.join(timeout=timeout_s)
         return not self._thread.is_alive()
 
+    def is_idle(self) -> bool:
+        """Observe queued and running work, including detached futures."""
+        with self._condition:
+            return not self._active and not self._work
+
     def _worker(self) -> None:
         while True:
             with self._condition:
@@ -93,4 +99,9 @@ class SingleWorkerDaemonExecutor:
                         return
                     self._condition.wait()
                 item = self._work.popleft()
-            item.run()
+                self._active = True
+            try:
+                item.run()
+            finally:
+                with self._condition:
+                    self._active = False

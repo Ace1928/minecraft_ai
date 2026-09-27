@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import re
 import socket
 import threading
 import time
@@ -745,6 +746,21 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
                 return
             observation = read_observation(preferred_source=source, stream_id=stream)
             self._send_json(HTTPStatus.OK, build_topology(operator_status(), observation))
+        elif path == "/api/directions/qualification":
+            from minecraft_ai.directions import DirectionsGateway
+            gateway = DirectionsGateway(app_paths().state_db)
+            discovery = gateway.discover()
+            with StateDatabase(app_paths().state_db) as database:
+                row = database.connection.execute(
+                    "SELECT request_id FROM paid_directions WHERE member_id=? "
+                    "AND execution_mode='qualification' ORDER BY created_ns DESC LIMIT 1",
+                    ("local-operator-qualification",),
+                ).fetchone()
+            receipt = None if row is None else gateway.status(row[0]).model_dump(mode="json")
+            self._send_json(HTTPStatus.OK, {
+                "commands_enabled": False, "discovery": discovery.model_dump(mode="json"),
+                "receipt": receipt,
+            })
         elif path == "/api/messages":
             with StateDatabase(app_paths().state_db) as database:
                 messages = database.load_operator_messages(limit=100)
@@ -779,6 +795,15 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_body()
             if path == "/api/messages":
                 self._post_message(payload)
+            elif path == "/api/directions/qualification":
+                self._post_inventory_qualification(payload)
+            elif path == "/api/directions/qualification/cancel":
+                self._post_inventory_qualification(payload, cancel=True)
+            elif path == "/api/control/reasoning-standby":
+                from minecraft_ai.operator.standby import set_reasoning_standby
+                if set(payload) != {"enabled"}:
+                    raise ValueError("Only enabled may be supplied.")
+                self._send_json(HTTPStatus.OK, set_reasoning_standby(payload["enabled"]))
             elif path == "/api/target":
                 self._post_target(payload)
             elif path == "/api/target/clear":
@@ -933,6 +958,29 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
         with StateDatabase(app_paths().state_db) as database:
             database.save_operator_message(message)
         self._send_json(HTTPStatus.CREATED, message.model_dump(mode="json"))
+
+    def _post_inventory_qualification(self, payload: dict[str, Any], *, cancel=False) -> None:
+        from minecraft_ai.directions import DirectionsGateway, DirectionsRequest
+        allowed = {"request_id"} if cancel else {
+            "request_id", "server_id", "expected_session_id", "expected_epoch",
+        }
+        if set(payload) != allowed:
+            raise ValueError("Use the fixed inventory qualification fields only.")
+        if not isinstance(payload["request_id"], str) or not re.fullmatch(
+            r"[a-zA-Z0-9-]{1,80}", payload["request_id"],
+        ):
+            raise ValueError("Invalid qualification request identity.")
+        gateway = DirectionsGateway(app_paths().state_db)
+        member = "local-operator-qualification"
+        if cancel:
+            receipt = gateway.cancel(payload["request_id"], member_id=member)
+        else:
+            receipt = gateway.submit_qualification(DirectionsRequest(
+                **payload, member_id=member, instruction_id="open_observe_close_inventory",
+                deadline_s=25.0,
+            ))
+        self._send_json(HTTPStatus.OK if cancel else HTTPStatus.CREATED,
+                        receipt.model_dump(mode="json"))
 
     def _get_frame(self) -> None:
         query = parse_qs(urlparse(self.path).query)
@@ -1272,6 +1320,8 @@ section+section{margin-top:13px}
 <section class="card"><h2>Fresh learned perception</h2><pre class="facts" id="facts">Waiting for perception facts.</pre></section>
 <section class="card"><h2>System topology</h2><div class="topo-wrap"><canvas id="topoCanvas" width="1280" height="520" aria-label="Live Minecraft AI part topology"></canvas></div><div class="chips" id="topoChips"></div></section>
 <section class="card"><h2>Observed model topology</h2><div class="row"><select id="modelPick" aria-label="Observed model"></select><span class="label" id="modelMeta">Waiting for a bound model population.</span></div><div class="topo-wrap"><canvas id="brainCanvas" width="1280" height="620" aria-label="Observed model population; drag to orbit"></canvas></div><div class="chips" id="brainChips"></div></section>
+<section class="card"><h2>Reasoning standby</h2><p>Release autonomous inputs and stop scheduling new model work for up to 120 seconds. Existing inference drains; capture, the game lease and typed inventory checks continue.</p><div class="row"><button id="reasoningStandby">Stand by for 120 seconds</button><button id="reasoningResume" class="secondary">Resume reasoning</button></div><p id="reasoningStatus" role="status">Reading runtime state.</p></section>
+<section class="card"><h2>Inventory command check</h2><p>Open inventory once, verify the screen, then close it. Movement, attacks and interaction are blocked during this check. This is a private qualification trial; paid commands remain held.</p><div class="row"><button id="inventoryCheck" disabled>Run inventory check</button><button id="inventoryCancel" class="secondary" disabled>Cancel check</button></div><p id="inventoryStatus" role="status">Checking availability.</p><pre id="inventoryReceipt" class="facts"></pre></section>
 <section class="two"><div class="card"><h2>Talk to the high-level agent</h2><textarea id="text" maxlength="2000" placeholder="Give an instruction, ask a question, provide feedback, or correct its current approach…"></textarea>
 <div class="row"><select id="kind"><option value="instruction">Instruction</option><option value="question">Question</option><option value="feedback">Feedback</option><option value="correction">Correction</option></select>
 <select id="priority"><option value="0.8">High priority</option><option value="0.55">Normal priority</option><option value="1">Urgent</option></select><button id="send">Send to agent</button></div>
@@ -1303,12 +1353,19 @@ $('skill').textContent=esc(t.active_skill);$('goal').textContent=esc(t.chosen_go
 $('plan').textContent=esc((t.plan_steps||[]).length?(t.plan_steps||[]).join(' → '):'No explicit plan yet.');
 $('instruction').textContent=esc(t.active_instruction||'Waiting for an executable option.');const params=t.active_skill_parameters||{},paramText=Object.entries(params).map(([k,v])=>k+'='+v).join(' · ');$('constraints').textContent=paramText?'active contract · '+paramText:'no explicit action constraints';const recent=(t.recent_skill_runs||[])[0];$('outcome').textContent=recent?'last option · '+recent.skill_id+' · '+recent.outcome+(recent.failure_reason?' · '+recent.failure_reason:''):'no terminal option evidence yet';const p=t.policy||{},bodyByRoute={raw_motion:p.raw_motion,gui:p.gui,semantic:p.primary,primary:p.primary},active=bodyByRoute[p.active_route]||p.primary||p,pred=active.last_prediction||{},counts=active.learned_action_counts||{},suppressed=(counts['constraint_suppressed.attack']||0)+(counts['constraint_suppressed.use']||0)+(counts['constraint_suppressed.jump']||0),grounding=p.grounding_active?' + ROCKET target '+(p.grounded_track_id||'pending'):'';$('policy').textContent=esc(active.model_version||p.policy_id);$('policyMetrics').textContent=(active.last_inference_ms??'—')+' ms · '+esc((p.active_route||active.grounding_mode)+grounding)+' · '+esc(active.accepted_predictions||0)+' learned · '+esc(counts.jump||0)+' jumps · '+esc(counts.camera||0)+' camera · '+suppressed+' constrained · target '+(pred.target_exists_probability==null?'—':Math.round(pred.target_exists_probability*100)+'%');
 const wc=s.supervisor.world_camera||{};$('camera').textContent=esc(active.estimated_pitch_units??wc.estimated_pitch_units??'—')+' / '+esc(active.camera_pitch_limit??'—');$('cameraMode').textContent=(wc.origin_calibrated?'command origin set':'command origin unset')+' · physical pose unverified · '+(active.camera_envelope_saturated?'envelope saturated':'normal learned control');$('camera').className='value '+(!wc.origin_calibrated?'bad':'amber');drawPrediction(pred.target_bbox_xyxy,pred.target_exists_probability);
+const standby=t.reasoning_standby||{};$('reasoningStatus').textContent=standby.state==='draining'?'Draining existing inference · '+standby.remaining_seconds+' seconds remaining':standby.state==='standby'?'Standby · '+standby.remaining_seconds+' seconds remaining · typed inventory available':'Autonomous reasoning enabled';
 const pf=((t.perception||{}).fresh_facts)||{};$('facts').textContent=Object.keys(pf).length?JSON.stringify(pf,null,2):'No fresh semantic facts yet.';
 $('frames').textContent=esc(t.frames||0);$('actions').textContent=esc(t.motor_actions||0);$('capture').textContent=t.last_capture_ms==null?'—':t.last_capture_ms+' ms';
 const tr=t.trajectory_recording||{},recording=tr.enabled===true;$('recording').textContent=recording?'ON':'PAUSED';$('recording').className=recording?'ok':'amber';$('recordingDetail').textContent=recording?(esc(tr.written_steps||0)+' saved · '+esc(tr.queued_samples||0)+' queued'):esc(tr.disabled_reason||'not configured');
 }catch(e){$('dot').style.background='var(--red)';$('connection').textContent='Disconnected'}finally{statusLoading=false}}
 async function messages(){if(messagesLoading)return;messagesLoading=true;try{const d=await api('/api/messages');const feed=$('feed');feed.replaceChildren();if(!d.messages.length){const x=document.createElement('div');x.className='label';x.textContent='No messages yet';feed.append(x);return}
 d.messages.forEach(m=>{const box=document.createElement('div');box.className='msg';const meta=document.createElement('div');meta.className='meta';const k=document.createElement('span');k.className='kind';k.textContent=m.kind;const when=document.createElement('span');when.textContent=new Date(m.created_ns/1e6).toLocaleTimeString();const status=document.createElement('span');status.textContent=m.status;meta.append(k,when,status);const text=document.createElement('div');text.className='text';text.textContent=m.text;box.append(meta,text);if(m.response_text){const reply=document.createElement('div');reply.className='text ok';reply.textContent='Agent: '+m.response_text;box.append(reply)}feed.append(box)})}catch(e){}finally{messagesLoading=false}}
+async function setStandby(enabled){try{await api('/api/control/reasoning-standby',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});$('reasoningStatus').textContent=enabled?'Standby requested; waiting for the runtime to drain.':'Resume requested.';refresh()}catch(e){$('reasoningStatus').textContent=e.message}}
+$('reasoningStandby').onclick=()=>setStandby(true);$('reasoningResume').onclick=()=>setStandby(false);
+let inventoryDiscovery=null,inventoryReceipt=null,inventoryLoading=false,inventorySubmitting=false;
+async function inventoryStatus(){if(inventoryLoading||inventorySubmitting)return;inventoryLoading=true;try{const d=await api('/api/directions/qualification');inventoryDiscovery=d.discovery;inventoryReceipt=d.receipt;const pending=inventoryReceipt&&['queued','running'].includes(inventoryReceipt.state);$('inventoryCheck').disabled=!!pending||d.discovery.readiness_reason!=='execution_contract_unqualified';$('inventoryCancel').disabled=!pending;$('inventoryStatus').textContent=inventoryReceipt?('Check '+inventoryReceipt.state+' · '+inventoryReceipt.accepted_action_count+' inventory inputs accepted'+(inventoryReceipt.reason_code?' · '+inventoryReceipt.reason_code:'')):'Ready for a private inventory check. Paid commands remain held.';$('inventoryReceipt').textContent=inventoryReceipt?JSON.stringify(inventoryReceipt,null,2):''}catch(e){$('inventoryStatus').textContent=e.message;$('inventoryCheck').disabled=true}finally{inventoryLoading=false}}
+$('inventoryCheck').onclick=async()=>{if(!inventoryDiscovery||inventorySubmitting)return;inventorySubmitting=true;$('inventoryCheck').disabled=true;try{await api('/api/directions/qualification',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:crypto.randomUUID(),server_id:inventoryDiscovery.server_id,expected_session_id:inventoryDiscovery.session_id,expected_epoch:inventoryDiscovery.control_epoch})})}catch(e){$('inventoryStatus').textContent=e.message}finally{inventorySubmitting=false;inventoryStatus()}};
+$('inventoryCancel').onclick=async()=>{if(!inventoryReceipt)return;try{await api('/api/directions/qualification/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:inventoryReceipt.request_id})});inventoryStatus()}catch(e){$('inventoryStatus').textContent=e.message}};
 $('send').onclick=async()=>{const text=$('text').value.trim();if(!text)return;try{await api('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,kind:$('kind').value,priority:Number($('priority').value)})});$('text').value='';$('notice').textContent='Delivered to the durable cognition inbox.';messages()}catch(e){$('notice').textContent=e.message}};
 $('setTarget').onclick=async()=>{if(!targetBox||targetBox.width<.005||targetBox.height<.005){$('targetNotice').textContent='Drag a non-empty target region first.';return}if(!displayedFrameToken){$('targetNotice').textContent='The reference frame expired; wait for a fresh frame and select again.';targetBox=null;selection.style.display='none';targetReview.hidden=true;refreshFrame();return}try{const t=await api('/api/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...targetBox,frame_token:displayedFrameToken,label:$('targetLabel').value.trim()||'target'})});targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;$('targetNotice').textContent='ROCKET-2 target armed from exact frozen pixels: '+t.label+' · '+t.track_id;refreshFrame()}catch(e){$('targetNotice').textContent=e.message;targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;refreshFrame()}};
 $('clearTarget').onclick=async()=>{try{await api('/api/target/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;$('targetNotice').textContent='Grounded target cleared.';refreshFrame()}catch(e){$('targetNotice').textContent=e.message}};
@@ -1342,5 +1399,5 @@ brainCanvas.onpointerdown=e=>{brainDrag={x:e.clientX,y:e.clientY};brainCanvas.se
 brainCanvas.onpointermove=e=>{if(!brainDrag)return;brainYaw+=(e.clientX-brainDrag.x)*0.008;brainPitch=Math.max(-1.2,Math.min(1.2,brainPitch+(e.clientY-brainDrag.y)*0.006));brainDrag={x:e.clientX,y:e.clientY};drawBrain()};
 brainCanvas.onpointerup=e=>{brainDrag=null;brainCanvas.releasePointerCapture(e.pointerId)};
 (function animateTopology(){frameTick++;if(!document.hidden&&topology){drawSystemTopology();if(!brainDrag&&frameTick%3===0)drawBrain()}requestAnimationFrame(animateTopology)})();
-refresh();messages();refreshFrame();refreshTopology();setInterval(refresh,500);setInterval(messages,2000);setInterval(refreshFrame,80);setInterval(refreshTopology,600);
+inventoryStatus();setInterval(inventoryStatus,1000);refresh();messages();refreshFrame();refreshTopology();setInterval(refresh,500);setInterval(messages,2000);setInterval(refreshFrame,80);setInterval(refreshTopology,600);
 </script></body></html>"""

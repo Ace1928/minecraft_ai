@@ -71,6 +71,10 @@ class OperatorMessage(BaseModel):
     delivered_ns: int | None = None
     acknowledged_ns: int | None = None
     response_text: str | None = Field(default=None, max_length=2000)
+    # Populated only by the private typed-direction gateway. The ordinary
+    # message endpoint cannot supply these fields; the receipt owns authority.
+    direction_request_id: str | None = None
+    direction_attempt_id: str | None = None
 
 
 class Promise(BaseModel):

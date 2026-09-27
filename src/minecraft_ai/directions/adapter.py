@@ -44,16 +44,11 @@ class MinecraftDirectionsAdapter:
         if len(text) > 256:
             raise ValueError("Direction text exceeds maximum allowed length of 256 characters.")
 
-        # Find matching supported instruction
+        # Admission accepts an immutable catalogue entry, not a substring in
+        # arbitrary customer instructions.
         for spec in SUPPORTED_INSTRUCTIONS:
-            if spec.canonical_text.lower() in text.lower() or spec.instruction_id in text.lower():
+            if text in {spec.canonical_text, spec.instruction_id}:
                 return spec.instruction_id
-            if "open inventory" in text.lower() and "close" in text.lower():
-                return "open_observe_close_inventory"
-            if "open inventory" in text.lower():
-                return "observe_inventory"
-            if "explore forward" in text.lower():
-                return "explore_forward"
 
         raise ValueError(
             f"Text {text!r} does not match any admitted bounded instruction in the catalog."
@@ -80,7 +75,7 @@ class MinecraftDirectionsAdapter:
             expected_session_id=expected_session_id,
             expected_epoch=expected_epoch,
             instruction_id=instruction_id,
-            instruction_text=text,
+            instruction_text=None,
             arguments=arguments or {},
             deadline_s=deadline_s,
         )
