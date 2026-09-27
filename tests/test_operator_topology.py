@@ -44,7 +44,8 @@ def _observation_packet():
         },
         "action": None,
     }
-    return observation.project_observation(raw, now_ns=10_500_000_000, preferred_source="association-brain")
+    return observation.project_observation(
+        raw, now_ns=10_500_000_000, preferred_source="association-brain")
 
 
 def test_offline_topology_still_maps_every_part_and_edge():
@@ -66,7 +67,8 @@ def test_live_topology_binds_model_populations_and_activity():
     topology = build_topology(
         {"telemetry": {"last_capture_ms": 20, "active_skill": "mine_log",
                        "trajectory_recording": {"enabled": True, "written_steps": 12},
-                       "policy": {"primary": {"model_version": "rocket2", "last_inference_ms": 12}}},
+                       "policy": {"primary": {
+                           "model_version": "rocket2", "last_inference_ms": 12}}},
          "bedrock": {"version": "1.21", "instances": ["bedrock-1"]},
          "supervisor_reachable": True, "supervisor": {"state": "RUNNING"},
          "agent": {"alive": True}},
@@ -85,6 +87,62 @@ def test_live_topology_binds_model_populations_and_activity():
     assert population["unit_count"] == 2 and population["calls"] == 4
     assert population["activity_basis"] == "observed-activation"
     assert topology["observation"]["source_id"] == "association-brain"
+
+
+@pytest.mark.parametrize("online,phase,skill,expected", [
+    (True, "acting", "backtrack_from_obstacle", "live"),
+    (True, "reasoning", None, "idle"),
+    (False, "acting", "backtrack_from_obstacle", "idle"),
+])
+def test_direct_policy_availability_does_not_invent_observation_activity(
+    online, phase, skill, expected,
+):
+    status = {
+        "agent": {"alive": True},
+        "telemetry": {"active_skill": skill, "policy": {
+            "policy_id": "erais-mushroom-interaction-v2", "active_route": "direct",
+            "interaction_decisions": 430207, "learning_updates": 373154,
+            "retained_specialists": {"primary": {
+                "model_version": "unused-native-policy", "last_inference_ms": 1}},
+        }},
+    }
+    sample = _observation_packet() if online else {"online": False, "reason": "sample_expired"}
+    sample.update(state=phase, action={"kind": "prediction", "accepted": True})
+    topology = build_topology(status, sample)
+    parts = {part["id"]: part for part in topology["parts"]}
+    assert parts["policy"]["state"] == expected
+    assert parts["policy"]["detail"] == "erais-mushroom-interaction-v2"
+    assert parts["skills"]["state"] == ("live" if skill else "idle")
+    assert parts["native_policy"]["state"] == "offline"
+    if not online:
+        assert parts["association_brain"]["state"] == "offline"
+        assert topology["populations"] == []
+
+
+@pytest.mark.parametrize("route,key", [("semantic", "primary"), ("raw_motion", "raw_motion"),
+                                       ("gui", "gui")])
+def test_topology_uses_current_body_instead_of_primary_latency(route, key):
+    status = {"agent": {"alive": True}, "telemetry": {
+        "active_skill": "test-option", "policy": {
+            "active_route": route,
+            "primary": {"model_version": "unused-primary", "last_inference_ms": 1},
+            key: {"model_version": "selected-body", "last_inference_ms": None},
+        },
+    }}
+    topology = build_topology(status, {"online": False})
+    policy = next(part for part in topology["parts"] if part["id"] == "policy")
+    assert policy["detail"] == "selected-body"
+    assert policy["state"] == "idle" and policy["activity"] == 0
+
+
+def test_stopped_agent_does_not_keep_policy_or_skill_available():
+    topology = build_topology({"agent": {"alive": False}, "telemetry": {
+        "active_skill": "stale-option",
+        "policy": {"policy_id": "direct-policy", "active_route": "direct"},
+    }}, {"online": False})
+    parts = {part["id"]: part for part in topology["parts"]}
+    assert parts["policy"]["state"] == parts["skills"]["state"] == "offline"
+    assert parts["policy"]["activity"] == parts["skills"]["activity"] == 0
 
 
 def test_dashboard_exposes_the_topology_panels():
@@ -116,7 +174,8 @@ def test_topology_route_is_get_only_and_validates_preferences(monkeypatch):
             assert caught.value.code == 400
         with pytest.raises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(urllib.request.Request(
-                url, method="POST", data=b"{}", headers={"Content-Type": "application/json"}), timeout=2)
+                url, method="POST", data=b"{}", headers={"Content-Type": "application/json"}),
+                timeout=2)
         assert caught.value.code == 404
         assert calls == [{"preferred_source": "association-brain", "stream_id": ""}]
     finally:

@@ -72,6 +72,20 @@ def _model_activity(model: dict[str, Any]) -> float:
     return 1.0 if _integer(model.get("calls")) else 0.0
 
 
+def _active_motor_route(policy: dict[str, Any]) -> dict[str, Any]:
+    """Select the body that owns actions, including an in-process policy."""
+    route_id = policy.get("active_route")
+    if route_id == "direct":
+        return policy
+    key = {"semantic": "primary", "raw_motion": "raw_motion", "gui": "gui"}.get(
+        route_id, "primary" if route_id is None else None)
+    if key is not None and isinstance(policy.get(key), dict):
+        return policy[key]
+    # A standalone policy has no router; retained specialists do not own its
+    # current action and must not supply its latency or activity.
+    return policy if route_id is None and policy.get("policy_id") else {}
+
+
 def _observation_summary(observation: dict[str, Any]) -> dict[str, Any]:
     online = observation.get("online") is True
     action = observation.get("action")
@@ -123,11 +137,21 @@ def build_topology(
     perception_activity = _clamp(len(facts) / 8) if isinstance(facts, dict) else 0.0
     policy = telemetry.get("policy")
     policy = policy if isinstance(policy, dict) else {}
-    route = policy.get("primary") if isinstance(policy.get("primary"), dict) else {}
+    route = _active_motor_route(policy)
     inference_ms = route.get("last_inference_ms")
-    policy_activity = 1.0 if type(inference_ms) in (int, float) and inference_ms < 250 else 0.0
     active_skill = telemetry.get("active_skill")
-    skills_activity = 1.0 if active_skill else 0.0
+    policy_available = bool(route) and agent.get("alive") is True and (
+        route.get("process_alive", True) is True)
+    action = observation.get("action") or {}
+    direct_readout = (
+        policy.get("active_route") == "direct" and observation.get("online") is True
+        and observation.get("state") == "acting"
+        and action.get("kind") in {"prediction", "prediction_hold"}
+    )
+    policy_activity = 1.0 if policy_available and active_skill and (
+        direct_readout or (type(inference_ms) in (int, float) and 0 <= inference_ms < 250)
+    ) else 0.0
+    skills_activity = 1.0 if active_skill and agent.get("alive") is True else 0.0
     recording = telemetry.get("trajectory_recording")
     recording = recording if isinstance(recording, dict) else {}
     memory_activity = 1.0 if recording.get("enabled") is True else 0.0
@@ -156,15 +180,16 @@ def build_topology(
         "agent": "running" if agent.get("alive") else "disarmed",
         "native_policy": _model_detail(models.get("native_policy")),
         "association_brain": _model_detail(models.get("association_brain")),
-        "memory": f"{_integer(recording.get('written_steps'))} saved · "
-                  f"{_integer(recording.get('queued_samples'))} queued"
-                  if recording.get("enabled") is True else (recording.get("disabled_reason") or "paused"),
+        "memory": (f"{_integer(recording.get('written_steps'))} saved · "
+                   f"{_integer(recording.get('queued_samples'))} queued"
+                   if recording.get("enabled") is True
+                   else (recording.get("disabled_reason") or "paused")),
     }
     available = {
         "capture": capture_ms is not None,
         "perception": isinstance(facts, dict),
-        "policy": bool(route),
-        "skills": active_skill is not None,
+        "policy": policy_available,
+        "skills": agent.get("alive") is True,
         "bedrock": bool(bedrock.get("instances")),
         "supervisor": bool(supervisor),
         "agent": bool(agent),
@@ -206,7 +231,8 @@ def build_topology(
         "parts": parts,
         "edges": edges,
         "populations": populations,
-        "scope": "allowlisted status and observation fields only; no inferred pixels or activations",
+        "scope": ("allowlisted status and observation fields only; "
+                  "no inferred pixels or activations"),
     }
 
 
@@ -215,4 +241,5 @@ def _model_detail(model: dict[str, Any]) -> str | None:
         return "unavailable"
     return (f"{_integer(model.get('calls'))} calls · "
             f"{_integer(model.get('source_unit_count'))} units · "
-            f"{_integer(model.get('source_active_kcs'))}/{_integer(model.get('source_kc_count'))} KC busy")
+            f"{_integer(model.get('source_active_kcs'))}/"
+            f"{_integer(model.get('source_kc_count'))} KC busy")
