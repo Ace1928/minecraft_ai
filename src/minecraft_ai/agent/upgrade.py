@@ -84,20 +84,95 @@ class UpgradePlan:
     roots: dict[Path, tuple[Path, ...]] = field(repr=False)
     receipt: dict[str, Any]
     bundles: dict[Path, tuple[Path, ...]] = field(default_factory=dict, repr=False)
+    broker_parent: tuple[str, int, int] | None = field(default=None, repr=False)
 
     def check_unchanged(self) -> None:
         if (any(_stamp(path) != stamp for path, stamp in self.files.items())
                 or any(_sources(root) != paths for root, paths in self.roots.items())
                 or any(_bundle_files(root) != paths for root, paths in self.bundles.items())):
             raise UpgradeError("pinned-input-changed")
+        if self.broker_parent is not None:
+            path, device, inode = self.broker_parent
+            if _broker_parent_identity(path) != (device, inode):
+                raise UpgradeError("reviewed-broker-directory-changed")
 
 
-def prepare_upgrade(candidate_path: Path, previous_path: Path) -> UpgradePlan:
+def _broker_parent_identity(path: str) -> tuple[int, int]:
+    """Inspect the private directory through descriptors; never contact the broker."""
+    from minecraft_ai.resident_broker_transport import _parent
+
+    selected = Path(path)
+    if (not selected.is_absolute() or str(selected) != path or path.startswith("//")
+            or ".." in selected.parts or len(path.encode()) > 107):
+        raise UpgradeError("reviewed-broker-path-must-be-canonical")
+    try:
+        fd, _name = _parent(selected)
+        try:
+            metadata = os.fstat(fd)
+            return metadata.st_dev, metadata.st_ino
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        raise UpgradeError("reviewed-broker-directory-unavailable-or-unsafe") from None
+
+
+def _transport_handover(
+    candidate: RuntimeConfig, previous: RuntimeConfig, reviewed_path: str,
+) -> tuple[dict[str, Any], tuple[str, int, int]]:
+    """One explicit resident transport change; all other configuration is equal."""
+    from minecraft_ai.resident_broker_transport import CONTRACT, MODEL_ID, UPSTREAM_MODEL
+
+    direct = "http://127.0.0.1:8081/v1"
+    slots = ("high_level", "vision_language")
+    before = tuple(getattr(previous, name).broker_socket for name in slots)
+    after = tuple(getattr(candidate, name).broker_socket for name in slots)
+    if before == (None, None) and after == (reviewed_path, reviewed_path):
+        direction = "direct-to-shared-broker"
+    elif before == (reviewed_path, reviewed_path) and after == (None, None):
+        direction = "shared-broker-to-direct"
+    else:
+        raise UpgradeError("both-adapters-must-change-the-same-reviewed-transport")
+    for selected in (candidate, previous):
+        for name in slots:
+            model = getattr(selected, name)
+            if not model.enabled or model.model_id != UPSTREAM_MODEL or model.base_url != direct:
+                raise UpgradeError("transport-handover-requires-exact-resident-identity")
+    candidate_fields = candidate.model_dump(mode="json")
+    previous_fields = previous.model_dump(mode="json")
+    for name in slots:
+        candidate_fields[name]["broker_socket"] = None
+        previous_fields[name]["broker_socket"] = None
+    if candidate_fields != previous_fields:
+        raise UpgradeError("transport-handover-forbids-other-config-changes")
+    device, inode = _broker_parent_identity(reviewed_path)
+    receipt = {
+        "direction": direction,
+        "reviewed_socket_path": reviewed_path,
+        "directory_identity_sha256": _digest((device, inode)),
+        "contract": CONTRACT,
+        "broker_model_id": MODEL_ID,
+        "resident_model_id": UPSTREAM_MODEL,
+        "adapters": {name: {
+            "previous_destination": getattr(previous, name).broker_socket or direct,
+            "candidate_destination": getattr(candidate, name).broker_socket or direct,
+        } for name in slots},
+        "other_config": "exactly-unchanged",
+        "idle_evidence": "external-operator-required-not-established-by-preflight",
+    }
+    return receipt, (reviewed_path, device, inode)
+
+
+def prepare_upgrade(
+    candidate_path: Path, previous_path: Path, *, reviewed_broker_socket: str | None = None,
+) -> UpgradePlan:
     """Validate without importing candidate code, opening models or contacting IPC.
 
     Artifact bytes are streamed only for SHA-256 verification; no deserialization.
     Source identity covers Python/native files in the resolved factory package,
     public runtime package and configured policy source roots, not all dependencies.
+    An explicit transport handover pins both adapters to one reviewed private
+    socket and requires every other configuration field to remain identical.
+    It does not establish resident idle or grant permission to remove a fence.
     """
     files: dict[Path, tuple[int, ...]] = {}
     roots: dict[Path, tuple[Path, ...]] = {}
@@ -135,10 +210,17 @@ def prepare_upgrade(candidate_path: Path, previous_path: Path) -> UpgradePlan:
     candidate, previous = config(candidate_path), config(previous_path)
     # Handover is not model promotion or camera requalification. Preserve the
     # entire body configuration, including external argv and calibration pins.
-    for name in ("policy", "grounded_policy", "gui_policy", "raw_motion_policy",
-                 "high_level", "vision_language", "role"):
-        if getattr(candidate, name) != getattr(previous, name):
-            raise UpgradeError("model-body-or-role-change-requires-separate-qualification")
+    transport_receipt = None
+    broker_parent = None
+    if reviewed_broker_socket is not None:
+        transport_receipt, broker_parent = _transport_handover(
+            candidate, previous, reviewed_broker_socket,
+        )
+    else:
+        for name in ("policy", "grounded_policy", "gui_policy", "raw_motion_policy",
+                     "high_level", "vision_language", "role"):
+            if getattr(candidate, name) != getattr(previous, name):
+                raise UpgradeError("model-body-or-role-change-requires-separate-qualification")
 
     source_roots = {Path(__file__).resolve().parents[1]}
     for selected in (candidate, previous):
@@ -243,7 +325,7 @@ def prepare_upgrade(candidate_path: Path, previous_path: Path) -> UpgradePlan:
             "import_path": sys.path, "pythonpath": os.environ.get("PYTHONPATH", ""),
         }),
         "source_declarations": source_declarations,
-        "source_review_required": any(
+        "source_review_required": transport_receipt is not None or any(
             not declaration["declaration_matches_runtime"] for declaration in source_declarations
         ),
         "artifact_bundles": len(bundles),
@@ -254,11 +336,17 @@ def prepare_upgrade(candidate_path: Path, previous_path: Path) -> UpgradePlan:
         "recorder": "unverified",
         "readiness": "fresh-runtime-telemetry-not-gameplay-qualification",
     }
+    if transport_receipt is not None:
+        # This explicit private handover receipt pins the operator-supplied path.
+        # Ordinary handover receipts continue to omit configuration locations.
+        receipt["transport_handover"] = transport_receipt
+        receipt["rollback_scope"] = "operator-idle-verification-required-before-transport-reversal"
     receipt["plan_sha256"] = _digest({
         **receipt, "interpreter": sys.executable, "prefix": sys.prefix,
         "import_path": sys.path, "pythonpath": os.environ.get("PYTHONPATH", ""),
     })
-    plan = UpgradePlan(candidate, previous, previous_path, files, roots, receipt, bundles)
+    plan = UpgradePlan(candidate, previous, previous_path, files, roots, receipt,
+                       bundles, broker_parent)
     plan.check_unchanged()
     return plan
 
@@ -625,6 +713,10 @@ def activate_upgrade(
                 if admission_started:
                     cleanup_candidate()
                 environment()
+                if plan.receipt.get("transport_handover") is not None:
+                    # Containing a model client does not prove resident work
+                    # stopped. Never bypass a broker fence by automatic reversal.
+                    raise UpgradeError("transport-rollback-requires-operator-idle-check") from exc
                 record("rolling-back")
                 start_profile(plan.previous, previous_file)
                 record("rolled-back")
@@ -678,6 +770,10 @@ def upgrade_command(
         "", "--reviewed-source-sha256",
         help="Explicitly admit this exact reviewed runtime_source_sha256; never repin provenance.",
     ),
+    reviewed_broker_socket: str | None = typer.Option(
+        None, "--reviewed-broker-socket",
+        help="Private path for both resident adapters; permits only that transport change.",
+    ),
     drain_timeout_s: float = typer.Option(25.0, "--drain-timeout", min=0.1, max=25.0),
     startup_timeout_s: float = typer.Option(120.0, "--startup-timeout", min=0.1, max=600.0),
     launcher_pid: int | None = typer.Option(
@@ -691,17 +787,22 @@ def upgrade_command(
     Startup includes cold loading. IPC/filesystem overhead is additional; failed
     containment leaves control unavailable rather than promising a recovery time.
     --status is historical, not proof the recorded generation is still alive.
+    A transport handover never automatically reverses after startup failure;
+    operator idle verification is required before any explicit recovery.
     """
     try:
         if status:
-            if config or previous_config or dry_run or expect_plan or reviewed_source_sha256:
+            if (config or previous_config or dry_run or expect_plan or reviewed_source_sha256
+                    or reviewed_broker_socket is not None):
                 raise UpgradeError("status-cannot-be-combined-with-upgrade")
             path = lifecycle.RUNTIME_DIR / "upgrade.json"
             typer.echo(path.read_text() if path.exists() else '{"phase": "no-upgrade-receipt"}')
             return
         if config is None or previous_config is None:
             raise UpgradeError("config-and-previous-config-required")
-        plan = prepare_upgrade(config, previous_config)
+        plan = prepare_upgrade(
+            config, previous_config, reviewed_broker_socket=reviewed_broker_socket,
+        )
         if dry_run:
             needs_review = plan.receipt["source_review_required"] and not reviewed_source_sha256
             if (reviewed_source_sha256

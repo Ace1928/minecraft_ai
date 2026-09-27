@@ -5,6 +5,7 @@ import math
 import queue
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Literal, Protocol, cast
@@ -307,7 +308,8 @@ class ActiveVLMWorker:
     def stop(self, *, deadline_ns: int | None = None) -> bool:
         """Fence semantic work, then boundedly observe the daemon worker exit.
 
-        A running model call is not interrupted. False retains its ownership;
+        Cooperative private broker calls observe retirement; legacy calls may
+        continue. False retains the worker's ownership;
         its eventual result cannot publish after retirement. The default keeps
         the historical two-second wait without extending a supplied deadline.
         """
@@ -362,7 +364,14 @@ class ActiveVLMWorker:
             try:
                 if self._stop.is_set():
                     return
-                observation, latency_ms = self._inspect(job)
+                scope = getattr(self.model, "request_scope", None)
+                # Keep one budget across grammar discovery and the existing
+                # bounded schema repair; publication still rechecks the frame.
+                context = (
+                    scope(cancel_requested=self._stop.is_set) if callable(scope) else nullcontext()
+                )
+                with context:
+                    observation, latency_ms = self._inspect(job)
                 self.metrics.completed += 1
                 self.metrics.last_latency_ms = latency_ms
                 self.metrics.last_error = None

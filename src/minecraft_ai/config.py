@@ -15,6 +15,9 @@ class ModelConfig(BaseModel):
     enabled: bool = False
     model_id: str = ""
     base_url: str = "http://127.0.0.1:8080/v1"
+    # Explicit private shared-owner opt-in; absence preserves direct local HTTP.
+    # This endpoint is a same-user Unix socket, never a public model URL.
+    broker_socket: str | None = Field(default=None, min_length=1, max_length=107)
     api_key: str = "local"
     timeout_s: float = Field(default=60.0, gt=0.0, le=600.0)
     # Keep strategic decoding bounded independently from request timeout. A

@@ -3,7 +3,8 @@ from __future__ import annotations
 import base64
 import importlib
 import threading
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -18,14 +19,31 @@ _LOCAL_MODEL_INFERENCE_LOCK = threading.Lock()
 
 
 @contextmanager
-def local_model_inference_lane() -> Iterator[None]:
+def local_model_inference_lane(
+    *, deadline_ns: int | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
+) -> Iterator[None]:
     """Serialize local adapter inference with the existing language/vision lane.
 
     Acquire this in the worker that performs inference, never while submitting
     it. The lane is not reentrant: adapters own one acquisition per call.
     """
-    with _LOCAL_MODEL_INFERENCE_LOCK:
+    def check() -> None:
+        if ((cancel_requested is not None and cancel_requested())
+                or (deadline_ns is not None and time.monotonic_ns() >= deadline_ns)):
+            raise TimeoutError("local model request cancelled or expired")
+
+    if deadline_ns is None and cancel_requested is None:
+        _LOCAL_MODEL_INFERENCE_LOCK.acquire()
+    else:
+        check()
+        while not _LOCAL_MODEL_INFERENCE_LOCK.acquire(timeout=.025):
+            check()
+    try:
+        check()
         yield
+    finally:
+        _LOCAL_MODEL_INFERENCE_LOCK.release()
 
 
 def local_model_inference_available() -> bool:
@@ -214,15 +232,7 @@ class OpenAICompatibleLocalModel:
         # prefill and strategic decoding caused both requests to take roughly
         # six times longer on the managed machine. Serialize local inference
         # at the process boundary while capture and motor loops remain async.
-        with local_model_inference_lane():
-            with self._client() as client:
-                response = client.post(
-                    self.base_url.rstrip("/") + "/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json=payload,
-                )
-                response.raise_for_status()
-                raw = response.json()
+        raw = self._request_payload(payload)
         text = _extract_chat_text(raw)
         return ModelResponse(
             text=text,
@@ -339,6 +349,16 @@ class OpenAICompatibleLocalModel:
             payload["response_format"] = response_format
         if grammar is not None:
             payload["grammar"] = grammar
+        raw = self._request_payload(payload)
+        text = _extract_chat_text(raw)
+        return ModelResponse(
+            text=text,
+            model=str(raw.get("model", self.model_id)) if isinstance(raw, dict) else self.model_id,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+        )
+
+    def _request_payload(self, payload: dict[str, Any]) -> Any:
+        """Transport seam; the optional broker keeps the same request semantics."""
         with local_model_inference_lane():
             with self._client() as client:
                 response = client.post(
@@ -347,13 +367,7 @@ class OpenAICompatibleLocalModel:
                     json=payload,
                 )
                 response.raise_for_status()
-                raw = response.json()
-        text = _extract_chat_text(raw)
-        return ModelResponse(
-            text=text,
-            model=str(raw.get("model", self.model_id)) if isinstance(raw, dict) else self.model_id,
-            latency_ms=(time.perf_counter() - started) * 1000.0,
-        )
+                return response.json()
 
     def _llama_grammar_available(self) -> bool:
         if self._grammar_supported is not None:

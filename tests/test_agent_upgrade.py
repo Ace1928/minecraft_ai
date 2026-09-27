@@ -9,6 +9,7 @@ import signal
 import sys
 import threading
 import time
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -90,6 +91,181 @@ def test_no_model_promotion_through_handover(profiles):
     candidate.write_text("policy:\n  weights_path: unqualified-checkpoint\n")
     with pytest.raises(u.UpgradeError, match="separate-qualification"):
         u.prepare_upgrade(candidate, previous)
+
+
+@pytest.fixture
+def transport_profiles(profiles):
+    previous, candidate, module = profiles
+    model = {
+        "enabled": True, "model_id": "gemma-4-e4b-vl",
+        "base_url": "http://127.0.0.1:8081/v1", "api_key": "do-not-publish-this",
+        "timeout_s": 180, "max_tokens": 256, "thinking_budget_tokens": 0,
+        "reasoning_format": "none",
+    }
+    raw = {
+        "high_level": dict(model), "vision_language": dict(model),
+        "runtime_factory": {"reference": "handover_fixture:build"},
+    }
+    # Keep the Unix path short independently of pytest's parameterized test name.
+    with tempfile.TemporaryDirectory(prefix="mc-upgrade-") as directory:
+        selected = str(Path(directory) / "resident.sock")
+        previous.write_text(json.dumps(raw))
+        for name in ("high_level", "vision_language"):
+            raw[name]["broker_socket"] = selected
+        candidate.write_text(json.dumps(raw))
+        yield SimpleNamespace(previous=previous, candidate=candidate, module=module,
+                              socket=selected, raw=raw)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_reviewed_transport_binds_both_destinations_without_import_or_ipc(
+    transport_profiles, monkeypatch, reverse,
+):
+    p = transport_profiles
+    for name in ("_command", "_launcher_barrier", "activate_upgrade"):
+        monkeypatch.setattr(u, name, lambda *a, **kw: pytest.fail("offline side effect"))
+    monkeypatch.setattr(u.socket, "socket", lambda *a, **kw: pytest.fail("offline IPC"))
+    candidate, previous = (p.previous, p.candidate) if reverse else (p.candidate, p.previous)
+    result = CliRunner().invoke(cli.app, [
+        "upgrade", "--dry-run", "--config", str(candidate), "--previous-config", str(previous),
+        "--reviewed-broker-socket", p.socket,
+    ])
+    assert result.exit_code == 2, result.output
+    receipt = json.loads(result.output)
+    assert receipt["phase"] == "source-review-required"
+    assert receipt["source_review_required"] is True
+    assert receipt["rollback_scope"] == (
+        "operator-idle-verification-required-before-transport-reversal"
+    )
+    migration = receipt["transport_handover"]
+    assert migration["reviewed_socket_path"] == p.socket
+    assert migration["resident_model_id"] == "gemma-4-e4b-vl"
+    assert migration["broker_model_id"] == "erais-dense-gemma4-e4b"
+    assert migration["direction"] == (
+        "shared-broker-to-direct" if reverse else "direct-to-shared-broker"
+    )
+    for name in ("high_level", "vision_language"):
+        assert migration["adapters"][name] == {
+            "previous_destination": p.socket if reverse else "http://127.0.0.1:8081/v1",
+            "candidate_destination": "http://127.0.0.1:8081/v1" if reverse else p.socket,
+        }
+    assert "do-not-publish-this" not in result.output
+    assert str(p.previous) not in result.output
+    reviewed = CliRunner().invoke(cli.app, [
+        "upgrade", "--dry-run", "--config", str(candidate), "--previous-config", str(previous),
+        "--reviewed-broker-socket", p.socket,
+        "--reviewed-source-sha256", receipt["runtime_source_sha256"],
+    ])
+    assert reviewed.exit_code == 0, reviewed.output
+    assert json.loads(reviewed.output)["phase"] == "validated-offline"
+
+
+def test_transport_change_without_explicit_path_still_refused(transport_profiles):
+    p = transport_profiles
+    with pytest.raises(u.UpgradeError, match="separate-qualification"):
+        u.prepare_upgrade(p.candidate, p.previous)
+
+
+@pytest.mark.parametrize("fault", ["one-sided", "different-path", "previous-one-sided", "no-op"])
+def test_transport_change_requires_both_adapters_together(transport_profiles, fault):
+    p = transport_profiles
+    if fault == "one-sided":
+        p.raw["vision_language"].pop("broker_socket")
+    elif fault == "different-path":
+        p.raw["vision_language"]["broker_socket"] = p.socket + "-other"
+    elif fault == "previous-one-sided":
+        before = json.loads(p.previous.read_text())
+        before["high_level"]["broker_socket"] = p.socket
+        p.previous.write_text(json.dumps(before))
+    else:
+        p.previous.write_text(json.dumps(p.raw))
+    p.candidate.write_text(json.dumps(p.raw))
+    with pytest.raises(u.UpgradeError, match="both-adapters-must-change"):
+        u.prepare_upgrade(p.candidate, p.previous, reviewed_broker_socket=p.socket)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("model_id", "another-model"), ("enabled", False),
+    ("base_url", "http://127.0.0.1:8082/v1"),
+])
+def test_transport_mode_requires_exact_existing_resident(transport_profiles, key, value):
+    p = transport_profiles
+    # Even identical changes to both old and new profiles do not qualify a new backend.
+    for path in (p.previous, p.candidate):
+        raw = json.loads(path.read_text())
+        for name in ("high_level", "vision_language"):
+            raw[name][key] = value
+        path.write_text(json.dumps(raw))
+    with pytest.raises(u.UpgradeError, match="exact-resident-identity"):
+        u.prepare_upgrade(p.candidate, p.previous, reviewed_broker_socket=p.socket)
+
+
+@pytest.mark.parametrize("slot,key,value", [
+    ("high_level", "api_key", "changed-secret"),
+    ("high_level", "max_tokens", 128),
+    ("high_level", "timeout_s", 90),
+    ("vision_language", "thinking_budget_tokens", 16),
+    ("vision_language", "reasoning_format", "deepseek"),
+    ("runtime_factory", "reference", "another_fixture:build"),
+    ("policy", "threads", 2),
+    ("trajectory", "enabled", False),
+    (None, "role", "miner"),
+    (None, "cognition_hz", 1),
+    (None, "lease_renew_ms", 1000),
+])
+def test_transport_exception_preserves_every_other_config_field(
+    transport_profiles, slot, key, value,
+):
+    p = transport_profiles
+    target = p.raw if slot is None else p.raw.setdefault(slot, {})
+    target[key] = value
+    p.candidate.write_text(json.dumps(p.raw))
+    with pytest.raises(u.UpgradeError, match="transport-handover-forbids-other-config-changes"):
+        u.prepare_upgrade(p.candidate, p.previous, reviewed_broker_socket=p.socket)
+
+
+@pytest.mark.parametrize("fault", ["relative", "dotdot", "weak-mode", "symlink"])
+def test_transport_preflight_requires_private_canonical_parent(transport_profiles, fault):
+    p = transport_profiles
+    path = Path(p.socket)
+    if fault == "relative":
+        selected = "resident.sock"
+    elif fault == "dotdot":
+        selected = str(path.parent) + "/../" + path.parent.name + "/resident.sock"
+    elif fault == "weak-mode":
+        path.parent.chmod(0o755)
+        selected = p.socket
+    else:
+        (path.parent / "alias").symlink_to(path.parent, target_is_directory=True)
+        selected = str(path.parent / "alias" / "resident.sock")
+    for name in ("high_level", "vision_language"):
+        p.raw[name]["broker_socket"] = selected
+    p.candidate.write_text(json.dumps(p.raw))
+    with pytest.raises(u.UpgradeError, match="reviewed-broker-(path|directory)"):
+        u.prepare_upgrade(p.candidate, p.previous, reviewed_broker_socket=selected)
+
+
+def test_reviewed_transport_pins_parent_generation_and_new_path(transport_profiles):
+    p = transport_profiles
+    plan = u.prepare_upgrade(p.candidate, p.previous, reviewed_broker_socket=p.socket)
+    parent = Path(p.socket).parent
+    moved = parent.with_name(parent.name + "-old")
+    parent.rename(moved)
+    parent.mkdir(mode=0o700)
+    try:
+        with pytest.raises(u.UpgradeError, match="reviewed-broker-directory-changed"):
+            plan.check_unchanged()
+        new = u.prepare_upgrade(p.candidate, p.previous, reviewed_broker_socket=p.socket)
+        assert new.receipt["plan_sha256"] != plan.receipt["plan_sha256"]
+        other_socket = str(parent / "other.sock")
+        for name in ("high_level", "vision_language"):
+            p.raw[name]["broker_socket"] = other_socket
+        p.candidate.write_text(json.dumps(p.raw))
+        changed = u.prepare_upgrade(p.candidate, p.previous, reviewed_broker_socket=other_socket)
+        assert changed.receipt["plan_sha256"] != new.receipt["plan_sha256"]
+    finally:
+        parent.rmdir()
+        moved.rename(parent)
 
 
 def test_syntax_failure_is_found_without_import(profiles):
@@ -302,6 +478,51 @@ def test_candidate_start_failure_rolls_back_to_snapshotted_known_profile(handove
     restored = json.loads(h.launches[-1]["config_file"].read_text())
     assert restored == h.plan.previous.model_dump(mode="json")
     assert "private" not in json.dumps(receipt) and "do-not-publish" not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_transport_handover_preserves_lease_checks_without_unsafe_direct_rollback(handover, fails):
+    h = handover
+    model = {
+        "enabled": True, "model_id": "gemma-4-e4b-vl", "base_url": "http://127.0.0.1:8081/v1",
+    }
+    h.plan.previous = RuntimeConfig(high_level=model, vision_language=model)
+    model["broker_socket"] = "/private-fixture/resident.sock"
+    h.plan.candidate = RuntimeConfig(high_level=model, vision_language=model)
+    h.plan.receipt.update({
+        "source_review_required": True, "runtime_source_sha256": "b" * 64,
+        "transport_handover": {"direction": "direct-to-shared-broker"},
+    })
+    before_camera = h.supervisor.status()["world_camera"]
+    if fails:
+        h.telemetry_mode = "policy-error"
+    with pytest.raises(u.UpgradeError, match="exact-reviewed-runtime-source-required"):
+        h.apply()
+    assert not h.events
+    receipt = h.apply(reviewed_source_sha256="b" * 64)
+    assert len(h.launches) == 1
+    launched = json.loads(h.launches[0]["config_file"].read_text())
+    for name in ("high_level", "vision_language"):
+        assert launched[name]["broker_socket"] == "/private-fixture/resident.sock"
+    assert h.events.index("disarm") < h.events.index(("stop", h.old.pid, True))
+    assert h.events.index(("stop", h.old.pid, True)) < h.events.index("resume-for-agent-reload")
+    assert h.supervisor.status()["world_camera"] == before_camera
+    assert receipt["before"]["supervisor_generation_sha256"] == (
+        receipt["after"]["supervisor_generation_sha256"]
+    )
+    if fails:
+        assert receipt["phase"] == "blocked"
+        assert receipt["error"] == "transport-rollback-requires-operator-idle-check"
+        assert receipt["candidate_error"] == "candidate-runtime-startup-failed"
+        assert not h.groups and h.supervisor.motor.lease is None
+        assert h.supervisor.state.value == "PAUSED"
+        assert all(event["phase"] != "rolling-back" for event in receipt["events"])
+    else:
+        assert receipt["phase"] == "upgraded"
+        assert len(h.groups) == 1
+        assert receipt["before"]["lease_generation_sha256"] != (
+            receipt["after"]["lease_generation_sha256"]
+        )
 
 
 def test_spawn_exception_without_identity_never_assumes_cleanup_for_rollback(handover):

@@ -12,7 +12,7 @@ from minecraft_ai.cognition import HighLevelController
 from minecraft_ai.config import RuntimeConfig, app_paths, load_config
 from minecraft_ai.datasets import DatasetSource, DatasetSourceType, TrajectoryManifest
 from minecraft_ai.execution import SkillExecutor
-from minecraft_ai.models import OpenAICompatibleLocalModel
+from minecraft_ai.resident_broker_model import configured_model
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorPolicy
 from minecraft_ai.perception import PerceptionBlackboard
 from minecraft_ai.perception_service import ActiveVLMWorker, RealtimePerceptionService
@@ -136,30 +136,14 @@ def main(argv: list[str] | None = None) -> int:
         if config.high_level.enabled:
             if not config.high_level.model_id:
                 raise RuntimeError("high-level model is enabled but model_id is empty")
-            high_model = OpenAICompatibleLocalModel(
-                model_id=config.high_level.model_id,
-                base_url=config.high_level.base_url,
-                api_key=config.high_level.api_key,
-                timeout_s=config.high_level.timeout_s,
-                max_tokens=config.high_level.max_tokens,
-                thinking_budget_tokens=config.high_level.thinking_budget_tokens,
-                reasoning_format=config.high_level.reasoning_format,
-            )
+            high_model = configured_model(config.high_level, purpose="cognition")
             high_level = HighLevelController(high_model, skills)
 
         active_vlm: ActiveVLMWorker | None = None
         if config.vision_language.enabled:
             if not config.vision_language.model_id:
                 raise RuntimeError("vision-language model is enabled but model_id is empty")
-            vlm_model = OpenAICompatibleLocalModel(
-                model_id=config.vision_language.model_id,
-                base_url=config.vision_language.base_url,
-                api_key=config.vision_language.api_key,
-                timeout_s=config.vision_language.timeout_s,
-                max_tokens=config.vision_language.max_tokens,
-                thinking_budget_tokens=config.vision_language.thinking_budget_tokens,
-                reasoning_format=config.vision_language.reasoning_format,
-            )
+            vlm_model = configured_model(config.vision_language, purpose="vision")
             active_vlm = ActiveVLMWorker(vlm_model, blackboard, args.instance_id)
 
         perception = RealtimePerceptionService(
