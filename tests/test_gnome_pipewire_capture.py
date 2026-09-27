@@ -32,10 +32,12 @@ def test_capture_factory_uses_x11_without_host_monitor_binding(
     source: str,
 ) -> None:
     sentinel = object()
-    calls: list[tuple[str, int, bool]] = []
+    calls: list[tuple[str, int, bool, int]] = []
 
-    def fake_x11(display: str, window_id: int, *, allow_host: bool) -> object:
-        calls.append((display, window_id, allow_host))
+    def fake_x11(
+        display: str, window_id: int, *, allow_host: bool, capture_budget_ms: int,
+    ) -> object:
+        calls.append((display, window_id, allow_host, capture_budget_ms))
         return sentinel
 
     monkeypatch.setattr(
@@ -43,10 +45,10 @@ def test_capture_factory_uses_x11_without_host_monitor_binding(
         fake_x11,
     )
 
-    capture = create_bedrock_capture(":12", 7, source=source)
+    capture = create_bedrock_capture(":12", 7, source=source, capture_budget_ms=750)
 
     assert capture is sentinel
-    assert calls == [(":12", 7, False)]
+    assert calls == [(":12", 7, False, 750)]
 
 
 @pytest.mark.parametrize("binding", [None, _binding()])

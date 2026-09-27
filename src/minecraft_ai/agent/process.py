@@ -129,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_host=bool(args.allow_host_capture),
             host_monitor_binding=host_binding,
             source=args.capture_source,
+            capture_budget_ms=config.stale_frame_ms,
         )
         capture_probe = capture.capture()
 

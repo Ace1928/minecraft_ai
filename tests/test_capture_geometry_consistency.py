@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -93,6 +94,10 @@ def _capture() -> tuple[IsolatedX11Capture, Any]:
     capture._frame_id = 0
     window = SimpleNamespace(get_image=lambda *_args: SimpleNamespace(data=bytes(range(64))))
     capture._display = SimpleNamespace(create_resource_object=lambda *_args: window)
+    capture._reply_socket = Mock()
+    capture._reply_protocol = SimpleNamespace(socket=capture._reply_socket)
+    capture._reply_failed = False
+    capture._capture_budget_ms = 500
     capture._bounds = lambda: {"left": 0, "top": 0, "width": 4, "height": 4}  # type: ignore[method-assign]
     capture._content_rect = lambda *_args: (1, 1, 2, 2)  # type: ignore[method-assign]
     return capture, window

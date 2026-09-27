@@ -386,6 +386,7 @@ def create_bedrock_capture(
     allow_host: bool = False,
     host_monitor_binding: HostMonitorBinding | None = None,
     source: BedrockCaptureSource | str = BedrockCaptureSource.PIPEWIRE,
+    capture_budget_ms: int = 500,
 ) -> IsolatedX11Capture | MutterPipeWireCapture:
     """Select PipeWire only for a proven host-monitor session.
 
@@ -398,6 +399,7 @@ def create_bedrock_capture(
             display_name,
             target_window_id,
             allow_host=allow_host,
+            capture_budget_ms=capture_budget_ms,
         )
     if not allow_host:
         raise IsolationError("host-monitor capture requires explicit host-display access")
@@ -410,6 +412,7 @@ def create_bedrock_capture(
             display_name,
             target_window_id,
             allow_host=allow_host,
+            capture_budget_ms=capture_budget_ms,
         )
     content_rect = resolve_host_monitor_content_rect(display_name, host_monitor_binding)
     return MutterPipeWireCapture(host_monitor_binding, content_rect=content_rect)

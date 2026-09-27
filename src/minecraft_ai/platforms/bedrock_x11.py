@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from ..safety import InputRouteUnavailable, MotorAction, MotorLease, MotorRejected
+from .x11_image_reply import ImageReplyError, coalesce_image_reply
 
 
 class IsolationError(RuntimeError):
@@ -1509,7 +1510,10 @@ class IsolatedX11Capture:
         *,
         host_display: str | None = None,
         allow_host: bool = False,
+        capture_budget_ms: int = 500,
     ) -> None:
+        if type(capture_budget_ms) is not int or not 100 <= capture_budget_ms <= 5000:
+            raise IsolationError("X11 capture budget must be between 100 and 5000 ms")
         require_isolated_display(display_name, host_display, allow_host=allow_host)
         try:
             display_module = importlib.import_module("Xlib.display")
@@ -1523,7 +1527,33 @@ class IsolatedX11Capture:
         self.display_name = display_name
         self.target_window_id = target_window_id
         self._display: Any = display_module.Display(display_name)
+        self._reply_protocol = self._display.display
+        self._reply_socket = self._reply_protocol.socket
+        self._reply_failed = False
+        self._capture_budget_ms = capture_budget_ms
         self._frame_id = 0
+
+    def _get_image(self, drawable: Any, *args: int, deadline_ns: int) -> Any:
+        if self._reply_failed or self._reply_protocol.socket is not self._reply_socket:
+            self._discard_reply_connection()
+            raise IsolationError("X11 image connection is unavailable; reconnect required")
+        try:
+            with coalesce_image_reply(self._reply_protocol, deadline_ns=deadline_ns):
+                return drawable.get_image(*args)
+        except ImageReplyError as exc:
+            # A partially consumed reply cannot be reused. Do not call Xlib's
+            # flush-on-close after interrupting its receive loop or reconnect
+            # automatically; the capture owner must explicitly construct anew.
+            self._discard_reply_connection()
+            raise IsolationError(str(exc)) from exc
+
+    def _discard_reply_connection(self) -> None:
+        self._reply_failed = True
+        try:
+            self._reply_socket.close()
+        except OSError:
+            # Refuse all future use even if teardown itself reports an error.
+            pass
 
     def _bounds(self) -> dict[str, int]:
         try:
@@ -1549,26 +1579,33 @@ class IsolatedX11Capture:
         return _wine_content_rect(self._display, self.target_window_id, width, height)
 
     def capture(self) -> CapturedFrame:
+        if self._reply_failed:
+            raise IsolationError("X11 image connection is unavailable; reconnect required")
         bounds = self._bounds()
         content_rect = self._content_rect(bounds["width"], bounds["height"])
         # Timestamp the start of pixel acquisition, not the later geometry
         # checks/cropping: those checks must not make old pixels appear newer.
         captured_ns = time.monotonic_ns()
+        deadline_ns = captured_ns + self._capture_budget_ms * 1_000_000
         bgra_bytes: bytes = b""
         # Capture the target drawable first. Under nested Weston/Xwayland, root
         # capture can succeed while returning an all-black uncomposited buffer;
         # Wine's desktop window contains the actual Minecraft pixels.
         try:
             window = self._display.create_resource_object("window", self.target_window_id)
-            raw = window.get_image(
+            raw = self._get_image(
+                window,
                 0,
                 0,
                 bounds["width"],
                 bounds["height"],
                 self._X.ZPixmap,
                 0xFFFFFFFF,
+                deadline_ns=deadline_ns,
             )
             bgra_bytes = raw.data
+        except IsolationError:
+            raise
         except Exception:
             bgra_bytes = b""
         if not bgra_bytes and self._mss_module is not None:
@@ -1581,13 +1618,15 @@ class IsolatedX11Capture:
         if not bgra_bytes:
             try:
                 root = self._display.screen().root
-                raw = root.get_image(
+                raw = self._get_image(
+                    root,
                     bounds["left"],
                     bounds["top"],
                     bounds["width"],
                     bounds["height"],
                     self._X.ZPixmap,
                     0xFFFFFFFF,
+                    deadline_ns=deadline_ns,
                 )
                 bgra_bytes = raw.data
             except Exception as exc:
@@ -1618,6 +1657,8 @@ class IsolatedX11Capture:
         )
 
     def close(self) -> None:
+        if self._reply_failed:
+            return
         try:
             self._display.close()
         except Exception:
