@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import io
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,6 +94,83 @@ def test_menu_ocr_bounds_its_own_threads_without_mutating_parent(monkeypatch):
     reader = TesseractMenuTextReader(executable="unused-test-tesseract")
     assert reader._read_image(Image.new("RGB", (32, 32))) == ()
     assert os.environ["OMP_THREAD_LIMIT"] == "8"
+
+
+@pytest.mark.parametrize(
+    ("size", "expected_size"),
+    (((1920, 1080), (1920, 1080)), ((640, 360), (1920, 1080)),
+     ((2560, 1440), (2560, 1440))),
+)
+def test_menu_ocr_does_not_triple_large_captures(monkeypatch, size, expected_size):
+    from PIL import Image
+
+    def run(command, **kwargs):
+        with Image.open(io.BytesIO(kwargs["input"])) as encoded:
+            assert encoded.size == expected_size
+        assert kwargs["timeout"] == 8.0
+        assert kwargs["env"]["OMP_THREAD_LIMIT"] == "1"
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("minecraft_ai.bedrock_menu.subprocess.run", run)
+    reader = TesseractMenuTextReader(executable="unused-test-tesseract")
+    assert reader._read_image(Image.new("RGB", size)) == ()
+
+
+@pytest.fixture(scope="module")
+def retained_play_lan_observation():
+    """Exact browser-observed 27 September frame; no live capture or input."""
+    if not shutil.which("tesseract"):
+        pytest.skip("retained-frame OCR acceptance requires Tesseract")
+    from PIL import Image
+
+    path = Path(__file__).parent / "fixtures/bedrock_menu/play_lan_1920x1080.jpg"
+    with Image.open(path) as image:
+        image = image.convert("RGB")
+        frame = CapturedFrame(1, 1, image.width, image.height, image.tobytes("raw", "BGRX"))
+    return frame, TesseractMenuTextReader().read(frame)
+
+
+def test_retained_full_hd_lan_frame_keeps_verified_target(retained_play_lan_observation):
+    from minecraft_ai.operator.menu import MenuObservation, _find_click_target
+
+    frame, lines = retained_play_lan_observation
+    stage = classify_menu_stage(
+        frame, lines, lan_name="BedrockConnect", server_name="Eidos Local Bedrock",
+    )
+    assert stage == MenuStage.PLAY
+    target = _find_click_target(
+        MenuObservation(frame, lines, stage), ("BedrockConnect",),
+        region=(0.02, 0.10, 0.98, 0.98),
+    )
+    assert 40 <= target.center[0] <= 630
+    assert 670 <= target.center[1] <= 800
+
+
+def test_retained_lan_label_without_menu_anchors_sends_nothing(retained_play_lan_observation):
+    frame, lines = retained_play_lan_observation
+    isolated_label = tuple(line for line in lines if "BedrockConnect" in line.text)
+    assert isolated_label
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([frame]), text_reader=_MappedTextReader({1: isolated_label}),
+        click_backend=clicks, lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        hud_detector=lambda _frame: False,
+    )
+    with pytest.raises(MenuNavigationError, match="no input sent"):
+        navigator.run()
+    assert clicks.clicks == []
+
+
+def test_retained_lan_frame_never_substitutes_another_server(retained_play_lan_observation):
+    from minecraft_ai.operator.menu import MenuObservation, _find_click_target
+
+    frame, lines = retained_play_lan_observation
+    with pytest.raises(MenuNavigationError, match="not recognized"):
+        _find_click_target(
+            MenuObservation(frame, lines, MenuStage.PLAY), ("Unapproved New World",),
+            region=(0.02, 0.10, 0.98, 0.98),
+        )
 
 class _SequenceCapture:
     def __init__(self, frames: list[CapturedFrame]) -> None:

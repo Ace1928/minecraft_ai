@@ -231,10 +231,19 @@ class TesseractMenuTextReader:
         self, image: Image.Image, *, input_scale: int | None = None,
     ) -> tuple[OcrLine, ...]:
         # Bedrock's pixel font is substantially more reliable in Tesseract at
-        # enlarged nearest-neighbour scale (notably title anchors and
-        # configured server names). Keep click geometry in original screenshot
-        # coordinates when parsing.
+        # enlarged nearest-neighbour scale for small captures. A full-HD frame
+        # already has readable glyphs: tripling it creates an 18.7M-pixel OCR
+        # job that can exhaust the deadline while the game/models share CPU.
+        # Bound automatic enlargement to full HD, retaining native pixels and
+        # the existing recognition/input gates. Explicit caption scales remain
+        # authoritative. Keep all returned geometry in screenshot coordinates.
         scale = self.input_scale if input_scale is None else input_scale
+        if input_scale is None:
+            scale = min(
+                scale,
+                max(1, 1920 // image.width),
+                max(1, 1080 // image.height),
+            )
         if scale != 1:
             image = image.resize(
                 (image.width * scale, image.height * scale),
