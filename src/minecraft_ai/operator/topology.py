@@ -120,7 +120,8 @@ def build_topology(
 ) -> dict[str, Any]:
     """Derive the live part graph; every value is copied, never inferred pixels."""
     telemetry = status.get("telemetry")
-    telemetry = telemetry if isinstance(telemetry, dict) else {}
+    telemetry_current = status.get("telemetry_current") is True
+    telemetry = telemetry if telemetry_current and isinstance(telemetry, dict) else {}
     bedrock = status.get("bedrock")
     bedrock = bedrock if isinstance(bedrock, dict) else {}
     supervisor = status.get("supervisor")
@@ -189,7 +190,7 @@ def build_topology(
         "capture": capture_ms is not None,
         "perception": isinstance(facts, dict),
         "policy": policy_available,
-        "skills": agent.get("alive") is True,
+        "skills": telemetry_current and agent.get("alive") is True,
         "bedrock": bool(bedrock.get("instances")),
         "supervisor": bool(supervisor),
         "agent": bool(agent),

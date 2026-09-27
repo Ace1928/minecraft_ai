@@ -264,6 +264,31 @@ def _bedrock_discovery_view() -> tuple[BedrockLinuxInstall | None, list[BedrockL
         return _discovery_cache
 
 
+def _telemetry_current(status: dict[str, object]) -> bool:
+    """The same live-agent, active-lease and freshness contract for every panel."""
+    agent = status.get("agent")
+    supervisor = status.get("supervisor")
+    telemetry = status.get("telemetry")
+    if not all(isinstance(value, dict) for value in (agent, supervisor, telemetry)):
+        return False
+    assert isinstance(agent, dict) and isinstance(supervisor, dict) and isinstance(telemetry, dict)
+    updated = telemetry.get("updated_monotonic_ns")
+    return bool(
+        agent.get("alive") is True
+        and status.get("supervisor_reachable") is True
+        and supervisor.get("state") == "RUNNING"
+        and supervisor.get("motor_lease_active") is True
+        and not status.get("operator_pause_latched")
+        and not supervisor.get("emergency_stop_latched")
+        and type(updated) is int
+        and 0 <= time.monotonic_ns() - updated <= READINESS_TELEMETRY_MAX_AGE_NS
+        and telemetry.get("state") == "running"
+        and isinstance(supervisor.get("motor_lease_id"), str)
+        and bool(supervisor.get("motor_lease_id"))
+        and supervisor.get("motor_lease_id") == telemetry.get("lease_id")
+    )
+
+
 def _reasoning_status_text(status: dict[str, object]) -> str:
     """Do not describe persisted telemetry as the current agent's reasoning state."""
     agent = status.get("agent") or {}
@@ -280,15 +305,9 @@ def _reasoning_status_text(status: dict[str, object]) -> str:
         or supervisor.get("emergency_stop_latched")
     ):
         return "Autonomous control is unavailable. Reasoning standby is unconfirmed."
-    updated = telemetry.get("updated_monotonic_ns") if isinstance(telemetry, dict) else None
-    if (
-        type(updated) is not int
-        or not 0 <= time.monotonic_ns() - updated <= READINESS_TELEMETRY_MAX_AGE_NS
-        or telemetry.get("state") != "running"
-        or not isinstance(supervisor.get("motor_lease_id"), str)
-        or supervisor.get("motor_lease_id") != telemetry.get("lease_id")
-    ):
+    if not _telemetry_current(status):
         return "Reasoning state is unconfirmed; waiting for fresh agent telemetry."
+    assert isinstance(telemetry, dict)
     standby = telemetry.get("reasoning_standby") or {}
     state = standby.get("state") if isinstance(standby, dict) else None
     if state == "off":
@@ -361,6 +380,7 @@ def operator_status() -> dict[str, object]:
         "operator_pause_latched": operator_pause_latched(),
     }
     status["reasoning_status_text"] = _reasoning_status_text(status)
+    status["telemetry_current"] = _telemetry_current(status)
     return status
 
 
@@ -1402,6 +1422,10 @@ const $=id=>document.getElementById(id);const esc=v=>v??'—';
 async function api(path,options){const r=await fetch(path,options||{signal:AbortSignal.timeout(5000)});const d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);return d}
 let statusLoading=false,messagesLoading=false;
 function cls(el,good){el.className='value '+(good?'ok':'bad')}
+function clearTelemetryPanels(){
+for(const id of ['skill','goal','instruction','constraints','reason','plan','outcome','policy','policyMetrics','frames','actions','capture','recording','recordingDetail'])$(id).textContent='Unavailable';
+$('reason').textContent='Waiting for current agent telemetry.';$('recording').className='amber';$('facts').textContent='Current perception is unavailable.';$('prediction').style.display='none';
+}
 let dragging=false,startX=0,startY=0,targetBox=null,displayedFrameToken=null,frameObjectUrl=null,frameLoading=false;const viewer=$('viewer'),selection=$('selection'),prediction=$('prediction'),worldFrame=$('worldFrame'),targetReview=$('targetReview'),targetPreview=$('targetPreview');
 function imageRect(){const r=worldFrame.getBoundingClientRect(),nw=worldFrame.naturalWidth,nh=worldFrame.naturalHeight;if(!nw||!nh)return{left:r.left,top:r.top,width:r.width,height:r.height};const imageRatio=nw/nh,boxRatio=r.width/r.height;let width=r.width,height=r.height,left=r.left,top=r.top;if(boxRatio>imageRatio){width=r.height*imageRatio;left+=(r.width-width)/2}else if(boxRatio<imageRatio){height=r.width/imageRatio;top+=(r.height-height)/2}return{left,top,width,height}}
 function point(e){const r=imageRect();return{x:Math.max(0,Math.min(r.width,e.clientX-r.left)),y:Math.max(0,Math.min(r.height,e.clientY-r.top)),w:r.width,h:r.height}}
@@ -1414,10 +1438,10 @@ viewer.onpointermove=e=>{if(!dragging)return;const p=point(e),x=Math.min(startX,
 viewer.onpointerup=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId);drawTargetPreview();$('targetNotice').textContent='Review the frozen crop, then arm it only if the pixels match the label.'};
 viewer.onpointercancel=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId);drawTargetPreview()};
 async function refreshFrame(){if(dragging||targetBox||frameLoading)return;frameLoading=true;try{const r=await fetch('/api/frame.png?t='+Date.now());if(!r.ok)throw Error('live frame unavailable');const token=r.headers.get('X-Minecraft-Frame-Token');if(!token)throw Error('live frame has no reference token');const fw=r.headers.get('X-Minecraft-Frame-Width'),fh=r.headers.get('X-Minecraft-Frame-Height'),hud=r.headers.get('X-Minecraft-HUD-Complete')==='true';$('surface').textContent=(fw&&fh?fw+'×'+fh:'unknown geometry')+' · '+(hud?'FULL SURVIVAL HUD':'HUD INCOMPLETE / NOT IN WORLD');$('surface').className='label '+(hud?'ok':'bad');const blob=await r.blob(),url=URL.createObjectURL(blob),old=frameObjectUrl;displayedFrameToken=null;await new Promise((resolve,reject)=>{worldFrame.onload=resolve;worldFrame.onerror=reject;worldFrame.src=url});frameObjectUrl=url;displayedFrameToken=token;if(old)URL.revokeObjectURL(old)}catch(e){$('surface').textContent='Isolated capture unavailable';$('surface').className='label bad'}finally{frameLoading=false}}
-async function refresh(){if(statusLoading)return;statusLoading=true;try{const s=await api('/api/status');$('dot').style.background='var(--green)';$('connection').textContent='Live telemetry';
+async function refresh(){if(statusLoading)return;statusLoading=true;try{const s=await api('/api/status'),current=s.telemetry_current===true;$('dot').style.background=current?'var(--green)':'var(--amber)';$('connection').textContent=current?'Live agent telemetry':'Connected · agent telemetry unavailable';
 const bi=s.bedrock.instances.length>0; $('bedrock').textContent=bi?'RUNNING':'STOPPED';cls($('bedrock'),bi);$('version').textContent=esc(s.bedrock.version);
 const sup=esc(s.supervisor.state);$('supervisor').textContent=sup;cls($('supervisor'),s.supervisor_reachable&&sup!=='FAILSAFE');
-const alive=s.agent.alive;$('agent').textContent=alive?'RUNNING':'DISARMED';cls($('agent'),alive);const t=s.telemetry||{};
+const alive=s.agent.alive;$('agent').textContent=alive?'RUNNING':'DISARMED';cls($('agent'),alive);const t=current?(s.telemetry||{}):{};
 $('skill').textContent=esc(t.active_skill);$('goal').textContent=esc(t.chosen_goal_id||'No active goal');$('reason').textContent=esc(t.reasoning_summary||'Waiting for agent telemetry.');
 $('plan').textContent=esc((t.plan_steps||[]).length?(t.plan_steps||[]).join(' → '):'No explicit plan yet.');
 $('instruction').textContent=esc(t.active_instruction||'Waiting for an executable option.');const params=t.active_skill_parameters||{},paramText=Object.entries(params).map(([k,v])=>k+'='+v).join(' · ');$('constraints').textContent=paramText?'active contract · '+paramText:'no explicit action constraints';const recent=(t.recent_skill_runs||[])[0];$('outcome').textContent=recent?'last option · '+recent.skill_id+' · '+recent.outcome+(recent.failure_reason?' · '+recent.failure_reason:''):'no terminal option evidence yet';const p=t.policy||{},bodyByRoute={raw_motion:p.raw_motion,gui:p.gui,semantic:p.primary,primary:p.primary},active=bodyByRoute[p.active_route]||p.primary||p,pred=active.last_prediction||{},counts=active.learned_action_counts||{},suppressed=(counts['constraint_suppressed.attack']||0)+(counts['constraint_suppressed.use']||0)+(counts['constraint_suppressed.jump']||0),grounding=p.grounding_active?' + ROCKET target '+(p.grounded_track_id||'pending'):'';$('policy').textContent=esc(active.model_version||p.policy_id);$('policyMetrics').textContent=(active.last_inference_ms??'—')+' ms · '+esc((p.active_route||active.grounding_mode)+grounding)+' · '+esc(active.accepted_predictions||0)+' learned · '+esc(counts.jump||0)+' jumps · '+esc(counts.camera||0)+' camera · '+suppressed+' constrained · target '+(pred.target_exists_probability==null?'—':Math.round(pred.target_exists_probability*100)+'%');
@@ -1426,7 +1450,8 @@ $('reasoningStatus').textContent=s.reasoning_status_text||'Waiting for current a
 const pf=((t.perception||{}).fresh_facts)||{};$('facts').textContent=Object.keys(pf).length?JSON.stringify(pf,null,2):'No fresh semantic facts yet.';
 $('frames').textContent=esc(t.frames||0);$('actions').textContent=esc(t.motor_actions||0);$('capture').textContent=t.last_capture_ms==null?'—':t.last_capture_ms+' ms';
 const tr=t.trajectory_recording||{},recording=tr.enabled===true;$('recording').textContent=recording?'ON':'PAUSED';$('recording').className=recording?'ok':'amber';$('recordingDetail').textContent=recording?(esc(tr.written_steps||0)+' saved · '+esc(tr.queued_samples||0)+' queued'):esc(tr.disabled_reason||'not configured');
-}catch(e){$('dot').style.background='var(--red)';$('connection').textContent='Disconnected';$('reasoningStatus').textContent='Connection lost. Reasoning standby is unconfirmed.'}finally{statusLoading=false}}
+if(!current)clearTelemetryPanels();
+}catch(e){clearTelemetryPanels();$('dot').style.background='var(--red)';$('connection').textContent='Disconnected';for(const id of ['bedrock','supervisor','agent','camera']){$(id).textContent='Unconfirmed';$(id).className='value amber'}$('version').textContent='Unavailable';$('cameraMode').textContent='Connection lost; camera state is unconfirmed.';$('reasoningStatus').textContent='Connection lost. Reasoning standby is unconfirmed.'}finally{statusLoading=false}}
 async function messages(){if(messagesLoading)return;messagesLoading=true;try{const d=await api('/api/messages');const feed=$('feed');feed.replaceChildren();if(!d.messages.length){const x=document.createElement('div');x.className='label';x.textContent='No messages yet';feed.append(x);return}
 d.messages.forEach(m=>{const box=document.createElement('div');box.className='msg';const meta=document.createElement('div');meta.className='meta';const k=document.createElement('span');k.className='kind';k.textContent=m.kind;const when=document.createElement('span');when.textContent=new Date(m.created_ns/1e6).toLocaleTimeString();const status=document.createElement('span');status.textContent=m.status;meta.append(k,when,status);const text=document.createElement('div');text.className='text';text.textContent=m.text;box.append(meta,text);if(m.response_text){const reply=document.createElement('div');reply.className='text ok';reply.textContent='Agent: '+m.response_text;box.append(reply)}feed.append(box)})}catch(e){}finally{messagesLoading=false}}
 async function setStandby(enabled){try{await api('/api/control/reasoning-standby',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled})});$('reasoningStatus').textContent=enabled?'Standby requested; waiting for the runtime to drain.':'Resume requested.';refresh()}catch(e){$('reasoningStatus').textContent=e.message}}
@@ -1446,14 +1471,14 @@ const TOPO_LAYOUT={capture:[170,120],perception:[430,86],policy:[700,96],skills:
 let topology=null,topoLoading=false,brainYaw=.55,brainPitch=-.2,brainDrag=null,selectedModel=0,frameTick=0;
 function roundRect(c,x,y,w,h,r){c.beginPath();c.moveTo(x+r,y);c.arcTo(x+w,y,x+w,y+h,r);c.arcTo(x+w,y+h,x,y+h,r);c.arcTo(x,y+h,x,y,r);c.arcTo(x,y,x+w,y,r);c.closePath()}
 const partColour=s=>s==='live'?'#5ce58c':s==='idle'?'#ffc766':'#5a6b63';
-async function refreshTopology(){if(topoLoading)return;topoLoading=true;try{topology=await api('/api/topology');drawSystemTopology();drawBrain()}catch(e){topology=null}finally{topoLoading=false}}
+async function refreshTopology(){if(topoLoading)return;topoLoading=true;try{topology=await api('/api/topology');drawSystemTopology();drawBrain()}catch(e){topology=null;drawSystemTopology();drawBrain()}finally{topoLoading=false}}
 function drawSystemTopology(){const c=topoCtx,w=topoCanvas.width,h=topoCanvas.height,t=performance.now()/1000;c.clearRect(0,0,w,h);c.strokeStyle='#12241c';c.lineWidth=1;for(let x=0;x<w;x+=64){c.beginPath();c.moveTo(x,0);c.lineTo(x,h);c.stroke()}for(let y=0;y<h;y+=64){c.beginPath();c.moveTo(0,y);c.lineTo(w,y);c.stroke()}
 const parts=topology?topology.parts:[];const positions={};for(const part of parts){const base=TOPO_LAYOUT[part.id]||[w/2,h/2];positions[part.id]=[base[0],base[1]+Math.sin(t*1.3+part.label.length)*3]}
 for(const edge of (topology?topology.edges:[])){const a=positions[edge.source],b=positions[edge.target];if(!a||!b)continue;const flow=edge.flow;c.strokeStyle=flow>0.05?'rgba(92,229,140,'+(0.22+0.55*flow)+')':'rgba(90,120,105,.32)';c.lineWidth=flow>0.05?2.2:1.2;c.setLineDash(flow>0.05?[10,12]:[]);c.lineDashOffset=flow>0.05?-t*90*flow:0;c.beginPath();c.moveTo(a[0],a[1]);c.quadraticCurveTo((a[0]+b[0])/2,(a[1]+b[1])/2-54,b[0],b[1]);c.stroke()}c.setLineDash([]);
 for(const part of parts){const p=positions[part.id],colour=partColour(part.state),pulse=0.5+0.5*Math.sin(t*2.2+part.label.length);c.shadowColor=colour;c.shadowBlur=part.state==='live'?16+10*pulse:6;c.fillStyle='#0d1b16';roundRect(c,p[0]-94,p[1]-27,188,54,13);c.fill();c.shadowBlur=0;c.strokeStyle=colour;c.lineWidth=1.4;roundRect(c,p[0]-94,p[1]-27,188,54,13);c.stroke();c.fillStyle='#ecf8f1';c.font='600 15px ui-monospace,monospace';c.textAlign='center';c.fillText(part.label,p[0],p[1]-5);c.fillStyle=colour;c.font='10.5px ui-monospace,monospace';c.fillText(String(part.detail||part.state).slice(0,28),p[0],p[1]+13);c.beginPath();c.arc(p[0]+80,p[1]-15,3.5+2.5*part.activity*pulse,0,7);c.fillStyle=colour;c.fill()}
 c.shadowBlur=0;c.textAlign='left';c.fillStyle='#95aa9f';c.font='12px ui-monospace,monospace';const o=topology&&topology.observation;c.fillText(o?(o.online?('observation '+o.source_id+' · seq '+o.sequence+' · '+(o.frame_age_ms||0).toFixed(0)+' ms · action '+((o.action&&o.action.kind)||'none')):'observation unavailable'):'waiting for live topology',20,28);
 const chips=$('topoChips');chips.replaceChildren();for(const part of parts){const el=document.createElement('span');el.className='chip';el.innerHTML='<b style="color:'+partColour(part.state)+'">●</b> '+part.label+' · '+part.state+' · '+Math.round(part.activity*100)+'%';chips.append(el)}}
-function drawBrain(){const c=brainCtx,w=brainCanvas.width,h=brainCanvas.height;c.clearRect(0,0,w,h);const pops=(topology&&topology.populations)||[];if(!pops.length){c.fillStyle='#95aa9f';c.font='15px ui-monospace,monospace';c.fillText('No bound model population in the current observation.',24,46);c.font='12px ui-monospace,monospace';c.fillText('Populations appear when a producer publishes an allowlisted packet with a bound model.',24,70);$('modelMeta').textContent='Waiting for a bound model population.';$('brainChips').replaceChildren();return}
+function drawBrain(){const c=brainCtx,w=brainCanvas.width,h=brainCanvas.height;c.clearRect(0,0,w,h);const pops=(topology&&topology.populations)||[];if(!pops.length){c.fillStyle='#95aa9f';c.font='15px ui-monospace,monospace';c.fillText('No bound model population in the current observation.',24,46);c.font='12px ui-monospace,monospace';c.fillText('Populations appear when a producer publishes an allowlisted packet with a bound model.',24,70);$('modelMeta').textContent='Waiting for a bound model population.';$('modelPick').replaceChildren();$('modelPick').dataset.models='';$('brainChips').replaceChildren();return}
 selectedModel=Math.min(selectedModel,pops.length-1);const pop=pops[selectedModel];const pick=$('modelPick');if(pick.options.length!==pops.length||pick.dataset.models!==pops.map(p=>p.model).join(',')){pick.replaceChildren();pick.dataset.models=pops.map(p=>p.model).join(',');pops.forEach((p,i)=>{const o=document.createElement('option');o.value=String(i);o.textContent=p.model;pick.append(o)});pick.onchange=()=>{selectedModel=Number(pick.value);drawBrain()}}pick.value=String(selectedModel);
 $('modelMeta').textContent=pop.unit_count+' units · '+pop.total_edges+' edges'+(pop.edges_complete?' · complete':'')+' · '+pop.calls+' calls · '+(pop.activity||[]).length+' active now';
 const pos=pop.positions,layers=pop.layer_sizes||[pop.unit_count],n=pos.length;const layerOf=i=>{let acc=0;for(let L=0;L<layers.length;L++){acc+=layers[L];if(i<acc)return L}return layers.length-1};

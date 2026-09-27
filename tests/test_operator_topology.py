@@ -65,7 +65,7 @@ def test_offline_topology_still_maps_every_part_and_edge():
 
 def test_live_topology_binds_model_populations_and_activity():
     topology = build_topology(
-        {"telemetry": {"last_capture_ms": 20, "active_skill": "mine_log",
+        {"telemetry_current": True, "telemetry": {"last_capture_ms": 20, "active_skill": "mine_log",
                        "trajectory_recording": {"enabled": True, "written_steps": 12},
                        "policy": {"primary": {
                            "model_version": "rocket2", "last_inference_ms": 12}}},
@@ -98,6 +98,7 @@ def test_direct_policy_availability_does_not_invent_observation_activity(
     online, phase, skill, expected,
 ):
     status = {
+        "telemetry_current": True,
         "agent": {"alive": True},
         "telemetry": {"active_skill": skill, "policy": {
             "policy_id": "erais-mushroom-interaction-v2", "active_route": "direct",
@@ -122,7 +123,7 @@ def test_direct_policy_availability_does_not_invent_observation_activity(
 @pytest.mark.parametrize("route,key", [("semantic", "primary"), ("raw_motion", "raw_motion"),
                                        ("gui", "gui")])
 def test_topology_uses_current_body_instead_of_primary_latency(route, key):
-    status = {"agent": {"alive": True}, "telemetry": {
+    status = {"telemetry_current": True, "agent": {"alive": True}, "telemetry": {
         "active_skill": "test-option", "policy": {
             "active_route": route,
             "primary": {"model_version": "unused-primary", "last_inference_ms": 1},
@@ -230,3 +231,28 @@ def test_viewer_renders_the_association_producer_population():
     assert any(part["id"] == "association_brain" and part["state"] == "live"
                for part in topology["parts"])
     assert topology["observation"]["source_id"] == "association-brain"
+
+
+@pytest.mark.parametrize("current", [False, None])
+def test_old_telemetry_cannot_light_live_topology_while_current_controls_stay_visible(current):
+    snapshot = {
+        "telemetry_current": current,
+        "agent": {"alive": True},
+        "supervisor_reachable": True, "supervisor": {"state": "RUNNING"},
+        "bedrock": {"instances": ["same-game"]},
+        "telemetry": {
+            "last_capture_ms": 20, "active_skill": "old-skill",
+            "perception": {"fresh_facts": {"old-fact": 1}},
+            "policy": {"primary": {"model_version": "old-model", "last_inference_ms": 1}},
+            "trajectory_recording": {"enabled": True, "written_steps": 100},
+        },
+    }
+    topology = build_topology(snapshot, _observation_packet())
+    parts = {part["id"]: part for part in topology["parts"]}
+    for key in ("capture", "perception", "policy", "skills", "memory"):
+        assert parts[key]["state"] == "offline"
+        assert parts[key]["activity"] == 0
+    assert parts["skills"]["detail"] is None
+    assert parts["policy"]["detail"] is None
+    for key in ("bedrock", "supervisor", "agent", "association_brain"):
+        assert parts[key]["state"] == "live"

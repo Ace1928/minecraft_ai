@@ -23,6 +23,7 @@ from minecraft_ai.operator_server import (
     _default_operator_hostnames,
     _private_operator_address,
     _reasoning_status_text,
+    _telemetry_current,
     _inventory_qualification_view,
     _validate_dashboard_bind_address,
     operator_readiness,
@@ -644,3 +645,49 @@ def test_operator_http_message_roundtrip(tmp_path: Path, monkeypatch) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@pytest.mark.parametrize("case", [
+    "current", "old-lease", "stale", "future", "bool-time", "warming", "stopped",
+    "no-agent", "unreachable", "inactive", "empty-lease", "paused", "estop", "missing",
+])
+def test_dashboard_current_telemetry_requires_same_live_lease_and_freshness(
+    monkeypatch, case,
+) -> None:
+    now = 10_000_000_000
+    monkeypatch.setattr("minecraft_ai.operator_server.time.monotonic_ns", lambda: now)
+    status = {
+        "agent": {"alive": True}, "supervisor_reachable": True,
+        "supervisor": {"state": "RUNNING", "motor_lease_active": True,
+                       "motor_lease_id": "current"},
+        "telemetry": {"state": "running", "lease_id": "current",
+                      "updated_monotonic_ns": now, "frames": 99,
+                      "active_skill": "prior-value-must-not-imply-current"},
+    }
+    if case == "old-lease":
+        status["telemetry"]["lease_id"] = "previous"
+    elif case == "stale":
+        status["telemetry"]["updated_monotonic_ns"] = now - 5_000_000_001
+    elif case == "future":
+        status["telemetry"]["updated_monotonic_ns"] = now + 1
+    elif case == "bool-time":
+        status["telemetry"]["updated_monotonic_ns"] = True
+    elif case in {"warming", "stopped"}:
+        status["telemetry"]["state"] = case
+    elif case == "no-agent":
+        status["agent"]["alive"] = False
+    elif case == "unreachable":
+        status["supervisor_reachable"] = False
+    elif case == "inactive":
+        status["supervisor"]["motor_lease_active"] = False
+    elif case == "empty-lease":
+        status["supervisor"]["motor_lease_id"] = ""
+        status["telemetry"]["lease_id"] = ""
+    elif case == "paused":
+        status["operator_pause_latched"] = True
+    elif case == "estop":
+        status["supervisor"]["emergency_stop_latched"] = True
+    elif case == "missing":
+        status["telemetry"] = None
+    assert _telemetry_current(status) is (case == "current")
+    assert status["supervisor"]["state"] == "RUNNING"  # Current controls remain intact.
