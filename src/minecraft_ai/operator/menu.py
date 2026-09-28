@@ -215,9 +215,9 @@ class TesseractMenuTextReader:
                 captions: list[OcrLine] = []
                 for row in range(5):
                     center_y = 0.325 + row * 0.1185
-                    left, top = int(frame.width * 0.365), int(frame.height * (center_y - 0.035))
+                    left, top = int(frame.width * 0.37), int(frame.height * (center_y - 0.025))
                     caption = image.crop((
-                        left, top, int(frame.width * 0.69), int(frame.height * (center_y + 0.035)),
+                        left, top, int(frame.width * 0.685), int(frame.height * (center_y + 0.025)),
                     ))
                     captions.extend(
                         replace(line, left=line.left + left, top=line.top + top)
@@ -274,10 +274,15 @@ class TesseractMenuTextReader:
         if completed.returncode != 0:
             error = completed.stderr.decode("utf-8", errors="replace").strip()
             raise MenuNavigationError(f"menu OCR exited {completed.returncode}: {error[:200]}")
-        return _parse_tesseract_tsv(
+        lines = _parse_tesseract_tsv(
             completed.stdout.decode("utf-8", errors="replace"),
             coordinate_scale=scale,
+            minimum_word_confidence=0.0 if single_line else 30.0,
         )
+        # A low-confidence word inside a verified single caption must not be
+        # silently deleted from a server name. Retain the complete line, then
+        # require aggregate confidence and the navigator's exact-name match.
+        return tuple(line for line in lines if not single_line or line.confidence >= 35.0)
 
 
 class NestedXTestMenuInput:
@@ -1089,6 +1094,7 @@ def _parse_tesseract_tsv(
     payload: str,
     *,
     coordinate_scale: int = 1,
+    minimum_word_confidence: float = 30.0,
 ) -> tuple[OcrLine, ...]:
     if coordinate_scale < 1:
         raise ValueError("OCR coordinate scale must be positive")
@@ -1102,7 +1108,7 @@ def _parse_tesseract_tsv(
             if not text:
                 continue
             confidence = float(row.get("conf") or -1)
-            if confidence < 30.0:
+            if not math.isfinite(confidence) or confidence < minimum_word_confidence:
                 continue
             key = (
                 int(row.get("page_num") or 0),

@@ -315,7 +315,7 @@ def test_server_list_caption_ocr_requires_exact_title_and_retains_coordinates(
     if valid_title:
         assert len(calls) == 8
         target = next(line for line in result if line.text == "Eidos Local Bedrock")
-        assert target.center == (485, 409)
+        assert target.center == (490, 415)
         assert classify_menu_stage(
             frame, result, lan_name="BedrockConnect", server_name="Eidos Local Bedrock",
             hud_detector=lambda _frame: True,
