@@ -149,7 +149,21 @@ Observe the headless client through the captured-frame dashboard. For a configur
 local BedrockConnect server, `minecraft-ai bedrock navigate` performs bounded,
 screenshot-bound menu navigation (see `--help` for exact server selection). It is
 not a general sign-in flow, and there is no nested host window for normal physical
-keyboard/mouse interaction. Once the client is in-world or on a supported recovery
+keyboard/mouse interaction. Required resource downloads need a recognized dialog
+heading, explanatory body, caption and wide green control. Content Log History
+can be closed only after three positioned labels and its pixel-font close icon
+are verified; the navigator never clears the log. Loading captions authorize
+waiting only. Unknown screens stop further input and may be retained with
+`--evidence-dir` in a new private directory.
+
+The 28 September desktop diagnostic accepted the server pack, reached survival,
+and opened the stock starter menu with one ordinary Compass use. The menu stayed
+visible beyond 40 seconds without a selection. This establishes the desktop
+render path only; it does not resolve the separately reported Switch crash,
+prove autonomous gameplay, or authorize bypassing deployment-specific world
+restrictions. The diagnostic client was then stopped with operator pause latched.
+
+Once the client is in-world or on a supported recovery
 overlay, start the agent:
 
 ```bash

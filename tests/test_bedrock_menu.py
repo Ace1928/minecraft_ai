@@ -1725,3 +1725,22 @@ def test_retained_content_history_closes_only_verified_header_x():
     changed = replace(frame, bgra=image.tobytes('raw', 'BGRX'))
     with pytest.raises(MenuNavigationError, match='close control is not verified'):
         _transition_click_target(replace(observation, frame=changed), transition)
+
+
+def test_retained_resource_loading_panorama_only_authorizes_waiting():
+    if not shutil.which('tesseract'):
+        pytest.skip('retained-frame OCR acceptance requires Tesseract')
+    from PIL import Image
+    path = Path(__file__).parent / 'fixtures/bedrock_menu/resource_loading_cave_1920x1080.png'
+    with Image.open(path) as source:
+        image = source.convert('RGB')
+        frame = CapturedFrame(1, 1, image.width, image.height, image.tobytes('raw', 'BGRX'))
+    lines = TesseractMenuTextReader().read(frame)
+    stage = classify_menu_stage(frame, lines, lan_name='BedrockConnect',
+                               server_name='Family', hud_detector=lambda _: False)
+    assert stage is MenuStage.LOADING
+    navigator = BedrockMenuNavigator(capture=None, text_reader=None, click_backend=None,
+        lan_name='BedrockConnect', server=ConfiguredServer('Family', '192.168.4.166', 19136))
+    from minecraft_ai.operator.menu import MenuObservation
+    with pytest.raises(MenuNavigationError, match='no safe transition'):
+        navigator._transition_for(MenuObservation(frame, lines, stage))

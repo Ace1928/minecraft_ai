@@ -231,6 +231,29 @@ class TesseractMenuTextReader:
                 replace(line, left=line.left + left, top=line.top + top)
                 for line in self._read_image(caption, input_scale=1)
             )
+        if not any("loading" in _normalized_text(line.text) for line in lines) and any(
+            math.isfinite(line.confidence) and line.confidence >= 60
+            and _normalized_text(line.text) == "cancel"
+            and .40 <= line.center[0] / frame.width <= .60
+            and .52 <= line.center[1] / frame.height <= .65
+            for line in lines
+        ):
+            # A busy panorama can hide the gray loading-panel title from full
+            # frame OCR. This crop can authorize waiting, never another input.
+            left, top = int(frame.width * .35), int(frame.height * .34)
+            caption = image.crop((left, top, int(frame.width * .65), int(frame.height * .39)))
+            headings = tuple(
+                replace(line, left=line.left + left, top=line.top + top)
+                for line in self._read_image(caption, input_scale=1, single_line=True)
+            )
+            if any(
+                math.isfinite(line.confidence) and line.confidence >= 60
+                and _normalized_text(line.text) in {
+                    "loading resource packs", "downloading resource packs", "generating world",
+                }
+                for line in headings
+            ):
+                return lines + headings
         # Sparse full-frame OCR can miss every dark label inside BedrockConnect
         # while recognizing only its ping icon. At native scale its title is
         # readable; then isolated caption bands avoid the button borders that
