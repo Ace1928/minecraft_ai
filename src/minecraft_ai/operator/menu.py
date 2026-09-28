@@ -193,8 +193,7 @@ class TesseractMenuTextReader:
         # Tesseract otherwise treats as empty table cells. Keep all geometry
         # screenshot-relative and require the exact title before using crops.
         if frame.width >= 320 and frame.height >= 180 and not any(
-            "serverlist" in _normalized_text(line.text).replace(" ", "")
-            or any(anchor in _normalized_text(line.text) for anchor in (
+            any(anchor in _normalized_text(line.text) for anchor in (
                 "minecraft", "worlds", "disconnected from host", "you died", "tou died",
             ))
             for line in lines
@@ -216,19 +215,28 @@ class TesseractMenuTextReader:
                 captions: list[OcrLine] = []
                 for row in range(5):
                     center_y = 0.325 + row * 0.1185
-                    left, top = int(frame.width * 0.38), int(frame.height * (center_y - 0.035))
+                    left, top = int(frame.width * 0.365), int(frame.height * (center_y - 0.035))
                     caption = image.crop((
-                        left, top, int(frame.width * 0.68), int(frame.height * (center_y + 0.035)),
+                        left, top, int(frame.width * 0.69), int(frame.height * (center_y + 0.035)),
                     ))
                     captions.extend(
                         replace(line, left=line.left + left, top=line.top + top)
-                        for line in self._read_image(caption, input_scale=1)
+                        for line in self._read_image(caption, input_scale=1, single_line=True)
                     )
-                return panel_lines + tuple(captions)
+                # A readable title does not imply readable server labels.
+                # Prefer an isolated caption over a duplicate panel reading
+                # of the same text on the same row; distinct rows stay distinct
+                # so ambiguous server names still fail closed at selection.
+                remaining = tuple(line for line in panel_lines if not any(
+                    _normalized_text(line.text) == _normalized_text(caption.text)
+                    and abs(line.center[1] - caption.center[1]) < frame.height * 0.035
+                    for caption in captions
+                ))
+                return remaining + tuple(captions)
         return lines
 
     def _read_image(
-        self, image: Image.Image, *, input_scale: int | None = None,
+        self, image: Image.Image, *, input_scale: int | None = None, single_line: bool = False,
     ) -> tuple[OcrLine, ...]:
         # Bedrock's pixel font is substantially more reliable in Tesseract at
         # enlarged nearest-neighbour scale for small captures. A full-HD frame
@@ -253,7 +261,7 @@ class TesseractMenuTextReader:
         image.save(encoded, format="PNG", compress_level=1)
         try:
             completed = subprocess.run(
-                [self.executable, "stdin", "stdout", "--psm", "11", "tsv"],
+                [self.executable, "stdin", "stdout", "--psm", "7" if single_line else "11", "tsv"],
                 input=encoded.getvalue(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

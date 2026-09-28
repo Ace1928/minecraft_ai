@@ -286,14 +286,15 @@ def test_away_ocr_crop_maps_original_coordinates_and_requires_complete_anchors(
 
 
 @pytest.mark.parametrize("valid_title", [False, True])
+@pytest.mark.parametrize("title_visible_in_full_frame", [False, True])
 def test_server_list_caption_ocr_requires_exact_title_and_retains_coordinates(
-    monkeypatch: pytest.MonkeyPatch, valid_title: bool,
+    monkeypatch: pytest.MonkeyPatch, valid_title: bool, title_visible_in_full_frame: bool,
 ) -> None:
     reader = TesseractMenuTextReader(executable="unused-test-tesseract")
     calls: list[tuple[tuple[int, int], int | None]] = []
-    noise = (OcrLine("Bee = — ——", 280, 400, 100, 20),)
+    noise = (OcrLine("ServerList" if title_visible_in_full_frame else "Bee = — ——", 280, 400, 100, 20),)
 
-    def read_image(image: Any, *, input_scale: int | None = None) -> tuple[OcrLine, ...]:
+    def read_image(image: Any, *, input_scale: int | None = None, single_line: bool = False) -> tuple[OcrLine, ...]:
         calls.append((image.size, input_scale))
         if len(calls) == 1:  # Away notice crop.
             return ()
@@ -303,6 +304,7 @@ def test_server_list_caption_ocr_requires_exact_title_and_retains_coordinates(
         if len(calls) == 3:
             return (OcrLine("ServerList" if valid_title else "Server", 160, 20, 100, 20),)
         if len(calls) == 7:  # Fourth visible caption, not a hard-coded click.
+            assert single_line is True
             return (OcrLine("Eidos Local Bedrock", 20, 12, 200, 20, 89),)
         return ()
 
@@ -313,7 +315,7 @@ def test_server_list_caption_ocr_requires_exact_title_and_retains_coordinates(
     if valid_title:
         assert len(calls) == 8
         target = next(line for line in result if line.text == "Eidos Local Bedrock")
-        assert target.center == (500, 409)
+        assert target.center == (485, 409)
         assert classify_menu_stage(
             frame, result, lan_name="BedrockConnect", server_name="Eidos Local Bedrock",
             hud_detector=lambda _frame: True,
@@ -1624,3 +1626,24 @@ def test_menu_backend_refuses_before_any_pointer_or_button_input(monkeypatch, co
     # No display/window exists: reaching even a geometry query fails this test.
     with pytest.raises(MenuNavigationError):
         backend.click(frame, 500, 405)
+
+
+def test_retained_server_title_does_not_hide_unreadable_family_caption():
+    """A recognized header still requires isolated, complete server-label OCR."""
+    if not shutil.which('tesseract'):
+        pytest.skip('retained-frame OCR acceptance requires Tesseract')
+    from PIL import Image
+    from minecraft_ai.operator.menu import MenuObservation, _find_click_target
+
+    path = Path(__file__).parent / 'fixtures/bedrock_menu/server_list_1920x1080.png'
+    with Image.open(path) as source:
+        image = source.convert('RGB')
+        frame = CapturedFrame(1, 1, image.width, image.height, image.tobytes('raw', 'BGRX'))
+    lines = TesseractMenuTextReader().read(frame)
+    stage = classify_menu_stage(frame, lines, lan_name='BedrockConnect',
+                                server_name='Pokemon Family - CobbleDrock',
+                                hud_detector=lambda _: True)
+    assert stage is MenuStage.BEDROCK_CONNECT
+    target = _find_click_target(MenuObservation(frame, lines, stage),
+                               ('Pokemon Family - CobbleDrock',), region=(.25, .20, .75, .95))
+    assert 700 < target.center[0] < 1324 and 820 < target.center[1] < 900
