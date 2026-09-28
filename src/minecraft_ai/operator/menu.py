@@ -44,6 +44,7 @@ class MenuStage(StrEnum):
     PLAY = "play"
     BEDROCK_CONNECT = "bedrock-connect"
     RESOURCE_PACK = "resource-pack"
+    CONTENT_LOG = "content-log"
     DISCONNECTED = "disconnected"
     DEATH = "death"
     LOADING = "loading"
@@ -179,6 +180,41 @@ class TesseractMenuTextReader:
             )
         if not _update_notice_visible(frame, lines):
             lines = self._read_image(image)
+        if any(
+            math.isfinite(line.confidence) and line.confidence >= 60
+            and _normalized_text(line.text) == "content log history"
+            and .35 <= line.center[0] / frame.width <= .65
+            and .02 <= line.center[1] / frame.height <= .08
+            for line in lines
+        ):
+            for x0, x1 in ((.055, .25), (.36, .49)):
+                left, top = int(frame.width * x0), int(frame.height * .885)
+                caption = image.crop((left, top, int(frame.width * x1), int(frame.height * .945)))
+                lines += tuple(
+                    replace(line, left=line.left + left, top=line.top + top)
+                    for line in self._read_image(caption, input_scale=1, single_line=True)
+                )
+            if _content_log_visible(frame, lines):
+                return lines
+        if (
+            not _resource_pack_dialog_visible(frame, lines)
+            and _resource_pack_dialog_body_visible(frame, lines)
+            and _find_dense_green_control(
+                frame, region=(0.25, 0.50, 0.75, 0.67),
+                minimum_width_fraction=0.40, minimum_height_fraction=0.05,
+                minimum_row_fill_ratio=0.65,
+                description="possible resource-pack download control",
+            ) is not None
+        ):
+            # The animated backdrop can corrupt sparse full-frame heading OCR.
+            # A positioned body and wide control only authorize another read;
+            # the complete dialog and caption still gate the eventual click.
+            left, top = int(frame.width * 0.265), int(frame.height * 0.22)
+            heading = image.crop((left, top, int(frame.width * 0.72), int(frame.height * 0.27)))
+            lines += tuple(
+                replace(line, left=line.left + left, top=line.top + top)
+                for line in self._read_image(heading, input_scale=1, single_line=True)
+            )
         if _resource_pack_dialog_visible(frame, lines):
             left, top = int(frame.width * 0.29), int(frame.height * 0.57)
             caption = image.crop((left, top, int(frame.width * 0.71), int(frame.height * 0.62)))
@@ -536,6 +572,11 @@ class BedrockMenuNavigator:
         )
 
     def _transition_for(self, observation: MenuObservation) -> _Transition:
+        if observation.stage == MenuStage.CONTENT_LOG:
+            return _Transition(
+                target_text=("close content log",), destination=MenuStage.IN_WORLD,
+                region=(0.95, 0.02, 0.99, 0.08),
+            )
         if observation.stage == MenuStage.RESOURCE_PACK:
             return _Transition(
                 target_text=("download everything & join",), destination=MenuStage.IN_WORLD,
@@ -607,7 +648,9 @@ class BedrockMenuNavigator:
         deadline: float,
     ) -> tuple[MenuObservation, int]:
         source = observation.stage
-        attempts = 1 if source == MenuStage.UPDATE_NOTICE else self.max_retries
+        attempts = (
+            1 if source in {MenuStage.UPDATE_NOTICE, MenuStage.CONTENT_LOG} else self.max_retries
+        )
         for attempt in range(1, attempts + 1):
             if self.clock() >= deadline:
                 raise MenuNavigationError("Bedrock menu navigation timed out")
@@ -668,7 +711,8 @@ class BedrockMenuNavigator:
                             or current.frame.captured_ns <= clicked_frame.captured_ns):
                         continue
                     if current.stage == transition.destination or (
-                        source == MenuStage.BEDROCK_CONNECT and current.stage == MenuStage.RESOURCE_PACK
+                        source == MenuStage.BEDROCK_CONNECT
+                        and current.stage == MenuStage.RESOURCE_PACK
                     ):
                         return current, attempt
                     if (
@@ -817,6 +861,8 @@ def classify_menu_stage(
     text = _normalized_text(" ".join(line.text for line in lines))
     compact = text.replace(" ", "")
 
+    if _content_log_visible(frame, lines):
+        return MenuStage.CONTENT_LOG
     if _disconnected_dialog_visible(frame, lines):
         return MenuStage.DISCONNECTED
     if _resource_pack_dialog_visible(frame, lines):
@@ -965,17 +1011,60 @@ def classify_menu_stage(
     return MenuStage.UNKNOWN
 
 
+def _content_log_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
+    anchors = (
+        ("content log history", (0.35, 0.02, 0.65, 0.08)),
+        ("copy to clipboard", (0.01, 0.85, 0.26, 0.98)),
+        ("clear", (0.30, 0.85, 0.50, 0.98)),
+    )
+    return all(any(
+        math.isfinite(line.confidence) and line.confidence >= 60
+        and x0 <= line.center[0] / frame.width <= x1
+        and y0 <= line.center[1] / frame.height <= y1
+        and target in _normalized_text(line.text)
+        for line in lines
+    ) for target, (x0, y0, x1, y1) in anchors)
+
+
+def _content_log_close_control(frame: CapturedFrame) -> OcrLine | None:
+    """Locate the small pixel-font X in the verified history panel header."""
+    image = Image.frombytes("RGB", (frame.width, frame.height), frame.bgra, "raw", "BGRX")
+    left, top = int(frame.width * 0.95), int(frame.height * 0.02)
+    crop = image.crop((left, top, int(frame.width * 0.99), int(frame.height * 0.08)))
+    mask = crop.convert("L").point(lambda value: 255 if value < 100 else 0)
+    bounds = mask.getbbox()
+    if bounds is None:
+        return None
+    x0, y0, x1, y1 = bounds
+    width, height = x1 - x0, y1 - y0
+    if not (0.007 <= width / frame.width <= 0.015 and abs(width - height) <= 1):
+        return None
+    glyph = mask.crop(bounds).resize((10, 10), Image.Resampling.NEAREST)
+    expected = ("##......##", "##......##", "..##..##..", "..##..##..", "....##....",
+                "....##....", "..##..##..", "..##..##..", "##......##", "##......##")
+    if any(bool(glyph.getpixel((x, y))) != (expected[y][x] == "#")
+           for y in range(10) for x in range(10)):
+        return None
+    return OcrLine("close content log", left + x0, top + y0, width, height)
+
+
 def _resource_pack_dialog_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
     heading = any(
-        line.confidence >= 35 and 0.25 <= line.center[0] / frame.width <= 0.75
+        math.isfinite(line.confidence) and line.confidence >= 35
+        and 0.25 <= line.center[0] / frame.width <= 0.75
         and 0.18 <= line.center[1] / frame.height <= 0.29
         and _text_match_score(line.text, "download resource packs") >= 0.75
         for line in lines
     )
+    return heading and _resource_pack_dialog_body_visible(frame, lines)
+
+
+def _resource_pack_dialog_body_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
     body = _normalized_text(" ".join(line.text for line in lines
-        if 0.25 <= line.center[0] / frame.width <= 0.75
+        if math.isfinite(line.confidence) and line.confidence >= 35
+        and 0.25 <= line.center[0] / frame.width <= 0.75
         and 0.28 <= line.center[1] / frame.height <= 0.46))
-    return heading and "requires players" in body and "download all" in body
+    return "requires players" in body and "download all" in body
 
 
 def _away_overlay_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
@@ -1220,6 +1309,13 @@ def _transition_click_target(
     observation: MenuObservation,
     transition: _Transition,
 ) -> OcrLine:
+    if observation.stage == MenuStage.CONTENT_LOG:
+        if not _content_log_visible(observation.frame, observation.lines):
+            raise MenuNavigationError("content-log panel is not verified")
+        target = _content_log_close_control(observation.frame)
+        if target is None:
+            raise MenuNavigationError("content-log close control is not verified")
+        return target
     if observation.stage == MenuStage.RESOURCE_PACK:
         if not _resource_pack_dialog_visible(observation.frame, observation.lines):
             raise MenuNavigationError("resource-pack dialog is not verified")

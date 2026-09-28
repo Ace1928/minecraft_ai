@@ -1649,13 +1649,16 @@ def test_retained_server_title_does_not_hide_unreadable_family_caption():
     assert 700 < target.center[0] < 1324 and 820 < target.center[1] < 900
 
 
-def test_retained_resource_pack_dialog_requires_verified_download_control():
+@pytest.mark.parametrize('fixture', [
+    'resource_pack_1920x1080.png', 'resource_pack_cave_1920x1080.png',
+])
+def test_retained_resource_pack_dialog_requires_verified_download_control(fixture):
     if not shutil.which('tesseract'):
         pytest.skip('retained-frame OCR acceptance requires Tesseract')
     from PIL import Image
     from minecraft_ai.operator.menu import MenuObservation, _transition_click_target
 
-    path = Path(__file__).parent / 'fixtures/bedrock_menu/resource_pack_1920x1080.png'
+    path = Path(__file__).parent / 'fixtures/bedrock_menu' / fixture
     with Image.open(path) as source:
         image = source.convert('RGB')
         frame = CapturedFrame(1, 1, image.width, image.height, image.tobytes('raw', 'BGRX'))
@@ -1674,7 +1677,51 @@ def test_retained_resource_pack_dialog_requires_verified_download_control():
     with pytest.raises(MenuNavigationError, match='dialog is not verified'):
         _transition_click_target(replace(observation, lines=(target,)), transition)
 
+    # Body/button alone, or text moved from its dialog band, cannot authorize input.
+    no_heading = tuple(line for line in lines if not .18 <= line.center[1] / frame.height <= .29)
+    with pytest.raises(MenuNavigationError, match='dialog is not verified'):
+        _transition_click_target(replace(observation, lines=no_heading), transition)
+    invalid_confidence = tuple(replace(line, confidence=float('nan')) for line in lines)
+    with pytest.raises(MenuNavigationError, match='dialog is not verified'):
+        _transition_click_target(replace(observation, lines=invalid_confidence), transition)
+
     # Matching text without the actual wide green control is not clickable.
     blank = replace(frame, bgra=b"\0" * len(frame.bgra))
     with pytest.raises(MenuNavigationError, match='control is not verified'):
         _transition_click_target(replace(observation, frame=blank), transition)
+
+
+def test_retained_content_history_closes_only_verified_header_x():
+    if not shutil.which('tesseract'):
+        pytest.skip('retained-frame OCR acceptance requires Tesseract')
+    from PIL import Image
+    from minecraft_ai.operator.menu import MenuObservation, _transition_click_target
+
+    path = Path(__file__).parent / 'fixtures/bedrock_menu/content_log_1920x1080.png'
+    with Image.open(path) as source:
+        image = source.convert('RGB')
+        frame = CapturedFrame(1, 1, image.width, image.height, image.tobytes('raw', 'BGRX'))
+    lines = TesseractMenuTextReader().read(frame)
+    stage = classify_menu_stage(frame, lines, lan_name='BedrockConnect',
+                               server_name='Family', hud_detector=lambda _: True)
+    assert stage is MenuStage.CONTENT_LOG
+    observation = MenuObservation(frame, lines, stage)
+    navigator = BedrockMenuNavigator(capture=None, text_reader=None, click_backend=None,
+        lan_name='BedrockConnect', server=ConfiguredServer('Family', '192.168.4.166', 19136))
+    transition = navigator._transition_for(observation)
+    assert transition.destination is MenuStage.IN_WORLD
+    target = _transition_click_target(observation, transition)
+    assert target.center == (1870, 50)
+
+    # Neither a gameplay text label nor the header alone may close a panel.
+    header = tuple(line for line in lines if line.top < 90)
+    with pytest.raises(MenuNavigationError, match='panel is not verified'):
+        _transition_click_target(replace(observation, lines=header), transition)
+    blank = replace(frame, bgra=b'\xff' * len(frame.bgra))
+    with pytest.raises(MenuNavigationError, match='close control is not verified'):
+        _transition_click_target(replace(observation, frame=blank), transition)
+    # A different dark symbol at the same place must not become an X click.
+    image.paste((70, 69, 70), (1860, 40, 1880, 60))
+    changed = replace(frame, bgra=image.tobytes('raw', 'BGRX'))
+    with pytest.raises(MenuNavigationError, match='close control is not verified'):
+        _transition_click_target(replace(observation, frame=changed), transition)
