@@ -163,6 +163,18 @@ render path only; it does not resolve the separately reported Switch crash,
 prove autonomous gameplay, or authorize bypassing deployment-specific world
 restrictions. The diagnostic client was then stopped with operator pause latched.
 
+The same day's follow-up verified server builds 103 and 104 through fresh
+required-pack downloads. Build 103 retained the full starter menu for 288 seconds;
+its flushed log had no Molang or animation errors. Build 104's on-demand menu
+construction preserved the nine regions and starter model. Separate screenshot-
+bound clicks changed Bulbasaur to Charmander and selected Johto/Chikorita. The
+top-right close click did not dismiss the menu in the retained three-second
+observation, so close behavior remains unresolved. No starter was confirmed and
+no movement or attack was sent. Build 104's flushed log had zero UI, Molang and
+animation errors, while 16 fossil-geometry warnings remained. These desktop
+checks do not establish Switch stability, Pokémon skill or autonomous safety.
+The client was stopped, its wrapper thawed and operator pause retained.
+
 Once the client is in-world or on a supported recovery
 overlay, start the agent:
 
