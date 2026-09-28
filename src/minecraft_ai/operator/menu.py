@@ -43,6 +43,7 @@ class MenuStage(StrEnum):
     PLAY_SERVERS = "play-servers"
     PLAY = "play"
     BEDROCK_CONNECT = "bedrock-connect"
+    RESOURCE_PACK = "resource-pack"
     DISCONNECTED = "disconnected"
     DEATH = "death"
     LOADING = "loading"
@@ -178,6 +179,13 @@ class TesseractMenuTextReader:
             )
         if not _update_notice_visible(frame, lines):
             lines = self._read_image(image)
+        if _resource_pack_dialog_visible(frame, lines):
+            left, top = int(frame.width * 0.29), int(frame.height * 0.57)
+            caption = image.crop((left, top, int(frame.width * 0.71), int(frame.height * 0.62)))
+            return lines + tuple(
+                replace(line, left=line.left + left, top=line.top + top)
+                for line in self._read_image(caption, input_scale=1, single_line=True)
+            )
         if _update_notice_visible(frame, lines):
             # Read the caption without the wide button border that sparse OCR
             # mistakes for a table. Coordinates still come from observed text.
@@ -528,6 +536,11 @@ class BedrockMenuNavigator:
         )
 
     def _transition_for(self, observation: MenuObservation) -> _Transition:
+        if observation.stage == MenuStage.RESOURCE_PACK:
+            return _Transition(
+                target_text=("download everything & join",), destination=MenuStage.IN_WORLD,
+                region=(0.25, 0.50, 0.75, 0.67),
+            )
         if observation.stage == MenuStage.UPDATE_NOTICE:
             return _Transition(
                 target_text=("play now",), destination=MenuStage.TITLE,
@@ -636,6 +649,9 @@ class BedrockMenuNavigator:
                     # It never permits another click or changes other screens.
                     response_deadline = deadline
                 if current.stage == transition.destination or (
+                    source == MenuStage.BEDROCK_CONNECT
+                    and current.stage == MenuStage.RESOURCE_PACK
+                ) or (
                     source in {MenuStage.DISCONNECTED, MenuStage.UPDATE_NOTICE}
                     and current.stage in {
                         MenuStage.PLAY, MenuStage.PLAY_TABS, MenuStage.PLAY_SERVERS,
@@ -651,7 +667,9 @@ class BedrockMenuNavigator:
                     if (current.frame.frame_id <= clicked_frame.frame_id
                             or current.frame.captured_ns <= clicked_frame.captured_ns):
                         continue
-                    if current.stage == transition.destination:
+                    if current.stage == transition.destination or (
+                        source == MenuStage.BEDROCK_CONNECT and current.stage == MenuStage.RESOURCE_PACK
+                    ):
                         return current, attempt
                     if (
                         source == MenuStage.BEDROCK_CONNECT
@@ -801,6 +819,8 @@ def classify_menu_stage(
 
     if _disconnected_dialog_visible(frame, lines):
         return MenuStage.DISCONNECTED
+    if _resource_pack_dialog_visible(frame, lines):
+        return MenuStage.RESOURCE_PACK
 
     error_phrases = (
         "unable to connect",
@@ -922,6 +942,7 @@ def classify_menu_stage(
         return MenuStage.TITLE
 
     loading_phrases = (
+        "downloading resource packs",
         "loading resource packs",
         "generating world",
         "locating server",
@@ -942,6 +963,19 @@ def classify_menu_stage(
     if hud_detector(frame):
         return MenuStage.IN_WORLD
     return MenuStage.UNKNOWN
+
+
+def _resource_pack_dialog_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
+    heading = any(
+        line.confidence >= 35 and 0.25 <= line.center[0] / frame.width <= 0.75
+        and 0.18 <= line.center[1] / frame.height <= 0.29
+        and _text_match_score(line.text, "download resource packs") >= 0.75
+        for line in lines
+    )
+    body = _normalized_text(" ".join(line.text for line in lines
+        if 0.25 <= line.center[0] / frame.width <= 0.75
+        and 0.28 <= line.center[1] / frame.height <= 0.46))
+    return heading and "requires players" in body and "download all" in body
 
 
 def _away_overlay_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
@@ -1186,6 +1220,19 @@ def _transition_click_target(
     observation: MenuObservation,
     transition: _Transition,
 ) -> OcrLine:
+    if observation.stage == MenuStage.RESOURCE_PACK:
+        if not _resource_pack_dialog_visible(observation.frame, observation.lines):
+            raise MenuNavigationError("resource-pack dialog is not verified")
+        target = _find_click_target(observation, transition.target_text, region=transition.region)
+        control = _find_dense_green_control(observation.frame, region=transition.region,
+            minimum_width_fraction=0.40, minimum_height_fraction=0.05,
+            minimum_row_fill_ratio=0.65,
+            description="resource-pack download control")
+        if (control is None or target.confidence < 35
+                or not control.left <= target.center[0] <= control.left + control.width
+                or not control.top <= target.center[1] <= control.top + control.height):
+            raise MenuNavigationError("resource-pack download control is not verified")
+        return target
     if observation.stage == MenuStage.UPDATE_NOTICE:
         return _update_play_control(observation)
     try:
@@ -1424,6 +1471,7 @@ def _find_dense_green_control(
     minimum_width_fraction: float,
     minimum_height_fraction: float,
     description: str,
+    minimum_row_fill_ratio: float = 1.0,
 ) -> OcrLine | None:
     expected_bytes = frame.width * frame.height * 4
     if frame.width < 64 or frame.height < 64 or len(frame.bgra) != expected_bytes:
@@ -1439,7 +1487,11 @@ def _find_dense_green_control(
         return green >= 80 and green >= red * 1.18 and green >= blue * 1.05
 
     qualifying_rows: list[int] = []
-    minimum_row_pixels = max(1, int(frame.width * minimum_width_fraction))
+    # Button lettering can interrupt otherwise dense green rows. Keep the full
+    # geometric width gate below while allowing an explicit text occupancy.
+    minimum_row_pixels = max(
+        1, int(frame.width * minimum_width_fraction * minimum_row_fill_ratio)
+    )
     for y in range(y0, y1):
         if sum(is_green(x, y) for x in range(x0, x1)) >= minimum_row_pixels:
             qualifying_rows.append(y)

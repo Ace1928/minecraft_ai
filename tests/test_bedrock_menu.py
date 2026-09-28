@@ -1647,3 +1647,34 @@ def test_retained_server_title_does_not_hide_unreadable_family_caption():
     target = _find_click_target(MenuObservation(frame, lines, stage),
                                ('Pokemon Family - CobbleDrock',), region=(.25, .20, .75, .95))
     assert 700 < target.center[0] < 1324 and 820 < target.center[1] < 900
+
+
+def test_retained_resource_pack_dialog_requires_verified_download_control():
+    if not shutil.which('tesseract'):
+        pytest.skip('retained-frame OCR acceptance requires Tesseract')
+    from PIL import Image
+    from minecraft_ai.operator.menu import MenuObservation, _transition_click_target
+
+    path = Path(__file__).parent / 'fixtures/bedrock_menu/resource_pack_1920x1080.png'
+    with Image.open(path) as source:
+        image = source.convert('RGB')
+        frame = CapturedFrame(1, 1, image.width, image.height, image.tobytes('raw', 'BGRX'))
+    lines = TesseractMenuTextReader().read(frame)
+    stage = classify_menu_stage(frame, lines, lan_name='BedrockConnect',
+                                server_name='Pokemon Family - CobbleDrock',
+                                hud_detector=lambda _: False)
+    assert stage is MenuStage.RESOURCE_PACK
+    observation = MenuObservation(frame, lines, stage)
+    navigator = BedrockMenuNavigator(capture=None, text_reader=None, click_backend=None,
+        lan_name='BedrockConnect', server=ConfiguredServer('Pokemon Family - CobbleDrock', '192.168.4.166', 19136))
+    transition = navigator._transition_for(observation)
+    target = _transition_click_target(observation, transition)
+    assert 520 < target.center[0] < 1395 and 580 < target.center[1] < 699
+    # An isolated button phrase in ordinary gameplay is not download authority.
+    with pytest.raises(MenuNavigationError, match='dialog is not verified'):
+        _transition_click_target(replace(observation, lines=(target,)), transition)
+
+    # Matching text without the actual wide green control is not clickable.
+    blank = replace(frame, bgra=b"\0" * len(frame.bgra))
+    with pytest.raises(MenuNavigationError, match='control is not verified'):
+        _transition_click_target(replace(observation, frame=blank), transition)
