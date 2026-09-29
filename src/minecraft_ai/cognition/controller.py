@@ -359,6 +359,24 @@ class HighLevelController:
                 ),
             )
             decision = self._complete(messages, repair_bounds=repair_bounds)
+            player_chat = blackboard.fact("social.player_message", min_confidence=0.7)
+            active_operator_pending = any(
+                message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+                for message in context.operator_messages
+            )
+            if (
+                context.pack_recipe_reply is not None
+                and not repair_bounds.reply_only
+                and not active_operator_pending
+                and player_chat is not None
+                and player_chat.fresh()
+            ):
+                # The model chooses the world plan; exact recipe text comes
+                # from the hash-pinned pack export and still passes the normal
+                # runtime player-chat authorization gate.
+                decision = decision.model_copy(
+                    update={"game_chat": context.pack_recipe_reply}
+                )
             decision = _bound_skill_parameters(
                 self._apply_decision_authority(decision, blackboard, context),
                 self.skills,

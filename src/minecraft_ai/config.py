@@ -6,15 +6,20 @@ from typing import Literal
 
 import yaml
 from platformdirs import user_config_dir, user_data_dir
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = False
+    provider: Literal["openai-compatible", "erais-native-world"] = "openai-compatible"
     model_id: str = ""
     base_url: str = "http://127.0.0.1:8080/v1"
+    # ERAIS native World credentials and readiness are read from private files;
+    # bearer values never belong in this YAML configuration.
+    native_world_token_file: str | None = Field(default=None, min_length=1, max_length=4096)
+    native_world_ready_file: str | None = Field(default=None, min_length=1, max_length=4096)
     # Explicit private shared-owner opt-in; absence preserves direct local HTTP.
     # This endpoint is a same-user Unix socket, never a public model URL.
     broker_socket: str | None = Field(default=None, min_length=1, max_length=107)
@@ -155,6 +160,8 @@ class RuntimeConfig(BaseModel):
     runtime_factory: RuntimeFactoryConfig | None = None
     high_level: ModelConfig = Field(default_factory=ModelConfig)
     vision_language: ModelConfig = Field(default_factory=ModelConfig)
+    pack_recipe_catalog: str | None = Field(default=None, min_length=1, max_length=4096)
+    pack_recipe_catalog_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     # Semantic/LATENT body (normally STEVE-1). Existing configurations retain
     # this field and behavior; the specialized body slots below are optional.
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
@@ -165,6 +172,26 @@ class RuntimeConfig(BaseModel):
     raw_motion_policy: PolicyConfig | None = None
     trajectory: TrajectoryConfig = Field(default_factory=TrajectoryConfig)
     online_wiki: bool = True
+
+    @model_validator(mode="after")
+    def _validate_native_world_and_pack_files(self) -> RuntimeConfig:
+        if (self.pack_recipe_catalog is None) != (self.pack_recipe_catalog_sha256 is None):
+            raise ValueError("pack recipe catalog path and SHA-256 must be configured together")
+        for name in ("high_level", "vision_language"):
+            model = getattr(self, name)
+            if model.provider == "erais-native-world":
+                if model.broker_socket is not None:
+                    raise ValueError("ERAIS native World models cannot also use a resident broker")
+                if model.native_world_token_file is None or model.native_world_ready_file is None:
+                    raise ValueError(
+                        "ERAIS native World models require private token and ready files"
+                    )
+            elif (
+                model.native_world_token_file is not None
+                or model.native_world_ready_file is not None
+            ):
+                raise ValueError("native World files require provider=erais-native-world")
+        return self
 
 
 @dataclass(frozen=True)

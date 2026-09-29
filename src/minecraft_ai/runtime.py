@@ -30,6 +30,7 @@ from .action_levels import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
 from .daemon_executor import SingleWorkerDaemonExecutor
 from .episodes import RuntimeEvent
+from .pack_recipes import PackRecipeCatalog
 from .emergency import emergency_stop_latched
 from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
 from .control.execution import visible_oak_trunk
@@ -274,6 +275,7 @@ class AgentRuntime:
     role: RoleProfile
     lease_id: str
     high_level: HighLevelController | None = None
+    pack_recipe_catalog: PackRecipeCatalog | None = None
     memories: MemoryStore = field(default_factory=MemoryStore)
     social: SocialState = field(default_factory=SocialState)
     custom_goals: list[Goal] = field(default_factory=list)
@@ -4763,13 +4765,44 @@ class AgentRuntime:
         ):
             # First, so the existing bounded model-memory payload retains it.
             memories = (inspection, *memories[:19])
+        wiki = ()
+        pack_recipe_reply = None
+        active_operator_pending = any(
+            message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+            for message in operator_messages
+        )
+        blackboard = getattr(self, "blackboard", None)
+        pack_recipe_catalog = getattr(self, "pack_recipe_catalog", None)
+        player_chat = (
+            None
+            if blackboard is None
+            else blackboard.fact("social.player_message", min_confidence=0.7)
+        )
+        if (
+            pack_recipe_catalog is not None
+            and not active_operator_pending
+            and player_chat is not None
+            and player_chat.fresh()
+            and isinstance(player_chat.value, str)
+        ):
+            _speaker, separator, query = player_chat.value.partition(":")
+            version_parts = self.perception.instance_id.split(":")
+            game_version = version_parts[1] if len(version_parts) > 1 else ""
+            answer = pack_recipe_catalog.lookup(
+                query if separator else player_chat.value,
+                game_version=game_version,
+            )
+            if answer is not None:
+                wiki = (answer.evidence,)
+                pack_recipe_reply = answer.chat_reply
         return CognitionContext(
             role=self.role,
             goals=goals,
             memories=memories,
             mining_evidence=self._mining_planning_evidence(knowledge),
             promises=self.social.active_promises(),
-            wiki=(),
+            wiki=wiki,
+            pack_recipe_reply=pack_recipe_reply,
             operator_messages=operator_messages,
             recent_skill_runs=tuple(self._recent_skill_runs),
             current_plan=self._plan_steps,

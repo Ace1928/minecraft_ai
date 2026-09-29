@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ModelConfig
+from .native_world_model import NativeWorldCognitionModel
 from .model_requests import RequestBinding
 from .models import (
     ModelMessage,
@@ -232,7 +233,30 @@ class BrokeredLocalModel(OpenAICompatibleLocalModel):
                 self._binding(request).canceled.set()
 
 
-def configured_model(config: ModelConfig, *, purpose: str) -> OpenAICompatibleLocalModel:
+def configured_model(
+    config: ModelConfig,
+    *,
+    purpose: str,
+) -> OpenAICompatibleLocalModel | NativeWorldCognitionModel:
+    if config.provider == "erais-native-world":
+        if purpose != "cognition":
+            raise ValueError(
+                "ERAIS Native World supplies strategic text only; it is not a decision-grade VLM"
+            )
+        if config.native_world_token_file is None or config.native_world_ready_file is None:
+            raise ValueError("private ERAIS World token and readiness files are required")
+        if config.broker_socket is not None:
+            raise ValueError("native World API cannot be combined with the dense resident broker")
+        return NativeWorldCognitionModel(
+            model_id=config.model_id,
+            base_url=config.base_url,
+            token_file=config.native_world_token_file,
+            ready_file=config.native_world_ready_file,
+            timeout_s=config.timeout_s,
+            max_tokens=min(config.max_tokens, 128),
+        )
+    if config.provider != "openai-compatible":
+        raise ValueError("unsupported Minecraft language-model provider")
     options = {
         name: getattr(config, name)
         for name in (

@@ -162,11 +162,12 @@ def _validate_reply_only_decision(
 def _reply_only_decision_from_response(
     response: ModelResponse, bounds: _DecisionRepairBounds,
 ) -> CognitionDecision:
-    """Reject action fields before normalization or authority rewriting.
+    """Parse a compact reply-only contract without granting action authority.
 
-    A valid question answer must not be manufactured by stripping a forbidden
-    field (including a plan sentinel normalized by the general planner parser).
-    Invalid question output has no automatic model repair round-trip.
+    The native World has a 128-unit generation ceiling. Its compact reply-only
+    wire form carries only the exact goal binding and operator text; omitted
+    action fields take safe defaults. Expanded responses remain accepted only
+    after every forbidden field is checked. Invalid output is not retried.
     """
     def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
@@ -180,6 +181,18 @@ def _reply_only_decision_from_response(
         raw = json.loads(response.text, object_pairs_hook=unique_object)
     except ValueError as exc:
         raise ValueError("operator_question_invalid_json") from exc
+    if isinstance(raw, dict) and set(raw) == {"g", "o"}:
+        if raw.get("g") != bounds.authority_goal_id:
+            raise ValueError("operator_question_goal_mismatch")
+        if not isinstance(raw.get("o"), str) or not raw["o"].strip() or len(raw["o"]) > 160:
+            raise ValueError("operator_question_contract_failed")
+        compact = CognitionDecision(
+            reasoning_summary="Answered the active operator question.",
+            chosen_goal_id=raw["g"],
+            say=raw["o"],
+        )
+        _validate_reply_only_decision(compact, bounds)
+        return compact
     if not isinstance(raw, dict) or set(raw) != set("rgspocxqwdn"):
         raise ValueError("operator_question_wire_fields")
     if (

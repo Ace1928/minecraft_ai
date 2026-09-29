@@ -9,6 +9,7 @@ import pytest
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.cognition import CognitionContext, HighLevelController, cognition_decision_sha256
 from minecraft_ai.cognition.prompts import _cognition_decision_grammar, _cognition_decision_schema
+from minecraft_ai.cognition.repair import _reply_only_decision_from_response
 from minecraft_ai.cognition.types import _DecisionRepairBounds
 from minecraft_ai.model_requests import ModelRequestLifecycle, RequestBinding
 from minecraft_ai.models import ModelMessage, ModelResponse
@@ -201,6 +202,22 @@ def test_reply_only_bounds_refuse_conflicting_action_authority():
         arguments = {"allowed_skills": (), "authority_goal_id": "operator:question", **values}
         with pytest.raises(ValueError, match="reply-only bounds"):
             _DecisionRepairBounds(**arguments, reply_only=True)
+
+
+def test_compact_reply_only_contract_keeps_exact_goal_and_no_action_authority():
+    bounds = _DecisionRepairBounds((), authority_goal_id="operator:question", reply_only=True)
+    response = ModelResponse(
+        text=json.dumps(
+            {"g": "operator:question", "o": "No fresh game observations are available."}
+        ),
+        model="synthetic-question-contract",
+        latency_ms=1,
+    )
+    decision = _reply_only_decision_from_response(response, bounds)
+    assert decision.chosen_goal_id == "operator:question"
+    assert decision.say == "No fresh game observations are available."
+    assert decision.skill_id is decision.game_chat is decision.instruction is None
+    assert decision.skill_parameters == {} and not decision.request_replan
 
 
 def test_question_preserves_exact_bound_request_deadline_and_model_origin():

@@ -12,6 +12,7 @@ from minecraft_ai.cognition import HighLevelController
 from minecraft_ai.config import RuntimeConfig, app_paths, load_config
 from minecraft_ai.datasets import DatasetSource, DatasetSourceType, TrajectoryManifest
 from minecraft_ai.execution import SkillExecutor
+from minecraft_ai.pack_recipes import PackRecipeCatalog
 from minecraft_ai.resident_broker_model import configured_model
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorPolicy
 from minecraft_ai.perception import PerceptionBlackboard
@@ -94,6 +95,14 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(config_path)
     if args.role is not None:
         config = config.model_copy(update={"role": args.role})
+    pack_recipe_catalog = None
+    if config.pack_recipe_catalog is not None:
+        if config.pack_recipe_catalog_sha256 is None:
+            raise ValueError("pack recipe catalog SHA-256 is required")
+        pack_recipe_catalog = PackRecipeCatalog.load(
+            config.pack_recipe_catalog,
+            config.pack_recipe_catalog_sha256,
+        )
     role = get_role(config.role)
 
     paths = app_paths()
@@ -225,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
             role=role,
             lease_id=args.lease_id,
             high_level=high_level,
+            pack_recipe_catalog=pack_recipe_catalog,
             memories=memories,
             social=social,
             state_db=database,

@@ -149,6 +149,9 @@ class CognitionContext:
     planks_retry_requires_wood: bool = False
     # Transient referent of this observation follow-up, never a visual fact or permission.
     active_perception_target: str | None = None
+    # Exact answer from the hash-pinned active-pack recipe snapshot, if the
+    # current fresh player-chat line asks about a supported recipe.
+    pack_recipe_reply: str | None = None
 
 
 @dataclass
