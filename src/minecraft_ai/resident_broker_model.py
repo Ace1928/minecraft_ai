@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import ModelConfig
+from .config import ModelConfig, RuntimeConfig
 from .native_world_model import NativeWorldCognitionModel
 from .model_requests import RequestBinding
 from .models import (
@@ -104,6 +104,12 @@ class BrokeredLocalModel(OpenAICompatibleLocalModel):
                 raise BrokerError("invalid private grammar capability")
             self._grammar_supported = result["grammar"]
         return bool(self._grammar_supported)
+
+    def verify_ready(self) -> str:
+        """Check the broker's private owner handshake without requesting inference."""
+        with self.request_scope():
+            self._llama_grammar_available()
+        return UPSTREAM_MODEL
 
     def complete_constrained(
         self,
@@ -272,3 +278,26 @@ def configured_model(
     if config.broker_socket is None:
         return OpenAICompatibleLocalModel(**options)
     return BrokeredLocalModel(**options, broker_socket=config.broker_socket, purpose=purpose)
+
+
+def configured_model_services(config: RuntimeConfig) -> tuple[str, ...]:
+    """Return only local services required by enabled configured model routes."""
+    services: set[str] = set()
+    for model in (config.high_level, config.vision_language):
+        if not model.enabled or model.provider != "openai-compatible" or model.broker_socket:
+            continue
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(model.base_url)
+        if (
+            parsed.scheme == "http"
+            and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+            and parsed.port == 8081
+            and parsed.path.rstrip("/") == "/v1"
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.query
+            and not parsed.fragment
+        ):
+            services.add("minecraft-ai-vlm-gemma4-vulkan-all.service")
+    return tuple(sorted(services))

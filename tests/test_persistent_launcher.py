@@ -56,6 +56,21 @@ def _launcher_harness(
 set -u
 printf '%s\n' "$*" >> "$TEST_STATE/cli-calls"
 case "${1:-}" in
+    model-plan)
+        printf '{"required_services":%s}\n' "${TEST_REQUIRED_SERVICES:-[]}"
+        ;;
+    model-ready)
+        count=0
+        if [ -e "$TEST_STATE/model-ready-count" ]; then
+            count="$(cat "$TEST_STATE/model-ready-count")"
+        fi
+        count=$((count + 1))
+        printf '%s\n' "$count" > "$TEST_STATE/model-ready-count"
+        if [ "$count" -le "${TEST_MODEL_READY_FAILURES:-0}" ]; then
+            exit 1
+        fi
+        printf '{"ready":true}\n'
+        ;;
     install|stop)
         exit 0
         ;;
@@ -437,6 +452,37 @@ def test_persistent_service_uses_dynamic_configured_role() -> None:
     assert "ExecStart=%h/minecraft_ai/start.sh\n" in unit
 
 
+def test_native_world_model_plan_does_not_start_the_legacy_gemma_service(
+    tmp_path: Path,
+) -> None:
+    root, env, state = _launcher_harness(tmp_path)
+    env.update({"STOP_AFTER_RUNS": "1", "TEST_MODEL_READY_FAILURES": "2"})
+
+    result = _run_launcher(root, env)
+
+    assert result.returncode == 0, result.stderr
+    service_calls = (state / "service-calls").read_text(encoding="utf-8").splitlines()
+    assert "--user start minecraft-ai-dashboard-live.service" in service_calls
+    assert not any("minecraft-ai-vlm-gemma4-vulkan-all.service" in line for line in service_calls)
+    assert int((state / "model-ready-count").read_text()) >= 3
+
+
+def test_configured_gemma_compat_route_starts_its_declared_model_service(tmp_path: Path) -> None:
+    root, env, state = _launcher_harness(tmp_path)
+    env.update(
+        {
+            "STOP_AFTER_RUNS": "1",
+            "TEST_REQUIRED_SERVICES": '["minecraft-ai-vlm-gemma4-vulkan-all.service"]',
+        }
+    )
+
+    result = _run_launcher(root, env)
+
+    assert result.returncode == 0, result.stderr
+    service_calls = (state / "service-calls").read_text(encoding="utf-8").splitlines()
+    assert "--user start minecraft-ai-vlm-gemma4-vulkan-all.service" in service_calls
+
+
 def _fault_status(**changes: object) -> str:
     return json.dumps(
         {
@@ -475,7 +521,8 @@ def test_existing_route_fault_holds_without_starting_or_stopping_game(
 
     assert result.returncode == 0, result.stderr
     calls = (state / "calls-before-stop").read_text(encoding="utf-8").splitlines()
-    assert set(calls) == {"status"}
+    assert set(calls) <= {"status", "model-ready"}
+    assert "status" in calls
     assert not (state / "service-calls").exists()
     assert int((state / "sleep-seconds").read_text()) > 420
     assert result.stderr.count("holding automatic recovery") == 1
@@ -532,7 +579,8 @@ def test_route_hold_adopts_only_ready_healthy_new_generation(tmp_path: Path) -> 
 
     assert result.returncode == 0, result.stderr
     calls = (state / "calls-before-stop").read_text(encoding="utf-8").splitlines()
-    assert set(calls) == {"status"}
+    assert set(calls) <= {"status", "model-ready"}
+    assert "status" in calls
     assert "adopting the recovered agent" in result.stdout
 
 

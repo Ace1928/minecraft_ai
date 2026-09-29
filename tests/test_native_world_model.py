@@ -341,6 +341,68 @@ def test_world_adapter_uses_owner_readiness_and_only_native_api_fields(monkeypat
     assert seen["payload"]["max_tokens"] == 128
 
 
+def test_world_readiness_checks_exact_native_owner_without_inference(monkeypatch):
+    runtime_id = "c" * 32
+    model = NativeWorldCognitionModel(
+        model_id=MODEL_ID,
+        base_url="http://127.0.0.1:8771/v1",
+        token_file="/tmp/native-world/token",
+        ready_file="/tmp/native-world/ready.json",
+    )
+    ready = {
+        "status": "private_ready",
+        "runtime_id": runtime_id,
+        "backend": {"model_id": MODEL_ID, "fully_native": True, "source_family": "Qwen3"},
+    }
+    model_meta = {
+        "data": [
+            {
+                "id": MODEL_ID,
+                "erais": {
+                    "runtime_id": runtime_id,
+                    "fully_native": True,
+                    "source_family": "Qwen3",
+                },
+            }
+        ]
+    }
+    requests = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return model_meta
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, url, **kwargs):
+            requests.append((url, kwargs))
+            return Response()
+
+        def post(self, *_args, **_kwargs):
+            raise AssertionError("readiness must not perform inference")
+
+    monkeypatch.setattr(
+        "minecraft_ai.native_world_model._read_private_file",
+        lambda path, **_kw: (
+            b"owner-token" if path == model.token_file else json.dumps(ready).encode()
+        ),
+    )
+    monkeypatch.setattr(model, "_client", lambda: Client())
+
+    assert model.verify_ready() == runtime_id
+    assert len(requests) == 1
+    assert requests[0][0].endswith("/models")
+    assert requests[0][1]["headers"]["Authorization"] == "Bearer owner-token"
+
+
 def test_world_adapter_rejects_malformed_owner_receipts_and_responses(monkeypatch):
     model = NativeWorldCognitionModel(
         model_id=MODEL_ID,

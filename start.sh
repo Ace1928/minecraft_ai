@@ -243,23 +243,42 @@ trap terminate INT TERM
 readiness_ok() {
     curl --fail --silent --show-error --max-time 5 \
         ${MINECRAFT_OPERATOR_URL:-http://127.0.0.1:8765}/readyz >/dev/null \
-        && curl --fail --silent --show-error --max-time 5 \
-            http://127.0.0.1:8081/v1/models >/dev/null
+        && "$CLI" model-ready >/dev/null 2>&1
 }
 
 runtime_health_ok() {
     curl --fail --silent --show-error --max-time 5 \
         ${MINECRAFT_OPERATOR_URL:-http://127.0.0.1:8765}/livez >/dev/null \
-        && curl --fail --silent --show-error --max-time 5 \
-            http://127.0.0.1:8081/v1/models >/dev/null
+        && "$CLI" model-ready >/dev/null 2>&1
 }
 
 start_support_services() {
-    local service
-    for service in \
-        minecraft-ai-dashboard-live.service \
-        minecraft-ai-vlm-gemma4-vulkan-all.service
-    do
+    local service plan_json required_services
+    local services=(minecraft-ai-dashboard-live.service)
+    if ! plan_json="$("$CLI" model-plan)"; then
+        echo "Could not resolve the configured Minecraft model service plan." >&2
+        return 1
+    fi
+    if ! required_services="$(printf '%s\n' "$plan_json" | "$PYTHON" -c '
+import json, sys
+payload = json.load(sys.stdin)
+services = payload.get("required_services") if isinstance(payload, dict) else None
+if not isinstance(services, list) or any(not isinstance(item, str) for item in services):
+    raise SystemExit("invalid model service plan")
+print("\n".join(services))
+')"; then
+        echo "Configured Minecraft model service plan is malformed." >&2
+        return 1
+    fi
+    while IFS= read -r service; do
+        [ -z "$service" ] && continue
+        if [ "$service" != minecraft-ai-vlm-gemma4-vulkan-all.service ]; then
+            echo "Refusing unknown model support service: $service" >&2
+            return 1
+        fi
+        services+=("$service")
+    done <<< "$required_services"
+    for service in "${services[@]}"; do
         if ! systemctl --user cat "$service" >/dev/null 2>&1; then
             echo "Required user service is missing: $service" >&2
             return 1
@@ -287,14 +306,12 @@ bedrock_session_alive() {
 wait_for_model() {
     local attempt
     for attempt in $(seq 1 60); do
-        if curl --fail --silent --max-time 5 \
-            http://127.0.0.1:8081/v1/models >/dev/null 2>&1
-        then
+        if "$CLI" model-ready >/dev/null 2>&1; then
             return 0
         fi
         sleep 2
     done
-    echo "Local planner/VLM service did not become ready within 120 seconds." >&2
+    echo "Configured ERAIS/local Minecraft model routes did not become ready within 120 seconds." >&2
     return 1
 }
 

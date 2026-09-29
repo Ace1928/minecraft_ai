@@ -513,6 +513,15 @@ class NativeWorldCognitionModel:
             )
         return ready["runtime_id"]
 
+    def verify_ready(self) -> str:
+        """Verify the private readiness receipt and API owner without inference."""
+        token = _read_private_file(self.token_file, limit=512).decode("ascii").strip()
+        if not token or any(char.isspace() for char in token):
+            raise RuntimeError("invalid private ERAIS World bearer token")
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        with self._client() as client:
+            return self._identity(client, headers)
+
     def _complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse:
         prompt = compact_planner_prompt(messages)
         token = _read_private_file(self.token_file, limit=512).decode("ascii").strip()

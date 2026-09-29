@@ -183,6 +183,14 @@ def test_existing_grammar_schema_fallback_uses_same_absolute_budget(broker):
     assert seen["requests"][2]["payload"]["response_format"]["json_schema"]["strict"] is True
 
 
+def test_readiness_uses_private_owner_capability_handshake_without_inference(broker):
+    model, seen, _ = broker
+
+    assert model.verify_ready() == UPSTREAM_MODEL
+    assert len(seen["requests"]) == 1
+    assert seen["requests"][0]["operation"] == "capabilities"
+
+
 def test_image_bytes_schema_and_sampler_options_preserved(broker):
     model, seen, _ = broker
     model.purpose = "vision"

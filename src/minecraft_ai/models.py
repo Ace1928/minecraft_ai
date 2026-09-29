@@ -157,6 +157,22 @@ class OpenAICompatibleLocalModel:
             raise RuntimeError("install minecraft-ai[knowledge] for HTTP model adapters") from exc
         return httpx.Client(timeout=self.timeout_s)
 
+    def verify_ready(self) -> str:
+        """Verify the configured local model is served without running inference."""
+        with self._client() as client:
+            response = client.get(
+                self.base_url.rstrip("/") + "/models",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+            )
+            response.raise_for_status()
+            body = response.json()
+        models = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(models, list):
+            raise RuntimeError("local model registry response is malformed")
+        if not any(isinstance(item, dict) and item.get("id") == self.model_id for item in models):
+            raise RuntimeError("configured local model is absent from the model registry")
+        return self.model_id
+
     def complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse:
         return self._complete(messages)
 

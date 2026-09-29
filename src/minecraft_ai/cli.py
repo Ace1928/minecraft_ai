@@ -755,6 +755,47 @@ def status() -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+@app.command("model-plan")
+def model_plan() -> None:
+    """Print non-secret local services required by enabled model routes."""
+    from .resident_broker_model import configured_model_services
+
+    config = load_config()
+    typer.echo(json.dumps({"required_services": configured_model_services(config)}))
+
+
+@app.command("model-ready")
+def model_ready() -> None:
+    """Verify configured model owners and endpoints without performing inference."""
+    from .resident_broker_model import configured_model
+
+    config = load_config()
+    results: list[dict[str, object]] = []
+    failures = False
+    for purpose, model_config in (
+        ("cognition", config.high_level),
+        ("vision", config.vision_language),
+    ):
+        if not model_config.enabled:
+            continue
+        result: dict[str, object] = {
+            "purpose": purpose,
+            "provider": model_config.provider,
+            "model_id": model_config.model_id,
+        }
+        try:
+            adapter = configured_model(model_config, purpose=purpose)
+            result["runtime_id"] = adapter.verify_ready()
+            result["ready"] = True
+        except Exception as exc:
+            failures = True
+            result.update(ready=False, error=type(exc).__name__)
+        results.append(result)
+    typer.echo(json.dumps({"ready": not failures, "models": results}, sort_keys=True))
+    if failures:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def pause() -> None:
     """Pause the agent and revoke motor capability immediately."""
