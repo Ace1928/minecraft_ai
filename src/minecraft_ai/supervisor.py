@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import secrets
 import signal
 import socket
 import sys
+import stat
 import threading
 import time
 from contextlib import contextmanager
@@ -47,6 +49,7 @@ CONTROL_FILE = RUNTIME_DIR / "control.json"
 STATUS_FILE = RUNTIME_DIR / "supervisor-state.json"
 LOCK_FILE = RUNTIME_DIR / "supervisor.lock"
 OPERATOR_PAUSE_FILE = Path(user_data_dir(APP_NAME)) / "OPERATOR_PAUSE"
+OPERATOR_PAUSE_AUDIT_FILE = Path(user_data_dir(APP_NAME)) / "logs" / "operator-pause-clear.jsonl"
 _IS_LINUX = sys.platform.startswith("linux")
 
 
@@ -78,7 +81,47 @@ def latch_operator_pause() -> None:
     )
 
 
-def clear_operator_pause() -> None:
+def clear_operator_pause(*, origin: str, remote_peer: str | None = None) -> None:
+    """Record the explicit resume origin durably before removing the pause."""
+    if origin not in {"cli", "operator-api", "supervisor-ipc", "private-calibration"}:
+        raise ValueError("operator pause clear origin is not recognized")
+    if remote_peer is not None:
+        if origin != "operator-api":
+            raise ValueError("a remote peer is only valid for operator API resume")
+        remote_peer = str(ipaddress.ip_address(remote_peer))
+    OPERATOR_PAUSE_AUDIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    event: dict[str, object] = {
+        "event": "operator_pause_clear_requested",
+        "at_unix_ns": time.time_ns(),
+        "pid": os.getpid(),
+        "origin": origin,
+        "pause_was_latched": OPERATOR_PAUSE_FILE.exists(),
+    }
+    if remote_peer is not None:
+        event["remote_peer"] = remote_peer
+    raw = (json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(OPERATOR_PAUSE_AUDIT_FILE, flags, 0o600)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError("operator pause audit target is not a regular file")
+        os.fchmod(fd, 0o600)
+        written = 0
+        while written < len(raw):
+            count = os.write(fd, raw[written:])
+            if count <= 0:
+                raise OSError("operator pause audit write did not progress")
+            written += count
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    if _IS_LINUX:
+        directory_fd = os.open(OPERATOR_PAUSE_AUDIT_FILE.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     try:
         OPERATOR_PAUSE_FILE.unlink()
     except FileNotFoundError:
@@ -889,7 +932,11 @@ class Supervisor:
             elif command == "resume":
                 with operator_intent_lock(), self._lock:
                     self.resume()
-                    clear_operator_pause()
+                    origin = payload.get("resume_origin")
+                    if origin not in {"cli", "operator-api"}:
+                        origin = "supervisor-ipc"
+                    peer = payload.get("resume_peer") if origin == "operator-api" else None
+                    clear_operator_pause(origin=origin, remote_peer=peer)
                     result = self.status()
                     if self._stop.is_set():
                         # FAILSAFE resume retires this generation. Deliver its

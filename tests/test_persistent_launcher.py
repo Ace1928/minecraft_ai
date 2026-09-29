@@ -80,7 +80,21 @@ case "${1:-}" in
         printf '"agent":{"alive":%s,"pid":%s}}\n' "$alive" "$generation"
         ;;
     bedrock)
-        if [ "${2:-}" = status ]; then
+        if [ "${2:-}" = camera-ready ]; then
+            count=0
+            if [ -e "$TEST_STATE/camera-ready-count" ]; then
+                count="$(cat "$TEST_STATE/camera-ready-count")"
+            fi
+            count=$((count + 1))
+            printf '%s\n' "$count" > "$TEST_STATE/camera-ready-count"
+            if [ "${TEST_CAMERA_READY:-1}" != 1 ]; then
+                exit 1
+            fi
+            if [ "${TEST_CAMERA_READY_FAIL_FROM_CALL:-0}" -gt 0 ] \
+                && [ "$count" -ge "$TEST_CAMERA_READY_FAIL_FROM_CALL" ]; then
+                exit 1
+            fi
+        elif [ "${2:-}" = status ]; then
             if [ "${TEST_BEDROCK_ALIVE:-1}" = 1 ] || [ -e "$TEST_STATE/bedrock-started" ]; then
                 printf '{"alive": true}\n'
             else
@@ -227,7 +241,9 @@ def _run_launcher(
         env=env,
         capture_output=True,
         text=True,
-        timeout=20,
+        # Long fault simulations launch many short-lived CLI status checks;
+        # allow for a busy host while retaining a bounded hang detector.
+        timeout=60,
         check=False,
     )
 
@@ -287,6 +303,37 @@ def test_gpu_preflight_never_automatically_recovers_or_acknowledges(
     else:
         assert result.returncode == 0, result.stderr
         assert (state / "run-roles").read_text().splitlines() == ["generalist"]
+
+
+def test_missing_camera_profile_holds_before_any_menu_or_world_input(tmp_path: Path) -> None:
+    root, env, state = _launcher_harness(tmp_path, constant_role="generalist")
+    env.update(TEST_CAMERA_READY="0", STOP_AFTER_SLEEPS="2")
+
+    result = _run_launcher(root, env)
+
+    assert result.returncode == 0, result.stderr
+    calls = (state / "cli-calls").read_text(encoding="utf-8").splitlines()
+    assert sum(call == "bedrock camera-ready" for call in calls) >= 1
+    assert not any(
+        call == "bedrock launch" or call.startswith("bedrock navigate") for call in calls
+    )
+    assert not any(call.startswith("run ") for call in calls)
+    assert "holding automatic startup without game input" in result.stderr
+    assert "Replacing unhealthy Bedrock session" not in result.stderr
+
+
+def test_profile_revoked_after_launch_still_blocks_navigation(tmp_path: Path) -> None:
+    root, env, state = _launcher_harness(tmp_path, constant_role="generalist")
+    env.update(TEST_CAMERA_READY_FAIL_FROM_CALL="2", STOP_AFTER_SLEEPS="2")
+
+    result = _run_launcher(root, env)
+
+    assert result.returncode == 0, result.stderr
+    calls = (state / "cli-calls").read_text(encoding="utf-8").splitlines()
+    assert "bedrock launch" in calls
+    assert not any(call.startswith("bedrock navigate") for call in calls)
+    assert not any(call.startswith("run ") for call in calls)
+    assert "Replacing unhealthy Bedrock session" not in result.stderr
 
 
 def test_new_healthy_agent_generation_gets_bounded_warmup_grace(tmp_path: Path) -> None:

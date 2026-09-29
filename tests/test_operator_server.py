@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import nullcontext
 from http.server import ThreadingHTTPServer
 from http import HTTPStatus
 from pathlib import Path
@@ -15,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from minecraft_ai.config import AppPaths
+import minecraft_ai.operator.server as operator_module
 from minecraft_ai.agent_lifecycle import AgentProcess
 from minecraft_ai.operator_server import (
     DASHBOARD_HTML,
@@ -38,6 +40,51 @@ def test_camera_counter_does_not_claim_verified_physical_pose() -> None:
     assert "physical pose unverified" in DASHBOARD_HTML
     assert "command origin set" in DASHBOARD_HTML
     assert "physical horizon calibrated" not in DASHBOARD_HTML
+
+
+def test_operator_resume_audits_private_remote_origin_without_request_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleared: list[dict[str, object]] = []
+    responses: list[tuple[HTTPStatus, dict[str, object]]] = []
+    handler = SimpleNamespace(
+        client_address=("127.0.0.1", 45678),
+        _send_json=lambda status, payload: responses.append((status, payload)),
+    )
+    monkeypatch.setattr(operator_module, "emergency_stop_latched", lambda: False)
+    monkeypatch.setattr(operator_module, "supervisor_alive", lambda: False)
+    monkeypatch.setattr(operator_module, "operator_intent_lock", nullcontext)
+    monkeypatch.setattr(operator_module, "current_control_owner_state", lambda: "absent")
+    monkeypatch.setattr(operator_module, "persistent_agent_service_load_state", lambda: "not-found")
+    monkeypatch.setattr(operator_module, "clear_operator_pause", lambda **kw: cleared.append(kw))
+
+    OperatorRequestHandler._resume_supervisor(handler)
+
+    assert cleared == [{"origin": "operator-api", "remote_peer": "127.0.0.1"}]
+    assert responses[0][0] == HTTPStatus.ACCEPTED
+
+
+def test_operator_resume_propagates_origin_through_supervisor_ipc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[dict[str, object]] = []
+    handler = SimpleNamespace(
+        client_address=("127.0.0.1", 45678),
+        _send_json=lambda _status, _payload: None,
+    )
+    monkeypatch.setattr(operator_module, "emergency_stop_latched", lambda: False)
+    monkeypatch.setattr(operator_module, "supervisor_alive", lambda: True)
+    monkeypatch.setattr(operator_module, "send_command", lambda _name, **kw: (
+        commands.append(kw) or {"state": "SAFE_IDLE"}
+    ))
+
+    OperatorRequestHandler._resume_supervisor(handler)
+
+    assert commands == [{
+        "timeout_s": 5.0,
+        "resume_origin": "operator-api",
+        "resume_peer": "127.0.0.1",
+    }]
 
 
 def test_inventory_qualification_status_explains_unavailability_and_retains_receipt() -> None:

@@ -538,7 +538,7 @@ def test_record_human_resume_live_uses_shared_safe_resume_transaction(
     monkeypatch.setattr(
         cli,
         "clear_operator_pause",
-        lambda: pytest.fail("record-human must not directly clear durable intent"),
+        lambda **_kwargs: pytest.fail("record-human must not directly clear durable intent"),
     )
     monkeypatch.setattr(
         cli,
@@ -906,7 +906,7 @@ def test_reset_emergency_never_clears_operator_pause(
     monkeypatch.setattr(cli, "latch_operator_pause", lambda: calls.append("pause-latch"))
     monkeypatch.setattr(cli, "operator_pause_latched", lambda: True)
     monkeypatch.setattr(cli, "clear_emergency_stop", lambda: calls.append("emergency"))
-    monkeypatch.setattr(cli, "clear_operator_pause", lambda: calls.append("pause"))
+    monkeypatch.setattr(cli, "clear_operator_pause", lambda **_kwargs: calls.append("pause"))
 
     cli.reset_emergency_stop()
 
@@ -944,7 +944,7 @@ def test_resume_starts_persistent_service_when_supervisor_is_absent(
     monkeypatch.setattr(cli, "supervisor_alive", lambda: False)
     monkeypatch.setattr(cli, "current_control_owner_state", lambda: "absent")
     monkeypatch.setattr(cli, "persistent_agent_service_load_state", lambda: "loaded")
-    monkeypatch.setattr(cli, "clear_operator_pause", lambda: calls.append("clear"))
+    monkeypatch.setattr(cli, "clear_operator_pause", lambda **_kwargs: calls.append("clear"))
     monkeypatch.setattr(
         cli,
         "start_persistent_agent_service",
@@ -964,7 +964,7 @@ def test_resume_keeps_pause_if_persistent_service_does_not_start(
     monkeypatch.setattr(cli, "supervisor_alive", lambda: False)
     monkeypatch.setattr(cli, "current_control_owner_state", lambda: "absent")
     monkeypatch.setattr(cli, "persistent_agent_service_load_state", lambda: "loaded")
-    monkeypatch.setattr(cli, "clear_operator_pause", lambda: calls.append("clear"))
+    monkeypatch.setattr(cli, "clear_operator_pause", lambda **_kwargs: calls.append("clear"))
     monkeypatch.setattr(cli, "start_persistent_agent_service", lambda: False)
     monkeypatch.setattr(cli, "latch_operator_pause", lambda: calls.append("restore"))
 
@@ -982,7 +982,7 @@ def test_resume_without_installed_service_permits_manual_startup(
     monkeypatch.setattr(cli, "supervisor_alive", lambda: False)
     monkeypatch.setattr(cli, "current_control_owner_state", lambda: "absent")
     monkeypatch.setattr(cli, "persistent_agent_service_load_state", lambda: "not-found")
-    monkeypatch.setattr(cli, "clear_operator_pause", lambda: calls.append("clear"))
+    monkeypatch.setattr(cli, "clear_operator_pause", lambda **_kwargs: calls.append("clear"))
     monkeypatch.setattr(
         cli,
         "start_persistent_agent_service",

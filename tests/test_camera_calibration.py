@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import typer
 
+from minecraft_ai import cli
 from minecraft_ai.camera_calibration import (
     load_camera_calibration,
     read_bedrock_mouse_sensitivity,
 )
+from minecraft_ai.config import RuntimeConfig
 
 
 def _profile() -> dict[str, object]:
@@ -58,6 +62,40 @@ def test_exact_version_camera_profile_is_loaded_and_compatibility_checked(
 
     assert profile.profile_id
     assert profile.yaw_counts_per_degree == pytest.approx(47.9638888889)
+
+
+def test_persistent_camera_preflight_uses_live_exact_version_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    directory = tmp_path / "calibrations"
+    directory.mkdir()
+    (directory / "bedrock-camera-1.26.45.1.json").write_text(
+        json.dumps(_profile()), encoding="utf-8",
+    )
+    monkeypatch.setattr(cli, "app_paths", lambda: SimpleNamespace(data_dir=tmp_path))
+    monkeypatch.setattr(cli, "load_config", lambda: RuntimeConfig())
+    monkeypatch.setattr(cli, "discover_bedrock_linux_install", lambda: SimpleNamespace(
+        selected_build=SimpleNamespace(version="1.26.45.1"), wine_prefix=tmp_path,
+    ))
+    monkeypatch.setattr(cli, "read_bedrock_mouse_sensitivity", lambda _prefix: 0.03)
+
+    cli.bedrock_camera_ready()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is True
+    assert payload["game_version"] == "1.26.45.1"
+
+
+def test_persistent_camera_preflight_rejects_missing_exact_build_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "app_paths", lambda: SimpleNamespace(data_dir=tmp_path))
+    monkeypatch.setattr(cli, "load_config", lambda: RuntimeConfig())
+    monkeypatch.setattr(cli, "discover_bedrock_linux_install", lambda: SimpleNamespace(
+        selected_build=SimpleNamespace(version="1.26.52.3"), wine_prefix=tmp_path,
+    ))
+    with pytest.raises(typer.BadParameter, match="compatible measured Bedrock profile"):
+        cli.bedrock_camera_ready()
 
 
 def test_camera_profile_rejects_changed_mouse_sensitivity(tmp_path: Path) -> None:

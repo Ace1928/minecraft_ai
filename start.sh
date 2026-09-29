@@ -16,6 +16,7 @@ bedrock_start_failures=0
 bedrock_failure_started_s=0
 input_route_hold_generation=""
 input_route_recovery_adopted=false
+camera_profile_hold_logged=false
 
 if [ ! -x "$CLI" ] || [ ! -x "$PYTHON" ]; then
     echo "Missing repo environment. Run: python3 -m venv .venv && .venv/bin/pip install -e '.[full,dev]'" >&2
@@ -73,6 +74,21 @@ print(role)
 
 runtime_role() {
     configured_runtime_role
+}
+
+camera_profile_ready() {
+    local camera_readiness
+    camera_readiness="$("$CLI" bedrock camera-ready 2>&1)"
+    if [ "$?" -ne 0 ]; then
+        if [ "$camera_profile_hold_logged" != true ]; then
+            echo "Bedrock camera profile is not ready; holding automatic startup without game input." >&2
+            echo "$camera_readiness" >&2
+            camera_profile_hold_logged=true
+        fi
+        return 1
+    fi
+    camera_profile_hold_logged=false
+    return 0
 }
 
 healthy_agent_generation() {
@@ -308,6 +324,12 @@ start_live_runtime() {
         fi
         return 68
     fi
+    # A menu navigator can respawn the player before `run --live` validates
+    # camera calibration. Hold the persistent service before any Bedrock menu
+    # input if this exact game build lacks a compatible measured profile.
+    if ! camera_profile_ready; then
+        return 70
+    fi
     # A live launcher intentionally owns the GPU marker, so Doctor reports it
     # as busy. Run the host preflight only when a fresh GPU launch is needed.
     if ! bedrock_session_alive && ! bedrock-on-linux doctor; then
@@ -346,6 +368,9 @@ start_live_runtime() {
     fi
     if operator_paused; then
         return 65
+    fi
+    if ! camera_profile_ready; then
+        return 70
     fi
     local -a navigate_args=(--timeout-s 300 --retries 3)
     if [ -n "$SERVER_NAME" ]; then
@@ -437,7 +462,7 @@ while [ "$input_route_recovery_adopted" != true ]; do
     if [ "$result" -eq 67 ]; then
         exit 67
     fi
-    if [ "$result" -eq 65 ] || [ "$result" -eq 69 ]; then
+    if [ "$result" -eq 65 ] || [ "$result" -eq 69 ] || [ "$result" -eq 70 ]; then
         sleep "$CHECK_INTERVAL_S"
         continue
     fi
@@ -544,7 +569,7 @@ while true; do
         if [ "$result" -eq 67 ]; then
             exit 67
         fi
-        if [ "$result" -eq 65 ] || [ "$result" -eq 69 ]; then
+        if [ "$result" -eq 65 ] || [ "$result" -eq 69 ] || [ "$result" -eq 70 ]; then
             sleep "$CHECK_INTERVAL_S"
             continue
         fi

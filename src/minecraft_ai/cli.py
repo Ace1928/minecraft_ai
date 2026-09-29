@@ -26,6 +26,7 @@ from .agent_lifecycle import (
     stop_agent_process,
 )
 from .camera_calibration import (
+    CameraCalibrationProfile,
     load_camera_calibration,
     read_bedrock_mouse_sensitivity,
 )
@@ -38,7 +39,7 @@ from .bedrock_menu import (
     TesseractMenuTextReader,
     load_configured_local_server,
 )
-from .config import app_paths, ensure_default_config, load_config
+from .config import RuntimeConfig, app_paths, ensure_default_config, load_config
 from .emergency import (
     clear_emergency_stop,
     emergency_reason,
@@ -647,27 +648,9 @@ def run(
     )
     if config is None:
         config = load_config()
-    try:
-        profile = load_camera_calibration(
-            app_paths().data_dir,
-            game_version=version,
-        )
-        sensitivity = read_bedrock_mouse_sensitivity(install.wine_prefix)
-        profile.require_compatible(
-            game_version=version,
-            mouse_sensitivity=sensitivity,
-            configured_yaw_counts_per_degree=(
-                config.policy.camera_scale if config.policy.enabled else None
-            ),
-            configured_pitch_counts_per_degree=(
-                config.policy.effective_camera_pitch_scale if config.policy.enabled else None
-            ),
-        )
-    except (OSError, TypeError, ValueError) as exc:
-        raise typer.BadParameter(
-            "Live camera origin cannot be established from a compatible measured "
-            f"Bedrock profile: {exc}"
-        ) from exc
+    profile = _require_compatible_bedrock_camera_profile(
+        config=config, version=version, wine_prefix=install.wine_prefix,
+    )
     camera_state = attached.get("world_camera")
     reported_pitch_scale = (
         camera_state.get("pitch_counts_per_degree") if isinstance(camera_state, dict) else None
@@ -827,7 +810,7 @@ def resume() -> None:
 
 
 def _resume_reachable_supervisor() -> dict[str, object]:
-    payload = _command("resume", timeout_s=5.0)
+    payload = _command("resume", timeout_s=5.0, resume_origin="cli")
     if payload.get("state") == "STOPPED":
         retired_session_id = str(payload.get("session_id") or "")
         if not retired_session_id:
@@ -866,7 +849,7 @@ def _resume_operator_intent() -> None:
                         "Persistent recovery service availability is unknown; operator pause "
                         "remains latched."
                     )
-                clear_operator_pause()
+                clear_operator_pause(origin="cli")
         if late_supervisor:
             payload = _resume_reachable_supervisor()
             print(f"[green]{payload['state']}[/green] — persistent recovery is permitted.")
@@ -1395,6 +1378,58 @@ def bedrock_status() -> None:
         "managed_session": _session_payload(session) if session is not None else None,
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _require_compatible_bedrock_camera_profile(
+    *,
+    config: RuntimeConfig,
+    version: str | None = None,
+    wine_prefix: Path | None = None,
+) -> CameraCalibrationProfile:
+    """Validate the exact profile before any persistent menu or world input."""
+    if version is None or wine_prefix is None:
+        install = discover_bedrock_linux_install()
+        build = install.selected_build if install is not None else None
+        if install is None or build is None:
+            raise typer.BadParameter(
+                "The exact active BedrockOnLinux build and Wine prefix are required "
+                "before live camera control can be calibrated."
+            )
+        version, wine_prefix = build.version, install.wine_prefix
+    try:
+        profile = load_camera_calibration(
+            app_paths().data_dir,
+            game_version=version,
+        )
+        sensitivity = read_bedrock_mouse_sensitivity(wine_prefix)
+        policy = config.policy
+        profile.require_compatible(
+            game_version=version,
+            mouse_sensitivity=sensitivity,
+            configured_yaw_counts_per_degree=(
+                policy.camera_scale if policy.enabled else None
+            ),
+            configured_pitch_counts_per_degree=(
+                policy.effective_camera_pitch_scale if policy.enabled else None
+            ),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise typer.BadParameter(
+            "Live camera origin cannot be established from a compatible measured "
+            f"Bedrock profile: {exc}"
+        ) from exc
+    return profile
+
+
+@bedrock_app.command("camera-ready")
+def bedrock_camera_ready() -> None:
+    """Check exact-build camera compatibility without launching or controlling Bedrock."""
+    profile = _require_compatible_bedrock_camera_profile(config=load_config())
+    print(json.dumps({
+        "ready": True,
+        "game_version": profile.game_version,
+        "profile_id": profile.profile_id,
+    }, sort_keys=True))
 
 
 @bedrock_app.command("launch")

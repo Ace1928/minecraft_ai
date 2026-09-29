@@ -17,6 +17,16 @@ from minecraft_ai.supervisor import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _private_operator_pause_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        supervisor_module, "OPERATOR_PAUSE_AUDIT_FILE",
+        tmp_path / "operator-pause-clear.jsonl",
+    )
+
+
 class _PhysicalFakeBackend:
     backend_id = "physical-fake"
     live_capable = True
@@ -78,11 +88,51 @@ def test_any_existing_operator_pause_marker_fails_closed(
 ) -> None:
     marker = tmp_path / "OPERATOR_PAUSE"
     monkeypatch.setattr(supervisor_module, "OPERATOR_PAUSE_FILE", marker)
+    monkeypatch.setattr(
+        supervisor_module, "OPERATOR_PAUSE_AUDIT_FILE", tmp_path / "operator-audit.jsonl",
+    )
     marker.write_text(contents, encoding="utf-8")
 
     assert supervisor_module.operator_pause_latched() is True
-    supervisor_module.clear_operator_pause()
+    supervisor_module.clear_operator_pause(origin="cli")
     assert supervisor_module.operator_pause_latched() is False
+
+
+def test_pause_clear_audit_is_private_durable_and_origin_attributed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "OPERATOR_PAUSE"
+    audit = tmp_path / "logs" / "operator-pause-clear.jsonl"
+    monkeypatch.setattr(supervisor_module, "OPERATOR_PAUSE_FILE", marker)
+    monkeypatch.setattr(supervisor_module, "OPERATOR_PAUSE_AUDIT_FILE", audit)
+    marker.write_text("paused", encoding="utf-8")
+
+    supervisor_module.clear_operator_pause(
+        origin="operator-api", remote_peer="127.0.0.1",
+    )
+
+    event = json.loads(audit.read_text(encoding="utf-8"))
+    assert event["event"] == "operator_pause_clear_requested"
+    assert event["origin"] == "operator-api"
+    assert event["remote_peer"] == "127.0.0.1"
+    assert event["pause_was_latched"] is True
+    assert "secret" not in event
+    assert audit.stat().st_mode & 0o777 == 0o600
+    assert not marker.exists()
+
+
+def test_pause_clear_fails_closed_when_audit_cannot_be_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "OPERATOR_PAUSE"
+    marker.write_text("paused", encoding="utf-8")
+    monkeypatch.setattr(supervisor_module, "OPERATOR_PAUSE_FILE", marker)
+    monkeypatch.setattr(supervisor_module, "OPERATOR_PAUSE_AUDIT_FILE", tmp_path / "logs")
+    (tmp_path / "logs").mkdir()
+
+    with pytest.raises(OSError):
+        supervisor_module.clear_operator_pause(origin="cli")
+    assert marker.exists()
 
 
 def test_camera_calibration_stops_on_operator_pause(
@@ -645,10 +695,10 @@ def test_resume_cannot_clear_later_durable_stop_intent(
     permit_clear = threading.Event()
     original_clear = supervisor_module.clear_operator_pause
 
-    def blocking_clear() -> None:
+    def blocking_clear(*, origin: str, remote_peer: str | None = None) -> None:
         entered_clear.set()
         assert permit_clear.wait(timeout=2.0)
-        original_clear()
+        original_clear(origin=origin, remote_peer=remote_peer)
 
     class _Connection:
         def __init__(self, command: str) -> None:
@@ -690,6 +740,8 @@ def test_resume_cannot_clear_later_durable_stop_intent(
     assert not later_thread.is_alive()
     assert supervisor.state == expected_state
     assert marker.exists()
+    audit = tmp_path / "operator-pause-clear.jsonl"
+    assert json.loads(audit.read_text(encoding="utf-8"))["origin"] == "supervisor-ipc"
 
 
 @pytest.mark.parametrize(

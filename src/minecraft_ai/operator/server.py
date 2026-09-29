@@ -1254,8 +1254,12 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
     def _resume_supervisor(self) -> None:
         if emergency_stop_latched():
             raise ValueError("emergency stop is latched")
+        peer = str(self.client_address[0])
         if supervisor_alive():
-            result = send_command("resume", timeout_s=5.0)
+            result = send_command(
+                "resume", timeout_s=5.0,
+                resume_origin="operator-api", resume_peer=peer,
+            )
         else:
             late_supervisor = False
             with operator_intent_lock():
@@ -1279,10 +1283,13 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
                         )
                     if emergency_stop_latched():
                         raise ValueError("emergency stop is latched; pause remains latched")
-                    clear_operator_pause()
+                    clear_operator_pause(origin="operator-api", remote_peer=peer)
                     result = {"state": "STARTING", "recovery_pending": True}
             if late_supervisor:
-                result = send_command("resume", timeout_s=5.0)
+                result = send_command(
+                    "resume", timeout_s=5.0,
+                    resume_origin="operator-api", resume_peer=peer,
+                )
         if result.get("state") == "STOPPED":
             result = {**result, "recovery_pending": True}
         response_status = (
