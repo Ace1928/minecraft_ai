@@ -292,9 +292,22 @@ def test_server_list_caption_ocr_requires_exact_title_and_retains_coordinates(
 ) -> None:
     reader = TesseractMenuTextReader(executable="unused-test-tesseract")
     calls: list[tuple[tuple[int, int], int | None]] = []
-    noise = (OcrLine("ServerList" if title_visible_in_full_frame else "Bee = — ——", 280, 400, 100, 20),)
+    noise = (
+        OcrLine(
+            "ServerList" if title_visible_in_full_frame else "Bee = — ——",
+            280,
+            400,
+            100,
+            20,
+        ),
+    )
 
-    def read_image(image: Any, *, input_scale: int | None = None, single_line: bool = False) -> tuple[OcrLine, ...]:
+    def read_image(
+        image: Any,
+        *,
+        input_scale: int | None = None,
+        single_line: bool = False,
+    ) -> tuple[OcrLine, ...]:
         calls.append((image.size, input_scale))
         if len(calls) == 1:  # Away notice crop.
             return ()
@@ -487,6 +500,21 @@ def test_featured_genwars_overlay_is_a_startup_popup() -> None:
     assert stage is MenuStage.STARTUP_POPUP
 
 
+def test_featured_dungeons_ii_overlay_is_a_startup_popup() -> None:
+    stage = classify_menu_stage(
+        _frame(1),
+        _lines(
+            "BRAVE THE UNKNOWN",
+            "Minecraft Dungeons II is here...",
+            "...with more action, more loot, and more adventure.",
+        ),
+        lan_name="BedrockConnect",
+        server_name="Eidos Local Bedrock",
+        hud_detector=lambda _frame: False,
+    )
+    assert stage is MenuStage.STARTUP_POPUP
+
+
 def test_menu_navigator_clicks_ocr_dismiss_on_featured_overlay() -> None:
     frames = [_frame(index) for index in range(1, 6)]
     reader = _MappedTextReader(
@@ -534,6 +562,47 @@ def test_menu_navigator_clicks_visual_dismiss_left_of_featured_battle() -> None:
     reader = _MappedTextReader(
         {
             1: _lines("Have you tried the action-packed PvP adventure GenWars?"),
+            2: _lines("Minecraft", "Play", "Settings", "Marketplace"),
+            3: _lines("Play", "Worlds", "LAN Games", "BedrockConnect"),
+            4: _lines("ServerList", "Connect to a Server", "Eidos Local Bedrock"),
+        }
+    )
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture(frames),
+        text_reader=reader,
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        poll_interval_s=0.0,
+        sleep=lambda _seconds: None,
+        hud_detector=lambda frame: frame.frame_id == 5,
+    )
+
+    result = navigator.run()
+
+    assert result.visited[0] is MenuStage.STARTUP_POPUP
+    click_x, click_y = clicks.clicks[0][1], clicks.clicks[0][2]
+    assert click_x < 520
+    assert 430 <= click_y <= 490
+
+
+def test_menu_navigator_dismisses_dungeons_ii_ad_without_ocr_dismiss_label() -> None:
+    featured = _pixel_frame(
+        1,
+        width=1000,
+        height=600,
+        green_box=(520, 430, 720, 490),
+    )
+    featured_lines = _lines(
+        "BRAVE THE UNKNOWN",
+        "Minecraft Dungeons II is here...",
+        "...with more action, more loot, and more adventure.",
+    )
+    frames = [featured, *(_frame(index) for index in range(2, 6))]
+    reader = _MappedTextReader(
+        {
+            1: featured_lines,
             2: _lines("Minecraft", "Play", "Settings", "Marketplace"),
             3: _lines("Play", "Worlds", "LAN Games", "BedrockConnect"),
             4: _lines("ServerList", "Connect to a Server", "Eidos Local Bedrock"),
@@ -1668,8 +1737,15 @@ def test_retained_resource_pack_dialog_requires_verified_download_control(fixtur
                                 hud_detector=lambda _: False)
     assert stage is MenuStage.RESOURCE_PACK
     observation = MenuObservation(frame, lines, stage)
-    navigator = BedrockMenuNavigator(capture=None, text_reader=None, click_backend=None,
-        lan_name='BedrockConnect', server=ConfiguredServer('Pokemon Family - CobbleDrock', '192.168.4.166', 19136))
+    navigator = BedrockMenuNavigator(
+        capture=None,
+        text_reader=None,
+        click_backend=None,
+        lan_name='BedrockConnect',
+        server=ConfiguredServer(
+            'Pokemon Family - CobbleDrock', '192.168.4.166', 19136
+        ),
+    )
     transition = navigator._transition_for(observation)
     target = _transition_click_target(observation, transition)
     assert 520 < target.center[0] < 1395 and 580 < target.center[1] < 699

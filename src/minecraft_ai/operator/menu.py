@@ -937,9 +937,17 @@ def classify_menu_stage(
         phrase in text for phrase in popup_anchors
     ):
         return MenuStage.STARTUP_POPUP
-    # Bedrock 1.26 title-screen featured ads (GenWars and similar) sit on top
-    # of Play. OCR often misses the Dismiss label; the body copy is enough.
-    if "genwars" in compact or "have you tried the action-packed" in text:
+    # Bedrock 1.26 title-screen featured ads sit on top of Play. OCR often
+    # misses the Dismiss label; require the ad's independent title/body anchors
+    # before the positioned light button beside its green action can be used.
+    if (
+        "genwars" in compact
+        or "have you tried the action-packed" in text
+        or (
+            "brave the unknown" in text
+            and "dungeons ii is here" in text
+        )
+    ):
         return MenuStage.STARTUP_POPUP
 
     if (
