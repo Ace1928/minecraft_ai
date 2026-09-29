@@ -366,6 +366,22 @@ def test_option_first_invocation_is_forwarded_without_being_consumed(tmp_path: P
     assert run_call.endswith("--edition bedrock")
 
 
+def test_persistent_service_selects_configured_bedrockconnect_world(tmp_path: Path) -> None:
+    root, env, state = _launcher_harness(tmp_path)
+    env.update({
+        "STOP_AFTER_RUNS": "1",
+        "MINECRAFT_AI_SERVER_NAME": "Pokemon Family - CobbleDrock",
+    })
+
+    result = _run_launcher(root, env)
+
+    assert result.returncode == 0, result.stderr
+    navigate = [line for line in (state / "cli-calls").read_text().splitlines()
+                if line.startswith("bedrock navigate")]
+    assert navigate == ["bedrock navigate --timeout-s 300 --retries 3 "
+                        "--server-name Pokemon Family - CobbleDrock"]
+
+
 def test_persistent_service_uses_dynamic_configured_role() -> None:
     unit = (Path(__file__).parents[1] / "systemd" / "minecraft-ai-agent-live.service").read_text(
         encoding="utf-8"

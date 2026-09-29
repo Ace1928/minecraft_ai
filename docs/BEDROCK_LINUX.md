@@ -156,6 +156,14 @@ are verified; the navigator never clears the log. Loading captions authorize
 waiting only. Unknown screens stop further input and may be retained with
 `--evidence-dir` in a new private directory.
 
+When BedrockConnect lists multiple local servers, set
+`MINECRAFT_AI_SERVER_NAME` to the exact intended entry in the persistent
+service's local environment. The launcher passes it as `--server-name` and
+allows up to 300 seconds for an initial pack-backed join. Without the setting,
+the navigator still handles a single-server list but refuses an ambiguous one.
+Keep the selected server name in the local unit/drop-in, since different hosts
+can use different BedrockConnect menus.
+
 The 28 September desktop diagnostic accepted the server pack, reached survival,
 and opened the stock starter menu with one ordinary Compass use. The menu stayed
 visible beyond 40 seconds without a selection. This establishes the desktop

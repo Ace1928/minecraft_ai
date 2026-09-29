@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI="$SCRIPT_DIR/.venv/bin/minecraft-ai"
 PYTHON="$SCRIPT_DIR/.venv/bin/python"
 CAPTURE_SOURCE="${MINECRAFT_AI_CAPTURE_SOURCE:-x11}"
+SERVER_NAME="${MINECRAFT_AI_SERVER_NAME:-}"
 CHECK_INTERVAL_S="${MINECRAFT_AI_CHECK_INTERVAL_S:-10}"
 FAILURES_BEFORE_RECOVERY="${MINECRAFT_AI_FAILURES_BEFORE_RECOVERY:-3}"
 NONPLAYABLE_FAILURES_BEFORE_RECOVERY="${MINECRAFT_AI_NONPLAYABLE_FAILURES_BEFORE_RECOVERY:-12}"
@@ -346,7 +347,11 @@ start_live_runtime() {
     if operator_paused; then
         return 65
     fi
-    "$CLI" bedrock navigate --timeout-s 180 --retries 3
+    local -a navigate_args=(--timeout-s 300 --retries 3)
+    if [ -n "$SERVER_NAME" ]; then
+        navigate_args+=(--server-name "$SERVER_NAME")
+    fi
+    "$CLI" bedrock navigate "${navigate_args[@]}"
     result=$?
     if [ "$result" -ne 0 ]; then
         abort_failed_start "$result"
