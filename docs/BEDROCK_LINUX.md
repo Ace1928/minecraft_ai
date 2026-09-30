@@ -107,6 +107,16 @@ death negative controls are documented in
 `tests/fixtures/bedrock_health/README.md`. Runtime source changes require a
 reviewed agent reload before this feedback is available to the live policy.
 
+An exact X11 `image reply read timed out` is a bounded dropped capture, not a
+usable old frame. The runtime releases and reconciles held inputs, reports
+`capture-stalled`, increments its existing consecutive-stale limit, and performs
+no cognition or motor action from that failed capture. The capture owner may
+reopen only the originally admitted private display/window on a later tick,
+with at most two consecutive reconnects; a third timeout remains fatal. Only a
+fresh, valid, advancing frame resets this allowance. Ownership, malformed reply
+and isolation failures remain fatal, and startup capture is not given a retry
+exception. Neither pose nor episode timestamps are reset during recovery.
+
 ## Private-LAN operator dashboard
 
 The dashboard stays loopback-only by default. To let trusted devices on the

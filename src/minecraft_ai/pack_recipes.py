@@ -168,10 +168,26 @@ class PackRecipeCatalog:
             confidence=1.0,
         )
         # Keep the in-game line short and source-exact; metadata stays in cognition.
-        reply = rendered[0]
-        if len(reply) > 150:
+        reply = self._ascii_chat_projection(rendered[0])
+        if reply is None or len(reply) > 150:
             return None
         return PackRecipeAnswer(evidence=evidence, chat_reply=reply)
+
+    @staticmethod
+    def _ascii_chat_projection(line: str) -> str | None:
+        """Project Latin accents/grid blanks into the existing ASCII actuator.
+
+        Original names and recipe text remain untouched in the catalog and
+        reference evidence. Unsupported characters refuse delivery rather than
+        disappearing from an item identifier or changing recipe quantities.
+        """
+        # Canonical decomposition supports accents only; compatibility
+        # transliteration (ligatures, full-width digits, etc.) is not admitted.
+        decomposed = unicodedata.normalize("NFD", line.replace("·", "."))
+        reply = "".join(char for char in decomposed if not unicodedata.combining(char))
+        if not reply or any(not 32 <= ord(char) <= 126 for char in reply):
+            return None
+        return reply
 
     def mentions_pack_content(self, query: str) -> bool:
         """A vanilla wiki cannot establish mechanics of a locally installed item."""
@@ -207,10 +223,12 @@ class PackRecipeCatalog:
             return None
 
         def named(item: dict[str, Any]) -> str | None:
-            record = items.get(item.get("id"))
-            if type(record) is dict and type(record.get("name")) is str:
-                return record["name"]
-            return None
+            item_id = item.get("id")
+            if type(item_id) is not str:
+                return None
+            record = items.get(item_id)
+            name = record.get("name") if type(record) is dict else None
+            return name if type(name) is str else None
 
         ingredient_rows = []
         for ingredient in ingredients:

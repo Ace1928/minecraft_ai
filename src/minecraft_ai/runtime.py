@@ -31,6 +31,7 @@ from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_
 from .daemon_executor import SingleWorkerDaemonExecutor
 from .episodes import RuntimeEvent
 from .pack_recipes import PackRecipeCatalog
+from .game_chat import game_chat_authority_matches, game_chat_delivery_admitted
 from .emergency import emergency_stop_latched
 from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
 from .control.execution import visible_oak_trunk
@@ -94,6 +95,7 @@ from .telemetry import TelemetryPublisher
 from .trajectory import ActionOrigin, ActionProvenance, TrajectoryRecorder
 from .storage import OperatorContextSnapshot, StateDatabase
 from .supervisor import operator_intent_lock, operator_pause_latched, send_command
+from .platforms.bedrock_x11 import ImageCaptureTimeout
 
 
 from minecraft_ai.skills.recovery import select_learned_recovery
@@ -666,7 +668,23 @@ class AgentRuntime:
         # deterministic hotbar evidence can only arrive after _send_motor below
         # returns; a rejected send raises, while a suppressed send stops the run.
         capture_started = time.perf_counter()
-        frame = self.perception.capture_once()
+        try:
+            frame = self.perception.capture_once()
+        except ImageCaptureTimeout as error:
+            # Only the exact admitted X11 image-read timeout is recoverable.
+            # The capture owner reconnects on a later tick. Release first;
+            # never publish a fake frame or run cognition against old pixels.
+            self.metrics.last_capture_ms = (time.perf_counter() - capture_started) * 1000.0
+            self.metrics.stale_frame_skips += 1
+            self.metrics.consecutive_stale_frames += 1
+            self._release_and_reconcile_inputs()
+            self.telemetry.publish(self._telemetry_payload(state="capture-stalled"))
+            if self.metrics.consecutive_stale_frames >= self.stale_frame_consecutive_limit:
+                raise RuntimeError(
+                    "capture stream timed out for "
+                    f"{self.metrics.consecutive_stale_frames} consecutive frames"
+                ) from error
+            return
         self.metrics.frames += 1
         self.metrics.last_capture_ms = (time.perf_counter() - capture_started) * 1000.0
         self._merge_operator_target()
@@ -3698,20 +3716,7 @@ class AgentRuntime:
                     # for unknown/stale answers, timeout or a new camera frame.
                     self._idle_stall_probe_used_for_run_id = idle_stall_run_id
                 perception_probe_started = True
-        game_chat = _authorized_game_chat(
-            decision,
-            self.blackboard,
-            already_replied_ns=self._last_player_chat_replied_ns,
-        )
-        if game_chat:
-            try:
-                send_command("chat", lease_id=self.lease_id, text=game_chat)
-                self.metrics.game_chat_messages += 1
-                # Answer a player message once. The social fact stays merged
-                # (expires in 30s) but the signature gate blocks re-replies.
-                self._last_player_chat_replied_ns = time.monotonic_ns()
-            except Exception:
-                pass
+        self._deliver_game_chat(decision)
         if decision.skill_id is not None:
             running = self.executor.run
             if running is not None and running.outcome == SkillOutcome.RUNNING:
@@ -4129,6 +4134,46 @@ class AgentRuntime:
             parameters=constraints,
         )
         return True
+
+    def _deliver_game_chat(self, decision: CognitionDecision) -> bool:
+        """Deliver a bound reply through the existing lease, never another agent."""
+        text = _authorized_game_chat(
+            decision, self.blackboard, already_replied_ns=self._last_player_chat_replied_ns,
+        )
+        if (
+            text is None or not game_chat_authority_matches(decision, self.blackboard)
+            or not game_chat_delivery_admitted(
+                text, self.blackboard, getattr(self.perception, "last_capture", None),
+            )
+        ):
+            return False
+        try:
+            # Typing takes focus. Do not let the backend restore an earlier
+            # movement/mining hold when it returns from the chat screen.
+            if not self._release_and_reconcile_inputs():
+                return False
+            if (
+                not game_chat_authority_matches(decision, self.blackboard)
+                or not game_chat_delivery_admitted(
+                    text, self.blackboard, getattr(self.perception, "last_capture", None),
+                )
+            ):
+                return False
+            result = send_command("chat", lease_id=self.lease_id, text=text)
+            if (
+                not isinstance(result, dict) or result.get("sent") is not True
+                or type(result.get("characters")) is not int
+                or result["characters"] != len(text)
+            ):
+                return False
+            self.metrics.game_chat_messages += 1
+            self._last_player_chat_replied_ns = time.monotonic_ns()
+            return True
+        except Exception as error:
+            logging.getLogger(__name__).warning(
+                "Game chat delivery was not confirmed: %s", type(error).__name__,
+            )
+            return False
 
     def _publish_player_chat_facts(self) -> None:
         """Turn freshly observed player chat lines into an authorizing fact.

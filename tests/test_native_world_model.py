@@ -573,9 +573,11 @@ def test_pokemon_recipe_answer_uses_exact_pack_item_names_and_version():
     answer = catalog.lookup("How do I craft a Poke Ball?", game_version="1.26.52.3")
     assert answer is not None
     assert answer.chat_reply == (
-        "At a crafting table, use 4 Red Apricorn and 1 Copper Ingot to make 4 Poké Balls. "
-        "Pattern · R · / R C R / · R ·."
+        "At a crafting table, use 4 Red Apricorn and 1 Copper Ingot to make 4 Poke Balls. "
+        "Pattern . R . / R C R / . R .."
     )
+    assert "Poké Balls" in answer.evidence.extract
+    assert "Pattern · R · / R C R / · R ·." in answer.evidence.extract
     assert answer.evidence.confidence == 1.0
     assert "pack revision aaaaaaaaaaaaaaaa" in answer.evidence.extract
     assert catalog.lookup("How do I craft a Poke Ball?", game_version="1.26.99") is None
@@ -634,8 +636,8 @@ def test_runtime_context_uses_pinned_family_recipe_for_fresh_player_chat(monkeyp
 
     context = runtime._cognition_context(requires_wood=False)
     assert context.pack_recipe_reply == (
-        "At a crafting table, use 4 Red Apricorn and 1 Copper Ingot to make 4 Poké Balls. "
-        "Pattern · R · / R C R / · R ·."
+        "At a crafting table, use 4 Red Apricorn and 1 Copper Ingot to make 4 Poke Balls. "
+        "Pattern . R . / R C R / . R .."
     )
     assert context.wiki and context.wiki[0].confidence == 1.0
 
@@ -652,3 +654,153 @@ def test_recipe_snapshot_must_match_file_hash_and_have_no_warnings(tmp_path):
     payload["warnings"] = ["unparsed pack file"]
     with pytest.raises(ValueError, match="warning-bearing"):
         PackRecipeCatalog(payload, hashlib.sha256(raw).hexdigest())
+
+
+@pytest.mark.parametrize("name", ["神奇球", "ﬁ Ball", "Ball\ncommand", "Ball\x00"])
+def test_recipe_chat_refuses_unrepresentable_item_name_without_mutating_catalog(name):
+    payload = _catalog_payload()
+    payload["items"]["lota:poke_ball"]["name"] = name
+    before = json.dumps(payload, ensure_ascii=False)
+    catalog = PackRecipeCatalog(payload, "a" * 64)
+    assert catalog.lookup("How do I craft a poke_ball?", game_version="1.26.52.3") is None
+    assert json.dumps(payload, ensure_ascii=False) == before
+
+
+def test_recipe_answer_is_bound_to_actual_catalog_not_an_assumed_pack_upgrade():
+    previous = PackRecipeCatalog(_catalog_payload(), "a" * 64)
+    current_payload = _catalog_payload()
+    current_payload["revision"] = "b" * 64
+    current_payload["recipes"]["lota:poke_ball_apricorn"]["outputs"][0]["count"] = 8
+    current_payload["recipes"]["lota:poke_ball_apricorn"]["source"]["pack"] = (
+        "synthetic-next-pack-not-live"
+    )
+    current = PackRecipeCatalog(current_payload, "c" * 64)
+    old = previous.lookup("How do I craft a Poke Ball?", game_version="1.26.52.3")
+    new = current.lookup("How do I craft a Poke Ball?", game_version="1.26.52.3")
+    assert old is not None and new is not None
+    assert "make 4 Poke Balls" in old.chat_reply
+    assert "make 8 Poke Balls" in new.chat_reply
+    assert old.evidence.version_key != new.evidence.version_key
+    assert "synthetic-next-pack-not-live" in new.evidence.extract
+    assert "bbbbbbbbbbbbbbbb" in new.evidence.extract
+
+
+def test_native_world_controller_recipe_reaches_existing_leased_chat_contract(monkeypatch):
+    """Synthetic transport/speaker authority, real catalog/controller/actuator contracts."""
+    from minecraft_ai.builtin_skills import build_bootstrap_skill_library
+    from minecraft_ai.cognition import CognitionContext, HighLevelController
+    from minecraft_ai.game_chat import game_chat_authority_matches
+    from minecraft_ai.supervisor import Supervisor
+
+    class ChatBackend:
+        backend_id = "synthetic-chat-contract"
+        live_capable = True
+
+        def __init__(self):
+            self.lease = None
+            self.messages = []
+            self.held_keys = set()
+            self.held_buttons = set()
+
+        def bind_lease(self, lease):
+            self.lease = lease
+
+        def clear_lease(self):
+            self.lease = None
+
+        def release_all(self):
+            self.held_keys.clear()
+            self.held_buttons.clear()
+
+        def apply(self, action):
+            pytest.fail("recipe response cannot authorize a gameplay action")
+
+        def type_chat(self, text, *, input_permitted):
+            assert self.lease is not None and input_permitted()
+            self.messages.append(text)
+
+    now = time.monotonic_ns()
+    board = PerceptionBlackboard()
+    board.publish(FrameState(
+        frame_id=1, captured_ns=now, instance_id="bedrock:1.26.52.3:synthetic-family-chat",
+        width=32, height=32,
+        facts=(PerceptionFact(
+            key="social.player_message", value="SyntheticKid: How do I craft a Poké Ball?",
+            confidence=0.99, observed_ns=now, source="synthetic-contract:not-training-label",
+            expires_after_ms=30_000,
+        ),),
+    ))
+    catalog = PackRecipeCatalog(_catalog_payload(), "a" * 64)
+    answer = catalog.lookup("How do I craft a Poké Ball?", game_version="1.26.52.3")
+    assert answer is not None
+    runtime_id = "b" * 32
+    identity = {"runtime_id": runtime_id, "fully_native": True, "source_family": "Qwen3"}
+    ready = {"status": "private_ready", "runtime_id": runtime_id,
+             "backend": {"model_id": MODEL_ID, **identity}}
+    calls = []
+
+    class Response:
+        def __init__(self, body):
+            self.body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.body
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, url, **kwargs):
+            calls.append(url)
+            return Response({"data": [{"id": MODEL_ID, "erais": identity}]})
+
+        def post(self, url, **kwargs):
+            calls.append(url)
+            if url.endswith("/tokenize"):
+                return Response(_token_budget(runtime_id))
+            prompt = kwargs["json"]["messages"][0]["content"]
+            assert "wiki_evidence" in prompt and "4 Red Apricorn" in prompt
+            assert "social.player_message" in prompt
+            return Response({"model": MODEL_ID, "choices": [{
+                "finish_reason": "stop", "message": {"content": json.dumps({
+                    "r": "Use the supplied pack reference", "g": None, "s": None,
+                    "p": {}, "o": None, "c": None, "x": False, "q": [],
+                    "w": None, "d": None, "n": [],
+                })},
+            }]})
+
+    model = NativeWorldCognitionModel(
+        MODEL_ID, "http://127.0.0.1:8771/v1", "/tmp/native-test/token", "/tmp/native-test/ready",
+    )
+    monkeypatch.setattr("minecraft_ai.native_world_model._read_private_file", lambda path, **kw: (
+        b"synthetic-bearer" if path == model.token_file else json.dumps(ready).encode()
+    ))
+    monkeypatch.setattr(model, "_client", Client)
+    context = CognitionContext(
+        role=get_role("generalist"), goals=(), memories=(), promises=(), wiki=(answer.evidence,),
+        pack_recipe_reply=answer.chat_reply,
+    )
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+    decision = controller.decide(board.cognition_snapshot(), context)
+    assert decision.game_chat == answer.chat_reply
+    assert decision.skill_id is None and decision.skill_parameters == {}
+    assert decision.plan_steps == ()
+    assert game_chat_authority_matches(decision, board)
+    assert calls == ["http://127.0.0.1:8771/v1/models", "http://127.0.0.1:8771/v1/tokenize",
+                     "http://127.0.0.1:8771/v1/chat/completions"]
+    assert all(not fact.key.startswith("inventory.") for fact in board.raw_latest().facts)
+    backend = ChatBackend()
+    supervisor = Supervisor()
+    supervisor.start()
+    supervisor.replace_backend(backend)
+    lease = supervisor.arm("bedrock:1.26.52.3:synthetic-family-chat")
+    supervisor.activate()
+    result = supervisor.send_chat(str(lease["lease_id"]), decision.game_chat)
+    assert result == {"sent": True, "characters": len(answer.chat_reply)}
+    assert backend.messages == [answer.chat_reply]

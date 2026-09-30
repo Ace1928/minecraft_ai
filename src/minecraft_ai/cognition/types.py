@@ -26,6 +26,18 @@ class DecisionModelOrigin:
     attempt_id: str
     source_decision_sha256: str
 
+
+@dataclass(frozen=True, slots=True)
+class DecisionChatAuthority:
+    """The exact observed channel fact supplied to this decision's computation."""
+
+    instance_id: str
+    key: str
+    value: str | int | float | bool
+    observed_ns: int
+    source: str
+    evidence_refs: tuple[str, ...]
+
 class CognitionDecision(BaseModel):
     """High-level output with explicit, non-interchangeable communication channels.
 
@@ -60,6 +72,11 @@ class CognitionDecision(BaseModel):
     )
 
     _model_origin: DecisionModelOrigin | None = PrivateAttr(default=None)
+    _chat_authority: DecisionChatAuthority | None = PrivateAttr(default=None)
+
+    @property
+    def chat_authority(self) -> DecisionChatAuthority | None:
+        return self._chat_authority
 
     @field_validator("plan_steps")
     @classmethod

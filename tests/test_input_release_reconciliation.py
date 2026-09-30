@@ -15,7 +15,7 @@ from minecraft_ai.crafting_control import PlankCraftPhase
 from minecraft_ai.execution import SkillExecutor
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorIntent
 from minecraft_ai.perception import PerceptionBlackboard
-from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
+from minecraft_ai.platforms.bedrock_x11 import CapturedFrame, ImageCaptureTimeout, IsolationError
 from minecraft_ai.policy_service import (
     GroundedPolicyRouter,
     LearnedPolicyOutput,
@@ -255,6 +255,108 @@ def test_stale_tick_confirms_release_without_advancing_skill_or_sequence(monkeyp
     assert runtime._input_release_pending_ns is None and runtime._sequence == 20
     assert runtime.metrics.stale_frame_skips == 1 and runtime.metrics.motor_actions == 0
     assert not runtime.executor.policy._held_keys
+
+
+@pytest.mark.parametrize("acknowledged", [True, False])
+def test_image_timeout_releases_before_next_tick_without_any_frame_or_action(
+    monkeypatch, acknowledged,
+):
+    runtime = _runtime(monkeypatch)
+    runtime.executor.policy._held_keys = {"w"}
+    runtime.executor.policy._last_sequence = 41
+    publications = []
+    runtime.telemetry = SimpleNamespace(publish=publications.append)
+    calls = []
+
+    def timeout():
+        calls.append("capture")
+        raise ImageCaptureTimeout("image reply read timed out")
+
+    def release(command, **kwargs):
+        calls.append(command)
+        assert kwargs == {"lease_id": "unit-lease"}
+        return {"released": acknowledged, "lease_active": True}
+
+    monkeypatch.setattr(runtime.perception, "capture_once", timeout)
+    monkeypatch.setattr(runtime_module, "send_command", release)
+    monkeypatch.setattr(runtime, "_merge_operator_target", lambda: pytest.fail("no fake frame"))
+    monkeypatch.setattr(runtime, "_merge_policy_perception", lambda: pytest.fail("no old frame"))
+    monkeypatch.setattr(runtime, "_consume_cognition_decision", lambda: pytest.fail("no cognition"))
+    runtime.tick()
+    assert calls == ["capture", "release-inputs"]
+    assert publications == [{"state": "capture-stalled"}]
+    assert runtime.metrics.frames == runtime.metrics.motor_actions == 0
+    assert runtime.metrics.stale_frame_skips == runtime.metrics.consecutive_stale_frames == 1
+    assert runtime._sequence == 20 and runtime.executor.policy._last_sequence == 41
+    assert (runtime._input_release_pending_ns is None) is acknowledged
+    assert bool(runtime.executor.policy._held_keys) is not acknowledged
+
+
+def test_image_timeouts_retain_existing_consecutive_limit(monkeypatch):
+    runtime = _runtime(monkeypatch)
+
+    def timeout():
+        raise ImageCaptureTimeout("image reply read timed out")
+
+    monkeypatch.setattr(runtime.perception, "capture_once", timeout)
+    monkeypatch.setattr(runtime_module, "send_command", lambda *_args, **_kw: {
+        "released": True, "lease_active": True,
+    })
+    runtime.tick()
+    runtime.tick()
+    with pytest.raises(RuntimeError, match="timed out for 3 consecutive frames"):
+        runtime.tick()
+    assert runtime.metrics.frames == 0 and runtime.metrics.stale_frame_skips == 3
+    assert runtime._input_release_pending_ns is None
+
+
+def test_only_explicit_image_timeout_is_recoverable(monkeypatch):
+    runtime = _runtime(monkeypatch)
+
+    def disconnected():
+        raise IsolationError("image connection reset or ownership changed")
+
+    monkeypatch.setattr(runtime.perception, "capture_once", disconnected)
+    monkeypatch.setattr(runtime_module, "send_command", lambda *_args, **_kw: pytest.fail(
+        "generic isolation faults must enter normal fatal shutdown, not retry",
+    ))
+    with pytest.raises(IsolationError):
+        runtime.tick()
+    assert runtime.metrics.stale_frame_skips == 0
+
+
+def test_fresh_capture_after_image_timeout_resets_counter_without_pose_or_sequence_reset(
+    monkeypatch,
+):
+    runtime = _runtime(monkeypatch)
+    reads = [ImageCaptureTimeout("image reply read timed out"), SimpleNamespace(frame_id=10)]
+
+    def capture():
+        value = reads.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(runtime.perception, "capture_once", capture)
+    monkeypatch.setattr(runtime_module, "send_command", lambda *_args, **_kw: {
+        "released": True, "lease_active": True,
+    })
+    runtime.tick()
+    reached = []
+
+    class FreshReached(Exception):
+        pass
+
+    def fresh():
+        reached.append(True)
+        raise FreshReached
+
+    monkeypatch.setattr(runtime, "_flush_pending_skill_stats", fresh)
+    with pytest.raises(FreshReached):
+        runtime.tick()
+    assert runtime.metrics.frames == 1 and runtime.metrics.consecutive_stale_frames == 0
+    assert runtime.metrics.stale_frame_skips == 1 and runtime._sequence == 20
+    assert reached == [True]
 
 
 def test_notification_failure_retains_release_interlock(monkeypatch):

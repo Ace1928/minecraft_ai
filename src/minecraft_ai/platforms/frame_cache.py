@@ -16,13 +16,19 @@ from pathlib import Path
 from typing import Protocol
 
 from minecraft_ai.agent_lifecycle import AgentProcess, RUNTIME_DIR
-from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
+from minecraft_ai.platforms.bedrock_x11 import (
+    CapturedFrame,
+    ImageCaptureTimeout,
+    IsolatedX11Capture,
+    IsolationError,
+)
 
 FRAME_CACHE_FILE = RUNTIME_DIR / "agent-frame.bgra"
 MAX_FRAME_BYTES = 32 * 1024 * 1024
 MAX_HEADER_BYTES = 4096
 FRAME_CACHE_INTERVAL_NS = 250_000_000
 FRAME_CACHE_MAX_AGE_NS = 500_000_000
+MAX_CONSECUTIVE_IMAGE_RECONNECTS = 2
 
 
 class CaptureSource(Protocol):
@@ -52,7 +58,13 @@ def _pixel_count(width: object, height: object) -> int | None:
 
 
 class PublishedFrameCapture:
-    """Best-effort spectator publication; capture/input authority is unchanged."""
+    """Publish real frames; recover only a classified private reader timeout.
+
+    A timeout drops the current frame. The runtime releases inputs before the
+    next capture, where this owner may reopen the exact admitted target. Two
+    consecutive reopen attempts are allowed; only fresh, valid, advancing
+    pixels reset that allowance. Other isolation failures remain fatal.
+    """
 
     def __init__(
         self, source: CaptureSource, owner: AgentProcess, *, path: Path = FRAME_CACHE_FILE,
@@ -62,10 +74,53 @@ class PublishedFrameCapture:
         self.path = path
         self._last_publish_ns = 0
         self._published_identity: tuple[int, int] | None = None
+        self._capture_recovery_owner = _owner_payload(owner)
+        self._capture_recovery_source = source
+        self._image_reconnect_pending = False
+        self._consecutive_image_timeouts = 0
+        self._last_capture_identity = (-1, -1)
+
+    def _require_private_recovery_owner(self) -> IsolatedX11Capture:
+        source = self.source
+        if (
+            type(source) is not IsolatedX11Capture
+            or source is not self._capture_recovery_source
+            or _owner_payload(self.owner) != self._capture_recovery_owner
+            or self.owner.allow_host_capture is not False
+            or source.display_name != self.owner.display
+            or source.target_window_id != self.owner.window_id
+        ):
+            raise IsolationError("capture recovery owner or private target changed")
+        return source
 
     def capture(self) -> CapturedFrame:
-        frame = self.source.capture()
+        if self._image_reconnect_pending:
+            source = self._require_private_recovery_owner()
+            # Consume the one pending reopen before trying it. A failed reopen
+            # is fatal, so even an erroneous caller cannot retry it implicitly.
+            self._image_reconnect_pending = False
+            source.reconnect_after_image_timeout()
+        try:
+            frame = self.source.capture()
+        except ImageCaptureTimeout as exc:
+            self._require_private_recovery_owner()
+            self._consecutive_image_timeouts += 1
+            if self._consecutive_image_timeouts > MAX_CONSECUTIVE_IMAGE_RECONNECTS:
+                raise IsolationError("consecutive image capture recovery budget exhausted") from exc
+            self._image_reconnect_pending = True
+            # No inline retry, fake pixels, spectator write or timestamp change.
+            raise
         now = time.monotonic_ns()
+        previous_id, previous_ns = self._last_capture_identity
+        size = _pixel_count(frame.width, frame.height)
+        if (
+            type(frame.frame_id) is int and frame.frame_id > previous_id
+            and type(frame.captured_ns) is int and previous_ns < frame.captured_ns <= now
+            and size is not None and len(frame.bgra) == size
+        ):
+            self._last_capture_identity = (frame.frame_id, frame.captured_ns)
+            if now - frame.captured_ns <= FRAME_CACHE_MAX_AGE_NS:
+                self._consecutive_image_timeouts = 0
         if now - self._last_publish_ns >= FRAME_CACHE_INTERVAL_NS:
             try:
                 self._publish(frame)

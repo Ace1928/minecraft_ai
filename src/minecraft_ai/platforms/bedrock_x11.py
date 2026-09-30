@@ -18,6 +18,10 @@ class IsolationError(RuntimeError):
     pass
 
 
+class ImageCaptureTimeout(IsolationError):
+    """One classified pixel-read timeout; no frame or input authority granted."""
+
+
 @dataclass(frozen=True)
 class ScreenRect:
     """One immutable rectangle in X root-window coordinates."""
@@ -1526,10 +1530,16 @@ class IsolatedX11Capture:
             self._mss_module = None
         self.display_name = display_name
         self.target_window_id = target_window_id
+        self._host_display = host_display
+        self._allow_host = allow_host
+        self._recovery_identity = (
+            display_name, target_window_id, host_display, allow_host, capture_budget_ms,
+        )
         self._display: Any = display_module.Display(display_name)
         self._reply_protocol = self._display.display
         self._reply_socket = self._reply_protocol.socket
         self._reply_failed = False
+        self._reply_timed_out = False
         self._capture_budget_ms = capture_budget_ms
         self._frame_id = 0
 
@@ -1542,13 +1552,58 @@ class IsolatedX11Capture:
                 return drawable.get_image(*args)
         except ImageReplyError as exc:
             # A partially consumed reply cannot be reused. Do not call Xlib's
-            # flush-on-close after interrupting its receive loop or reconnect
-            # automatically; the capture owner must explicitly construct anew.
+            # flush-on-close after interrupting its receive loop. Only the
+            # classified read timeout permits a later owner-managed reopen.
             self._discard_reply_connection()
+            if type(exc) is ImageReplyError and exc.args == ("image reply read timed out",):
+                self._reply_timed_out = True
+                raise ImageCaptureTimeout(str(exc)) from exc
             raise IsolationError(str(exc)) from exc
+
+    def reconnect_after_image_timeout(self) -> None:
+        """Replace only this poisoned reader on its exact private target.
+
+        The capture owner calls this on the next tick, after input release.
+        No pixels are acquired here, no window search or host fallback occurs,
+        and the successful-frame counter remains monotonic. Other reply,
+        geometry, ownership and isolation faults cannot take this path.
+        """
+        identity = (
+            self.display_name, self.target_window_id, self._host_display,
+            self._allow_host, self._capture_budget_ms,
+        )
+        if (
+            not self._reply_failed or not self._reply_timed_out
+            or identity != self._recovery_identity or self._allow_host is not False
+            or self._reply_protocol.socket is not self._reply_socket
+        ):
+            raise IsolationError("capture reconnect lacks an exact private timeout admission")
+        require_isolated_display(self.display_name, self._host_display, allow_host=False)
+        try:
+            replacement = IsolatedX11Capture(
+                self.display_name, self.target_window_id,
+                host_display=self._host_display, allow_host=False,
+                capture_budget_ms=self._capture_budget_ms,
+            )
+        except Exception as exc:
+            raise IsolationError("exact private capture connection cannot be reopened") from exc
+        try:
+            bounds = replacement._bounds()
+            replacement._content_rect(bounds["width"], bounds["height"])
+        except Exception as exc:
+            replacement.close()
+            raise IsolationError(
+                "exact private capture target is unavailable on reconnect",
+            ) from exc
+        self._display = replacement._display
+        self._reply_protocol = replacement._reply_protocol
+        self._reply_socket = replacement._reply_socket
+        self._reply_failed = False
+        self._reply_timed_out = False
 
     def _discard_reply_connection(self) -> None:
         self._reply_failed = True
+        self._reply_timed_out = False
         try:
             self._reply_socket.close()
         except OSError:
@@ -1629,6 +1684,8 @@ class IsolatedX11Capture:
                     deadline_ns=deadline_ns,
                 )
                 bgra_bytes = raw.data
+            except IsolationError:
+                raise
             except Exception as exc:
                 raise IsolationError(f"isolated X11 capture failed: {exc}") from exc
         if (

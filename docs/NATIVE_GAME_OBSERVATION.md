@@ -80,6 +80,37 @@ with version/confidence metadata; they never become observed facts, inventory
 counts, player-chat authority or an executable game action. Refresh the pinned
 catalog from the actual installed family pack before resuming after an upgrade.
 
+The existing recipe/controller/chat path now projects Latin accents and the
+empty-grid symbol into the printable-ASCII input contract (`Poke Ball`, `.`).
+Catalog bytes, Unicode item names and wiki extracts remain unchanged; an
+unrepresentable name refuses chat instead of losing characters. The native
+World planner still owns the decision; exact recipe quantities and arrangement
+come from the configured hash-pinned export, never assumed inventory or a
+vanilla recipe substituted for pack mechanics.
+
+Model-produced game replies retain private metadata binding the exact source
+player/explicit-channel fact. A new speaker/text, timestamp, source or pixel
+evidence reference cannot authorize an older answer. Before the existing
+supervisor chat command, the runtime requires the current captured HUD with
+fresh no-UI/no-death/no-drowning witnesses, blocks immediate danger and critical
+health (including unreadable survival hearts), and releases/reconciles all
+gameplay inputs. It rechecks those conditions
+after release and counts a reply only after the leased transport confirms the
+exact character count. This is source-level delivery admission, not qualified
+player-chat OCR or observed in-game delivery. Slash commands and unsupported
+text cannot pass this reply path.
+
+After any server pack upgrade, export and repin the actual installed catalog
+before using it. The Bedrock build number alone cannot establish that a server's
+pack is unchanged. A real acceptance check must retain the before/composer/
+submitted/returned-world frames and the matching exact pack answer. Until an
+exact-build chat observer is qualified, the native observation seam above
+remains explicitly unsupported for autonomous player-question ingestion.
+The current player-message authority expires after 30 seconds. An earlier
+actual native recipe probe took about 36 seconds, so this delivery path must
+reject such a late answer. Lower-latency reply routing remains a measured gap;
+the safety deadline has not been extended to conceal it.
+
 ## Replacing the shared World without closing the game
 
 The native World service overlay uses `Wants` and `After` for ordered bootstrap.

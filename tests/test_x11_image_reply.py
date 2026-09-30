@@ -5,11 +5,16 @@ import threading
 import time
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
-from minecraft_ai.platforms.bedrock_x11 import IsolatedX11Capture, IsolationError
+from minecraft_ai.platforms import bedrock_x11
+from minecraft_ai.platforms.bedrock_x11 import (
+    ImageCaptureTimeout,
+    IsolatedX11Capture,
+    IsolationError,
+)
 from minecraft_ai.platforms.x11_image_reply import (
     MAX_IMAGE_REPLY_BYTES,
     MIN_COALESCED_REPLY_BYTES,
@@ -316,3 +321,192 @@ def test_socket_ownership_change_discards_only_original_connection() -> None:
     assert capture._reply_protocol.socket is replacement
     assert capture._reply_failed
     drawable.get_image.assert_not_called()
+
+
+def _capture_displays(monkeypatch: pytest.MonkeyPatch) -> tuple[IsolatedX11Capture, list]:
+    """Two fake private X connections, never a real display or input route."""
+    displays = []
+    for _ in range(2):
+        raw = _Socket([])
+        protocol = _protocol(raw)
+        display = Mock()
+        display.display = protocol
+        window = Mock()
+        window.get_geometry.return_value = SimpleNamespace(width=4, height=4)
+        window.get_image.return_value = SimpleNamespace(data=b"\0" * 64)
+        display.create_resource_object.return_value = window
+        display.screen.return_value.root.translate_coords.return_value = SimpleNamespace(x=0, y=0)
+        displays.append(display)
+    factory = Mock(side_effect=displays)
+    displays[0]._connection_factory = factory
+    modules = {
+        "Xlib.display": SimpleNamespace(Display=factory),
+        "Xlib.X": SimpleNamespace(ZPixmap=2),
+        "mss": Mock(),
+    }
+    monkeypatch.setattr(
+        bedrock_x11, "importlib", SimpleNamespace(import_module=modules.__getitem__),
+    )
+    monkeypatch.setattr("minecraft_ai.platforms.bedrock_x11._wine_content_rect", lambda *_: None)
+    capture = IsolatedX11Capture(":2", 42, host_display=":0", capture_budget_ms=500)
+    capture._frame_id = 9
+    return capture, displays
+
+
+def _interrupt_image_read(capture: IsolatedX11Capture) -> None:
+    capture._reply_socket.recv = Mock(side_effect=TimeoutError("fixture"))
+    window = capture._display.create_resource_object.return_value
+    window.get_image.side_effect = lambda *_: capture._reply_protocol.socket.recv(
+        MAX_IMAGE_REPLY_BYTES,
+    )
+    with pytest.raises(ImageCaptureTimeout, match="image reply read timed out"):
+        capture.capture()
+
+
+def test_classified_read_timeout_reopens_only_exact_target_and_keeps_frame_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture, displays = _capture_displays(monkeypatch)
+    _interrupt_image_read(capture)
+    assert capture._reply_failed and capture._reply_timed_out
+    assert capture._reply_socket.closed
+    assert capture._frame_id == 9
+    capture.reconnect_after_image_timeout()
+    assert capture._display is displays[1]
+    assert not capture._reply_failed and not capture._reply_timed_out
+    assert capture._frame_id == 9
+    displays[0].close.assert_not_called()
+    assert displays[0]._connection_factory.call_args_list == [call(":2"), call(":2")]
+    displays[1].create_resource_object.assert_called_with("window", 42)
+    before = time.monotonic_ns()
+    frame = capture.capture()
+    assert frame.frame_id == 10 and before <= frame.captured_ns <= time.monotonic_ns()
+    assert frame.bgra == b"\0" * 64
+    capture.close()
+    displays[1].close.assert_called_once()
+
+
+def test_root_drawable_timeout_preserves_classification_without_fallback_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture, _ = _capture_displays(monkeypatch)
+    window = capture._display.create_resource_object.return_value
+    window.get_image.side_effect = ValueError("drawable")
+    capture._mss_module.mss.side_effect = OSError("fallback unavailable")
+    capture._reply_socket.recv = Mock(side_effect=TimeoutError("fixture"))
+    root = capture._display.screen.return_value.root
+    root.get_image.side_effect = lambda *_: capture._reply_protocol.socket.recv(
+        MAX_IMAGE_REPLY_BYTES,
+    )
+    with pytest.raises(ImageCaptureTimeout):
+        capture.capture()
+    assert capture._reply_failed and capture._reply_timed_out and capture._frame_id == 9
+    root.get_image.assert_called_once()
+
+
+@pytest.mark.parametrize("message", [
+    "image reply acquisition budget expired", "image reply assembly failed",
+    "image reply connection ownership changed", "invalid image reply framing",
+    "image reply ended before its declared length", "image reply read returned invalid bytes",
+])
+def test_other_reply_faults_never_receive_timeout_recovery_admission(
+    message: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture, displays = _capture_displays(monkeypatch)
+    monkeypatch.setattr(
+        "minecraft_ai.platforms.bedrock_x11.coalesce_image_reply",
+        Mock(side_effect=ImageReplyError(message)),
+    )
+    with pytest.raises(IsolationError) as caught:
+        capture.capture()
+    assert type(caught.value) is IsolationError
+    assert capture._reply_failed and not capture._reply_timed_out
+    with pytest.raises(IsolationError, match="admission"):
+        capture.reconnect_after_image_timeout()
+    displays[1].create_resource_object.assert_not_called()
+
+
+def test_unrecognized_reply_error_subclass_cannot_claim_read_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnclassifiedReplyError(ImageReplyError):
+        pass
+
+    capture, _ = _capture_displays(monkeypatch)
+    monkeypatch.setattr(
+        bedrock_x11, "coalesce_image_reply",
+        Mock(side_effect=UnclassifiedReplyError("image reply read timed out")),
+    )
+    with pytest.raises(IsolationError) as caught:
+        capture.capture()
+    assert type(caught.value) is IsolationError and not capture._reply_timed_out
+
+
+@pytest.mark.parametrize("field,value", [
+    ("display_name", ":3"), ("target_window_id", 99), ("_host_display", ":1"),
+    ("_allow_host", True), ("_capture_budget_ms", 600),
+])
+def test_reconnect_refuses_changed_target_or_budget(
+    field: str, value: object, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture, displays = _capture_displays(monkeypatch)
+    _interrupt_image_read(capture)
+    setattr(capture, field, value)
+    with pytest.raises(IsolationError, match="admission"):
+        capture.reconnect_after_image_timeout()
+    displays[1].create_resource_object.assert_not_called()
+
+
+def test_reconnect_rechecks_host_isolation_before_opening(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture, displays = _capture_displays(monkeypatch)
+    _interrupt_image_read(capture)
+    private_check = Mock(side_effect=IsolationError("host display refused"))
+    monkeypatch.setattr(
+        "minecraft_ai.platforms.bedrock_x11.require_isolated_display", private_check,
+    )
+    with pytest.raises(IsolationError, match="host display refused"):
+        capture.reconnect_after_image_timeout()
+    private_check.assert_called_once_with(":2", ":0", allow_host=False)
+    displays[1].create_resource_object.assert_not_called()
+
+
+def test_reconnect_refuses_replaced_reply_owner_even_after_classified_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture, displays = _capture_displays(monkeypatch)
+    _interrupt_image_read(capture)
+    replacement = _Socket([])
+    capture._reply_protocol.socket = replacement
+    with pytest.raises(IsolationError, match="admission"):
+        capture.reconnect_after_image_timeout()
+    assert not replacement.closed
+    displays[1].create_resource_object.assert_not_called()
+
+
+def test_reconnect_geometry_failure_closes_new_reader_and_keeps_original_poisoned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture, displays = _capture_displays(monkeypatch)
+    _interrupt_image_read(capture)
+    displays[1].create_resource_object.return_value.get_geometry.side_effect = OSError("gone")
+    with pytest.raises(IsolationError, match="target is unavailable"):
+        capture.reconnect_after_image_timeout()
+    assert capture._display is displays[0] and capture._reply_failed
+    displays[1].close.assert_called_once()
+    assert capture._frame_id == 9
+
+
+def test_reconnect_connection_failure_is_fatal_without_frame_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture, displays = _capture_displays(monkeypatch)
+    _interrupt_image_read(capture)
+    factory = Mock(side_effect=OSError("unavailable"))
+    monkeypatch.setattr(
+        "minecraft_ai.platforms.bedrock_x11.importlib.import_module",
+        lambda name: SimpleNamespace(Display=factory) if name == "Xlib.display" else Mock(),
+    )
+    with pytest.raises(IsolationError, match="cannot be reopened"):
+        capture.reconnect_after_image_timeout()
+    assert capture._display is displays[0] and capture._reply_failed and capture._frame_id == 9
+    factory.assert_called_once_with(":2")

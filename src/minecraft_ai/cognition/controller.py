@@ -61,6 +61,7 @@ from .types import (
 )
 from minecraft_ai.pack_recipes import PackRecipeCatalog
 from minecraft_ai.world_knowledge import WorldMinecraftSearch
+from minecraft_ai.game_chat import bind_game_chat_authority
 
 
 @dataclass
@@ -90,7 +91,7 @@ class HighLevelController:
         # deliberately irrelevant, and even a legacy nested call clears it.
         token = self._request_context.set(request)
         try:
-            return self._decide(blackboard, context)
+            return bind_game_chat_authority(self._decide(blackboard, context), blackboard)
         finally:
             self._request_context.reset(token)
 
