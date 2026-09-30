@@ -2457,32 +2457,56 @@ def test_only_fresh_explicit_craft_request_overrides_no_logs_guard(
     assert planks_retry_requires_wood(context) is blocked
 
 
-def test_planks_retry_override_selects_same_directive_as_operator_fast_path() -> None:
+@pytest.mark.parametrize("status", (
+    OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+))
+def test_pending_question_keeps_old_craft_retry_blocked(status) -> None:
     context = CognitionContext(
         role=get_role("generalist"), goals=(), memories=(), promises=(), wiki=(),
         planks_retry_requires_wood=True,
         operator_messages=(
             OperatorMessage(
                 message_id="newer-question", created_ns=2, text="What are you doing?",
-                kind=OperatorMessageKind.QUESTION,
+                kind=OperatorMessageKind.QUESTION, status=status,
             ),
             OperatorMessage(message_id="craft-once", created_ns=1, text="Craft planks once."),
         ),
     )
-    controller = HighLevelController(
-        _OperatorFastPathOnlyModel(), build_bootstrap_skill_library()
-    )
-    decision = controller.decide(PerceptionBlackboard(), context)
-    assert decision.skill_id == "craft_wood_planks"
-    assert decision.chosen_goal_id == "operator:craft-once"
-    assert planks_retry_requires_wood(context) is False
-    context.operator_messages = (
-        context.operator_messages[0],
-        context.operator_messages[1].model_copy(
-            update={"status": OperatorMessageStatus.ACKNOWLEDGED}
-        ),
-    )
+    class QuestionModel:
+        model_id = "synthetic-pending-question"
+        calls = 0
+
+        def complete_constrained(self, messages, **kwargs):
+            del messages, kwargs
+            self.calls += 1
+            return ModelResponse(text=json.dumps({
+                "r": "Current inventory has not been observed.",
+                "g": "operator:newer-question", "s": None, "p": {},
+                "o": "I am waiting for fresh inventory evidence before crafting.",
+                "c": None, "x": False, "q": [], "w": None, "d": None, "n": [],
+            }), model=self.model_id, latency_ms=1)
+
+    model = QuestionModel()
+    controller = HighLevelController(model, build_bootstrap_skill_library())
+    assert controller._operator_fast_path_decision(PerceptionBlackboard(), context) is None
     assert planks_retry_requires_wood(context) is True
+    decision = controller.decide(PerceptionBlackboard(), context)
+    assert decision.skill_id is None
+    assert decision.chosen_goal_id == "operator:newer-question"
+    assert model.calls == 1
+    assert decision.say is not None
+    assert planks_retry_requires_wood(context, skill_id="craft_wood_planks") is True
+    # The pending question is completed; the unchanged fresh craft directive
+    # may receive its normal one bounded inventory audit afterwards.
+    context.operator_messages = (
+        context.operator_messages[0].model_copy(
+            update={"status": OperatorMessageStatus.ACKNOWLEDGED}),
+        context.operator_messages[1],
+    )
+    assert planks_retry_requires_wood(context) is False
+    retry = controller.decide(PerceptionBlackboard(), context)
+    assert retry.skill_id == "craft_wood_planks"
+    assert retry.chosen_goal_id == "operator:craft-once"
 
 
 def test_cognition_excludes_missing_wood_audit_but_reenables_after_repair() -> None:

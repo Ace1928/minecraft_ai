@@ -620,6 +620,17 @@ def planks_retry_requires_wood(
     """Keep crafting blocked; a current inventory directive may admit GUI inspection."""
     if not context.planks_retry_requires_wood:
         return False
+    if (
+        context.operator_messages
+        and context.operator_messages[0].kind == OperatorMessageKind.QUESTION
+        and context.operator_messages[0].status in {
+            OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+        }
+    ):
+        # The same reply-only priority as the controller fast path. An older
+        # craft directive cannot unblock an action while a question owns this
+        # decision, including the runtime's final prerequisite revalidation.
+        return True
     active = next(
         (
             message
