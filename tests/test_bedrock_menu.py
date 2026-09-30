@@ -146,6 +146,32 @@ def test_retained_full_hd_lan_frame_keeps_verified_target(retained_play_lan_obse
     assert 670 <= target.center[1] <= 800
 
 
+def test_lan_join_caption_is_not_a_server_selection_dialog():
+    """Actual 1.26.52.3 frame: 'Open Server List' is the LAN entry caption."""
+    if not shutil.which("tesseract"):
+        pytest.skip("retained-frame OCR acceptance requires Tesseract")
+    from PIL import Image
+    from minecraft_ai.operator.menu import MenuObservation, _find_click_target
+
+    path = Path(__file__).parent / (
+        "fixtures/bedrock_menu/play_lan_server_list_caption_1920x1080.png"
+    )
+    with Image.open(path) as image:
+        image = image.convert("RGB")
+        frame = CapturedFrame(1, 1, image.width, image.height, image.tobytes("raw", "BGRX"))
+    lines = TesseractMenuTextReader().read(frame)
+    assert "serverlis" in "".join(line.text.lower().replace(" ", "") for line in lines)
+    stage = classify_menu_stage(
+        frame, lines, lan_name="BedrockConnect", server_name="Pokemon Family - CobbleDrock",
+    )
+    assert stage == MenuStage.PLAY
+    target = _find_click_target(
+        MenuObservation(frame, lines, stage), ("BedrockConnect",),
+        region=(0.02, 0.10, 0.98, 0.98),
+    )
+    assert target.center[0] < 650 and 670 < target.center[1] < 805
+
+
 def test_retained_lan_label_without_menu_anchors_sends_nothing(retained_play_lan_observation):
     frame, lines = retained_play_lan_observation
     isolated_label = tuple(line for line in lines if "BedrockConnect" in line.text)

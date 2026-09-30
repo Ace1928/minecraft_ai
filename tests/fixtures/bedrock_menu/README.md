@@ -12,6 +12,14 @@ anchors or request an unapproved target. All test clicks use an in-memory
 recorder; the tests never capture a live display or send game input. The OCR
 acceptance tests skip when Tesseract is unavailable.
 
+`play_lan_server_list_caption_1920x1080.png` is the unmodified frame 011 from
+the 30 September 2026 pack-1.3.147 reconnect attempt002, on Bedrock 1.26.52.3.
+The LAN entry caption says "Join To Open Server List". This is the Worlds
+browser, not the ServerList modal; selection must remain on the bounded LAN
+entry path until a real server-form rectangle is observed. Its regression runs
+the real local OCR reader and retains the older full-HD LAN target check.
+SHA-256: `f2937947fc51f40db34ad3fa4c74ac4dac04f06a86a27faa3765b4e45ccfc510`.
+
 `server_list_transfer_1920x1080.png` is the exact unmodified frame 012 from the
 30 September 2026 family reconnect attempt002 on Bedrock 1.26.52.3. Its
 translucent ServerList pane is shifted right over a complete survival HUD.

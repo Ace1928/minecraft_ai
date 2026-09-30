@@ -100,6 +100,11 @@ exact character count. This is source-level delivery admission, not qualified
 player-chat OCR or observed in-game delivery. Slash commands and unsupported
 text cannot pass this reply path.
 
+Any attempted chat transport also fences the pre-chat capture, including
+unconfirmed sends. The runtime releases inputs and waits for a frame captured
+after that attempt completed before scheduling another skill or motor action.
+The returned chat transport alone cannot certify the current world scene.
+
 After any server pack upgrade, export and repin the actual installed catalog
 before using it. The Bedrock build number alone cannot establish that a server's
 pack is unchanged. A real acceptance check must retain the before/composer/

@@ -95,7 +95,7 @@ from .telemetry import TelemetryPublisher
 from .trajectory import ActionOrigin, ActionProvenance, TrajectoryRecorder
 from .storage import OperatorContextSnapshot, StateDatabase
 from .supervisor import operator_intent_lock, operator_pause_latched, send_command
-from .platforms.bedrock_x11 import ImageCaptureTimeout
+from .platforms.bedrock_x11 import CapturedFrame, ImageCaptureTimeout
 
 
 from minecraft_ai.skills.recovery import select_learned_recovery
@@ -304,6 +304,7 @@ class AgentRuntime:
     _last_cognition_ns: int = field(default=0, init=False)
     _last_player_chat_replied_ns: int | None = field(default=None, init=False)
     _last_player_chat_signature: str | None = field(default=None, init=False)
+    _game_chat_completed_ns: int | None = field(default=None, init=False)
     _last_semantic_ns: int = field(default=0, init=False)
     _lease_thread: threading.Thread | None = field(default=None, init=False)
     _lease_fault: str | None = field(default=None, init=False)
@@ -715,6 +716,8 @@ class AgentRuntime:
             # The next tick must observe the released body before selecting
             # another action; never replay the pre-release image or command.
             return
+        if self._await_post_chat_capture(frame):
+            return
         if not self._continue_after_capture():
             return
         self._flush_pending_skill_stats()
@@ -747,6 +750,8 @@ class AgentRuntime:
                 self._flush_pending_skill_stats()
                 return
         self._consume_cognition()
+        if self._await_post_chat_capture(frame):
+            return
         self._reconcile_cognition_perception_probe()
         if self._start_cognition_if_due():
             return
@@ -3717,6 +3722,10 @@ class AgentRuntime:
                     self._idle_stall_probe_used_for_run_id = idle_stall_run_id
                 perception_probe_started = True
         self._deliver_game_chat(decision)
+        if self._game_chat_completed_ns is not None:
+            # Typing may have changed focus even when delivery is unconfirmed.
+            # No new skill can be selected from the pre-chat captured scene.
+            return
         if decision.skill_id is not None:
             running = self.executor.run
             if running is not None and running.outcome == SkillOutcome.RUNNING:
@@ -4147,6 +4156,7 @@ class AgentRuntime:
             )
         ):
             return False
+        chat_attempted = False
         try:
             # Typing takes focus. Do not let the backend restore an earlier
             # movement/mining hold when it returns from the chat screen.
@@ -4159,6 +4169,7 @@ class AgentRuntime:
                 )
             ):
                 return False
+            chat_attempted = True
             result = send_command("chat", lease_id=self.lease_id, text=text)
             if (
                 not isinstance(result, dict) or result.get("sent") is not True
@@ -4174,6 +4185,20 @@ class AgentRuntime:
                 "Game chat delivery was not confirmed: %s", type(error).__name__,
             )
             return False
+        finally:
+            if chat_attempted:
+                self._game_chat_completed_ns = time.monotonic_ns()
+
+    def _await_post_chat_capture(self, frame: CapturedFrame) -> bool:
+        completed = self._game_chat_completed_ns
+        if completed is None:
+            return False
+        if frame.captured_ns > completed:
+            self._game_chat_completed_ns = None
+            return False
+        self._release_and_reconcile_inputs()
+        self.telemetry.publish(self._telemetry_payload(state="awaiting-post-chat-frame"))
+        return True
 
     def _publish_player_chat_facts(self) -> None:
         """Turn freshly observed player chat lines into an authorizing fact.

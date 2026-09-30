@@ -226,6 +226,34 @@ def test_delivery_requires_exact_positive_transport_confirmation(monkeypatch, re
     assert calls == ["release", "chat"]
     assert runtime.metrics.game_chat_messages == 0
     assert runtime._last_player_chat_replied_ns is None
+    assert runtime._game_chat_completed_ns == NOW
+
+
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_chat_focus_requires_a_post_attempt_capture_even_without_confirmation(
+    monkeypatch, confirmed,
+):
+    frame = _frame(FIXTURES / "bedrock_health/full_health_1920x1080.png")
+    board = _board(frame, monkeypatch)
+    runtime = _runtime(board, frame)
+    decision = bind_game_chat_authority(CognitionDecision(game_chat="hello"), board)
+    releases = []
+    publications = []
+    runtime.telemetry = SimpleNamespace(publish=publications.append)
+    monkeypatch.setattr(runtime, "_telemetry_payload", lambda **kw: kw)
+    monkeypatch.setattr(runtime, "_release_and_reconcile_inputs", lambda: releases.append(1)
+                        or True)
+    monkeypatch.setattr(runtime_module, "send_command", lambda *_args, **_kw: {
+        "sent": confirmed, "characters": 5,
+    })
+    assert runtime._deliver_game_chat(decision) is confirmed
+    assert runtime._await_post_chat_capture(frame)
+    assert runtime._await_post_chat_capture(replace(frame, captured_ns=NOW - 1))
+    assert publications == [{"state": "awaiting-post-chat-frame"}] * 2
+    assert runtime._game_chat_completed_ns == NOW
+    assert not runtime._await_post_chat_capture(replace(frame, captured_ns=NOW + 1))
+    assert runtime._game_chat_completed_ns is None
+    assert releases == [1, 1, 1]
 
 
 def test_confirmed_reply_is_delivered_once_after_inputs_are_reconciled(monkeypatch):

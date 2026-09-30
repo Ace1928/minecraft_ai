@@ -310,6 +310,35 @@ def test_image_timeouts_retain_existing_consecutive_limit(monkeypatch):
     assert runtime._input_release_pending_ns is None
 
 
+def test_tick_never_reuses_the_pre_chat_scene_for_policy_or_cognition(monkeypatch):
+    runtime = _runtime(monkeypatch)
+    runtime._game_chat_completed_ns = 100
+    runtime.perception.capture_once = lambda: SimpleNamespace(frame_id=9, captured_ns=100)
+    publications = []
+    runtime.telemetry = SimpleNamespace(publish=publications.append)
+    monkeypatch.setattr(runtime_module, "send_command", lambda *_args, **_kw: {
+        "released": True, "lease_active": True,
+    })
+    reached = []
+
+    class FreshSceneReached(Exception):
+        pass
+
+    def continue_fresh():
+        reached.append(True)
+        raise FreshSceneReached
+
+    monkeypatch.setattr(runtime, "_continue_after_capture", continue_fresh)
+    runtime.tick()
+    assert reached == [] and runtime.metrics.motor_actions == 0
+    assert publications == [{"state": "awaiting-post-chat-frame"}]
+    assert runtime._game_chat_completed_ns == 100
+    runtime.perception.capture_once = lambda: SimpleNamespace(frame_id=10, captured_ns=101)
+    with pytest.raises(FreshSceneReached):
+        runtime.tick()
+    assert reached == [True] and runtime._game_chat_completed_ns is None
+
+
 def test_only_explicit_image_timeout_is_recoverable(monkeypatch):
     runtime = _runtime(monkeypatch)
 

@@ -976,6 +976,9 @@ def classify_menu_stage(
             _normalized_text(server_name).replace(" ", "") in compact
             and "manage server list" in text
         )
+    ) and (
+        len(frame.bgra) != frame.width * frame.height * 4
+        or bedrock_server_form_bounds(frame) is not None
     ):
         return MenuStage.BEDROCK_CONNECT
 
