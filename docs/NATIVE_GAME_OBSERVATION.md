@@ -71,6 +71,25 @@ route. It still needs a parsed mapping, exact rendering calibration and the
 real-frame quality receipt before producing player-chat authority. No OCR
 expert is declared qualified or active by this document.
 
+## Replacing the shared World without closing the game
+
+The native World service overlay uses `Wants` and `After` for ordered bootstrap.
+It deliberately avoids `Requires`: replacing World otherwise stops the player
+unit, whose shutdown hooks close the managed Bedrock client. Native readiness,
+runtime identity, model leases and existing input interlocks remain mandatory.
+This dependency change does not itself authorize gameplay during an outage.
+
+For a supervised runtime handover, retain the exact wrapper PID/start identity,
+suspend only that wrapper's recovery loop, and use the repository CLI's
+`stop --transient` to drain the agent/supervisor and release every held input.
+Verify the game process, window and session are unchanged before replacing
+World. Restart the dashboard after the new owner's real health checks pass,
+then resume the same wrapper so the next agent loads the new source/config.
+Verify its exact owner binding and live readiness before scheduling a task.
+Retain the rollback source and latest consistent learning checkpoint. If
+qualification fails, restore the previous owner before resuming the wrapper;
+never leave a suspended recovery loop without a recorded handover owner.
+
 ## Bounded progression before autonomous observation
 
 The existing exact-frame operator selection can supply a manually grounded
