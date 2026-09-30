@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from contextlib import nullcontext
 from http.server import ThreadingHTTPServer
 from http import HTTPStatus
@@ -34,6 +35,68 @@ from minecraft_ai.perception_service import frame_dhash
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.platforms.bedrock_x11 import IsolationError
 from minecraft_ai.storage import StateDatabase
+
+
+def _reference_frame(frame_id: int = 17) -> CapturedFrame:
+    return CapturedFrame(
+        frame_id=frame_id, captured_ns=123_456, width=4, height=4,
+        bgra=bytes([0, 128, 255, 255]) * 16,
+    )
+
+
+def test_selected_frame_survives_other_viewers_with_bounded_cache(monkeypatch) -> None:
+    monkeypatch.setattr(operator_module, "_frame_references", OrderedDict())
+    original = _reference_frame()
+    token = operator_module._cache_frame_reference(original, "original-dhash")
+    operator_module._pin_frame_reference(token)
+    for frame_id in range(100, 132):
+        operator_module._cache_frame_reference(_reference_frame(frame_id), "new-dhash")
+        assert len(operator_module._frame_references) <= operator_module.MAX_FRAME_REFERENCES
+    assert operator_module._consume_frame_reference(token) == (original, "original-dhash")
+    assert operator_module._consume_frame_reference(token) is None
+
+
+def test_pin_never_renews_expiry_or_changes_pixels(monkeypatch) -> None:
+    monkeypatch.setattr(operator_module, "_frame_references", OrderedDict())
+    clock = [1_000]
+    monkeypatch.setattr(operator_module.time, "monotonic_ns", lambda: clock[0])
+    original = _reference_frame()
+    token = operator_module._cache_frame_reference(original, "fixed-dhash")
+    clock[0] += operator_module.FRAME_REFERENCE_TTL_NS - 1
+    operator_module._pin_frame_reference(token)
+    operator_module._pin_frame_reference(token)
+    reference = operator_module._frame_references[token]
+    assert reference.frame is original and reference.cached_ns == 1_000
+    clock[0] += 2
+    with pytest.raises(ValueError, match="expired"):
+        operator_module._pin_frame_reference(token)
+    assert operator_module._consume_frame_reference(token) is None
+
+
+def test_selection_limit_can_be_released_without_expanding_cache(monkeypatch) -> None:
+    monkeypatch.setattr(operator_module, "_frame_references", OrderedDict())
+    tokens = [
+        operator_module._cache_frame_reference(_reference_frame(i), "dhash") for i in range(5)
+    ]
+    for token in tokens[:4]:
+        operator_module._pin_frame_reference(token)
+    with pytest.raises(ValueError, match="too many selections"):
+        operator_module._pin_frame_reference(tokens[4])
+    assert operator_module._release_frame_reference(tokens[0]) is True
+    assert operator_module._release_frame_reference(tokens[0]) is False
+    operator_module._pin_frame_reference(tokens[4])
+    assert operator_module._consume_frame_reference(tokens[0]) is None
+    assert sum(value.pinned for value in operator_module._frame_references.values()) == 4
+
+
+def test_unpinned_frames_remain_disposable(monkeypatch) -> None:
+    monkeypatch.setattr(operator_module, "_frame_references", OrderedDict())
+    token = operator_module._cache_frame_reference(_reference_frame(), "dhash")
+    assert operator_module._release_frame_reference(token) is False
+    for frame_id in range(operator_module.MAX_FRAME_REFERENCES):
+        operator_module._cache_frame_reference(_reference_frame(frame_id), "new")
+    with pytest.raises(ValueError, match="expired"):
+        operator_module._pin_frame_reference(token)
 
 
 def test_camera_counter_does_not_claim_verified_physical_pose() -> None:
@@ -538,6 +601,7 @@ def test_operator_pause_fails_closed_when_local_agent_survives(
 
 
 def test_operator_http_message_roundtrip(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(operator_module, "_frame_references", OrderedDict())
     paths = AppPaths(
         config_dir=tmp_path,
         data_dir=tmp_path,
@@ -637,6 +701,40 @@ def test_operator_http_message_roundtrip(tmp_path: Path, monkeypatch) -> None:
             assert response.headers["X-Minecraft-HUD-Complete"] == "false"
             assert "img-src 'self' blob:" in response.headers["Content-Security-Policy"]
             assert len(response.read()) > 0
+
+        for payload, headers in (
+            ({"frame_token": frame_token, "x": 0.4}, {"Content-Type": "application/json"}),
+            ({"frame_token": 17}, {"Content-Type": "application/json"}),
+            ({"frame_token": frame_token}, {"Content-Type": "application/json", "Origin": "https://untrusted.example"}),
+        ):
+            invalid_pin = urllib.request.Request(
+                f"http://{host}:{port}/api/target/reference", method="POST",
+                headers=headers, data=json.dumps(payload).encode(),
+            )
+            with pytest.raises(urllib.error.HTTPError) as pin_error:
+                urllib.request.urlopen(invalid_pin, timeout=2)
+            assert pin_error.value.code == HTTPStatus.BAD_REQUEST
+            assert not operator_module._frame_references[frame_token].pinned
+        pin_request = urllib.request.Request(
+            f"http://{host}:{port}/api/target/reference", method="POST",
+            headers={"Content-Type": "application/json"},
+            data=json.dumps({"frame_token": frame_token}).encode(),
+        )
+        with urllib.request.urlopen(pin_request, timeout=2) as response:
+            assert json.load(response) == {"pinned": True}
+        with StateDatabase(paths.state_db) as database:
+            assert database.load_operator_target() is None
+        # A second spectator exhausts the old eight-frame cache, but may not
+        # move the selection onto a new frame or change its reference pixels.
+        monkeypatch.setattr(
+            "minecraft_ai.operator_server._capture_live_bedrock_frame",
+            lambda: _reference_frame(99),
+        )
+        for _ in range(16):
+            with urllib.request.urlopen(
+                f"http://{host}:{port}/api/frame.png?size=public", timeout=2
+            ) as response:
+                response.read()
 
         with urllib.request.urlopen(
             f"http://{host}:{port}/api/frame.png?size=public", timeout=2

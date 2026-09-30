@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -75,6 +75,7 @@ from minecraft_ai.operator.topology import build_topology
 MAX_BODY_BYTES = 16 * 1024
 FRAME_REFERENCE_TTL_NS = 120 * 1_000_000_000
 MAX_FRAME_REFERENCES = 8
+MAX_PINNED_FRAME_REFERENCES = 4
 READINESS_TELEMETRY_MAX_AGE_NS = 5 * 1_000_000_000
 
 # Spectator encoding must leave CPU time for the independent agent capture loop.
@@ -170,6 +171,7 @@ class _FrameReference:
     frame: CapturedFrame
     dhash: str
     cached_ns: int
+    pinned: bool = False
 
 
 _frame_references: OrderedDict[str, _FrameReference] = OrderedDict()
@@ -200,8 +202,35 @@ def _cache_frame_reference(frame: CapturedFrame, dhash: str) -> str:
             _frame_references.pop(key, None)
         _frame_references[token] = _FrameReference(frame=frame, dhash=dhash, cached_ns=now_ns)
         while len(_frame_references) > MAX_FRAME_REFERENCES:
-            _frame_references.popitem(last=False)
+            # Other viewers must not evict pixels an operator is selecting.
+            # Pinning has its own smaller limit, so a disposable entry exists.
+            oldest = next(key for key, value in _frame_references.items() if not value.pinned)
+            del _frame_references[oldest]
     return token
+
+
+def _pin_frame_reference(token: str) -> None:
+    """Protect one exact selection from viewer churn without renewing its TTL."""
+    now_ns = time.monotonic_ns()
+    with _frame_references_lock:
+        reference = _frame_references.get(token)
+        if reference is None or now_ns - reference.cached_ns > FRAME_REFERENCE_TTL_NS:
+            _frame_references.pop(token, None)
+            raise ValueError("target frame expired; refresh the live frame and select it again")
+        if reference.pinned:
+            return
+        if sum(value.pinned for value in _frame_references.values()) >= MAX_PINNED_FRAME_REFERENCES:
+            raise ValueError("too many selections are open; clear a selection or wait for expiry")
+        _frame_references[token] = replace(reference, pinned=True)
+
+
+def _release_frame_reference(token: str) -> bool:
+    with _frame_references_lock:
+        reference = _frame_references.get(token)
+        if reference is None or not reference.pinned:
+            return False
+        del _frame_references[token]
+        return True
 
 
 def _consume_frame_reference(token: str) -> tuple[CapturedFrame, str] | None:
@@ -891,6 +920,17 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, set_reasoning_standby(payload["enabled"]))
             elif path == "/api/target":
                 self._post_target(payload)
+            elif path in {"/api/target/reference", "/api/target/reference/release"}:
+                if set(payload) != {"frame_token"} or not isinstance(payload["frame_token"], str):
+                    raise ValueError("Only a frame_token string may be supplied.")
+                token = payload["frame_token"].strip()
+                if not token or len(token) > 128:
+                    raise ValueError("A valid frame_token is required.")
+                if path.endswith("/release"):
+                    self._send_json(HTTPStatus.OK, {"released": _release_frame_reference(token)})
+                else:
+                    _pin_frame_reference(token)
+                    self._send_json(HTTPStatus.OK, {"pinned": True})
             elif path == "/api/target/clear":
                 self._clear_target()
             elif path == "/api/control/pause":
@@ -1429,14 +1469,15 @@ function clearTelemetryPanels(){
 for(const id of ['skill','goal','instruction','constraints','reason','plan','outcome','policy','policyMetrics','frames','actions','capture','recording','recordingDetail'])$(id).textContent='Unavailable';
 $('reason').textContent='Waiting for current agent telemetry.';$('recording').className='amber';$('facts').textContent='Current perception is unavailable.';$('prediction').style.display='none';
 }
-let dragging=false,startX=0,startY=0,targetBox=null,displayedFrameToken=null,frameObjectUrl=null,frameLoading=false;const viewer=$('viewer'),selection=$('selection'),prediction=$('prediction'),worldFrame=$('worldFrame'),targetReview=$('targetReview'),targetPreview=$('targetPreview');
+let dragging=false,startX=0,startY=0,targetBox=null,displayedFrameToken=null,frameObjectUrl=null,frameLoading=false,targetReferencePin=null;const viewer=$('viewer'),selection=$('selection'),prediction=$('prediction'),worldFrame=$('worldFrame'),targetReview=$('targetReview'),targetPreview=$('targetPreview');
+function releaseSelectionReference(){const pin=targetReferencePin;targetReferencePin=null;if(pin)pin.ready.then(ok=>{if(ok)return api('/api/target/reference/release',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({frame_token:pin.token}),signal:AbortSignal.timeout(5000)})}).catch(()=>{})}
 function imageRect(){const r=worldFrame.getBoundingClientRect(),nw=worldFrame.naturalWidth,nh=worldFrame.naturalHeight;if(!nw||!nh)return{left:r.left,top:r.top,width:r.width,height:r.height};const imageRatio=nw/nh,boxRatio=r.width/r.height;let width=r.width,height=r.height,left=r.left,top=r.top;if(boxRatio>imageRatio){width=r.height*imageRatio;left+=(r.width-width)/2}else if(boxRatio<imageRatio){height=r.width/imageRatio;top+=(r.height-height)/2}return{left,top,width,height}}
 function point(e){const r=imageRect();return{x:Math.max(0,Math.min(r.width,e.clientX-r.left)),y:Math.max(0,Math.min(r.height,e.clientY-r.top)),w:r.width,h:r.height}}
 function placeBox(el,box){const r=imageRect(),v=viewer.getBoundingClientRect();el.style.display='block';el.style.left=(r.left-v.left+box.x*r.width)+'px';el.style.top=(r.top-v.top+box.y*r.height)+'px';el.style.width=(box.width*r.width)+'px';el.style.height=(box.height*r.height)+'px'}
 function drawBox(box){placeBox(selection,box)}
 function drawPrediction(raw,confidence){if(!raw||raw.length!==4||!worldFrame.naturalWidth){prediction.style.display='none';return}const w=worldFrame.naturalWidth,h=worldFrame.naturalHeight,r=16/9;let ox=0,oy=0,cw=w,ch=h;if(w/h>r){cw=h*r;ox=(w-cw)/2}else{ch=w/r;oy=(h-ch)/2}const x=(ox+raw[0]*cw)/w,y=(oy+raw[1]*ch)/h,x1=(ox+raw[2]*cw)/w,y1=(oy+raw[3]*ch)/h;placeBox(prediction,{x,y,width:Math.max(0,x1-x),height:Math.max(0,y1-y)});prediction.title='ROCKET-2 learned target · '+Math.round((confidence||0)*100)+'%'}
 function drawTargetPreview(){if(!targetBox||!worldFrame.naturalWidth){targetReview.hidden=true;return}const c=targetPreview.getContext('2d'),w=worldFrame.naturalWidth,h=worldFrame.naturalHeight,sw=targetBox.width*w,sh=targetBox.height*h,scale=Math.min(targetPreview.width/sw,targetPreview.height/sh),dw=sw*scale,dh=sh*scale,dx=(targetPreview.width-dw)/2,dy=(targetPreview.height-dh)/2;c.clearRect(0,0,targetPreview.width,targetPreview.height);c.imageSmoothingEnabled=false;c.drawImage(worldFrame,targetBox.x*w,targetBox.y*h,sw,sh,dx,dy,dw,dh);targetReview.hidden=false}
-viewer.onpointerdown=e=>{if(!displayedFrameToken||!worldFrame.complete||!worldFrame.naturalWidth)return;const p=point(e);dragging=true;startX=p.x;startY=p.y;viewer.setPointerCapture(e.pointerId);targetBox={x:p.x/p.w,y:p.y/p.h,width:.001,height:.001};drawBox(targetBox);targetReview.hidden=true};
+viewer.onpointerdown=e=>{if(frameLoading||!displayedFrameToken||!worldFrame.complete||!worldFrame.naturalWidth)return;if(!targetReferencePin||targetReferencePin.token!==displayedFrameToken){releaseSelectionReference();const token=displayedFrameToken;targetReferencePin={token,ready:api('/api/target/reference',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({frame_token:token}),signal:AbortSignal.timeout(5000)}).then(d=>d.pinned===true).catch(()=>false)}}const p=point(e);dragging=true;startX=p.x;startY=p.y;viewer.setPointerCapture(e.pointerId);targetBox={x:p.x/p.w,y:p.y/p.h,width:.001,height:.001};drawBox(targetBox);targetReview.hidden=true};
 viewer.onpointermove=e=>{if(!dragging)return;const p=point(e),x=Math.min(startX,p.x),y=Math.min(startY,p.y);targetBox={x:x/p.w,y:y/p.h,width:Math.max(1,Math.abs(p.x-startX))/p.w,height:Math.max(1,Math.abs(p.y-startY))/p.h};drawBox(targetBox)};
 viewer.onpointerup=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId);drawTargetPreview();$('targetNotice').textContent='Review the frozen crop, then arm it only if the pixels match the label.'};
 viewer.onpointercancel=e=>{if(!dragging)return;dragging=false;viewer.releasePointerCapture(e.pointerId);drawTargetPreview()};
@@ -1464,8 +1505,8 @@ async function inventoryStatus(){if(document.hidden||inventoryLoading||inventory
 $('inventoryCheck').onclick=async()=>{if(!inventoryDiscovery||inventorySubmitting)return;inventorySubmitting=true;$('inventoryCheck').disabled=true;try{await api('/api/directions/qualification',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:crypto.randomUUID(),server_id:inventoryDiscovery.server_id,expected_session_id:inventoryDiscovery.session_id,expected_epoch:inventoryDiscovery.control_epoch})})}catch(e){$('inventoryStatus').textContent=e.message}finally{inventorySubmitting=false;inventoryStatus()}};
 $('inventoryCancel').onclick=async()=>{if(!inventoryReceipt)return;try{await api('/api/directions/qualification/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({request_id:inventoryReceipt.request_id})});inventoryStatus()}catch(e){$('inventoryStatus').textContent=e.message}};
 $('send').onclick=async()=>{const text=$('text').value.trim();if(!text)return;try{await api('/api/messages',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,kind:$('kind').value,priority:Number($('priority').value)})});$('text').value='';$('notice').textContent='Delivered to the durable cognition inbox.';messages()}catch(e){$('notice').textContent=e.message}};
-$('setTarget').onclick=async()=>{if(!targetBox||targetBox.width<.005||targetBox.height<.005){$('targetNotice').textContent='Drag a non-empty target region first.';return}if(!displayedFrameToken){$('targetNotice').textContent='The reference frame expired; wait for a fresh frame and select again.';targetBox=null;selection.style.display='none';targetReview.hidden=true;refreshFrame();return}try{const t=await api('/api/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...targetBox,frame_token:displayedFrameToken,label:$('targetLabel').value.trim()||'target'})});targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;$('targetNotice').textContent='ROCKET-2 target armed from exact frozen pixels: '+t.label+' · '+t.track_id;refreshFrame()}catch(e){$('targetNotice').textContent=e.message;targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;refreshFrame()}};
-$('clearTarget').onclick=async()=>{try{await api('/api/target/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;$('targetNotice').textContent='Grounded target cleared.';refreshFrame()}catch(e){$('targetNotice').textContent=e.message}};
+$('setTarget').onclick=async()=>{if(!targetBox||targetBox.width<.005||targetBox.height<.005){$('targetNotice').textContent='Drag a non-empty target region first.';return}const pin=targetReferencePin,box={...targetBox};$('setTarget').disabled=true;try{if(!pin||!await pin.ready||pin!==targetReferencePin||pin.token!==displayedFrameToken)throw Error('The reference frame expired; select a fresh frame again.');const t=await api('/api/target',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...box,frame_token:pin.token,label:$('targetLabel').value.trim()||'target'})});targetReferencePin=null;targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;$('targetNotice').textContent='ROCKET-2 target armed from exact frozen pixels: '+t.label+' · '+t.track_id;refreshFrame()}catch(e){$('targetNotice').textContent=e.message;releaseSelectionReference();targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;refreshFrame()}finally{$('setTarget').disabled=false}};
+$('clearTarget').onclick=async()=>{try{await api('/api/target/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});releaseSelectionReference();targetBox=null;displayedFrameToken=null;selection.style.display='none';targetReview.hidden=true;$('targetNotice').textContent='Grounded target cleared.';refreshFrame()}catch(e){$('targetNotice').textContent=e.message}};
 $('pause').onclick=async()=>{try{await api('/api/control/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('notice').textContent='Agent paused; motor capability revoked.';refresh()}catch(e){$('notice').textContent=e.message}};
 $('resume').onclick=async()=>{try{await api('/api/control/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});$('notice').textContent='Supervisor returned to safe idle. Live control was not armed.';refresh()}catch(e){$('notice').textContent=e.message}};
 const topoCanvas=$('topoCanvas'),topoCtx=topoCanvas.getContext('2d'),brainCanvas=$('brainCanvas'),brainCtx=brainCanvas.getContext('2d');
