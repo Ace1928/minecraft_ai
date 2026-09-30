@@ -228,11 +228,22 @@ class PackRecipeCatalog:
         ):
             return None
 
-        def named(item: dict[str, Any]) -> str | None:
-            item_id = item.get("id")
-            if type(item_id) is not str:
+        def reference_key(item: dict[str, Any]) -> str | None:
+            # The export's key distinguishes ingredient tags and legacy item
+            # metadata. Falling back from a declared key would change the
+            # recipe (for example, Awkward Potion becomes generic Potion).
+            key = item.get("key", item.get("id"))
+            if type(key) is not str:
                 return None
-            record = items.get(item_id)
+            if "key" not in item and (
+                item.get("tag") is True or item.get("data") not in (None, 0)
+            ):
+                return None
+            return key
+
+        def named(item: dict[str, Any]) -> str | None:
+            key = reference_key(item)
+            record = items.get(key) if key is not None else None
             name = record.get("name") if type(record) is dict else None
             return name if type(name) is str else None
 
@@ -242,7 +253,7 @@ class PackRecipeCatalog:
             count = ingredient.get("count")
             if name is None or type(count) is not int or count <= 0:
                 return None
-            ingredient_rows.append((name, count, ingredient.get("id")))
+            ingredient_rows.append((name, count, reference_key(ingredient)))
         output = outputs[0]
         output_name = named(output)
         output_count = output.get("count")
@@ -257,19 +268,22 @@ class PackRecipeCatalog:
         grid = recipe.get("grid")
         if (
             type(grid) is list
+            and grid
             and len(ingredient_rows) == 2
             and all(type(row) is list for row in grid)
         ):
-            id_to_name = {item_id: name for name, _count, item_id in ingredient_rows}
+            key_to_name = {key: name for name, _count, key in ingredient_rows}
             rendered_rows = []
             for row in grid:
-                rendered_rows.append(
-                    " ".join(
-                        "·" if cell is None else id_to_name.get(cell.get("id"), "?")[:1].upper()
-                        for cell in row
-                        if cell is None or type(cell) is dict
-                    )
-                )
+                rendered_cells = []
+                for cell in row:
+                    if cell is None:
+                        rendered_cells.append("·")
+                        continue
+                    if type(cell) is not dict or reference_key(cell) not in key_to_name:
+                        return None
+                    rendered_cells.append(key_to_name[reference_key(cell)][:1].upper())
+                rendered_rows.append(" ".join(rendered_cells))
             arrangement = " Pattern " + " / ".join(rendered_rows) + "."
         joined = " and ".join(f"{count} {name}" for name, count, _item_id in ingredient_rows)
         plural_output = output_name + (

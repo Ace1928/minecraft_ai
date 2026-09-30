@@ -1,0 +1,77 @@
+{
+  "schema": "minecraft-ai.recipe-reference-identity.correctness.v1",
+  "date": "2026-10-01",
+  "source_base_commit": "85cc020149ccceadf1b14812c9a441a6ef06d442",
+  "change": "Resolve exported key for ingredient, output and shaped-grid identity; preserve plain id compatibility. Missing declared keys and unkeyed metadata/tag refs refuse. Empty grids do not print a pattern.",
+  "scope": "Offline rendering correctness; not a live catalog migration, model-quality result or game mastery result.",
+  "baseline": {
+    "tests_run": 7,
+    "distinct_failed_tests": 6,
+    "passing_tests": 1,
+    "failure_entries_including_subtests": 7,
+    "errors": 1,
+    "source_sha256": "682d13e58464c5d0731b16edbec19dc249a6832688318b2b81efa167c1dd2442"
+  },
+  "candidate_attempt_001": {
+    "passed_tests": 6,
+    "failed_tests": 1,
+    "failure": "Empty brewing grid printed Pattern .",
+    "source_sha256": "802d4330e778a8cb328d0c438cecafd762f56f347bbdac9b839c88386748716d",
+    "unit_invocation": "794962d15033433e8645de943304c4af",
+    "unit_result": "exit-code",
+    "unit_main_pid_at_terminal": 0,
+    "reported_unit_runtime_ms": 406,
+    "unit_cpu_usage_ns": 302854000,
+    "unit_reported_memory_peak_bytes": 2093056,
+    "unit_reported_swap_peak_bytes": 0
+  },
+  "corrected_attempt_002": {
+    "tests_run": 1,
+    "passed_tests": 1,
+    "failed_tests": 0,
+    "rerun": "Only failing metadata ingredient/output node; no full-suite rerun",
+    "source_sha256": "64f5aa17337e0f5658aad4e7e7edd6ca5b48d013538d35f6a5351478279aee9b",
+    "unit_invocation": "c24d9d704ff84cb39386f165ea3fddd5",
+    "unit_result": "success",
+    "reported_unit_runtime_ms": 314,
+    "reported_unit_cpu_time_ms": 262,
+    "reported_unit_memory_peak": "2.2M",
+    "reported_unit_swap_peak_bytes": 0
+  },
+  "qualification": "Seven distinct controls passed across initial six passes and one corrected rerun. Negative attempt retained.",
+  "resource_envelope": {
+    "cpus": null,
+    "cpu_quota_percent": 100,
+    "memory_max_bytes": 268435456,
+    "swap_max_bytes": 0,
+    "runtime_max_seconds": 30,
+    "tasks_max": 32,
+    "cpu_affinity_observed": null,
+    "configured_AllowedCPUs": [
+      3
+    ],
+    "cpu_affinity_limit_qualification": "Configured AllowedCPUs only; actual affinity was not measured. Newboot cpuset EffectiveCPUs empty observed in separate export admission; no CPU3 execution claim.",
+    "intended_cpus": [
+      3
+    ]
+  },
+  "model_imports": false,
+  "network_or_game_input": false,
+  "tests_sha256": "722ec4e1d8791057f3277ef1743f98cfa1625d4b3dc81deeabacd8275b103cef",
+  "evidence_sha256": {
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-001/baseline.py": "682d13e58464c5d0731b16edbec19dc249a6832688318b2b81efa167c1dd2442",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-001/baseline.txt": "bd529fc7175f6067818ae429c102bc036d280bdff86fd86d89c28a31e1300296",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-001/candidate.txt": "ff7e5083a30846d3a7e79401f50b735eaba8c5bfaa12b708b04cddac4bb75e6e",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-001/executed-candidate.py": "802d4330e778a8cb328d0c438cecafd762f56f347bbdac9b839c88386748716d",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-001/executed-tests.py": "722ec4e1d8791057f3277ef1743f98cfa1625d4b3dc81deeabacd8275b103cef",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-001/registration.json": "0da48572eedf03fbb12ebaf96e0b748b491952a0a351c1aaa32861ac0452daee",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-001/result.json": "faa5f85d488e2c7530dcec592c89b4f00de5bac52c7a61ea51fb9542d812a23e",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-001/run.py": "cc83dbc0698440c3e239de11aa96351531e81351a3895889b8640b6345f94456",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-001/terminal-unit.txt": "c72cfcab8392aed15bacb86135ff171a417130641ffd1d4955897623ea2d82c5",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-002/candidate.txt": "abefda6450b53ae04492c9e4b99fbffe4304f27e92cb7eba200c7d56c77dd43c",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-002/executed-candidate.py": "64f5aa17337e0f5658aad4e7e7edd6ca5b48d013538d35f6a5351478279aee9b",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-002/registration.json": "e0be5cfe909fee96a3793e274f3cab58df3365f122d2449cba7a0a2ce8bf5881",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-002/result.json": "304bd96f1f280627ff2b6b760957ec832bf00c4d4048eb52f6a70c6120c3f6dd",
+    "/home/lloyd/.local/state/minecraft-ai/recipe-reference-identity-20261001-002/run.py": "9f769d7c75f4425c7e464bfb04cab9f2db1f88c7f4d87986d7ffa2bff4780f3a"
+  }
+}
