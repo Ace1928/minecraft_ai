@@ -102,7 +102,7 @@ class PackRecipeCatalog:
         intent_position = 0 if intent is None else intent.end()
         items = self._payload["items"]
         recipes = self._payload["recipes"]
-        candidates: list[tuple[int, int, str, dict[str, Any]]] = []
+        candidates: list[tuple[int, int, int, str, dict[str, Any]]] = []
         for item_id, item in items.items():
             if type(item) is not dict or item.get("craftable") is not True:
                 continue
@@ -112,8 +112,8 @@ class PackRecipeCatalog:
             name_norm = _normalize(name)
             id_norm = _normalize(item_id.split(":", 1)[-1].replace("_", " "))
             variants = {name_norm, f"{name_norm}s", id_norm, f"{id_norm}s"}
-            starts = [
-                match.start()
+            phrases = [
+                (match.start(), match.end() - match.start())
                 for variant in variants
                 if variant
                 for match in re.finditer(
@@ -121,20 +121,26 @@ class PackRecipeCatalog:
                     normalized,
                 )
             ]
-            if not starts:
+            if not phrases:
                 for variant in variants:
                     compact_variant = variant.replace(" ", "")
                     if compact_variant and compact_variant in compact:
-                        starts.append(compact.index(compact_variant))
-            if starts:
-                position = min(starts, key=lambda start: abs(start - intent_position))
+                        phrases.append((compact.index(compact_variant), 0))
+            if phrases:
+                position, exact_length = min(
+                    phrases,
+                    key=lambda phrase: (abs(phrase[0] - intent_position), -phrase[1]),
+                )
                 before_intent = int(position < intent_position)
-                candidates.append((before_intent, abs(position - intent_position), item_id, item))
+                candidates.append(
+                    (before_intent, abs(position - intent_position), -exact_length, item_id, item)
+                )
         if not candidates:
             return None
         # In questions that name both a result and its ingredients, prefer the
-        # first exact item phrase after "craft", "make", or "recipe".
-        _before_intent, _distance, selected_id, selected_item = min(candidates)
+        # first exact item phrase after "craft", "make", or "recipe". If phrases
+        # start at that same position, retain the complete compound item name.
+        _before_intent, _distance, _length, selected_id, selected_item = min(candidates)
         recipe_ids = selected_item.get("recipes")
         if type(recipe_ids) is not list:
             return None

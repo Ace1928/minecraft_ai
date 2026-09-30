@@ -1,0 +1,64 @@
+{
+  "contract": "minecraft.recipe-compound-match-correctness.v1",
+  "status": "focused_offline_correctness_pass",
+  "base_commit": "25a63daa3aab376455b9a45cb522b26011b54439",
+  "source_sha256": {
+    "src/minecraft_ai/pack_recipes.py": "682d13e58464c5d0731b16edbec19dc249a6832688318b2b81efa167c1dd2442",
+    "tests/test_native_world_model.py": "d5f24ea57ab395a34f16aa4ff4c446fddc4b07429c83942c68a396ad047b359c"
+  },
+  "change": "Prefer the complete compound item name only when exact phrases start at the same intent-relative position; preserve before/after intent and distance ordering.",
+  "checks": {
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "tests": 63
+  },
+  "junit_sha256": "47a6edff346c34606b7960877d09ebc427780931922eb947cae86aea2a624013",
+  "result_sha256": "63f9b258c61e3a0f5fcd3957c9b87c2c27cb0798ea7531acbec62b81a4d18d44",
+  "postflight_sha256": "d5d99ac27ab3b2bcbcb6e0d0f7b9451be0e26037407570dd07a92e63599e4e97",
+  "test_scope": "18 invented compound/base collisions including reversed catalog order, plus existing recipe/version/hash/leased-chat/general-reference authority controls.",
+  "catalog_sha256": "d544d1ab13536b4cabef34d7bd4e99f638ef488040ff38ba69cbf55a852d64e1",
+  "catalog_revision": "b36968c41af0672480b7ee4170312d17a6c265b014364156ac4681335f7da7b7",
+  "game_version": "Bedrock 1.26.52.3",
+  "active_behavior_pack_version": "1.3.150",
+  "actual_reference": {
+    "chat_reply": "At a crafting table, use 3 Blackstone and 2 Stick to make 1 Stone Pickaxe. Pattern B B B / . S . / . S ..",
+    "load_and_lookup_wall_seconds": 0.4241018700413406,
+    "reference": {
+      "confidence": 1.0,
+      "extract": "Minecraft; Bedrock 1.26.52.3; pack revision b36968c41af06724. At a crafting table, use 3 Blackstone and 2 Stick to make 1 Stone Pickaxe. Pattern B B B / \u00b7 S \u00b7 / \u00b7 S \u00b7. At a crafting table, use 3 Cobbled Deepslate and 2 Stick to make 1 Stone Pickaxe. Pattern C C C / \u00b7 S \u00b7 / \u00b7 S \u00b7.",
+      "page_id": null,
+      "query": "How do I craft a stone pickaxe?",
+      "retrieved_ns": 1790770459347419001,
+      "revision_id": null,
+      "title": "Stone Pickaxe recipe \u2014 family pack",
+      "url": null,
+      "version_key": "bedrock:1.26.52.3:pack:b36968c41af0672480b7ee4170312d17a6c265b014364156ac4681335f7da7b7"
+    }
+  },
+  "retained_old_negative": "Accepted 7aec player lookup selected Stone furnace output for the same stone-pickaxe question; that original negative remains unchanged.",
+  "complete_unit_wall_seconds": 4.529144,
+  "complete_unit_cpu_seconds": 2.212906,
+  "kernel_peak_bytes": 92291072,
+  "kernel_swap_peak_bytes": 0,
+  "process_hwm_bytes": 85209088,
+  "worker_affinity_observations": 65,
+  "live_affinity_observations": 56,
+  "all_observed_threads_cpu": [
+    0
+  ],
+  "exact_process_and_cgroup_released": true,
+  "terminal_memory_events": null,
+  "terminal_cgroup_values": null,
+  "limits": [
+    "The actual named Blackstone and Cobbled Deepslate alternatives are valid catalogue entries. The unnamed stone-tool-materials tag recipe is skipped by the unchanged renderer; preferred cobblestone is not established.",
+    "This does not qualify all 2087 recipes, change inventory authority, install the catalogue in the current player, send game inputs or deploy the new controller.",
+    "Terminal cgroup counters were unavailable after automatic retirement; systemd unit peaks are retained separately from process high-water memory.",
+    "A metadata-only postflight None-handling error was corrected without rerunning tests or changing raw evidence."
+  ],
+  "whole_catalog_accuracy_qualified": false,
+  "native_forwards": 0,
+  "network_requests": 0,
+  "inputs_sent": 0,
+  "deployed": false
+}

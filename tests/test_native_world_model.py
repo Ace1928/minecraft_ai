@@ -588,6 +588,65 @@ def test_pokemon_recipe_answer_uses_exact_pack_item_names_and_version():
     assert mixed_query.evidence.title.startswith("Poké Ball recipe")
 
 
+@pytest.mark.parametrize("reverse_items", [False, True])
+@pytest.mark.parametrize(
+    ("query", "selected_name", "expected_recipe"),
+    [
+        ("How do I craft a stone pickaxe?", "Stone Pickaxe", "3 Cobblestone and 2 Stick"),
+        ("How do I craft stone pickaxes?", "Stone Pickaxe", "3 Cobblestone and 2 Stick"),
+        ("How do I craft stone_pickaxe?", "Stone Pickaxe", "3 Cobblestone and 2 Stick"),
+        ("How do I craft a copper spear?", "Copper Spear", "1 Copper and 2 Stick"),
+        ("How do I make copper spears?", "Copper Spear", "1 Copper and 2 Stick"),
+        (
+            "How do I craft a stone pickaxe with stone?",
+            "Stone Pickaxe",
+            "3 Cobblestone and 2 Stick",
+        ),
+        ("How do I make stone from a stone pickaxe?", "Stone", "1 Cobblestone"),
+        ("With a stone pickaxe, how do I craft stone?", "Stone", "1 Cobblestone"),
+        ("How do I make copper for a copper spear?", "Copper", "1 Raw Copper"),
+    ],
+)
+def test_recipe_compound_phrase_wins_only_at_same_intent_position(
+    query, selected_name, expected_recipe, reverse_items,
+):
+    """Invented collisions exercise the accepted catalog matcher without live data."""
+    payload = _catalog_payload()
+    ingredients = {
+        "minecraft:cobblestone": "Cobblestone",
+        "minecraft:stick": "Stick",
+        "minecraft:raw_copper": "Raw Copper",
+    }
+    for item_id, name in ingredients.items():
+        payload["items"][item_id] = {"name": name, "craftable": False}
+    recipes = [
+        ("stone", "Stone", "furnace", [("cobblestone", 1)]),
+        ("stone_pickaxe", "Stone Pickaxe", "crafting_table", [("cobblestone", 3), ("stick", 2)]),
+        ("copper", "Copper", "furnace", [("raw_copper", 1)]),
+        ("copper_spear", "Copper Spear", "crafting_table", [("copper", 1), ("stick", 2)]),
+    ]
+    for suffix, name, station, inputs in recipes:
+        item_id = f"minecraft:{suffix}"
+        payload["items"][item_id] = {
+            "name": name, "craftable": True, "recipes": [item_id],
+        }
+        payload["recipes"][item_id] = {
+            "ingredients": [{"id": f"minecraft:{key}", "count": count} for key, count in inputs],
+            "outputs": [{"id": item_id, "count": 1}],
+            "stations": [station],
+        }
+    if reverse_items:
+        payload["items"] = dict(reversed(tuple(payload["items"].items())))
+    before = json.dumps(payload, ensure_ascii=False)
+    answer = PackRecipeCatalog(payload, "a" * 64).lookup(query, game_version="1.26.52.3")
+    assert answer is not None
+    assert answer.evidence.title == f"{selected_name} recipe — family pack"
+    assert f"use {expected_recipe} to make 1 {selected_name}." in answer.chat_reply
+    # A read-only reference does not modify the catalog or assert possession.
+    assert json.dumps(payload, ensure_ascii=False) == before
+    assert "inventory" not in type(answer.evidence).model_fields
+
+
 def test_runtime_context_uses_pinned_family_recipe_for_fresh_player_chat(monkeypatch):
     now = time.monotonic_ns()
     blackboard = PerceptionBlackboard()
