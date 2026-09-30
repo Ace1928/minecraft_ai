@@ -1295,10 +1295,10 @@ class GroundedPolicyRouter:
     configured. GROUNDED keeps the semantic body; ``grounded`` is an optional
     asynchronous target observer whose physical action is discarded.
 
-    Specialists may be omitted independently. Startup warmup loads the
-    semantic body and the RAW/MOTION body when present. GUI and GROUNDED
-    observers warm on first use so unused specialists do not compete for
-    memory before a matching option exists.
+    Specialists may be omitted independently. An unwrapped router warms the
+    semantic and RAW/MOTION bodies at startup. An identity-validated policy
+    wrapper may defer all retained experts until this router actually receives
+    their option; prospective plan hints then cannot load an unused body.
     """
 
     primary: MotorPolicy
@@ -1338,6 +1338,7 @@ class GroundedPolicyRouter:
     _warm_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     _warming: dict[int, threading.Thread] = field(default_factory=dict, init=False)
     _retiring: bool = field(default=False, init=False)
+    _defer_option_warmup: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if self.max_track_age_ms <= 0:
@@ -1383,6 +1384,13 @@ class GroundedPolicyRouter:
                 self.grounded if intent.action_level == ActionLevel.GROUNDED
                 else self.gui if intent.action_level == ActionLevel.GUI else None
             )
+            if self._defer_option_warmup:
+                # This is an actual routed option, unlike an anticipatory plan
+                # hint forwarded by a wrapper which may execute it itself.
+                # The existing warm owner checks its handshake; keep the motor
+                # thread free to capture/release while a cold worker loads.
+                self._begin_warm(selected, blocking=False)
+                self._begin_warm(observer, blocking=False)
             with self._warm_lock:
                 warming = {key for key, thread in self._warming.items() if thread.is_alive()}
                 unavailable = any(
@@ -1659,8 +1667,24 @@ class GroundedPolicyRouter:
             complete = complete and report["process_exited"] and report["error_code"] is None
         return {"complete": complete, "workers": workers}
 
+    def defer_option_warmup(self) -> None:
+        """Defer retained experts after trusted wrapper identity admission.
+
+        This changes no routing, permissions or worker lifetime. It is an
+        assembly-only choice: an already loaded/bound owner cannot be silently
+        converted or unloaded. The wrapper's own warmup remains authoritative.
+        """
+        with self._warm_lock:
+            if self._defer_option_warmup:
+                return
+            if self._retiring or self._episode_id is not None or self._warmed or self._warming:
+                raise RuntimeError("option warmup deferral requires an unstarted router")
+            self._defer_option_warmup = True
+
     def warmup(self) -> None:
         """Load bodies needed for the first option; specialists wait until used."""
+        if self._defer_option_warmup:
+            return
         self._ensure_warm(self.primary)
         self._ensure_warm(self.raw_motion)
 
@@ -1671,6 +1695,10 @@ class GroundedPolicyRouter:
         specialist loads while the current option finishes.
         """
 
+        if self._defer_option_warmup:
+            # A wrapper can satisfy a hinted level with its own active body.
+            # Only act(), carrying the actual option, may start retained work.
+            return
         selected, _, _ = self._body_for_level(level)
         self._begin_warm(selected, blocking=False)
         if level == ActionLevel.GROUNDED:

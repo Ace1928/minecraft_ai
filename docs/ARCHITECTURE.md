@@ -94,6 +94,17 @@ with fresh request/frame/episode attribution, followed separately by a guarded
 live trace through the supervisor. Accepted inputs, observed displacement and
 successful gameplay remain different evidence gates.
 
+When the explicitly admitted runtime factory wraps the original motor router,
+the existing base-policy identity check now defers its unused expert warmup.
+The active wrapper still receives normal startup warmup. A prospective plan or
+action-level hint cannot load retained STEVE, raw-motion, GUI or grounding
+workers; their first actual routed option starts the existing bounded warmup
+owner and emits only input release while its handshake is pending. No episode
+binds before readiness, and failed or retiring owners cannot authorize actions.
+Unwrapped startup behavior, route fallback and option-level permissions remain
+unchanged. This avoids dormant model ownership; it does not establish task
+quality, inference throughput or a shared temporal World executor.
+
 An optional `erais.native-minecraft-drain.v1` capability adds an explicit
 terminal checkpoint transaction over POSIX pipes; Windows rejects it before
 admission and retains its existing lifecycle. The parent binds the worker's READY session

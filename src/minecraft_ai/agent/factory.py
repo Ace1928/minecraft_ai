@@ -173,6 +173,13 @@ def run_agent_runtime(
                         raise RuntimeStartupCleanupIncomplete(
                             "runtime factory replaced protected executor policy"
                         )
+                    guard.check()
+                    defer = getattr(supplied_policy, "defer_option_warmup", None)
+                    if callable(defer):
+                        # The admitted wrapper retains this exact owner and may
+                        # execute an option without it. Keep the wrapper's own
+                        # warmup; its unused experts start on actual routing.
+                        defer()
             finally:
                 # No simultaneous construction/runtime renewal owners at handoff.
                 guard.close()

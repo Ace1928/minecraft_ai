@@ -114,6 +114,69 @@ def test_explicit_policy_wrapper_keeps_the_original_body_owner(environment) -> N
     assert runtime.executor.policy.base_policy is original
 
 
+def test_only_identity_admitted_wrapper_defers_retained_expert_warmup(environment) -> None:
+    defer = Mock()
+    original = SimpleNamespace(defer_option_warmup=defer)
+    environment.kwargs["executor"].policy = original
+    runtime = FakeRuntime(**environment.kwargs)
+
+    def factory(**_kwargs):
+        runtime.executor.policy = SimpleNamespace(base_policy=original)
+        return runtime
+
+    environment.factory.side_effect = factory
+    startup.run_agent_runtime(environment.kwargs, factory_config=environment.config.model_copy(
+        update={"allow_policy_wrapper": True},
+    ))
+    defer.assert_called_once_with()
+    runtime.run_forever.assert_called_once()
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_rejected_wrapper_cannot_change_retained_warmup_authority(environment, allowed) -> None:
+    defer = Mock()
+    original = SimpleNamespace(defer_option_warmup=defer)
+    environment.kwargs["executor"].policy = original
+    runtime = FakeRuntime(**environment.kwargs)
+
+    def factory(**_kwargs):
+        runtime.executor.policy = SimpleNamespace(base_policy=original if not allowed else object())
+        return runtime
+
+    environment.factory.side_effect = factory
+    with pytest.raises(startup.RuntimeStartupCleanupIncomplete, match="protected executor policy"):
+        startup.run_agent_runtime(environment.kwargs, factory_config=environment.config.model_copy(
+            update={"allow_policy_wrapper": allowed},
+        ))
+    defer.assert_not_called()
+    runtime.run_forever.assert_not_called()
+
+
+def test_unwrapped_runtime_keeps_original_startup_warmup_policy(environment) -> None:
+    defer = Mock()
+    environment.kwargs["executor"].policy = SimpleNamespace(defer_option_warmup=defer)
+    startup.run_agent_runtime(environment.kwargs, factory_config=environment.config)
+    defer.assert_not_called()
+
+
+def test_failed_deferral_is_cleaned_before_runtime_execution(environment) -> None:
+    original = SimpleNamespace(defer_option_warmup=Mock(side_effect=RuntimeError("already loaded")))
+    environment.kwargs["executor"].policy = original
+    runtime = FakeRuntime(**environment.kwargs)
+
+    def factory(**_kwargs):
+        runtime.executor.policy = SimpleNamespace(base_policy=original)
+        return runtime
+
+    environment.factory.side_effect = factory
+    with pytest.raises(RuntimeError, match="already loaded"):
+        startup.run_agent_runtime(environment.kwargs, factory_config=environment.config.model_copy(
+            update={"allow_policy_wrapper": True},
+        ))
+    runtime.run_forever.assert_not_called()
+    runtime.close_constructed_runtime.assert_called_once_with()
+
+
 def test_initial_rejected_lease_skips_even_external_import(environment, monkeypatch) -> None:
     send = Mock(side_effect=RuntimeError("lease expired"))
     monkeypatch.setattr(startup, "send_command", send)
