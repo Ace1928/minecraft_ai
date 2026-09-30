@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import Any, Literal, Protocol, cast
 
@@ -69,6 +69,9 @@ BEDROCK_HOTBAR_DIRT_COUNT_SOURCE = (
     "deterministic:bedrock-1.26.45.1-classic-hud-hotbar-dirt-v1:not-training-label"
 )
 BEDROCK_HUD_SAFETY_SOURCE = "safety:bedrock-hud-v1:not-training-label"
+BEDROCK_CLASSIC_HEALTH_SOURCE = (
+    "safety:bedrock-1.26.52.3-classic-health-1920x1080-4px-v1:not-training-label"
+)
 
 
 @dataclass(frozen=True)
@@ -693,6 +696,7 @@ class BootstrapFastPerception:
 
     model_id: str = "bootstrap-rgb-v1"
     training_label_eligible: bool = False
+    game_version: str | None = None
     _hotbar_geometry_cache: dict[tuple[int, int], tuple[int, int]] = field(
         default_factory=dict,
         init=False,
@@ -849,6 +853,27 @@ class BootstrapFastPerception:
         )
         if not ui_overlay and in_world_hud:
             pixels = _numpy_bgra(frame)
+            health = (
+                _classic_health_units(frame, pixels)
+                if self.game_version == _CLASSIC_HEALTH_VERSION
+                else None
+            )
+            if health is not None:
+                facts.extend(
+                    PerceptionFact(
+                        key=key,
+                        value=value,
+                        confidence=0.995,
+                        observed_ns=frame.captured_ns,
+                        source=BEDROCK_CLASSIC_HEALTH_SOURCE,
+                        expires_after_ms=250,
+                    )
+                    for key, value in (
+                        ("player.health", health),
+                        ("player.health_fraction", health / 20.0),
+                        ("player.critical_health", health <= 6),
+                    )
+                )
             geometry = self._hotbar_geometry_cache.get((frame.width, frame.height))
             if geometry is not None and not _classic_hotbar_geometry_matches(
                 pixels,
@@ -921,6 +946,15 @@ class RealtimePerceptionService:
     _last_frame_ns: int | None = field(default=None, init=False)
     _last_capture: CapturedFrame | None = field(default=None, init=False)
     _last_observation: CaptureObservation | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        # Bind this observer to the same authoritative instance as publication.
+        # No installation lookup or reuse of another version's camera profile.
+        fast = self.fast_perception
+        if isinstance(fast, BootstrapFastPerception) and type(fast) is BootstrapFastPerception:
+            parts = self.instance_id.split(":", 2)
+            version = parts[1] if len(parts) == 3 and parts[0] == "bedrock" else None
+            self.fast_perception = replace(fast, game_version=version)
 
     @property
     def last_capture(self) -> CapturedFrame | None:
@@ -2094,6 +2128,129 @@ def _sampled_neutral_ratio(
             )
             sampled += 1
     return matched / sampled if sampled else 0.0
+
+
+_CLASSIC_HEALTH_VERSION = "1.26.52.3"
+# Measured from the unmodified respawn PNG (SHA 8d043112...) and ravine JPEG
+# (SHA 2b389595...). These are the nine-by-nine opaque glyph cells, not a red
+# pixel ratio. Dots are transparent world pixels and have no health meaning.
+_CLASSIC_HEALTH_GLYPH = (
+    "..KK.KK..",
+    ".KRRKRRK.",
+    "KRHRRRRRK",
+    "KRRRRRRRK",
+    "KSRRRRRSK",
+    ".KSRRRSK.",
+    "..KSRSK..",
+    "...KSK...",
+    "....K....",
+)
+
+
+def bedrock_classic_health(
+    frame: CapturedFrame, *, game_version: str | None = None
+) -> int | None:
+    """Read 0..20 visible health units from the qualified classic heart bank.
+
+    Only Bedrock 1.26.52.3, 1920x1080 and the measured four-pixel grid are
+    supported. Require independently positioned rail/dividers, no UI/death,
+    and a complete ordered bank of normal full/half/empty heart glyphs. JPEG
+    tolerance applies to cell centres, never to layout or missing glyph cells.
+    Poison/wither/freeze/absorption colours, flashing outlines, jitter, extra
+    bright health rows and any ambiguous glyph abstain. This is an observable
+    safety signal, not a learned perception or training-label qualification.
+    """
+    if (
+        game_version != _CLASSIC_HEALTH_VERSION
+        or (frame.width, frame.height) != (1920, 1080)
+        or len(frame.bgra) != 1920 * 1080 * 4
+        or bedrock_ui_chrome_present(frame)
+        or bedrock_death_screen_present(frame)
+    ):
+        return None
+    return _classic_health_units(frame, _numpy_bgra(frame))
+
+
+def _classic_health_units(frame: CapturedFrame, pixels: Any | None) -> int | None:
+    """Glyph decoder for an already qualified no-UI/no-death frame."""
+    if (
+        pixels is None
+        or (frame.width, frame.height) != (1920, 1080)
+        or len(frame.bgra) != 1920 * 1080 * 4
+    ):
+        return None
+    numpy = importlib.import_module("numpy")
+    rgb = pixels[..., :3][..., ::-1]
+    # The actual selected slot replaces two divider cells. Six remaining
+    # independent columns plus a long light-over-black rail must be visible.
+    rail = rgb[992, numpy.arange(620, 1300, 40)]
+    above = rgb[986, numpy.arange(620, 1300, 40)]
+    rail_matches = (
+        (rail.max(axis=1) - rail.min(axis=1) <= 28)
+        & (rail.mean(axis=1) >= 100)
+        & (rail.mean(axis=1) <= 210)
+        & (rail.mean(axis=1) - above.mean(axis=1) >= 60)
+    )
+    if int(rail_matches.sum()) < 15:
+        return None
+    dividers = rgb[
+        numpy.asarray((1008, 1020, 1032, 1044))[:, None],
+        (596 + 80 * numpy.arange(1, 9))[None, :],
+    ]
+    neutral = (
+        (dividers.max(axis=2) - dividers.min(axis=2) <= 28)
+        & (dividers.mean(axis=2) >= 70)
+        & (dividers.mean(axis=2) <= 240)
+    )
+    if int(numpy.all(neutral, axis=0).sum()) < 6:
+        return None
+    # A coloured additional health row is unresolved, not a promise that the
+    # player has only 20 maximum health. Terrain matching this palette also
+    # abstains conservatively; it never creates a status-effect observation.
+    upper = rgb[876:916, 596:920]
+    red, green, blue = upper[..., 0], upper[..., 1], upper[..., 2]
+    extra_colour = ((red >= 150) & (red > green * 1.6) & (red > blue * 1.6)) | (
+        (red >= 150) & (green >= 110) & (blue <= 100) & (red >= green)
+    )
+    if int(extra_colour.sum()) > 8:
+        return None
+    rows = 916 + 4 * numpy.arange(9)[None, :, None, None, None]
+    rows = rows + numpy.asarray((1, 2))[None, None, None, :, None]
+    columns = 596 + 32 * numpy.arange(10)[:, None, None, None, None]
+    columns = columns + 4 * numpy.arange(9)[None, None, :, None, None]
+    columns = columns + numpy.asarray((1, 2))[None, None, None, None, :]
+    cells = numpy.median(rgb[rows, columns], axis=(3, 4))
+    palette = {
+        "K": (0, 0, 0), "R": (255, 19, 19), "S": (187, 19, 19),
+        "H": (255, 200, 200), "E": (40, 40, 40),
+    }
+    states: list[int] = []
+    for icon in cells:
+        matches: list[int] = []
+        for units in (0, 1, 2):
+            valid = True
+            for y, row in enumerate(_CLASSIC_HEALTH_GLYPH):
+                for x, symbol in enumerate(row):
+                    if symbol == ".":
+                        continue
+                    if symbol != "K" and (units == 0 or units == 1 and x > 4):
+                        symbol = "E"
+                    observed = icon[y, x]
+                    tolerance = 35 if symbol == "K" else 12 if symbol == "E" else 45
+                    if float(numpy.abs(observed - palette[symbol]).max()) > tolerance:
+                        valid = False
+                        break
+                if not valid:
+                    break
+            if valid:
+                matches.append(units)
+        if len(matches) != 1:
+            return None
+        states.append(matches[0])
+    health = sum(states)
+    expected = [2] * (health // 2) + ([1] if health % 2 else [])
+    expected += [0] * (10 - len(expected))
+    return health if states == expected else None
 
 
 def bedrock_survival_hud_present(frame: CapturedFrame) -> bool:

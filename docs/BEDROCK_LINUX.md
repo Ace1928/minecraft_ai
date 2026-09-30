@@ -85,6 +85,28 @@ death, away, or inventory overlay that the agent can recover from. This detector
 is only a launch-safety interlock; it is explicitly not a
 semantic perception source or training label.
 
+The fast safety observer additionally reads normal full, half and empty hearts
+only on the measured Bedrock **1.26.52.3, 1920x1080 classic HUD at four pixels per
+sprite cell**. The runtime binds the supported version from its existing
+`bedrock:<version>:<session>` instance identity. A complete ordered heart bank
+and independently positioned hotbar rail/dividers are required; menus and
+death overlays cannot publish health. `player.health` uses the game's 0..20
+units, `player.health_fraction` divides by 20, and `player.critical_health`
+means at most 6 units. Each fact is tied to the actual capture timestamp,
+expires after 250 ms and carries
+`safety:bedrock-1.26.52.3-classic-health-1920x1080-4px-v1:not-training-label`.
+This supplies the existing ERAIS interaction policy's observed-damage input;
+it does not qualify a learned perception label or prove gameplay mastery.
+
+The observer abstains on unreadable cells, unsupported builds/scales, shifted
+glyphs, low-health jitter, flashing outlines, effect colours or an unresolved
+additional health row. Matching terrain colours above the heart bank can also
+cause conservative abstention. It never substitutes an assumed health value
+for a missing observation. Retained real PNG/JPEG positive and animation/menu/
+death negative controls are documented in
+`tests/fixtures/bedrock_health/README.md`. Runtime source changes require a
+reviewed agent reload before this feedback is available to the live policy.
+
 ## Private-LAN operator dashboard
 
 The dashboard stays loopback-only by default. To let trusted devices on the
