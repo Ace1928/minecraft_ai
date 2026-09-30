@@ -134,6 +134,46 @@ class HighLevelController:
             return context
         return replace(context, wiki=evidence)
 
+    def _with_operator_reference(
+        self, blackboard: CognitionReadView, context: CognitionContext,
+    ) -> CognitionContext:
+        """Give a pending reply-only question the same bounded references.
+
+        Recipe/wiki text remains reference evidence. It grants neither an
+        observed item nor an action or an in-game chat reply.
+        """
+        question = self._active_operator_question(context)
+        latest = blackboard.latest()
+        if question is None or latest is None or context.wiki:
+            return context
+        parts = latest.instance_id.split(":")
+        if len(parts) < 2 or parts[0] != "bedrock":
+            return context
+        request = self._request_context.get()
+        if request is not None and request.snapshot().disposition != "pending":
+            return context
+        if self.pack_recipe_catalog is not None:
+            answer = self.pack_recipe_catalog.lookup(question.text, game_version=parts[1])
+            if answer is not None:
+                if request is not None and request.snapshot().disposition != "pending":
+                    return context
+                return replace(context, wiki=(answer.evidence,))
+            if self.pack_recipe_catalog.mentions_pack_content(question.text):
+                return context
+        if self.world_search is None:
+            return context
+        cutoff = time.monotonic_ns() + 5_000_000_000
+        if request is not None:
+            cutoff = min(cutoff, request.binding.deadline_ns)
+        evidence = self.world_search.search(
+            question.text, game_version=parts[1], deadline_ns=cutoff,
+        )
+        if not evidence or (
+            request is not None and request.snapshot().disposition != "pending"
+        ):
+            return context
+        return replace(context, wiki=evidence)
+
     def _decide(
         self,
         blackboard: CognitionReadView,
@@ -157,6 +197,8 @@ class HighLevelController:
             )
             if active_operator is None and not _urgent_safety_required(blackboard):
                 context = self._with_player_reference(blackboard, context)
+            elif not _urgent_safety_required(blackboard):
+                context = self._with_operator_reference(blackboard, context)
             planning_query = (
                 active_operator.text
                 if active_operator is not None

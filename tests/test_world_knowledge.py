@@ -17,6 +17,9 @@ from minecraft_ai.pack_recipes import PackRecipeCatalog
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
 from minecraft_ai.roles import get_role
 from minecraft_ai.world_knowledge import WorldMinecraftSearch, minecraft_public_topic
+from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
+from minecraft_ai.wiki import WikiEvidence
+from minecraft_ai.models import ModelResponse
 
 
 @pytest.mark.parametrize("query,subject,intent", [
@@ -173,3 +176,88 @@ def test_reference_lookup_cannot_supersede_pack_or_stale_authority(case):
         controller._request_context.set(request)
     assert controller._with_player_reference(board, context) is context
     service.search.assert_not_called()
+
+
+def _operator_context(*, kind=OperatorMessageKind.QUESTION,
+                      status=OperatorMessageStatus.DELIVERED,
+                      text="How do I craft a Poké Ball?"):
+    return replace(_context(), operator_messages=(OperatorMessage(
+        message_id="recipe-question", created_ns=time.monotonic_ns(), text=text,
+        kind=kind, status=status,
+    ),))
+
+
+def test_operator_recipe_reference_reaches_reply_only_model_without_game_authority():
+    evidence = WikiEvidence(
+        title="Poké Ball recipe — family pack", extract="4 red apricorns and 1 copper ingot.",
+        retrieved_ns=time.time_ns(), query="How do I craft a Poké Ball?",
+        version_key="bedrock:1.26.52.3:pack:" + "a" * 64, confidence=1,
+    )
+    pack = Mock(spec=PackRecipeCatalog)
+    pack.lookup.return_value = SimpleNamespace(evidence=evidence)
+    service = Mock()
+    model = Mock(spec=["complete_constrained"])
+    model.complete_constrained.return_value = ModelResponse(
+        model="synthetic-reference-contract", latency_ms=1,
+        text=json.dumps({
+            "g": "operator:recipe-question", "o": "4 red apricorns and 1 copper ingot.",
+        }),
+    )
+    controller = HighLevelController(
+        model, build_bootstrap_skill_library(), world_search=service, pack_recipe_catalog=pack,
+    )
+    board = _blackboard(query="Kid: Where is copper?")
+    before = board.raw_latest()
+    decision = controller.decide(board, _operator_context())
+    pack.lookup.assert_called_once_with("How do I craft a Poké Ball?", game_version="1.26.52.3")
+    service.search.assert_not_called()
+    payload = json.loads(model.complete_constrained.call_args.args[0][1].content)
+    assert payload["wiki_evidence"][0]["version"] == evidence.version_key[:80]
+    assert payload["skills"] == []
+    assert decision.say == "4 red apricorns and 1 copper ingot."
+    assert decision.skill_id is decision.game_chat is decision.research_query is None
+    assert decision.skill_parameters == {} and not decision.plan_steps
+    assert board.raw_latest() is before
+
+
+@pytest.mark.parametrize("case", [
+    "instruction", "answered", "wrong_edition", "cancelled", "pack_unknown",
+])
+def test_operator_reference_cannot_replace_authority_or_invent_pack_answers(case):
+    pack = Mock(spec=PackRecipeCatalog)
+    pack.lookup.return_value = None
+    pack.mentions_pack_content.return_value = True
+    service = Mock()
+    controller = HighLevelController(
+        Mock(), build_bootstrap_skill_library(), world_search=service, pack_recipe_catalog=pack,
+    )
+    ctx = _operator_context(
+        kind=(OperatorMessageKind.INSTRUCTION if case == "instruction"
+              else OperatorMessageKind.QUESTION),
+        status=(OperatorMessageStatus.ACKNOWLEDGED if case == "answered"
+                else OperatorMessageStatus.DELIVERED),
+    )
+    if case == "cancelled":
+        controller._request_context.set(SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(disposition="rejected"),
+        ))
+    board = _blackboard(instance="java:1.21" if case == "wrong_edition" else None)
+    assert controller._with_operator_reference(board, ctx) is ctx
+    service.search.assert_not_called()
+    if case != "pack_unknown":
+        pack.lookup.assert_not_called()
+
+
+def test_operator_vanilla_question_uses_existing_private_search_filter(monkeypatch, tmp_path):
+    connection, _ = _transport(monkeypatch)
+    controller = HighLevelController(
+        Mock(), build_bootstrap_skill_library(),
+        world_search=WorldMinecraftSearch(_token(tmp_path)),
+    )
+    ctx = _operator_context(text="Where do I find copper ore for PrivateKidName?")
+    enriched = controller._with_operator_reference(_blackboard(), ctx)
+    assert enriched.wiki[0].confidence == 0.65
+    body = connection.request.call_args.kwargs["body"].decode()
+    assert "PrivateKidName" not in body
+    assert parse_qs(body)["q"] == ["Minecraft Wiki Bedrock copper ore locations"]
+    assert enriched.pack_recipe_reply is None

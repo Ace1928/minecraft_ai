@@ -71,6 +71,15 @@ route. It still needs a parsed mapping, exact rendering calibration and the
 real-frame quality receipt before producing player-chat authority. No OCR
 expert is declared qualified or active by this document.
 
+Pending typed operator questions also retrieve bounded references in the
+cognition worker. An exact configured family-pack recipe takes precedence;
+unanswered pack-specific questions cannot fall back to vanilla wiki advice.
+Other supported public topics use the authenticated shared search service and
+its existing query filter. References enter the native World reply-only prompt
+with version/confidence metadata; they never become observed facts, inventory
+counts, player-chat authority or an executable game action. Refresh the pinned
+catalog from the actual installed family pack before resuming after an upgrade.
+
 ## Replacing the shared World without closing the game
 
 The native World service overlay uses `Wants` and `After` for ordered bootstrap.
