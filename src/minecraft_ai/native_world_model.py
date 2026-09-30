@@ -24,6 +24,7 @@ MODEL_ID = "erais-native-qwen3"
 MAX_PROMPT_BYTES = 2048
 MAX_OUTPUT_TOKENS = 128
 _RUNTIME_ID = re.compile(r"[0-9a-f]{32}\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 _PLANNER_RULES = (
@@ -45,7 +46,8 @@ _REPLY_ONLY_RULES = (
     "ERAIS World Minecraft operator reply. Use only fresh_facts as observed truth. "
     "If facts do not answer the question, say fresh evidence is unavailable. Do not "
     "invent observations or propose actions. Return exactly one JSON object with keys "
-    "g and o. Use the exact supplied goal ID for g; keep o under 160 characters.\nContext:"
+    "g, o and q. Use the exact supplied goal ID for g; keep o under 160 characters. "
+    "q is an empty list or at most two admitted perception keys.\nContext:"
 )
 
 
@@ -164,7 +166,7 @@ def _compact_context(messages: tuple[ModelMessage, ...]) -> tuple[dict[str, Any]
                     result[key] = _short(item, 180)
         fallback = value.get("safe_fallback")
         if type(fallback) is dict:
-            safe_fallback = {}
+            safe_fallback: dict[str, object] = {}
             for key in ("s", "p", "x"):
                 if key not in fallback:
                     continue
@@ -311,6 +313,7 @@ def _compact_context(messages: tuple[ModelMessage, ...]) -> tuple[dict[str, Any]
 def compact_planner_prompt(
     messages: tuple[ModelMessage, ...], *, max_prompt_bytes: int = MAX_PROMPT_BYTES,
     fits_prompt: Callable[[str], bool] | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> str:
     """Fit the native World's byte and exact tokenizer bounds before inference."""
     if type(max_prompt_bytes) is not int or not 1 <= max_prompt_bytes <= MAX_PROMPT_BYTES:
@@ -318,6 +321,13 @@ def compact_planner_prompt(
     if fits_prompt is not None and not callable(fits_prompt):
         raise ValueError("native World token budget check must be callable")
     context, reply_only = _compact_context(messages)
+    if response_format is not None:
+        # This is already parsed from original controller authority, before
+        # lossy prompt compaction. Prose cannot select a different contract mode.
+        reply_only = response_format["mode"] == "operator_reply"
+        context.pop("reply_only_goal_id", None)
+        if reply_only:
+            context["reply_only_goal_id"] = response_format["authority"]["authority_goal_id"]
     if reply_only:
         goal_id = context.get("reply_only_goal_id")
         if type(goal_id) is not str:
@@ -489,7 +499,7 @@ class NativeWorldCognitionModel:
             raise RuntimeError("httpx is required for the ERAIS Native World adapter") from error
         return httpx.Client(timeout=self.timeout_s)
 
-    def _identity(self, client: Any, headers: dict[str, str]) -> str:
+    def _owner_identity(self, client: Any, headers: dict[str, str]) -> tuple[str, dict[str, Any]]:
         ready = json.loads(_read_private_file(self.ready_file, limit=4_194_304))
         backend = ready.get("backend") if type(ready) is dict else None
         if (
@@ -521,11 +531,15 @@ class NativeWorldCognitionModel:
             or identity.get("runtime_id") != ready["runtime_id"]
             or identity.get("fully_native") is not True
             or identity.get("source_family") != "Qwen3"
+            or identity.get("minecraft_cognition") != backend.get("minecraft_cognition")
         ):
             raise RuntimeError(
                 "ERAIS World API and private readiness receipt identify different owners"
             )
-        return ready["runtime_id"]
+        return ready["runtime_id"], identity
+
+    def _identity(self, client: Any, headers: dict[str, str]) -> str:
+        return self._owner_identity(client, headers)[0]
 
     def verify_ready(self) -> str:
         """Verify the private readiness receipt and API owner without inference."""
@@ -536,7 +550,22 @@ class NativeWorldCognitionModel:
         with self._client() as client:
             return self._identity(client, headers)
 
-    def _complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse:
+    def _complete(
+        self, messages: tuple[ModelMessage, ...], *, response_format: dict[str, Any] | None = None,
+    ) -> ModelResponse:
+        capsule = None
+        if response_format is not None:
+            try:
+                from erais.demo.minecraft_cognition_contract import (  # type: ignore[import-not-found]
+                    CONTRACT, PERCEPTION_KEYS, parse_format, validate_output,
+                )
+                from .cognition.prompts import _cognition_perception_keys
+                if set(PERCEPTION_KEYS) != set(_cognition_perception_keys()):
+                    raise ValueError("Minecraft perception contract vocabulary changed")
+                capsule = parse_format(response_format)
+                response_format = capsule.to_format()
+            except (ImportError, ValueError) as error:
+                raise RuntimeError("qualified native Minecraft contract is unavailable") from error
         token = _read_private_file(self.token_file, limit=512).decode("ascii").strip()
         if not token or any(char.isspace() for char in token):
             raise RuntimeError("invalid private ERAIS World bearer token")
@@ -544,7 +573,43 @@ class NativeWorldCognitionModel:
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         with local_model_inference_lane():
             with self._client() as client:
-                runtime_id = self._identity(client, headers)
+                structured_identity = None
+                if capsule is None:
+                    runtime_id = self._identity(client, headers)
+                else:
+                    runtime_id, identity = self._owner_identity(client, headers)
+                    structured_identity = identity.get("minecraft_cognition")
+                    if (
+                        type(structured_identity) is not dict
+                        or structured_identity.get("supported") is not True
+                        or structured_identity.get("contract") != CONTRACT
+                        or type(structured_identity.get("tokenizer_identity")) is not str
+                        or _SHA256.fullmatch(structured_identity["tokenizer_identity"]) is None
+                        or type(structured_identity.get("stop_token_ids")) is not list
+                        or len(structured_identity["stop_token_ids"]) != 1
+                        or type(structured_identity["stop_token_ids"][0]) is not int
+                        or structured_identity["stop_token_ids"][0] < 0
+                    ):
+                        raise RuntimeError(
+                            "active World lacks qualified Minecraft structured decoding"
+                        )
+
+                def check_receipt(receipt: object, *, complete: bool) -> None:
+                    assert capsule is not None and structured_identity is not None
+                    expected = {
+                        "contract": CONTRACT, "mode": capsule.mode,
+                        "authority_sha256": capsule.authority_sha256,
+                        "grammar_sha256": capsule.grammar_sha256,
+                        "tokenizer_identity": structured_identity["tokenizer_identity"],
+                        "runtime_id": runtime_id, "complete": complete,
+                    }
+                    if (
+                        type(receipt) is not dict or set(receipt) != set(expected)
+                        or receipt != expected or receipt.get("complete") is not complete
+                    ):
+                        raise RuntimeError(
+                            "native Minecraft structured receipt does not match authority/owner"
+                        )
                 budget_checks = 0
 
                 def fits_prompt(prompt: str) -> bool:
@@ -559,6 +624,8 @@ class NativeWorldCognitionModel:
                         "stream": False,
                         "n": 1,
                     }
+                    if capsule is not None:
+                        payload["response_format"] = response_format
                     budget_response = client.post(
                         self.base_url.rstrip("/") + "/tokenize", headers=headers, json=payload
                     )
@@ -578,9 +645,13 @@ class NativeWorldCognitionModel:
                         raise RuntimeError(
                             "ERAIS World returned an invalid or different-owner token budget"
                         )
-                    return budget["fits"]
+                    if capsule is not None:
+                        check_receipt(budget.get("structured"), complete=False)
+                    return budget["fits"] is True
 
-                prompt = compact_planner_prompt(messages, fits_prompt=fits_prompt)
+                prompt = compact_planner_prompt(
+                    messages, fits_prompt=fits_prompt, response_format=response_format,
+                )
                 payload = {
                     "model": MODEL_ID,
                     "messages": [{"role": "user", "content": prompt}],
@@ -588,6 +659,8 @@ class NativeWorldCognitionModel:
                     "stream": False,
                     "n": 1,
                 }
+                if capsule is not None:
+                    payload["response_format"] = response_format
                 response = client.post(
                     self.base_url.rstrip("/") + "/chat/completions",
                     headers=headers,
@@ -610,6 +683,15 @@ class NativeWorldCognitionModel:
             or choice.get("finish_reason") not in {"stop", "length"}
         ):
             raise RuntimeError("ERAIS Native World returned an invalid Minecraft decision response")
+        if capsule is not None:
+            erais = body.get("erais")
+            check_receipt(erais.get("structured") if type(erais) is dict else None, complete=True)
+            try:
+                validate_output(
+                    text, capsule, finish_reason=choice["finish_reason"], interrupted=False,
+                )
+            except ValueError as error:
+                raise RuntimeError("native Minecraft decision was not completed") from error
         return ModelResponse(
             text=text,
             model=MODEL_ID,
@@ -619,10 +701,24 @@ class NativeWorldCognitionModel:
     def complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse:
         return self._complete(messages)
 
-    def complete_structured(self, messages, *, name, schema) -> ModelResponse:
-        return self._complete(messages)
+    def complete_structured(
+        self, messages: tuple[ModelMessage, ...], *, name: str, schema: dict[str, Any],
+    ) -> ModelResponse:
+        raise RuntimeError(
+            "native Minecraft requires original named authority, not an arbitrary schema"
+        )
 
-    def complete_constrained(self, messages, *, name, schema, grammar) -> ModelResponse:
-        # Native World owns decoding and does not accept caller-supplied grammars.
-        # The existing strict decision parser and authority layer validate output.
-        return self._complete(messages)
+    def complete_constrained(
+        self, messages: tuple[ModelMessage, ...], *, name: str,
+        schema: dict[str, Any], grammar: str,
+    ) -> ModelResponse:
+        raise RuntimeError(
+            "native Minecraft requires original named authority, not an arbitrary grammar"
+        )
+
+    def complete_minecraft_decision(
+        self, messages: tuple[ModelMessage, ...], *, name: str, authority: dict[str, Any],
+    ) -> ModelResponse:
+        if name not in {"cognition_decision", "cognition_decision_json_repair"}:
+            raise RuntimeError("unsupported native Minecraft request name")
+        return self._complete(messages, response_format=authority)

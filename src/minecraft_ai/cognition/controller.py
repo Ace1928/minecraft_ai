@@ -967,6 +967,11 @@ class HighLevelController:
             authority_goal_id=None if active is None else f"operator:{active.message_id}",
             required_action_constraints=constraints,
             requested_skill_ids=requested_skill_ids,
+            allowed_goal_ids=(
+                tuple(goal.goal_id for goal in _selected_goals(
+                    context.goals, active_goal_id=context.plan_goal_id,
+                )) if active is None else ()
+            ),
         )
 
     @staticmethod
@@ -1149,7 +1154,12 @@ class HighLevelController:
             return _reply_only_decision_from_response(response, repair_bounds)
         try:
             return _decision_from_response(response)
-        except (RuntimeError, ValidationError):
+        except (RuntimeError, ValidationError) as error:
+            if callable(getattr(self.model, "complete_minecraft_decision", None)):
+                # Named native output was already syntax/authority checked by
+                # its owner. Parser disagreement refuses rather than admitting
+                # another inference or downgrading to unconstrained repair.
+                raise RuntimeError("native Minecraft contract parser disagreement") from error
             self.metrics.repairs += 1
             self.metrics.json_repairs += 1
             repair_messages = _json_repair_messages(response.text, repair_bounds)
@@ -1175,21 +1185,27 @@ class HighLevelController:
         repair_bounds: _DecisionRepairBounds,
     ) -> ModelResponse:
         request = self._request_context.get()
+        native = getattr(self.model, "complete_minecraft_decision", None)
         bound = getattr(self.model, "complete_bound_constrained", None)
         constrained = getattr(self.model, "complete_constrained", None)
         structured = getattr(self.model, "complete_structured", None)
-        use_bound = request is not None and callable(bound)
+        use_bound = not callable(native) and request is not None and callable(bound)
         schema = (
             _cognition_decision_schema(repair_bounds)
-            if use_bound or callable(constrained) or callable(structured) else {}
+            if not callable(native) and (use_bound or callable(constrained) or callable(structured))
+            else {}
         )
         grammar = (
             _cognition_decision_grammar(repair_bounds)
-            if use_bound or callable(constrained) else ""
+            if not callable(native) and (use_bound or callable(constrained)) else ""
         )
         attempt_id = None if request is None else request.start_attempt(name)
         try:
-            if request is not None and callable(bound):
+            if callable(native):
+                response = cast(ModelResponse, native(
+                    messages, name=name, authority=repair_bounds.native_format(),
+                ))
+            elif request is not None and callable(bound):
                 response = cast(
                     ModelResponse,
                     bound(

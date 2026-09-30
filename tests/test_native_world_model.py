@@ -328,16 +328,13 @@ def test_world_adapter_uses_owner_readiness_and_only_native_api_fields(monkeypat
         ),
     )
     monkeypatch.setattr(model, "_client", lambda: Client())
-    response = model.complete_constrained(
+    response = model.complete(
         (
             ModelMessage(role="system", content="Use only verified facts."),
             ModelMessage(
                 role="user", content='{"fresh_facts":{"scene.playable":[false,0.99]},"skills":[]}'
             ),
         ),
-        name="decision",
-        schema={"type": "object"},
-        grammar='root ::= "{}"',
     )
     assert response.model == MODEL_ID
     assert seen["get"].endswith("/models")
@@ -734,7 +731,11 @@ def test_native_world_controller_recipe_reaches_existing_leased_chat_contract(mo
     answer = catalog.lookup("How do I craft a Poké Ball?", game_version="1.26.52.3")
     assert answer is not None
     runtime_id = "b" * 32
-    identity = {"runtime_id": runtime_id, "fully_native": True, "source_family": "Qwen3"}
+    from erais.demo.minecraft_cognition_contract import parse_format
+    identity = {"runtime_id": runtime_id, "fully_native": True, "source_family": "Qwen3",
+                "minecraft_cognition": {"contract": "erais.minecraft.cognition.v1",
+                    "supported": True, "tokenizer_identity": "c" * 64,
+                    "stop_token_ids": [151645]}}
     ready = {"status": "private_ready", "runtime_id": runtime_id,
              "backend": {"model_id": MODEL_ID, **identity}}
     calls = []
@@ -762,12 +763,18 @@ def test_native_world_controller_recipe_reaches_existing_leased_chat_contract(mo
 
         def post(self, url, **kwargs):
             calls.append(url)
+            capsule = parse_format(kwargs["json"]["response_format"])
+            structured = {"contract": "erais.minecraft.cognition.v1", "mode": capsule.mode,
+                "authority_sha256": capsule.authority_sha256,
+                "grammar_sha256": capsule.grammar_sha256,
+                "tokenizer_identity": "c" * 64, "runtime_id": runtime_id,
+                "complete": not url.endswith("/tokenize")}
             if url.endswith("/tokenize"):
-                return Response(_token_budget(runtime_id))
+                return Response({**_token_budget(runtime_id), "structured": structured})
             prompt = kwargs["json"]["messages"][0]["content"]
             assert "wiki_evidence" in prompt and "4 Red Apricorn" in prompt
             assert "social.player_message" in prompt
-            return Response({"model": MODEL_ID, "choices": [{
+            return Response({"model": MODEL_ID, "erais": {"structured": structured}, "choices": [{
                 "finish_reason": "stop", "message": {"content": json.dumps({
                     "r": "Use the supplied pack reference", "g": None, "s": None,
                     "p": {}, "o": None, "c": None, "x": False, "q": [],

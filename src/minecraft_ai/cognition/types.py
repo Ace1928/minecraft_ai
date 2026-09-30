@@ -193,6 +193,7 @@ class _DecisionRepairBounds:
     required_action_constraints: tuple[tuple[str, bool], ...] = ()
     requested_skill_ids: tuple[str, ...] = ()
     reply_only: bool = False
+    allowed_goal_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.reply_only and (
@@ -200,8 +201,26 @@ class _DecisionRepairBounds:
             or self.allowed_skills
             or self.required_action_constraints
             or self.requested_skill_ids
+            or self.allowed_goal_ids
         ):
             raise ValueError("reply-only bounds require one operator goal and no action authority")
+
+    def native_format(self) -> dict[str, object]:
+        """Copy original typed bounds; compacted prose never grants authority."""
+        return {
+            "type": "erais.minecraft.cognition.v1",
+            "mode": "operator_reply" if self.reply_only else "decision",
+            "authority": {
+                "goal_ids": list(self.allowed_goal_ids),
+                "authority_goal_id": self.authority_goal_id,
+                "allowed_skills": [
+                    {"skill_id": skill, "parameters": list(parameters)}
+                    for skill, parameters in self.allowed_skills
+                ],
+                "requested_skill_ids": list(self.requested_skill_ids),
+                "required_action_constraints": dict(self.required_action_constraints),
+            },
+        }
 
     def prompt_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {

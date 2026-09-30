@@ -181,17 +181,30 @@ def _reply_only_decision_from_response(
         raw = json.loads(response.text, object_pairs_hook=unique_object)
     except ValueError as exc:
         raise ValueError("operator_question_invalid_json") from exc
-    if isinstance(raw, dict) and set(raw) == {"g", "o"}:
+    if isinstance(raw, dict) and set(raw) in ({"g", "o"}, {"g", "o", "q"}):
         if raw.get("g") != bounds.authority_goal_id:
             raise ValueError("operator_question_goal_mismatch")
         if not isinstance(raw.get("o"), str) or not raw["o"].strip() or len(raw["o"]) > 160:
+            raise ValueError("operator_question_contract_failed")
+        questions = raw.get("q", [])
+        if (
+            type(questions) is not list or len(questions) > 2
+            or any(type(key) is not str for key in questions)
+            or len(set(questions)) != len(questions)
+        ):
             raise ValueError("operator_question_contract_failed")
         compact = CognitionDecision(
             reasoning_summary="Answered the active operator question.",
             chosen_goal_id=raw["g"],
             say=raw["o"],
+            ask_perception=tuple(questions),
         )
         _validate_reply_only_decision(compact, bounds)
+        origin = response.request_attempt
+        if origin is not None:
+            compact._model_origin = DecisionModelOrigin(
+                origin.request_id, origin.attempt_id, cognition_decision_sha256(compact),
+            )
         return compact
     if not isinstance(raw, dict) or set(raw) != set("rgspocxqwdn"):
         raise ValueError("operator_question_wire_fields")
