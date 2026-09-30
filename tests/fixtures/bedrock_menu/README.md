@@ -29,3 +29,14 @@ SHA-256: `87c3bf9fcadeb2624b58fc417b9ae3476bedf34878d683136706e81ad2678bef`.
 
 Derived synthetic position and destructive geometry controls are labelled as
 tests. They are not retained gameplay, camera calibration, or live authority.
+
+`clear_sky_world_1920x1080.png` is an unmodified captured family-world frame
+from the failed pack-1.3.148 stability interval on 30 September 2026, Bedrock
+1.26.52.3, classic four-pixel HUD. The earlier brightness-only top-bar guard
+mistook its blue sky for a menu: 92.7003% of sampled top-band pixels exceeded
+the luma threshold, but none met the independently measured neutral chrome
+palette. The regression keeps the existing 90% coverage and luma threshold,
+checks the same HUD and 15/20 health glyph readers, and retains real Content
+Log and Play toolbar refusals. This is a safety regression, not training data,
+camera qualification, current input authority, or proof of gameplay mastery.
+SHA-256: `f679c25c93f7abaf73e42829445815e8cce10ca54145b2d1a3c7698f1ae185de`.

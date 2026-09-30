@@ -536,6 +536,69 @@ def test_bedrock_ui_chrome_is_a_negative_only_motor_interlock() -> None:
     assert "scene.inventory_overlay" not in facts
 
 
+@pytest.mark.parametrize("without_numpy", [False, True])
+@pytest.mark.parametrize("blue_green_red", [(220, 220, 220), (255, 225, 180)])
+def test_top_chrome_requires_light_neutral_palette(
+    blue_green_red: tuple[int, int, int], without_numpy: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if without_numpy:
+        monkeypatch.setattr(perception_service, "_numpy_bgra", lambda _frame: None)
+    width, height = 640, 360
+    pixels = bytearray(bytes((40, 40, 40, 255)) * width * height)
+    for y in range(int(height * 0.05)):
+        for x in range(width):
+            offset = (y * width + x) * 4
+            pixels[offset:offset + 4] = bytes((*blue_green_red, 255))
+    frame = _frame(bytes(pixels), width=width, height=height)
+    neutral = blue_green_red == (220, 220, 220)
+    assert perception_service._bedrock_top_ui_chrome_present(frame) is neutral
+    assert bedrock_ui_chrome_present(frame) is neutral
+    # A coloured bright band supplies no positive world or input authority.
+    assert not bedrock_in_world_hud_present(frame)
+    assert live_control_arm_reason(frame) is None
+
+
+@pytest.mark.parametrize("without_numpy", [False, True])
+@pytest.mark.parametrize("name", [
+    "content_log_1920x1080.png", "play_lan_server_list_caption_1920x1080.png",
+])
+def test_retained_real_top_toolbars_remain_negative_only(
+    name: str, without_numpy: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if without_numpy:
+        monkeypatch.setattr(perception_service, "_numpy_bgra", lambda _frame: None)
+    path = Path(__file__).parent / "fixtures" / "bedrock_menu" / name
+    image = Image.open(path).convert("RGBA")
+    frame = _frame(image.tobytes("raw", "BGRA"), width=image.width, height=image.height)
+    assert perception_service._bedrock_top_ui_chrome_present(frame)
+    assert bedrock_ui_chrome_present(frame)
+    assert not bedrock_in_world_hud_present(frame)
+    assert live_control_arm_reason(frame) is None
+
+
+def test_retained_real_clear_sky_does_not_block_independent_hud_health() -> None:
+    path = Path(__file__).parent / "fixtures" / "bedrock_menu" / "clear_sky_world_1920x1080.png"
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+        "f679c25c93f7abaf73e42829445815e8cce10ca54145b2d1a3c7698f1ae185de"
+    )
+    image = Image.open(path).convert("RGBA")
+    frame = _frame(image.tobytes("raw", "BGRA"), width=image.width, height=image.height)
+    assert not perception_service._bedrock_top_ui_chrome_present(frame)
+    assert not bedrock_ui_chrome_present(frame)
+    assert bedrock_in_world_hud_present(frame)
+    assert live_control_arm_reason(frame) == "hud"
+    assert perception_service.bedrock_classic_health(frame, game_version="1.26.52.3") == 15
+    facts = {
+        fact.key: fact for fact in BootstrapFastPerception(game_version="1.26.52.3").infer(frame)
+    }
+    assert facts["scene.playable"].value is True
+    assert facts["scene.ui_overlay"].value is False
+    assert facts["scene.playable"].source.endswith(":not-training-label")
+    assert facts["player.health"].value == 15
+    assert facts["player.health"].source.endswith(":not-training-label")
+
+
 def test_bedrock_inventory_chrome_is_a_negative_only_motor_interlock() -> None:
     width, height = 640, 360
     pixels = bytearray(bytes((50, 80, 45, 255)) * width * height)

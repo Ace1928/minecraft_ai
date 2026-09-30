@@ -1198,7 +1198,13 @@ def _bedrock_top_ui_chrome_present(frame: CapturedFrame) -> bool:
             offset = (y * frame.width + x) * 4
             blue, green, red = source[offset : offset + 3]
             luma = 29 * int(blue) + 150 * int(green) + 77 * int(red)
-            bright += int(luma > 180 * 256)
+            # Retained Content Log/Play bars have light neutral chrome. The
+            # actual family-world clear sky also exceeds this luma threshold,
+            # so brightness alone must not assert an obstructing UI. This is
+            # still a negative-only interlock; playable HUD admission is an
+            # independent check over the captured hotbar/heart geometry.
+            neutral = max(blue, green, red) - min(blue, green, red) <= 18
+            bright += int(neutral and luma > 180 * 256)
             sampled += 1
     return bool(sampled > 0 and bright / sampled >= 0.90)
 
