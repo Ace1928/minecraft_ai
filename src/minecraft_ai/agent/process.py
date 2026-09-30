@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import sys
 import time
@@ -21,12 +22,15 @@ from minecraft_ai.platforms import create_bedrock_capture
 from minecraft_ai.platforms.bedrock_session import BedrockSession
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame, IsolationError
 from minecraft_ai.platforms.capture_source import BedrockCaptureSource
+from minecraft_ai.platforms.frame_cache import PublishedFrameCapture
+from minecraft_ai.agent_lifecycle import AgentProcess
 from minecraft_ai.policy_service import GroundedPolicyRouter, TemporalPolicyClient
 from minecraft_ai.roles import get_role
 from minecraft_ai.runtime_factory import RuntimeStartupCleanupIncomplete, run_agent_runtime
 from minecraft_ai.storage import StateDatabase
 from minecraft_ai.supervisor import send_command
 from minecraft_ai.trajectory import TrajectoryRecorder, new_trajectory_id
+from minecraft_ai.world_knowledge import WorldMinecraftSearch
 
 
 def build_motor_policy(
@@ -140,6 +144,19 @@ def main(argv: list[str] | None = None) -> int:
             source=args.capture_source,
             capture_budget_ms=config.stale_frame_ms,
         )
+        # A spectator must reuse this process's exact pixels while we own capture.
+        # Missing publication metadata remains a viewing limitation only.
+        try:
+            capture_owner = AgentProcess.load()
+        except (OSError, ValueError, TypeError, KeyError):
+            capture_owner = None
+        if (
+            capture_owner is not None and capture_owner.pid == os.getpid()
+            and capture_owner.display == args.display
+            and capture_owner.window_id == args.window_id
+            and capture_owner.instance_id == args.instance_id
+        ):
+            capture = PublishedFrameCapture(capture, capture_owner)
         capture_probe = capture.capture()
 
         high_level: HighLevelController | None = None
@@ -147,7 +164,16 @@ def main(argv: list[str] | None = None) -> int:
             if not config.high_level.model_id:
                 raise RuntimeError("high-level model is enabled but model_id is empty")
             high_model = configured_model(config.high_level, purpose="cognition")
-            high_level = HighLevelController(high_model, skills)
+            world_search = None
+            if (
+                config.online_wiki and config.high_level.provider == "erais-native-world"
+                and config.high_level.native_world_token_file is not None
+            ):
+                world_search = WorldMinecraftSearch(config.high_level.native_world_token_file)
+            high_level = HighLevelController(
+                high_model, skills, world_search=world_search,
+                pack_recipe_catalog=pack_recipe_catalog,
+            )
 
         active_vlm: ActiveVLMWorker | None = None
         if config.vision_language.enabled:

@@ -173,6 +173,21 @@ class PackRecipeCatalog:
             return None
         return PackRecipeAnswer(evidence=evidence, chat_reply=reply)
 
+    def mentions_pack_content(self, query: str) -> bool:
+        """A vanilla wiki cannot establish mechanics of a locally installed item."""
+        normalized = _normalize(query)
+        for item_id, item in self._payload["items"].items():
+            if item_id.startswith("minecraft:") or type(item) is not dict:
+                continue
+            name = item.get("name")
+            if type(name) is not str:
+                continue
+            names = {_normalize(name), _normalize(item_id.split(":", 1)[-1])}
+            if any(re.search(r"(?<![a-z0-9])" + re.escape(value) + r"s?(?![a-z0-9])",
+                             normalized) for value in names if value):
+                return True
+        return False
+
     @staticmethod
     def _render_recipe(recipe: dict[str, Any], items: dict[str, Any]) -> str | None:
         ingredients = recipe.get("ingredients")

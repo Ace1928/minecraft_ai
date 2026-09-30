@@ -49,6 +49,7 @@ from minecraft_ai.platforms.bedrock_session import (
     require_autonomous_input_isolation,
 )
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
+from minecraft_ai.platforms.frame_cache import read_agent_frame
 from minecraft_ai.social import OperatorMessage, OperatorMessageKind
 from minecraft_ai.service_control import (
     persistent_agent_service_load_state,
@@ -550,29 +551,10 @@ def _capture_live_bedrock_frame() -> CapturedFrame | None:
     except (OSError, ValueError, TypeError, KeyError):
         process = None
     if process is not None and agent_alive(process):
-        binding = None
-        if process.allow_host_capture and session is not None:
-            try:
-                process_binding = session.host_monitor_binding()
-            except (OSError, ValueError, IsolationError):
-                process_binding = None
-            if (
-                process_binding is not None
-                and session.mode == "host-monitor"
-                and bedrock_session_alive(session)
-                and process_binding.display == process.display
-                and process_binding.window_id == process.window_id
-            ):
-                binding = process_binding
-        if not process.allow_host_capture or binding is not None:
-            targets.append(
-                (
-                    process.display,
-                    process.window_id,
-                    process.allow_host_capture,
-                    binding,
-                )
-            )
+        # Do not contend with the live agent's large XGetImage requests. Missing
+        # or stale agent pixels mean unavailable viewing, never a second reader.
+        _close_live_bedrock_capture()
+        return read_agent_frame(process)
     if session is not None and bedrock_session_alive(session):
         window_id = session.find_window()
         if window_id is not None:

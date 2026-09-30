@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Literal, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .grounded import (
     CROSSHAIR_BLOCK_FAST_SOURCE,
@@ -131,6 +131,17 @@ class SemanticObservation(BaseModel):
     tracks: tuple[SemanticTrack, ...] = ()
     chat: tuple[str, ...] = ()
     chat_evidence_ids: tuple[str, ...] = ()
+    chat_speakers: tuple[str | None, ...] = ()
+    chat_confidences: tuple[float, ...] = ()
+
+    @model_validator(mode="after")
+    def _aligned_chat_metadata(self) -> SemanticObservation:
+        for metadata in (self.chat_speakers, self.chat_confidences):
+            if metadata and len(metadata) != len(self.chat):
+                raise ValueError("chat metadata must match observed lines")
+        if any(not 0 <= value <= 1 for value in self.chat_confidences):
+            raise ValueError("chat confidence must be a probability")
+        return self
 
     def canonical_facts(self) -> dict[str, str | int | float | bool]:
         values = dict(self.facts)
@@ -236,6 +247,8 @@ def _semantic_observation(report: GroundedPerceptionReport) -> SemanticObservati
         ),
         chat=tuple(item.text for item in report.chat),
         chat_evidence_ids=tuple(item.evidence_id for item in report.chat),
+        chat_speakers=tuple(item.speaker for item in report.chat),
+        chat_confidences=tuple(item.confidence for item in report.chat),
     )
 
 
@@ -615,8 +628,11 @@ class ActiveVLMWorker:
         chat = tuple(
             ChatLine(
                 text=text,
+                speaker=(observation.chat_speakers[index] if observation.chat_speakers else None),
                 observed_ns=now,
-                confidence=0.7,
+                confidence=(
+                    observation.chat_confidences[index] if observation.chat_confidences else 0.7
+                ),
                 evidence_refs=(observation.chat_evidence_ids[index],)
                 if index < len(observation.chat_evidence_ids)
                 else (),

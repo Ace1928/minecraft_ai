@@ -270,7 +270,28 @@ server. It tries window-targeted XGetImage, with scoped `mss`/root-image fallbac
 and validates complete content geometry before returning BGRA frames. Capture
 timestamps must be monotonic and stale frames are fatal to the motor runtime.
 
+While a verified live agent owns capture, the spectator dashboard reuses that
+agent's exact BGRA pixels from a private atomic snapshot in the runtime directory.
+Publication is limited to four frames per second, and snapshots are bound to the
+agent process generation, display, window and instance. Missing, malformed or
+older-than-500-ms snapshots make viewing unavailable; they do not trigger another
+X11 capture alongside the player. When the agent is stopped, the dashboard can
+capture the preserved game directly for recovery and menu navigation. This
+reduces concurrent full-frame requests without changing isolation or motor leases.
+
 The fast path does not wait for a VLM. Semantic vision runs asynchronously and merges typed facts/tracks/chat observations into the perception blackboard.
+
+With native World cognition and `online_wiki: true`, a fresh observed player
+question can retrieve general vanilla references through the existing
+authenticated ERAIS search owner on loopback port 8889. This runs in the
+cognition worker, under a five-second deadline; capture and motor control never
+wait for the search. Only recognized public Minecraft subject and intent words
+are submitted. Player names and full chat text stay local. Only `minecraft.wiki`
+results become explanatory evidence, tagged with the target Bedrock version and
+`general-wiki`; they do not become observed game facts or prove pack mechanics.
+Exact hash-pinned pack recipes take precedence, and Pokémon/pack-specific
+questions do not fall back to vanilla wiki mechanics. The native chat observer
+must actually supply a fresh player message before in-game answers are possible.
 
 ## Input
 

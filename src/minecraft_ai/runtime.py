@@ -4145,6 +4145,8 @@ class AgentRuntime:
         now_ns = time.monotonic_ns()
         latest_line = None
         for line in latest.chat:
+            if line.confidence < 0.7:
+                continue
             if line.speaker is None or line.speaker.casefold() in {
                 self.role.role_id.casefold(),
                 "eidos",
@@ -4152,7 +4154,7 @@ class AgentRuntime:
                 "console",
             }:
                 continue
-            if now_ns - line.observed_ns > 60_000_000_000:
+            if not 0 <= now_ns - line.observed_ns < 30_000_000_000:
                 continue
             if latest_line is None or line.observed_ns > latest_line.observed_ns:
                 latest_line = line
@@ -4173,10 +4175,11 @@ class AgentRuntime:
                 PerceptionFact(
                     key="social.player_message",
                     value=signature,
-                    confidence=0.95,
-                    observed_ns=now_ns,
+                    confidence=latest_line.confidence,
+                    observed_ns=latest_line.observed_ns,
                     source="grounded:player-chat",
                     expires_after_ms=30_000,
+                    evidence_refs=latest_line.evidence_refs,
                 ),
             ),
         )

@@ -4,7 +4,7 @@ import json
 import re
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 from pydantic import ValidationError
@@ -59,12 +59,16 @@ from .types import (
     _WOOD_INVENTORY_AUDIT_SKILLS,
     _without_model_origin,
 )
+from minecraft_ai.pack_recipes import PackRecipeCatalog
+from minecraft_ai.world_knowledge import WorldMinecraftSearch
 
 
 @dataclass
 class HighLevelController:
     model: LanguageModel
     skills: SkillLibrary
+    world_search: WorldMinecraftSearch | None = None
+    pack_recipe_catalog: PackRecipeCatalog | None = None
     _bootstrap: BootstrapCognitionPolicy = field(init=False)
     metrics: HighLevelMetrics = field(default_factory=HighLevelMetrics, init=False)
     _request_context: ContextVar[ModelRequestLifecycle | None] = field(
@@ -90,6 +94,46 @@ class HighLevelController:
         finally:
             self._request_context.reset(token)
 
+    def _with_player_reference(
+        self, blackboard: CognitionReadView, context: CognitionContext,
+    ) -> CognitionContext:
+        """Retrieve in this worker, never in the capture/motor thread.
+
+        Pack recipes already supplied by the runtime are authoritative here.
+        General vanilla snippets are explanatory references, not game facts.
+        """
+        if self.world_search is None or context.wiki or context.pack_recipe_reply is not None:
+            return context
+        question = blackboard.fact("social.player_message", min_confidence=0.7)
+        latest = blackboard.latest()
+        if (
+            question is None or not question.fresh() or type(question.value) is not str
+            or latest is None
+        ):
+            return context
+        _speaker, separator, text = question.value.partition(":")
+        query = (text if separator else question.value).strip()
+        if self.pack_recipe_catalog is not None and self.pack_recipe_catalog.mentions_pack_content(
+            query,
+        ):
+            return context
+        parts = latest.instance_id.split(":")
+        if len(parts) < 2 or parts[0] != "bedrock":
+            return context
+        request = self._request_context.get()
+        if request is not None and request.snapshot().disposition != "pending":
+            return context
+        cutoff = question.observed_ns + question.expires_after_ms * 1_000_000
+        if request is not None:
+            cutoff = min(cutoff, request.binding.deadline_ns)
+        evidence = self.world_search.search(query, game_version=parts[1], deadline_ns=cutoff)
+        if (
+            not question.fresh() or not evidence
+            or (request is not None and request.snapshot().disposition != "pending")
+        ):
+            return context
+        return replace(context, wiki=evidence)
+
     def _decide(
         self,
         blackboard: CognitionReadView,
@@ -111,6 +155,8 @@ class HighLevelController:
                 if _urgent_safety_required(blackboard) or not context.operator_messages
                 else context.operator_messages[0]
             )
+            if active_operator is None and not _urgent_safety_required(blackboard):
+                context = self._with_player_reference(blackboard, context)
             planning_query = (
                 active_operator.text
                 if active_operator is not None
