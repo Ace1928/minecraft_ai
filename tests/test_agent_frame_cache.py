@@ -152,13 +152,18 @@ def _private_source(results: list) -> IsolatedX11Capture:
     return source
 
 
-def _timeout() -> ImageCaptureTimeout:
-    return ImageCaptureTimeout("image reply read timed out")
+def _timeout(message: str = "image reply read timed out") -> ImageCaptureTimeout:
+    return ImageCaptureTimeout(message)
 
 
-def test_timeout_drops_frame_then_reopens_once_on_next_capture(tmp_path: Path) -> None:
+@pytest.mark.parametrize("message", [
+    "image reply read timed out", "image reply acquisition budget expired",
+])
+def test_timeout_drops_frame_then_reopens_once_on_next_capture(
+    tmp_path: Path, message: str,
+) -> None:
     frame = _frame()
-    source = _private_source([_timeout(), frame])
+    source = _private_source([_timeout(message), frame])
     path = tmp_path / "frame"
     publisher = PublishedFrameCapture(source, _owner(), path=path)
     with pytest.raises(ImageCaptureTimeout):
@@ -174,8 +179,13 @@ def test_timeout_drops_frame_then_reopens_once_on_next_capture(tmp_path: Path) -
     assert publisher._consecutive_image_timeouts == 0
 
 
-def test_three_consecutive_timeouts_exhaust_two_reopens_without_publishing(tmp_path: Path) -> None:
-    source = _private_source([_timeout(), _timeout(), _timeout()])
+@pytest.mark.parametrize("message", [
+    "image reply read timed out", "image reply acquisition budget expired",
+])
+def test_three_consecutive_timeouts_exhaust_two_reopens_without_publishing(
+    tmp_path: Path, message: str,
+) -> None:
+    source = _private_source([_timeout(message), _timeout(message), _timeout(message)])
     path = tmp_path / "frame"
     publisher = PublishedFrameCapture(source, _owner(), path=path)
     for _ in range(2):

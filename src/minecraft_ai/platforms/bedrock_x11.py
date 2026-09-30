@@ -19,7 +19,7 @@ class IsolationError(RuntimeError):
 
 
 class ImageCaptureTimeout(IsolationError):
-    """One classified pixel-read timeout; no frame or input authority granted."""
+    """One classified pixel acquisition timeout; grants no frame/input authority."""
 
 
 @dataclass(frozen=True)
@@ -1553,9 +1553,13 @@ class IsolatedX11Capture:
         except ImageReplyError as exc:
             # A partially consumed reply cannot be reused. Do not call Xlib's
             # flush-on-close after interrupting its receive loop. Only the
-            # classified read timeout permits a later owner-managed reopen.
+            # exact classified read/acquisition timeout permits a later
+            # owner-managed reopen. A late completed reply is still dropped.
             self._discard_reply_connection()
-            if type(exc) is ImageReplyError and exc.args == ("image reply read timed out",):
+            if type(exc) is ImageReplyError and exc.args in (
+                ("image reply read timed out",),
+                ("image reply acquisition budget expired",),
+            ):
                 self._reply_timed_out = True
                 raise ImageCaptureTimeout(str(exc)) from exc
             raise IsolationError(str(exc)) from exc

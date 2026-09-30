@@ -405,7 +405,7 @@ def test_root_drawable_timeout_preserves_classification_without_fallback_retry(
 
 
 @pytest.mark.parametrize("message", [
-    "image reply acquisition budget expired", "image reply assembly failed",
+    "image reply assembly failed",
     "image reply connection ownership changed", "invalid image reply framing",
     "image reply ended before its declared length", "image reply read returned invalid bytes",
 ])
@@ -429,17 +429,104 @@ def test_other_reply_faults_never_receive_timeout_recovery_admission(
 def test_unrecognized_reply_error_subclass_cannot_claim_read_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _check_unrecognized_timeout_subclass("image reply read timed out", monkeypatch)
+
+
+def test_unrecognized_reply_error_subclass_cannot_claim_acquisition_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _check_unrecognized_timeout_subclass("image reply acquisition budget expired", monkeypatch)
+
+
+def _check_unrecognized_timeout_subclass(
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class UnclassifiedReplyError(ImageReplyError):
         pass
 
     capture, _ = _capture_displays(monkeypatch)
     monkeypatch.setattr(
         bedrock_x11, "coalesce_image_reply",
-        Mock(side_effect=UnclassifiedReplyError("image reply read timed out")),
+        Mock(side_effect=UnclassifiedReplyError(message)),
     )
     with pytest.raises(IsolationError) as caught:
         capture.capture()
     assert type(caught.value) is IsolationError and not capture._reply_timed_out
+
+
+@pytest.mark.parametrize("phase", ["before_read", "after_read", "completed_reply"])
+def test_actual_acquisition_expiry_drops_reply_and_reopens_only_next_admitted_capture(
+    phase: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture, displays = _capture_displays(monkeypatch)
+    clock = [1_000_000_000]
+    monkeypatch.setattr(
+        "minecraft_ai.platforms.x11_image_reply.time.monotonic_ns", lambda: clock[0],
+    )
+    original_socket = capture._reply_socket
+    drawable = displays[0].create_resource_object.return_value
+    deadline = clock[0] + 500_000_000
+    if phase == "before_read":
+        clock[0] = deadline
+    elif phase == "after_read":
+        capture._reply_protocol.recv_packet_len = 64
+
+        def late_bytes(count: int, flags: int = 0) -> bytes:
+            clock[0] = deadline
+            return b"\0" * 64
+
+        original_socket.recv = late_bytes
+        drawable.get_image.side_effect = lambda *_: SimpleNamespace(
+            data=capture._reply_protocol.socket.recv(64))
+    else:
+        # This is the exact observed live failure: Xlib returned its reply,
+        # then the unchanged absolute acquisition deadline failed at exit.
+        def late_reply(*_args: int) -> SimpleNamespace:
+            clock[0] = deadline
+            return SimpleNamespace(data=b"\0" * 64)
+
+        drawable.get_image.side_effect = late_reply
+    with pytest.raises(ImageCaptureTimeout, match="image reply acquisition budget expired"):
+        capture._get_image(drawable, deadline_ns=deadline)
+    assert capture._reply_protocol.socket is original_socket
+    assert original_socket.closed and capture._reply_failed and capture._reply_timed_out
+    assert capture._frame_id == 9 and capture._capture_budget_ms == 500
+    displays[0]._connection_factory.assert_called_once_with(":2")  # No inline reopen/retry.
+    if phase == "before_read":
+        drawable.get_image.assert_not_called()
+    capture.reconnect_after_image_timeout()
+    clock[0] += 1
+    frame = capture.capture()
+    assert frame.frame_id == 10 and frame.captured_ns == clock[0]
+    assert frame.bgra == b"\0" * 64 and capture._capture_budget_ms == 500
+    assert capture._display is displays[1]
+
+
+def test_late_completed_reply_with_changed_socket_stays_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture, displays = _capture_displays(monkeypatch)
+    clock = [1_000_000_000]
+    monkeypatch.setattr(
+        "minecraft_ai.platforms.x11_image_reply.time.monotonic_ns", lambda: clock[0],
+    )
+    replacement = _Socket([])
+    drawable = displays[0].create_resource_object.return_value
+
+    def late_replaced(*_args: int) -> SimpleNamespace:
+        clock[0] += 500_000_000
+        capture._reply_protocol.socket = replacement
+        return SimpleNamespace(data=b"\0" * 64)
+
+    drawable.get_image.side_effect = late_replaced
+    with pytest.raises(IsolationError, match="connection ownership changed") as caught:
+        capture._get_image(drawable, deadline_ns=clock[0] + 500_000_000)
+    assert type(caught.value) is IsolationError and not capture._reply_timed_out
+    assert not replacement.closed
+    with pytest.raises(IsolationError, match="admission"):
+        capture.reconnect_after_image_timeout()
+    displays[0]._connection_factory.assert_called_once_with(":2")
 
 
 @pytest.mark.parametrize("field,value", [

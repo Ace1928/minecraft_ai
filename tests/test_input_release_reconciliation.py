@@ -258,8 +258,11 @@ def test_stale_tick_confirms_release_without_advancing_skill_or_sequence(monkeyp
 
 
 @pytest.mark.parametrize("acknowledged", [True, False])
+@pytest.mark.parametrize("message", [
+    "image reply read timed out", "image reply acquisition budget expired",
+])
 def test_image_timeout_releases_before_next_tick_without_any_frame_or_action(
-    monkeypatch, acknowledged,
+    monkeypatch, acknowledged, message,
 ):
     runtime = _runtime(monkeypatch)
     runtime.executor.policy._held_keys = {"w"}
@@ -270,7 +273,7 @@ def test_image_timeout_releases_before_next_tick_without_any_frame_or_action(
 
     def timeout():
         calls.append("capture")
-        raise ImageCaptureTimeout("image reply read timed out")
+        raise ImageCaptureTimeout(message)
 
     def release(command, **kwargs):
         calls.append(command)
