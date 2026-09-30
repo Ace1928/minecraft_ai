@@ -337,6 +337,13 @@ def _inventory_qualification_view(discovery, receipt):
         }.get(reason, (reason or "readiness is unconfirmed").replace("_", " "))
         availability = f"Inventory check unavailable: {explanation}. Paid commands remain held."
     summary = ""
+    receipt_current = bool(receipt) and all(
+        receipt.get(receipt_key) is not None
+        and receipt.get(receipt_key) == discovery.get(discovery_key)
+        for receipt_key, discovery_key in (
+            ("server_id", "server_id"), ("session_id", "session_id"), ("epoch", "control_epoch"),
+        )
+    )
     if receipt:
         summary = (
             f"Check {receipt['state']} · {receipt.get('accepted_action_count', 0)} "
@@ -344,7 +351,11 @@ def _inventory_qualification_view(discovery, receipt):
         )
         if receipt.get("reason_code"):
             summary += f" · {receipt['reason_code']}"
+        if not receipt_current:
+            summary = "Historical " + summary
+            summary += " · does not verify this game session"
     return {
+        "receipt_current": receipt_current,
         "can_start": ready and not pending,
         "can_cancel": pending,
         "status_text": summary if pending and ready else " · ".join(

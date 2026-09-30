@@ -106,6 +106,32 @@ def test_inventory_qualification_status_explains_unavailability_and_retains_rece
     assert "d.status_text" in DASHBOARD_HTML and "d.can_start!==true" in DASHBOARD_HTML
 
 
+@pytest.mark.parametrize("changed", ("server_id", "session_id", "control_epoch", "missing"))
+def test_previous_build_or_session_inventory_receipt_never_verifies_current_game(changed) -> None:
+    discovery = {"server_id": "bedrock:1.26.52.3:x11:123", "session_id": "current-session",
+                 "control_epoch": 3, "readiness_reason": "execution_contract_unqualified"}
+    receipt = {"state": "succeeded", "accepted_action_count": 2,
+               "server_id": discovery["server_id"], "session_id": discovery["session_id"],
+               "epoch": discovery["control_epoch"]}
+    current = _inventory_qualification_view(discovery, receipt)
+    assert current["receipt_current"] is True and "Historical" not in current["status_text"]
+    old = dict(receipt)
+    if changed == "missing":
+        old.pop("server_id")
+    else:
+        old["epoch" if changed == "control_epoch" else changed] = (
+            2 if changed == "control_epoch" else "previous"
+        )
+    historical = _inventory_qualification_view(discovery, old)
+    assert historical["receipt_current"] is False
+    assert "Historical" in historical["status_text"]
+    assert "does not verify this game session" in historical["status_text"]
+    assert historical["can_start"] is True
+    # Unknown pending work must still be reconciled before a new check starts.
+    pending = _inventory_qualification_view(discovery, {**old, "state": "running"})
+    assert not pending["can_start"] and pending["can_cancel"]
+
+
 @pytest.mark.parametrize(
     "fault",
     ["stopped", "unreachable", "inactive", "paused", "stale", "old-lease", "missing"],
