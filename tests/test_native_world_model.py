@@ -74,6 +74,13 @@ def _catalog_payload():
     }
 
 
+def _token_budget(runtime_id, count=100):
+    return {"object": "erais.native-token-budget.v1", "model": MODEL_ID,
+            "runtime_id": runtime_id, "prompt_tokens": count,
+            "max_prompt_tokens": 512, "fits": count <= 512,
+            "retained_history_exchanges": 0}
+
+
 def test_native_provider_is_explicit_and_never_used_as_vlm():
     config = ModelConfig(
         enabled=True,
@@ -301,6 +308,8 @@ def test_world_adapter_uses_owner_readiness_and_only_native_api_fields(monkeypat
             return Response(model_meta)
 
         def post(self, url, **kwargs):
+            if url.endswith("/tokenize"):
+                return Response(_token_budget(runtime_id))
             seen["url"] = url
             seen["headers"] = kwargs["headers"]
             seen["payload"] = kwargs["json"]
@@ -403,6 +412,93 @@ def test_world_readiness_checks_exact_native_owner_without_inference(monkeypatch
     assert requests[0][1]["headers"]["Authorization"] == "Bearer owner-token"
 
 
+def test_planner_compacts_against_exact_owner_token_budget_before_inference(monkeypatch):
+    model = NativeWorldCognitionModel(MODEL_ID, "http://127.0.0.1:8771/v1",
+                                     "/tmp/native-world/token", "/tmp/native-world/ready.json")
+    runtime_id = "c" * 32
+    inspected, generated = [], []
+    class Response:
+        def __init__(self, body): self.body = body
+        def raise_for_status(self): pass
+        def json(self): return self.body
+    class Client:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def post(self, url, **kwargs):
+            payload = kwargs["json"]
+            text = payload["messages"][0]["content"]
+            if url.endswith("/tokenize"):
+                inspected.append(text)
+                return Response(_token_budget(runtime_id, len(text.encode()) // 3 + 100))
+            generated.append(text)
+            return Response({"model": MODEL_ID, "choices": [
+                {"finish_reason": "stop", "message": {"content": '{"s":null,"x":true}'}}
+            ]})
+    monkeypatch.setattr(model, "_identity", lambda *_: runtime_id)
+    monkeypatch.setattr(model, "_client", Client)
+    monkeypatch.setattr(
+        "minecraft_ai.native_world_model._read_private_file", lambda *_a, **_kw: b"token"
+    )
+    payload = {"fresh_facts": {"scene.death": [False, .99], "scene.playable": [True, .99],
+                              **{f"terrain.optional.{i}": ["x" * 80, .8] for i in range(25)}},
+               "skills": [{"skill_id": "survey_surroundings", "description": "Look around"}]}
+    model.complete((ModelMessage(role="user", content=json.dumps(payload)),))
+    assert 2 <= len(inspected) <= 64
+    assert len(generated) == 1 and generated[0] == inspected[-1]
+    assert len(generated[0].encode()) // 3 + 100 <= 512
+    assert "scene.death" in generated[0] and "scene.playable" in generated[0]
+
+
+def test_token_budget_owner_mismatch_never_dispatches_inference(monkeypatch):
+    model = NativeWorldCognitionModel(MODEL_ID, "http://127.0.0.1:8771/v1",
+                                     "/tmp/native-world/token", "/tmp/native-world/ready.json")
+    calls = []
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return _token_budget("d" * 32)
+    class Client:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def post(self, url, **_kwargs):
+            calls.append(url)
+            return Response()
+    monkeypatch.setattr(model, "_identity", lambda *_: "c" * 32)
+    monkeypatch.setattr(model, "_client", Client)
+    monkeypatch.setattr(
+        "minecraft_ai.native_world_model._read_private_file", lambda *_a, **_kw: b"token"
+    )
+    with pytest.raises(RuntimeError, match="different-owner token budget"):
+        model.complete((ModelMessage(role="user", content="{}"),))
+    assert len(calls) == 1 and calls[0].endswith("/tokenize")
+
+
+def test_token_compaction_retains_source_for_player_question():
+    source = {"title": "Poké Ball", "extract": "4 Red Apricorn + 1 Copper Ingot makes 4 balls.",
+              "url": "https://minecraft.wiki/w/Copper_Ingot", "version": "pack:1.3.143",
+              "confidence": 1.0}
+    payload = {"fresh_facts": {"social.player_message": ["How do I make a Poké Ball?", .99],
+                              **{f"terrain.optional.{i}": ["x" * 80, .8] for i in range(9)}},
+               "wiki_evidence": [source, {"title": "irrelevant", "extract": "x" * 220}],
+               "skills": [{"skill_id": "survey_surroundings", "description": "Look around"}]}
+    prompt = compact_planner_prompt((ModelMessage(role="user", content=json.dumps(payload)),),
+                                    fits_prompt=lambda text: len(text.encode()) < 1500)
+    assert source["extract"] in prompt and source["url"] in prompt
+    assert source["version"] in prompt and '"confidence":1.0' in prompt
+    assert "How do I make a Poké Ball?" in prompt and "irrelevant" not in prompt
+
+
+def test_exact_token_compaction_fails_boundedly_when_minimum_context_cannot_fit():
+    inspected = []
+    marker = ("ACTIVE OPERATOR DIRECTIVE (highest authority; follow this literal current "
+              "request and do not substitute an older task): ")
+    messages = (ModelMessage(role="user", content=marker + json.dumps({
+        "message_id": "id", "text": "x" * 200, "kind": "instruction",
+    })), ModelMessage(role="user", content=json.dumps({"fresh_facts": {}, "skills": []})))
+    with pytest.raises(ValueError, match="admitted request budget"):
+        compact_planner_prompt(messages, fits_prompt=lambda text: inspected.append(text) or False)
+    assert 1 <= len(inspected) <= 3 and len(inspected) == len(set(inspected))
+
+
 def test_world_adapter_rejects_malformed_owner_receipts_and_responses(monkeypatch):
     model = NativeWorldCognitionModel(
         model_id=MODEL_ID,
@@ -435,6 +531,8 @@ def test_world_adapter_rejects_malformed_owner_receipts_and_responses(monkeypatc
             return Response(self.model_body)
 
         def post(self, _url, **_kwargs):
+            if _url.endswith("/tokenize"):
+                return Response(_token_budget("b" * 32))
             return Response({"model": MODEL_ID, "choices": "malformed"})
 
     ready = {

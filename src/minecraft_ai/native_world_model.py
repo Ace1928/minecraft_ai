@@ -15,7 +15,7 @@ import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from .models import ModelMessage, ModelResponse, local_model_inference_lane
@@ -259,7 +259,9 @@ def _compact_context(messages: tuple[ModelMessage, ...]) -> tuple[dict[str, Any]
                     {
                         "title": _short(row.get("title"), 80),
                         "extract": _short(row.get("extract"), limit),
+                        "url": _short(row.get("url"), 220),
                         "version": _short(row.get("version"), 90),
+                        "confidence": row.get("confidence"),
                     }
                 )
             elif source == "chat_lines":
@@ -306,8 +308,15 @@ def _compact_context(messages: tuple[ModelMessage, ...]) -> tuple[dict[str, Any]
     return result, reply_only
 
 
-def compact_planner_prompt(messages: tuple[ModelMessage, ...]) -> str:
-    """Make the control context fit the native World's strict byte contract."""
+def compact_planner_prompt(
+    messages: tuple[ModelMessage, ...], *, max_prompt_bytes: int = MAX_PROMPT_BYTES,
+    fits_prompt: Callable[[str], bool] | None = None,
+) -> str:
+    """Fit the native World's byte and exact tokenizer bounds before inference."""
+    if type(max_prompt_bytes) is not int or not 1 <= max_prompt_bytes <= MAX_PROMPT_BYTES:
+        raise ValueError("native World prompt byte budget is invalid")
+    if fits_prompt is not None and not callable(fits_prompt):
+        raise ValueError("native World token budget check must be callable")
     context, reply_only = _compact_context(messages)
     if reply_only:
         goal_id = context.get("reply_only_goal_id")
@@ -317,15 +326,22 @@ def compact_planner_prompt(messages: tuple[ModelMessage, ...]) -> str:
             "reply_only_goal_id": goal_id,
             "operator_question": context.get("operator_question", ""),
             "fresh_facts": context.get("fresh_facts", {}),
+            "wiki_evidence": context.get("wiki_evidence", []),
         }
         context = compact
         prefix = f"{_REPLY_ONLY_RULES} Exact g value: {json.dumps(goal_id)}."
     else:
         prefix = _PLANNER_RULES
+    facts = context.get("fresh_facts", {})
+    needs_answer = bool(context.get("operator_question")) or (
+        isinstance(facts, dict) and bool(facts.get("social.player_message"))
+    )
     while True:
         encoded = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
         prompt = prefix + encoded
-        if len(prompt.encode("utf-8")) <= MAX_PROMPT_BYTES:
+        if len(prompt.encode("utf-8")) <= max_prompt_bytes and (
+            fits_prompt is None or fits_prompt(prompt) is True
+        ):
             return prompt
         for key in (
             "wiki_evidence",
@@ -337,7 +353,8 @@ def compact_planner_prompt(messages: tuple[ModelMessage, ...]) -> str:
             "skills",
         ):
             rows = context.get(key)
-            if isinstance(rows, list) and len(rows) > (1 if key == "skills" else 0):
+            minimum_rows = 1 if key == "skills" or (key == "wiki_evidence" and needs_answer) else 0
+            if isinstance(rows, list) and len(rows) > minimum_rows:
                 rows.pop()
                 break
             if isinstance(rows, dict) and rows:
@@ -388,21 +405,18 @@ def compact_planner_prompt(messages: tuple[ModelMessage, ...]) -> str:
                     facts.pop(removable[-1])
                     continue
             directive = context.get("active_operator_directive")
-            if isinstance(directive, dict) and isinstance(directive.get("text"), str):
+            if (
+                isinstance(directive, dict) and isinstance(directive.get("text"), str)
+                and len(directive["text"]) > 160
+            ):
                 directive["text"] = directive["text"][:160]
-                if len(
-                    json.dumps(context, ensure_ascii=False, separators=(",", ":")).encode()
-                ) < MAX_PROMPT_BYTES - len(prefix.encode()):
-                    continue
-            if context.get("repair_or_directive_context"):
+                continue
+            if len(context.get("repair_or_directive_context", "")) > 120:
                 context["repair_or_directive_context"] = context["repair_or_directive_context"][
                     :120
                 ]
-                if len(
-                    json.dumps(context, ensure_ascii=False, separators=(",", ":")).encode()
-                ) < MAX_PROMPT_BYTES - len(prefix.encode()):
-                    continue
-            raise ValueError("native World planner context exceeds the 2048-byte request limit")
+                continue
+            raise ValueError("native World planner context exceeds its admitted request budget")
 
 
 def _read_private_file(path_value: str, *, limit: int) -> bytes:
@@ -523,22 +537,57 @@ class NativeWorldCognitionModel:
             return self._identity(client, headers)
 
     def _complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse:
-        prompt = compact_planner_prompt(messages)
         token = _read_private_file(self.token_file, limit=512).decode("ascii").strip()
         if not token or any(char.isspace() for char in token):
             raise RuntimeError("invalid private ERAIS World bearer token")
         started = time.perf_counter()
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        payload = {
-            "model": MODEL_ID,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": min(self.max_tokens, MAX_OUTPUT_TOKENS),
-            "stream": False,
-            "n": 1,
-        }
         with local_model_inference_lane():
             with self._client() as client:
-                self._identity(client, headers)
+                runtime_id = self._identity(client, headers)
+                budget_checks = 0
+
+                def fits_prompt(prompt: str) -> bool:
+                    nonlocal budget_checks
+                    budget_checks += 1
+                    if budget_checks > 64:
+                        raise RuntimeError("ERAIS World planner exceeded bounded token checks")
+                    payload = {
+                        "model": MODEL_ID,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": min(self.max_tokens, MAX_OUTPUT_TOKENS),
+                        "stream": False,
+                        "n": 1,
+                    }
+                    budget_response = client.post(
+                        self.base_url.rstrip("/") + "/tokenize", headers=headers, json=payload
+                    )
+                    budget_response.raise_for_status()
+                    budget = budget_response.json()
+                    if (
+                        type(budget) is not dict
+                        or budget.get("object") != "erais.native-token-budget.v1"
+                        or budget.get("model") != MODEL_ID
+                        or budget.get("runtime_id") != runtime_id
+                        or type(budget.get("prompt_tokens")) is not int
+                        or budget["prompt_tokens"] <= 0
+                        or budget.get("max_prompt_tokens") != 512
+                        or type(budget.get("fits")) is not bool
+                        or budget["fits"] != (budget["prompt_tokens"] <= 512)
+                    ):
+                        raise RuntimeError(
+                            "ERAIS World returned an invalid or different-owner token budget"
+                        )
+                    return budget["fits"]
+
+                prompt = compact_planner_prompt(messages, fits_prompt=fits_prompt)
+                payload = {
+                    "model": MODEL_ID,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": min(self.max_tokens, MAX_OUTPUT_TOKENS),
+                    "stream": False,
+                    "n": 1,
+                }
                 response = client.post(
                     self.base_url.rstrip("/") + "/chat/completions",
                     headers=headers,
