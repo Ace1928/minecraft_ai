@@ -496,6 +496,65 @@ def _established_camera_supervisor(backend: _PhysicalFakeBackend) -> Supervisor:
     return supervisor
 
 
+def test_world_camera_probe_uses_one_mouse_delta_and_invalidates_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("minecraft_ai.supervisor.time.sleep", lambda _seconds: None)
+    backend = _PhysicalFakeBackend(":2", 42)
+    supervisor = _established_camera_supervisor(backend)
+
+    result = supervisor.probe_world_camera(mouse_dx=24, mouse_dy=0)
+
+    assert result["accepted"] is True
+    assert result["mouse_dx"] == 24
+    assert result["mouse_dy"] == 0
+    assert backend.actions == [MotorAction(sequence=0, mouse_dx=24)]
+    assert supervisor.motor.lease is None
+    assert supervisor.status()["world_camera"] == {
+        "estimated_pitch_units": 0,
+        "accepted_updates": 0,
+        "origin_calibrated": False,
+        "pitch_counts_per_degree": 47.96,
+        "calibration_id": "previous-measured-profile",
+    }
+
+
+@pytest.mark.parametrize(
+    ("mouse_dx", "mouse_dy"),
+    [(0, 0), (129, 0), (0, -129), (1, 1)],
+)
+def test_world_camera_probe_rejects_zero_oversized_or_mixed_axis(
+    mouse_dx: int, mouse_dy: int,
+) -> None:
+    backend = _PhysicalFakeBackend(":2", 42)
+    supervisor = Supervisor()
+    supervisor.start()
+    supervisor.replace_backend(backend)
+
+    with pytest.raises(ValueError, match="camera probe"):
+        supervisor.probe_world_camera(mouse_dx=mouse_dx, mouse_dy=mouse_dy)
+
+    assert backend.actions == []
+    assert supervisor.motor.lease is None
+
+
+def test_world_camera_probe_refuses_non_idle_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("minecraft_ai.supervisor.time.sleep", lambda _seconds: None)
+    backend = _PhysicalFakeBackend(":2", 42)
+    supervisor = Supervisor()
+    supervisor.start()
+    supervisor.replace_backend(backend)
+    supervisor.pause()
+
+    with pytest.raises(RuntimeError, match="cannot probe camera"):
+        supervisor.probe_world_camera(mouse_dx=-24, mouse_dy=0)
+
+    assert backend.actions == []
+    assert supervisor.motor.lease is None
+
+
 @pytest.mark.parametrize(
     "interruption",
     ["return-pause", "backend-failure", "settle-pause", "settle-stop", "cleanup-pause"],

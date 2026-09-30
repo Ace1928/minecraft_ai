@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ class CameraCalibrationProfile(BaseModel):
     input_window_id: int
     input_backend: str
     mouse_sensitivity_option: float = Field(gt=0.0, le=1.0)
+    vertical_fov_degrees: float | None = Field(default=None, ge=30.0, le=150.0)
     options_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     method: str
     full_yaw_counts: int = Field(gt=0)
@@ -41,6 +43,7 @@ class CameraCalibrationProfile(BaseModel):
         *,
         game_version: str,
         mouse_sensitivity: float,
+        current_vertical_fov_degrees: float | None = None,
         configured_yaw_counts_per_degree: float | None,
         configured_pitch_counts_per_degree: float | None,
     ) -> None:
@@ -53,6 +56,14 @@ class CameraCalibrationProfile(BaseModel):
                 "Bedrock mouse sensitivity changed after camera calibration "
                 f"({self.mouse_sensitivity_option} -> {mouse_sensitivity})"
             )
+        if self.vertical_fov_degrees is not None:
+            if current_vertical_fov_degrees is None:
+                raise ValueError("Bedrock field of view is unavailable after camera calibration")
+            if abs(self.vertical_fov_degrees - current_vertical_fov_degrees) > 1e-6:
+                raise ValueError(
+                    "Bedrock field of view changed after camera calibration "
+                    f"({self.vertical_fov_degrees} -> {current_vertical_fov_degrees})"
+                )
         if configured_yaw_counts_per_degree is not None:
             relative_error = abs(
                 configured_yaw_counts_per_degree - self.yaw_counts_per_degree
@@ -110,3 +121,43 @@ def read_bedrock_mouse_sensitivity(wine_prefix: Path) -> float:
         if separator and key == "ctrl_sensitivity2_mouse":
             return float(value)
     raise ValueError("Bedrock options.txt does not expose ctrl_sensitivity2_mouse")
+
+
+@dataclasses.dataclass(frozen=True)
+class BedrockCameraSettings:
+    mouse_sensitivity: float
+    vertical_fov_degrees: float
+    options_sha256: str
+
+
+def read_bedrock_camera_settings(wine_prefix: Path) -> BedrockCameraSettings:
+    """Read and fingerprint the current Bedrock camera options file."""
+    pattern = (
+        "drive_c/users/*/AppData/Roaming/Minecraft Bedrock/Users/*/games/"
+        "com.mojang/minecraftpe/options.txt"
+    )
+    candidates = sorted(
+        wine_prefix.glob(pattern),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )
+    if not candidates:
+        raise FileNotFoundError("Bedrock options.txt was not found in the active Wine prefix")
+    raw = candidates[0].read_bytes()
+    values: dict[str, str] = {}
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key in {"ctrl_sensitivity2_mouse", "gfx_field_of_view"}:
+            values[key] = value
+    try:
+        sensitivity = float(values["ctrl_sensitivity2_mouse"])
+        fov = float(values["gfx_field_of_view"])
+    except (KeyError, ValueError) as exc:
+        raise ValueError(
+            "Bedrock options.txt must expose mouse sensitivity and field of view"
+        ) from exc
+    return BedrockCameraSettings(
+        mouse_sensitivity=sensitivity,
+        vertical_fov_degrees=fov,
+        options_sha256=hashlib.sha256(raw).hexdigest(),
+    )

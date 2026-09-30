@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+import statistics
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from .agent_lifecycle import (
 from .camera_calibration import (
     CameraCalibrationProfile,
     load_camera_calibration,
+    read_bedrock_camera_settings,
     read_bedrock_mouse_sensitivity,
 )
 from .bedrock_menu import (
@@ -61,6 +63,7 @@ from .eval import (
 from .operator_server import serve_operator_dashboard
 from .perception_service import live_control_arm_reason
 from .platforms import (
+    CapturedFrame,
     IsolatedX11Capture,
     IsolationError,
     create_bedrock_capture,
@@ -1442,11 +1445,19 @@ def _require_compatible_bedrock_camera_profile(
             app_paths().data_dir,
             game_version=version,
         )
-        sensitivity = read_bedrock_mouse_sensitivity(wine_prefix)
+        profile_fov = getattr(profile, "vertical_fov_degrees", None)
+        if profile_fov is None:
+            sensitivity = read_bedrock_mouse_sensitivity(wine_prefix)
+            current_vertical_fov = None
+        else:
+            camera_settings = read_bedrock_camera_settings(wine_prefix)
+            sensitivity = camera_settings.mouse_sensitivity
+            current_vertical_fov = camera_settings.vertical_fov_degrees
         policy = config.policy
         profile.require_compatible(
             game_version=version,
             mouse_sensitivity=sensitivity,
+            current_vertical_fov_degrees=current_vertical_fov,
             configured_yaw_counts_per_degree=(
                 policy.camera_scale if policy.enabled else None
             ),
@@ -1470,6 +1481,318 @@ def bedrock_camera_ready() -> None:
         "ready": True,
         "game_version": profile.game_version,
         "profile_id": profile.profile_id,
+    }, sort_keys=True))
+
+
+@bedrock_app.command("calibrate-camera")
+def bedrock_calibrate_camera() -> None:
+    """Measure the current camera while holding the Bedrock lifecycle lock."""
+    with bedrock_lifecycle_lock():
+        _measure_bedrock_camera()
+
+
+def _measure_bedrock_camera() -> None:
+    """Measure and store this exact isolated Bedrock build's camera response."""
+    from .perception.camera_measurement import (
+        camera_rotation_delta_degrees,
+        camera_view_mean_absolute_error,
+    )
+    if emergency_stop_latched():
+        raise typer.BadParameter("Emergency stop is latched; camera calibration is disabled.")
+    if operator_pause_latched():
+        raise typer.BadParameter("Operator pause is latched; resume before camera calibration.")
+    if agent_alive():
+        raise typer.BadParameter("Stop the gameplay controller before camera calibration.")
+    try:
+        session = BedrockSession.load()
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise typer.BadParameter("No managed isolated Bedrock session exists.") from exc
+    if not bedrock_session_alive(session):
+        raise typer.BadParameter("The managed Bedrock session is not alive.")
+    _require_autonomous_isolated_session(session)
+    install = discover_bedrock_linux_install()
+    build = install.selected_build if install is not None else None
+    if install is None or build is None:
+        raise typer.BadParameter("The exact active BedrockOnLinux build is required.")
+
+    config = load_config()
+    settings = read_bedrock_camera_settings(install.wine_prefix)
+    if not 30.0 <= settings.vertical_fov_degrees <= 150.0:
+        raise typer.BadParameter("The active Bedrock field of view is outside calibration bounds.")
+    configured_yaw = config.policy.camera_scale
+    configured_pitch = config.policy.effective_camera_pitch_scale
+    if not config.policy.enabled:
+        raise typer.BadParameter("Enable the measured camera policy before live calibration.")
+    calibration_path = (
+        app_paths().data_dir / "calibrations"
+        / f"bedrock-camera-{build.version}.json"
+    )
+    receipt_path = calibration_path.with_suffix(".receipt.json")
+    if calibration_path.exists():
+        raise typer.BadParameter(
+            f"A camera profile already exists for Bedrock {build.version}; refusing to replace it."
+        )
+    receipt_temporary_path = receipt_path.with_name(receipt_path.name + ".tmp")
+    if (
+        receipt_path.exists()
+        or calibration_path.with_name(calibration_path.name + ".tmp").exists()
+        or receipt_temporary_path.exists()
+    ):
+        raise typer.BadParameter("A camera calibration receipt or temporary file already exists.")
+
+    window_id = wait_for_minecraft_window(session, timeout_s=10.0)
+    _ensure_dirs()
+    if not supervisor_alive():
+        _start_supervisor(config.role)
+    owner_status = _command("status")
+    if owner_status.get("state") != "SAFE_IDLE" or owner_status.get("motor_lease_active"):
+        raise typer.BadParameter("Camera calibration requires an unarmed SAFE_IDLE supervisor.")
+    supervisor_session_id = str(owner_status.get("session_id") or "")
+    if not supervisor_session_id:
+        raise typer.BadParameter("Supervisor identity is missing; camera calibration stopped.")
+    attached = _command(
+        "attach-bedrock-x11",
+        display=session.display,
+        window_id=window_id,
+        allow_host=False,
+        host_monitor_binding=None,
+    )
+    if attached.get("live_capable") is not True:
+        raise typer.BadParameter("The isolated Bedrock camera input route is not live-capable.")
+    input_window_id = int(attached.get("input_window_id") or window_id)
+
+    def capture_world_frame() -> CapturedFrame:
+        if (
+            emergency_stop_latched()
+            or operator_pause_latched()
+            or agent_alive()
+        ):
+            raise typer.BadParameter(
+                "Camera calibration was interrupted by a controller or safety latch."
+            )
+        owner = _command("status")
+        if (
+            owner.get("session_id") != supervisor_session_id
+            or owner.get("state") != "SAFE_IDLE"
+            or owner.get("motor_lease_active")
+            or owner.get("input_window_id") != input_window_id
+        ):
+            raise typer.BadParameter("Supervisor or Bedrock target changed during calibration.")
+        current = BedrockSession.load()
+        if current != session or not bedrock_session_alive(current):
+            raise typer.BadParameter("The managed Bedrock session changed during calibration.")
+        require_autonomous_input_isolation(current)
+        capture = create_bedrock_capture(
+            current.display,
+            window_id,
+            allow_host=False,
+            host_monitor_binding=None,
+            source=BedrockCaptureSource.X11,
+        )
+        try:
+            frame = capture.capture()
+        finally:
+            capture.close()
+        if live_control_arm_reason(frame) != "hud":
+            raise typer.BadParameter(
+                "Camera probes require a fresh complete survival HUD; no further input was sent."
+            )
+        return frame
+
+    def probe(dx: int, dy: int) -> None:
+        result = _command("probe-world-camera", mouse_dx=dx, mouse_dy=dy)
+        if result.get("accepted") is not True:
+            raise typer.BadParameter("The one-use camera-only probe was not accepted.")
+        time.sleep(0.12)
+
+    def measure_axis(axis: str) -> tuple[float, list[dict[str, object]]]:
+        counts_per_degree: list[float] = []
+        observations: list[dict[str, object]] = []
+        for magnitude in (24, 48, 96):
+            baseline = capture_world_frame()
+            delta_x = magnitude if axis == "yaw" else 0
+            delta_y = magnitude if axis == "pitch" else 0
+            probe(delta_x, delta_y)
+            try:
+                moved = capture_world_frame()
+                angle_forward, inliers_forward = camera_rotation_delta_degrees(
+                    baseline.bgra,
+                    moved.bgra,
+                    width=baseline.width,
+                    height=baseline.height,
+                    vertical_fov_degrees=settings.vertical_fov_degrees,
+                    axis=axis,
+                )
+            finally:
+                probe(-delta_x, -delta_y)
+            restored = capture_world_frame()
+            angle_reverse, inliers_reverse = camera_rotation_delta_degrees(
+                moved.bgra,
+                restored.bgra,
+                width=moved.width,
+                height=moved.height,
+                vertical_fov_degrees=settings.vertical_fov_degrees,
+                axis=axis,
+            )
+            counts_per_degree.extend((magnitude / angle_forward, magnitude / angle_reverse))
+            restore_error = camera_view_mean_absolute_error(
+                baseline.bgra,
+                restored.bgra,
+                width=baseline.width,
+                height=baseline.height,
+            )
+            observations.append({
+                "axis": axis,
+                "probe_counts": magnitude,
+                "forward_degrees": round(angle_forward, 6),
+                "reverse_degrees": round(angle_reverse, 6),
+                "forward_homography_inliers": inliers_forward,
+                "reverse_homography_inliers": inliers_reverse,
+                "restore_mean_absolute_pixel_error": round(restore_error, 6),
+                "baseline_frame_sha256": hashlib.sha256(baseline.bgra).hexdigest(),
+                "moved_frame_sha256": hashlib.sha256(moved.bgra).hexdigest(),
+                "restored_frame_sha256": hashlib.sha256(restored.bgra).hexdigest(),
+            })
+        measured = statistics.median(counts_per_degree)
+        relative_spread = max(
+            abs(value - measured) / measured for value in counts_per_degree
+        )
+        if relative_spread > 0.03:
+            raise typer.BadParameter(
+                f"{axis} camera response was nonlinear or unstable ({relative_spread:.1%} spread)."
+            )
+        return measured, observations
+
+    yaw_scale, yaw_observations = measure_axis("yaw")
+    pitch_scale, pitch_observations = measure_axis("pitch")
+    observations = [*yaw_observations, *pitch_observations]
+    inlier_counts = [
+        int(item[key])
+        for item in observations
+        for key in ("forward_homography_inliers", "reverse_homography_inliers")
+    ]
+    restoration_errors = [
+        float(item["restore_mean_absolute_pixel_error"]) for item in observations
+    ]
+    restore_error = statistics.mean(restoration_errors)
+    if restore_error > 0.08:
+        raise typer.BadParameter(
+            f"Camera probes did not restore the view reliably (MAE={restore_error:.4f}); "
+            "profile was not saved."
+        )
+    yaw_config_error = abs(configured_yaw - yaw_scale) / yaw_scale
+    pitch_config_error = abs(configured_pitch - pitch_scale) / pitch_scale
+    if yaw_config_error > 0.02 or pitch_config_error > 0.02:
+        raise typer.BadParameter(
+            "Measured camera gains differ from the active runtime policy by more than 2%; "
+            "profile was not saved. "
+            f"yaw={yaw_scale:.6f} configured={configured_yaw:.6f}; "
+            f"pitch={pitch_scale:.6f} configured={configured_pitch:.6f}"
+        )
+
+    from datetime import datetime
+
+    payload = {
+        "schema_version": 2,
+        "captured_at": datetime.now().astimezone().isoformat(),
+        "game": "Minecraft Bedrock",
+        "game_version": build.version,
+        "launcher": "bedrock-on-linux",
+        "display": session.display,
+        "capture_window_id": window_id,
+        "input_window_id": input_window_id,
+        "input_backend": str(attached.get("backend") or "bedrock-isolated-x11-xtest"),
+        "mouse_sensitivity_option": settings.mouse_sensitivity,
+        "vertical_fov_degrees": settings.vertical_fov_degrees,
+        "options_sha256": settings.options_sha256,
+        "method": "bidirectional in-world ORB/RANSAC camera-only probes at 24, 48 and 96 counts",
+        "full_yaw_counts": round(yaw_scale * 360.0),
+        "yaw_counts_per_degree": yaw_scale,
+        "full_pitch_counts": round(pitch_scale * 180.0),
+        "pitch_counts_per_degree": pitch_scale,
+        "horizon_from_upper_pole_counts": round(pitch_scale * 90.0),
+        "configured_yaw_counts_per_degree": configured_yaw,
+        "configured_pitch_counts_per_degree": configured_pitch,
+        "restore_mean_absolute_pixel_error": restore_error,
+        "pitch_method": (
+            "bidirectional ORB/RANSAC gain measurement; full span and upper-pole horizon "
+            "counts derived from the measured gain and Bedrock pitch clamp"
+        ),
+        "notes": (
+            f"Bedrock {build.version}; gfx_field_of_view={settings.vertical_fov_degrees:g}; "
+            f"minimum homography inliers={min(inlier_counts)}; "
+            "camera origin must be re-established before live play"
+        ),
+    }
+    profile = CameraCalibrationProfile.model_validate({**payload, "profile_id": "0" * 64})
+    calibration_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = calibration_path.with_name(calibration_path.name + ".tmp")
+    if temporary_path.exists() or receipt_temporary_path.exists():
+        raise typer.BadParameter(
+            "A camera calibration temporary file already exists; inspect it first."
+        )
+    profile_bytes = (
+        json.dumps(profile.model_dump(exclude={"profile_id"}), indent=2) + "\n"
+    ).encode("utf-8")
+    profile_id = hashlib.sha256(profile_bytes).hexdigest()
+    receipt = {
+        "schema_version": 1,
+        "captured_at": payload["captured_at"],
+        "game_version": build.version,
+        "profile_id": profile_id,
+        "options_sha256": settings.options_sha256,
+        "mouse_sensitivity_option": settings.mouse_sensitivity,
+        "vertical_fov_degrees": settings.vertical_fov_degrees,
+        "capture_window_id": window_id,
+        "input_window_id": input_window_id,
+        "yaw_counts_per_degree": yaw_scale,
+        "pitch_counts_per_degree": pitch_scale,
+        "configured_yaw_counts_per_degree": configured_yaw,
+        "configured_pitch_counts_per_degree": configured_pitch,
+        "probe_observations": observations,
+    }
+    receipt_created = False
+    profile_created = False
+    try:
+        with receipt_temporary_path.open("x", encoding="utf-8") as output:
+            json.dump(receipt, output, indent=2)
+            output.write("\n")
+        os.chmod(receipt_temporary_path, 0o600)
+        os.link(receipt_temporary_path, receipt_path)
+        receipt_created = True
+        receipt_temporary_path.unlink()
+        with temporary_path.open("x") as output:
+            output.write(profile_bytes.decode("utf-8"))
+        os.chmod(temporary_path, 0o600)
+        os.link(temporary_path, calibration_path)
+        profile_created = True
+        temporary_path.unlink()
+        _require_compatible_bedrock_camera_profile(
+            config=config,
+            version=build.version,
+            wine_prefix=install.wine_prefix,
+        )
+        if load_camera_calibration(
+            app_paths().data_dir, game_version=build.version
+        ).profile_id != profile_id:
+            raise typer.BadParameter(
+                "Saved profile checksum did not match its measurement receipt."
+            )
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        receipt_temporary_path.unlink(missing_ok=True)
+        if profile_created:
+            calibration_path.unlink(missing_ok=True)
+        if receipt_created:
+            receipt_path.unlink(missing_ok=True)
+        raise
+    print(json.dumps({
+        "ready": True,
+        "game_version": build.version,
+        "profile_id": profile_id,
+        "yaw_counts_per_degree": round(yaw_scale, 6),
+        "pitch_counts_per_degree": round(pitch_scale, 6),
+        "restore_mean_absolute_pixel_error": round(restore_error, 5),
     }, sort_keys=True))
 
 

@@ -129,15 +129,34 @@ profile at:
 ```
 
 The profile is accepted only when the active Bedrock version, in-game mouse
-sensitivity, and configured per-axis policy scales match. Yaw and pitch are
-measured independently: WineGDK/Bedrock must not be assumed to map both axes
-through one scalar. On the first attachment to a physical game window, the
-supervisor uses a one-use mouse-only lease to send pitch homing commands and
+sensitivity, field of view, and configured per-axis policy scales match. Yaw
+and pitch are measured independently: WineGDK/Bedrock must not be assumed to
+map both axes through one scalar. On the first attachment to a physical game
+window, the supervisor uses a one-use mouse-only lease to send pitch homing commands and
 establish a command-origin estimate. Motion is paced across Bedrock input frames
 to reduce event coalescing. Completion and accepted counts do not verify the
 physical horizon; that retained-image qualification remains open. Reattaching to
 the same physical target preserves the command origin; changing targets
 invalidates it, as does starting a new calibration attempt.
+
+For a new managed build, install the optional computer-vision extra and run
+`minecraft-ai bedrock calibrate-camera` while the client is in a stable world
+with a complete survival HUD. The command requires an unarmed `SAFE_IDLE`
+supervisor and uses reversible, mouse-only 24/48/96-count probes in each axis.
+It estimates each angular delta from the active field of view and RANSAC-filtered
+image features, checks linearity, restoration error, and agreement with the
+configured policy, then writes the version-bound profile and a private JSON
+receipt containing probe values and frame hashes. The receipt is written before
+the profile becomes visible to the persistent launcher. No screenshots are
+retained. The reported full-turn and pole-to-pole spans are extrapolated from
+the local gain; they are not direct 360-degree or pitch-limit sweeps. Physical
+horizon qualification remains separate.
+
+```bash
+uv pip install --python .venv/bin/python -e '.[camera-calibration]'
+minecraft-ai bedrock calibrate-camera
+minecraft-ai bedrock camera-ready
+```
 
 If BedrockOnLinux Doctor blocks a fresh GPU launch, persistent startup stops
 instead of acknowledging the incident automatically. Inspect Doctor and the

@@ -561,6 +561,69 @@ class Supervisor:
             self._persist_status()
             return self.status()
 
+    def probe_world_camera(self, *, mouse_dx: int, mouse_dy: int) -> dict[str, Any]:
+        """Apply one small, reversible camera-only probe under a one-use lease."""
+        if type(mouse_dx) is not int or type(mouse_dy) is not int:
+            raise ValueError("camera probe deltas must be integers")
+        if (mouse_dx == 0) == (mouse_dy == 0):
+            raise ValueError("camera probe must move exactly one axis")
+        if abs(mouse_dx) > 128 or abs(mouse_dy) > 128:
+            raise ValueError("camera probe deltas must be within 128 counts")
+        with self._lock:
+            if self.state != SupervisorState.SAFE_IDLE:
+                raise RuntimeError(f"cannot probe camera from {self.state}")
+            if not self.backend.live_capable:
+                raise RuntimeError("camera probe requires a live isolated backend")
+            target_window_id = getattr(self.backend, "target_window_id", None)
+            display_name = getattr(self.backend, "display_name", None)
+            if target_window_id is None or not display_name:
+                raise RuntimeError("camera probe requires a bound Bedrock target")
+            if not self._actuation_permitted():
+                raise RuntimeError("actuation interlock is latched")
+
+            # A probe changes the physical view, so a prior world-camera origin
+            # cannot remain trusted even though the measured gain stays valid.
+            self.world_camera_origin_calibrated = False
+            self.world_camera_pitch_units = 0
+            self.world_camera_updates = 0
+            self._persist_status()
+            lease = self.motor.issue(
+                session_id=self.session_id,
+                target_instance=f"camera-probe:{display_name}:{target_window_id}",
+                ttl_ms=2000,
+                allowed_actions=frozenset({"mouse"}),
+                max_action_duration_ms=50,
+            )
+            try:
+                self.motor.apply(
+                    lease.lease_id,
+                    MotorAction(sequence=0, mouse_dx=mouse_dx, mouse_dy=mouse_dy),
+                )
+                time.sleep(0.08)
+                if not self._actuation_permitted():
+                    raise RuntimeError("actuation interlock was latched during camera probe")
+            except Exception as exc:
+                if isinstance(exc, InputRouteUnavailable):
+                    self.fault_code = exc.fault_code
+                if emergency_stop_latched():
+                    self.fail("emergency-stop-latched")
+                elif operator_pause_latched():
+                    self.motor.revoke("operator-pause")
+                else:
+                    self.fail(f"camera-probe:{type(exc).__name__}")
+                raise
+            finally:
+                self.motor.revoke(
+                    "operator-pause" if operator_pause_latched() else "camera-probe-complete"
+                )
+                self._persist_status()
+            return {
+                "accepted": True,
+                "mouse_dx": mouse_dx,
+                "mouse_dy": mouse_dy,
+                "status": self.status(),
+            }
+
     def arm(self, target_instance: str) -> dict[str, Any]:
         with self._lock:
             if emergency_stop_latched():
@@ -1009,6 +1072,11 @@ class Supervisor:
                 result = self.calibrate_world_camera(
                     pitch_counts_per_degree=pitch_counts_per_degree,
                     calibration_id=calibration_id,
+                )
+            elif command == "probe-world-camera":
+                result = self.probe_world_camera(
+                    mouse_dx=payload.get("mouse_dx", 0),
+                    mouse_dy=payload.get("mouse_dy", 0),
                 )
             elif command in {"arm-fake", "arm"}:
                 target_instance = str(payload.get("target_instance", "fake-instance"))

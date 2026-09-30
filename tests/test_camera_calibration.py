@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ import typer
 from minecraft_ai import cli
 from minecraft_ai.camera_calibration import (
     load_camera_calibration,
+    read_bedrock_camera_settings,
     read_bedrock_mouse_sensitivity,
 )
 from minecraft_ai.config import RuntimeConfig
@@ -149,3 +151,40 @@ def test_active_bedrock_mouse_sensitivity_is_read_from_wine_prefix(
     )
 
     assert read_bedrock_mouse_sensitivity(tmp_path) == pytest.approx(0.03)
+
+
+def test_camera_settings_include_fov_and_options_fingerprint(tmp_path: Path) -> None:
+    options = (
+        tmp_path
+        / "drive_c/users/steamuser/AppData/Roaming/Minecraft Bedrock/Users/1/games/"
+        "com.mojang/minecraftpe/options.txt"
+    )
+    options.parent.mkdir(parents=True)
+    payload = "gfx_field_of_view:70\nctrl_sensitivity2_mouse:0.5\n"
+    options.write_text(payload, encoding="utf-8")
+
+    settings = read_bedrock_camera_settings(tmp_path)
+
+    assert settings.mouse_sensitivity == pytest.approx(0.5)
+    assert settings.vertical_fov_degrees == pytest.approx(70.0)
+    assert settings.options_sha256 == hashlib.sha256(payload.encode()).hexdigest()
+
+
+def test_camera_profile_rejects_changed_field_of_view(tmp_path: Path) -> None:
+    directory = tmp_path / "calibrations"
+    directory.mkdir()
+    profile_data = _profile()
+    profile_data["vertical_fov_degrees"] = 70.0
+    (directory / "bedrock-camera-1.26.45.1.json").write_text(
+        json.dumps(profile_data), encoding="utf-8",
+    )
+    profile = load_camera_calibration(tmp_path, game_version="1.26.45.1")
+
+    with pytest.raises(ValueError, match="field of view changed"):
+        profile.require_compatible(
+            game_version="1.26.45.1",
+            mouse_sensitivity=0.03,
+            current_vertical_fov_degrees=75.0,
+            configured_yaw_counts_per_degree=47.96,
+            configured_pitch_counts_per_degree=66.0,
+        )
