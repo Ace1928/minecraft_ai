@@ -322,7 +322,13 @@ def test_server_list_caption_ocr_requires_exact_title_and_retains_coordinates(
         return ()
 
     monkeypatch.setattr(reader, "_read_image", read_image)
-    frame = _pixel_frame(1, width=1000, height=600)
+    # Real retained chrome qualifies the extra OCR pass. Mocked text tests
+    # only coordinate mapping; blank artwork no longer qualifies a reread.
+    from PIL import Image
+    path = Path(__file__).parent / "fixtures/bedrock_menu/server_list_1920x1080.png"
+    with Image.open(path) as source:
+        image = source.convert("RGB").resize((1000, 600), Image.Resampling.NEAREST)
+    frame = CapturedFrame(1, 1, 1000, 600, image.tobytes("raw", "BGRX"))
     result = reader.read(frame)
 
     if valid_title:
@@ -1820,3 +1826,111 @@ def test_retained_resource_loading_panorama_only_authorizes_waiting():
     from minecraft_ai.operator.menu import MenuObservation
     with pytest.raises(MenuNavigationError, match='no safe transition'):
         navigator._transition_for(MenuObservation(frame, lines, stage))
+
+
+def _retained_server_frame(name: str, frame_id: int = 1) -> CapturedFrame:
+    from PIL import Image
+    with Image.open(Path(__file__).parent / "fixtures/bedrock_menu" / name) as source:
+        image = source.convert("RGB")
+    return CapturedFrame(frame_id, frame_id, image.width, image.height,
+                         image.tobytes("raw", "BGRX"))
+
+
+def test_real_translucent_transfer_form_never_accepts_background_hud():
+    from minecraft_ai.operator.menu import MenuObservation, _transition_click_target
+    from minecraft_ai.perception_service import bedrock_server_form_bounds
+    frame = _retained_server_frame("server_list_transfer_1920x1080.png")
+    assert bedrock_server_form_bounds(frame) is not None
+    # Exact original full-frame OCR missed every menu caption. Do not invent
+    # observations from a recognizable HUD or a desired navigation outcome.
+    lines = _lines("Crouch or punch to re-trigger the popup")
+    assert classify_menu_stage(frame, lines, lan_name="BedrockConnect",
+        server_name="Pokemon Family - CobbleDrock",
+        hud_detector=lambda _: True) is MenuStage.UNKNOWN
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(capture=_SequenceCapture([frame]),
+        text_reader=_MappedTextReader({1: lines}), click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Pokemon Family - CobbleDrock", "192.168.4.166", 19136),
+        hud_detector=lambda _: True)
+    with pytest.raises(MenuNavigationError, match="unrecognized Bedrock screen; no input"):
+        navigator.run()
+    assert clicks.clicks == []
+    forged = MenuObservation(frame, (), MenuStage.BEDROCK_CONNECT)
+    with pytest.raises(MenuNavigationError, match="title is not verified"):
+        _transition_click_target(forged, navigator._transition_for(forged))
+
+
+def test_actual_transfer_ocr_stays_unknown_when_title_is_unreadable():
+    if not shutil.which("tesseract"):
+        pytest.skip("retained-frame OCR acceptance requires Tesseract")
+    frame = _retained_server_frame("server_list_transfer_1920x1080.png")
+    lines = TesseractMenuTextReader().read(frame)
+    assert not any(line.text.replace(" ", "").lower() == "serverlist" for line in lines)
+    assert classify_menu_stage(frame, lines, lan_name="BedrockConnect",
+        server_name="Pokemon Family - CobbleDrock",
+        hud_detector=lambda _: True) is MenuStage.UNKNOWN
+
+
+def test_shifted_opaque_form_reads_exact_caption_and_pixel_bound_target():
+    """Derived synthetic position control, not a live observation or calibration."""
+    if not shutil.which("tesseract"):
+        pytest.skip("retained-frame OCR acceptance requires Tesseract")
+    from PIL import Image
+    from minecraft_ai.operator.menu import MenuObservation, _transition_click_target
+    frame = _retained_server_frame("server_list_1920x1080.png")
+    original = Image.frombytes("RGB", (frame.width, frame.height), frame.bgra, "raw", "BGRX")
+    image = Image.new("RGB", original.size, (28, 40, 50))
+    image.paste(original.crop((510, 140, 1410, 940)), (820, 140))
+    frame = replace(frame, bgra=image.tobytes("raw", "BGRX"))
+    lines = TesseractMenuTextReader().read(frame)
+    stage = classify_menu_stage(frame, lines, lan_name="BedrockConnect",
+        server_name="Pokemon Family - CobbleDrock", hud_detector=lambda _: True)
+    assert stage is MenuStage.BEDROCK_CONNECT
+    observation = MenuObservation(frame, lines, stage)
+    navigator = BedrockMenuNavigator(capture=None, text_reader=None, click_backend=None,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Pokemon Family - CobbleDrock", "192.168.4.166", 19136))
+    transition = navigator._transition_for(observation)
+    target = _transition_click_target(observation, transition)
+    assert 1010 < target.center[0] < 1640 and 820 < target.center[1] < 900
+    caption = replace(target, text="Pokemon Family")
+    title = tuple(line for line in lines if line.center[1] < 240)
+    with pytest.raises(MenuNavigationError):
+        _transition_click_target(replace(observation, lines=title + (caption,)), transition)
+    with pytest.raises(MenuNavigationError, match="ambiguous"):
+        _transition_click_target(replace(observation, lines=lines +
+            (replace(target, top=target.top - 128),)), transition)
+    with pytest.raises(MenuNavigationError, match="chrome is not verified"):
+        _transition_click_target(replace(observation,
+            frame=replace(frame, bgra=b"\0" * len(frame.bgra))), transition)
+
+
+def test_server_selection_waits_past_guarded_form_and_loading_without_extra_input():
+    now = 0.0
+    def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+    first = _retained_server_frame("server_list_1920x1080.png")
+    if not shutil.which("tesseract"):
+        pytest.skip("retained-frame OCR acceptance requires Tesseract")
+    first_lines = TesseractMenuTextReader().read(first)
+    blocked = _retained_server_frame("server_list_transfer_1920x1080.png", 2)
+    frames = [first, blocked, replace(blocked, frame_id=3, captured_ns=3), _frame(4), _frame(5)]
+    observations = []
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(capture=_SequenceCapture(frames),
+        text_reader=_MappedTextReader({1: first_lines,
+            4: _lines("Generating world", "Loading resources")}),
+        click_backend=clicks, lan_name="BedrockConnect",
+        server=ConfiguredServer("Pokemon Family - CobbleDrock", "192.168.4.166", 19136),
+        timeout_s=1.0, response_timeout_s=0.1, poll_interval_s=0.1,
+        clock=lambda: now, sleep=advance, hud_detector=lambda _: True,
+        observation_sink=observations.append)
+    result = navigator.run()
+    assert result.actions == 1
+    assert len(clicks.clicks) == 1
+    assert [o.stage for o in observations] == [MenuStage.BEDROCK_CONNECT,
+        MenuStage.UNKNOWN, MenuStage.UNKNOWN, MenuStage.LOADING, MenuStage.IN_WORLD]
+    assert observations[-1].frame.frame_id == 5
+    assert now >= 0.4

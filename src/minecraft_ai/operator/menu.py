@@ -19,7 +19,11 @@ from typing import Any, Protocol
 
 from PIL import Image
 
-from minecraft_ai.perception_service import bedrock_in_world_hud_present
+from minecraft_ai.perception_service import (
+    bedrock_in_world_hud_present,
+    bedrock_server_form_bounds,
+    bedrock_ui_chrome_present,
+)
 from minecraft_ai.platforms.bedrock_x11 import (
     CapturedFrame,
     IsolationError,
@@ -259,15 +263,21 @@ class TesseractMenuTextReader:
         # readable; then isolated caption bands avoid the button borders that
         # Tesseract otherwise treats as empty table cells. Keep all geometry
         # screenshot-relative and require the exact title before using crops.
-        if frame.width >= 320 and frame.height >= 180 and not any(
+        server_form = bedrock_server_form_bounds(frame)
+        if server_form is not None and not any(
             any(anchor in _normalized_text(line.text) for anchor in (
                 "minecraft", "worlds", "disconnected from host", "you died", "tou died",
             ))
             for line in lines
         ):
-            panel_left, panel_top = int(frame.width * 0.275), int(frame.height * 0.13)
+            # The observed transfer form can move right while the survival
+            # HUD remains visible. Chrome permits a bounded reread only; an
+            # exact positioned title is still required before caption OCR.
+            shift = server_form[0] - 510 / 1920
+            panel_left, panel_top = int(frame.width * (0.275 + shift)), int(frame.height * 0.13)
             panel = image.crop((
-                panel_left, panel_top, int(frame.width * 0.725), int(frame.height * 0.845),
+                panel_left, panel_top,
+                int(frame.width * (0.725 + shift)), int(frame.height * 0.845),
             ))
             panel_lines = tuple(
                 replace(line, left=line.left + panel_left, top=line.top + panel_top)
@@ -275,16 +285,19 @@ class TesseractMenuTextReader:
             )
             if any(
                 _normalized_text(line.text).replace(" ", "") == "serverlist"
-                and line.confidence >= 60
+                and math.isfinite(line.confidence) and line.confidence >= 60
                 and 0.13 <= line.center[1] / frame.height <= 0.22
+                and server_form[0] <= line.center[0] / frame.width <= server_form[2]
                 for line in panel_lines
             ):
                 captions: list[OcrLine] = []
                 for row in range(5):
                     center_y = 0.325 + row * 0.1185
-                    left, top = int(frame.width * 0.37), int(frame.height * (center_y - 0.025))
+                    left = int(frame.width * (0.37 + shift))
+                    top = int(frame.height * (center_y - 0.025))
                     caption = image.crop((
-                        left, top, int(frame.width * 0.685), int(frame.height * (center_y + 0.025)),
+                        left, top, int(frame.width * (0.685 + shift)),
+                        int(frame.height * (center_y + 0.025)),
                     ))
                     captions.extend(
                         replace(line, left=line.left + left, top=line.top + top)
@@ -705,13 +718,16 @@ class BedrockMenuNavigator:
                 if (
                     source == MenuStage.BEDROCK_CONNECT
                     and transition.destination == MenuStage.IN_WORLD
-                    and current.stage == MenuStage.UNKNOWN
-                    and _external_connection_heading_visible(current)
+                    and (
+                        bedrock_server_form_bounds(current.frame) is not None
+                        or (current.stage == MenuStage.UNKNOWN
+                            and _external_connection_heading_visible(current))
+                    )
                 ):
                     # The retained transfer heading was OCR'd as "Connecting
                     # tao external", with its final word omitted. Only after
-                    # selecting our configured server may this exact central
-                    # heading extend observation to the existing loading bound.
+                    # selecting our configured server may this heading or a
+                    # retained transfer form extend observation to the loading bound.
                     # It never permits another click or changes other screens.
                     response_deadline = deadline
                 if current.stage == transition.destination or (
@@ -742,11 +758,14 @@ class BedrockMenuNavigator:
                         source == MenuStage.BEDROCK_CONNECT
                         and transition.destination == MenuStage.IN_WORLD
                         and current.stage == MenuStage.UNKNOWN
-                        and self.clock() < response_deadline
+                        and (self.clock() < response_deadline
+                             or bedrock_server_form_bounds(current.frame) is not None)
                     ):
                         # A transfer can briefly lose its loading caption.
                         # Spend only the original response budget observing;
                         # no retry click and no new spelling-based authority.
+                        if bedrock_server_form_bounds(current.frame) is not None:
+                            response_deadline = deadline
                         continue
                     self._raise_unexpected(source, transition.destination, current)
                 if current.stage == source:
@@ -1037,6 +1056,11 @@ def classify_menu_stage(
     if any(phrase in text for phrase in loading_phrases) or loading_heading_visible:
         return MenuStage.LOADING
 
+    # A translucent menu can retain the complete survival HUD. Pixel chrome
+    # is negative evidence even when OCR missed every label; it grants no
+    # action and cannot be overridden by a custom HUD reader.
+    if bedrock_ui_chrome_present(frame):
+        return MenuStage.UNKNOWN
     if hud_detector(frame):
         return MenuStage.IN_WORLD
     return MenuStage.UNKNOWN
@@ -1340,6 +1364,45 @@ def _transition_click_target(
     observation: MenuObservation,
     transition: _Transition,
 ) -> OcrLine:
+    if observation.stage == MenuStage.BEDROCK_CONNECT:
+        form = bedrock_server_form_bounds(observation.frame)
+        if (len(observation.frame.bgra) == observation.frame.width * observation.frame.height * 4
+                and form is None):
+            raise MenuNavigationError("server-form chrome is not verified; no input sent")
+        if form is not None:
+            if not any(
+                math.isfinite(line.confidence) and line.confidence >= 60
+                and _normalized_text(line.text).replace(" ", "") == "serverlist"
+                and form[0] <= line.center[0] / observation.frame.width <= form[2]
+                and 0.13 <= line.center[1] / observation.frame.height <= 0.22
+                for line in observation.lines
+            ):
+                raise MenuNavigationError("server-form title is not verified; no input sent")
+            # A label must be unique inside a real visible row. Do not use a
+            # prefix from chat or the half-rendered transfer overlay as authority.
+            server_target = _find_click_target(observation, transition.target_text,
+                region=(form[0] + 60 / 1920, 0.26, form[2] - 70 / 1920, 0.84))
+            if not math.isfinite(server_target.confidence) or server_target.confidence < 35:
+                raise MenuNavigationError("server-form caption is not verified; no input sent")
+            row = min((0.325 + index * 0.1185 for index in range(5)),
+                key=lambda y: abs(y - server_target.center[1] / observation.frame.height))
+            if abs(row - server_target.center[1] / observation.frame.height) > 0.035:
+                raise MenuNavigationError("server caption is outside a visible row; no input sent")
+            region = (form[0] + 60 / 1920, row - 0.06,
+                      form[2] - 80 / 1920, row + 0.06)
+            control = _find_dense_neutral_control(observation.frame, region=region,
+                minimum_width_fraction=0.18, minimum_height_fraction=0.045,
+                description="verified server row")
+            if control is None:
+                control = _find_dense_green_control(observation.frame, region=region,
+                    minimum_width_fraction=0.25, minimum_height_fraction=0.045,
+                    description="verified selected server row")
+            if (control is None
+                    or control.width < observation.frame.width * 0.25
+                    or not control.left <= server_target.center[0] <= control.left + control.width
+                    or not control.top <= server_target.center[1] <= control.top + control.height):
+                raise MenuNavigationError("server row pixels are not verified; no input sent")
+            return server_target
     if observation.stage == MenuStage.CONTENT_LOG:
         if not _content_log_visible(observation.frame, observation.lines):
             raise MenuNavigationError("content-log panel is not verified")

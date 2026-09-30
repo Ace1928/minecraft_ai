@@ -711,6 +711,7 @@ class BootstrapFastPerception:
             or away_overlay
             or _bedrock_top_ui_chrome_present(frame)
             or _bedrock_centered_modal_present(frame)
+            or bedrock_server_form_bounds(frame) is not None
         )
         bootstrap_source = (
             CROSSHAIR_BLOCK_FAST_SOURCE
@@ -1105,7 +1106,49 @@ def bedrock_ui_chrome_present(frame: CapturedFrame) -> bool:
         or bedrock_inventory_overlay_present(frame)
         or bedrock_away_overlay_present(frame)
         or _bedrock_centered_modal_present(frame)
+        or bedrock_server_form_bounds(frame) is not None
     )
+
+
+def bedrock_server_form_bounds(
+    frame: CapturedFrame,
+) -> tuple[float, float, float, float] | None:
+    """Locate captured server-form chrome only as a negative input interlock.
+
+    The retained centered and right-shifted forms have two layered left rims
+    and repeated button separators. Contrast comparisons tolerate the actual
+    translucent loading frame without treating terrain, clouds, or the HUD as
+    a menu. Geometry alone never identifies a server, authorizes a click, or
+    supplies a training label. Only these observed layouts are recognized.
+    """
+    if (frame.width < 320 or frame.height < 180
+            or len(frame.bgra) != frame.width * frame.height * 4):
+        return None
+    source = memoryview(frame.bgra)
+
+    def luma(x: float, y: float) -> int:
+        offset = (int(y * frame.height) * frame.width + int(x * frame.width)) * 4
+        blue, green, red = (int(value) for value in source[offset:offset + 3])
+        return (29 * blue + 150 * green + 77 * red) // 256
+
+    for left in (510 / 1920, 820 / 1920):
+        side_matches = sum(
+            luma(left + 8 / 1920, y) - luma(left + 2 / 1920, y) >= 35
+            and luma(left + 24 / 1920, y) - luma(left + 36 / 1920, y) >= 25
+            for y in (0.26, 0.31, 0.36, 0.44, 0.49, 0.56, 0.61, 0.69, 0.75, 0.80)
+        )
+        if side_matches < 8:
+            continue
+        # Separate upper rims of the second and third rows, not a broad gray
+        # pixel ratio. The first row may be green when selected.
+        separators = all(sum(
+            luma(left + x / 1920, (top + 2) / 1080)
+            - luma(left + x / 1920, (top - 4) / 1080) >= 35
+            for x in (100, 180, 260, 340, 420, 500, 580, 660, 740)
+        ) >= 6 for top in (420, 548))
+        if separators:
+            return left, 140 / 1080, left + 900 / 1920, 940 / 1080
+    return None
 
 
 def _bedrock_top_ui_chrome_present(frame: CapturedFrame) -> bool:
@@ -2060,7 +2103,7 @@ def bedrock_survival_hud_present(frame: CapturedFrame) -> bool:
     training label. Requiring both the red heart bank and neutral hotbar frame
     prevents calibration motion from being emitted over menus or loading UI.
     """
-    return not bedrock_away_overlay_present(frame) and _bedrock_hud_present(
+    return not bedrock_ui_chrome_present(frame) and _bedrock_hud_present(
         frame, require_hearts=True,
     )
 
@@ -2166,6 +2209,8 @@ def live_control_arm_reason(
     refuse arming. Inventory recovery is the existing close_open_inventory
     scene router, not a new actuator sequence.
     """
+    if bedrock_server_form_bounds(frame) is not None:
+        return None
     if bedrock_in_world_hud_present(frame):
         return "hud"
     if bedrock_death_screen_present(frame):

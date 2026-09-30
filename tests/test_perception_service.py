@@ -5,6 +5,7 @@ import hashlib
 import json
 import statistics
 import time
+from pathlib import Path
 
 import pytest
 from PIL import Image, ImageDraw
@@ -47,6 +48,7 @@ from minecraft_ai.perception_service import (
     bedrock_in_world_hud_present,
     bedrock_survival_hud_present,
     bedrock_ui_chrome_present,
+    bedrock_server_form_bounds,
     crosshair_block_dhash,
     death_respawn_control_center,
     frame_dhash,
@@ -858,6 +860,54 @@ def test_creative_hud_abstains_when_decoder_or_scale_is_unsupported(monkeypatch)
     frame = _frame(image.tobytes("raw", "BGRA"), width=image.width, height=image.height)
     monkeypatch.setattr(perception_service, "_numpy_bgra", lambda _frame: None)
     assert not bedrock_creative_hud_present(frame)
+
+
+@pytest.mark.parametrize("without_numpy", [False, True])
+def test_retained_server_form_blocks_real_survival_hud_and_world_arming(
+    without_numpy: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = Path(__file__).parent / "fixtures/bedrock_menu/server_list_transfer_1920x1080.png"
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+        "87c3bf9fcadeb2624b58fc417b9ae3476bedf34878d683136706e81ad2678bef"
+    )
+    with Image.open(path) as source:
+        image = source.convert("RGB")
+    frame = _frame(image.tobytes("raw", "BGRX"), width=image.width, height=image.height)
+    if without_numpy:
+        monkeypatch.setattr(perception_service, "_numpy_bgra", lambda _: None)
+    # Demonstrate the actual false-positive trigger, not a mock HUD outcome.
+    assert perception_service._bedrock_hud_present(frame, require_hearts=True)
+    assert bedrock_server_form_bounds(frame) is not None
+    assert bedrock_ui_chrome_present(frame)
+    assert not bedrock_survival_hud_present(frame)
+    assert not bedrock_in_world_hud_present(frame)
+    assert live_control_arm_reason(frame) is None
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["scene.playable"].value is False
+    assert facts["scene.ui_overlay"].value is True
+    assert facts["scene.ui_overlay"].source.endswith(":not-training-label")
+    assert "scene.mode" not in facts
+
+
+@pytest.mark.parametrize("removed", ["left-rim", "inner-well", "separator-2", "separator-3"])
+def test_server_form_requires_independent_rims_and_repeated_row_edges(removed: str) -> None:
+    path = Path(__file__).parent / "fixtures/bedrock_menu/server_list_transfer_1920x1080.png"
+    with Image.open(path) as source:
+        image = source.convert("RGB")
+    # Deliberate destructive controls of the retained image, never observations.
+    boxes = {"left-rim": (824, 250, 833, 900),
+             "inner-well": (842, 250, 865, 900),
+             "separator-2": (900, 415, 1630, 424),
+             "separator-3": (900, 542, 1630, 552)}
+    image.paste((70, 70, 70), boxes[removed])
+    frame = _frame(image.tobytes("raw", "BGRX"), width=image.width, height=image.height)
+    assert bedrock_server_form_bounds(frame) is None
+
+
+@pytest.mark.parametrize("shade", [20, 60, 100, 140, 198, 230])
+def test_uniform_scene_cannot_supply_server_form_geometry(shade: int) -> None:
+    frame = _frame(bytes((shade, shade, shade, 255)) * 640 * 360, width=640, height=360)
+    assert bedrock_server_form_bounds(frame) is None
 
 
 @pytest.mark.parametrize("count", range(1, 17))

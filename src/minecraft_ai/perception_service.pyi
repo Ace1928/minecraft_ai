@@ -20,6 +20,7 @@ from minecraft_ai.perception.service import (
     frame_region_dhash as frame_region_dhash,
     frame_region_luma_grid as frame_region_luma_grid,
     bedrock_ui_chrome_present as bedrock_ui_chrome_present,
+    bedrock_server_form_bounds as bedrock_server_form_bounds,
     _bedrock_top_ui_chrome_present as _bedrock_top_ui_chrome_present,
     _CLASSIC_HOTBAR_RAIL_MIN_LENGTH as _CLASSIC_HOTBAR_RAIL_MIN_LENGTH,
     _CLASSIC_HOTBAR_RAIL_MAX_LENGTH as _CLASSIC_HOTBAR_RAIL_MAX_LENGTH,
