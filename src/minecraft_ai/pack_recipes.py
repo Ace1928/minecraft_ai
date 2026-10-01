@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from .wiki import WikiEvidence
+from .pack_scope import ActiveRecipeIdentity, active_recipe_identity
+from .perception import CognitionReadView
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_CATALOG_BYTES = 10 * 1024 * 1024
@@ -35,6 +37,7 @@ def _normalize(value: str) -> str:
 class PackRecipeAnswer:
     evidence: WikiEvidence
     chat_reply: str
+    identity: ActiveRecipeIdentity | None = None
 
 
 class PackRecipeCatalog:
@@ -63,6 +66,48 @@ class PackRecipeCatalog:
         self._payload = payload
         self.sha256 = sha256
         self.version_id = payload["bds_version"]
+
+    def active_scope_status(self, view: CognitionReadView) -> str:
+        return self._scope_status(active_recipe_identity(view))
+
+    def _scope_status(self, active: ActiveRecipeIdentity | None) -> str:
+        configured = self._payload.get("configured_recipe_identity")
+        if (
+            type(configured) is not dict
+            or configured.get("state") != "configured_only"
+            or type(configured.get("scope_sha256")) is not str
+            or _SHA256.fullmatch(configured["scope_sha256"]) is None
+            or active is None
+        ):
+            return "unknown"
+        if (
+            active.world != self._payload["world"]
+            or active.bds_version != self.version_id
+            or active.catalog_sha256 != self.sha256
+            or active.scope_sha256 != configured["scope_sha256"]
+        ):
+            return "mismatch"
+        return "verified"
+
+    def active_identity(self, view: CognitionReadView) -> ActiveRecipeIdentity | None:
+        active = active_recipe_identity(view)
+        return active if self._scope_status(active) == "verified" else None
+
+    @staticmethod
+    def is_recipe_query(query: str) -> bool:
+        return _RECIPE_INTENT.search(query.casefold()) is not None
+
+    def lookup_live(
+        self, query: str, view: CognitionReadView,
+    ) -> PackRecipeAnswer | None:
+        """Only a fresh matching active identity admits configured recipe text."""
+        identity = self.active_identity(view)
+        if identity is None:
+            return None
+        answer = self.lookup(query, game_version=identity.bds_version)
+        if answer is None:
+            return None
+        return PackRecipeAnswer(answer.evidence, answer.chat_reply, identity)
 
     @classmethod
     def load(cls, path: str | Path, expected_sha256: str) -> "PackRecipeCatalog":

@@ -77,6 +77,11 @@ still the live server revision. A next bounded improvement should bind the
 existing producer snapshot to verified live session/active-stack identity and
 invalidate old evidence when that binding changes.
 
+That bounded contract and offline invalidation logic are now implemented in
+[Active recipe scope](ACTIVE_RECIPE_SCOPE.md). The first target verification
+receipt above remains a historical checkpoint; live observer acceptance is
+still outstanding and configured snapshots alone no longer admit live advice.
+
 No actual desktop join, chat typing, crafting, general model quality or skill
 learning was established here. Production services deploy on the desktop;
 service ownership, world updates and live acceptance remain separate.

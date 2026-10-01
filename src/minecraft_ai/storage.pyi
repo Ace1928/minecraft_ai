@@ -3,6 +3,7 @@ from minecraft_ai.memory.storage import (
     MAX_OPERATOR_REVISION as MAX_OPERATOR_REVISION,
     _OPERATOR_REVISION_KEY as _OPERATOR_REVISION_KEY,
     OperatorContextSnapshot as OperatorContextSnapshot,
+    OperatorResponseAdmissionError as OperatorResponseAdmissionError,
     _message_authority as _message_authority,
     StateDatabase as StateDatabase,
 )

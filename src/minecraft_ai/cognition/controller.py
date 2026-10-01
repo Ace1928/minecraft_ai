@@ -62,6 +62,7 @@ from .types import (
 from minecraft_ai.pack_recipes import PackRecipeCatalog
 from minecraft_ai.world_knowledge import WorldMinecraftSearch
 from minecraft_ai.game_chat import bind_game_chat_authority
+from minecraft_ai.pack_scope import RECIPE_SCOPE_UNAVAILABLE, active_recipe_identity
 
 
 @dataclass
@@ -91,7 +92,42 @@ class HighLevelController:
         # deliberately irrelevant, and even a legacy nested call clears it.
         token = self._request_context.set(request)
         try:
-            return bind_game_chat_authority(self._decide(blackboard, context), blackboard)
+            identity = (
+                self.pack_recipe_catalog.active_identity(blackboard)
+                if self.pack_recipe_catalog is not None
+                else active_recipe_identity(blackboard)
+            )
+            has_pack_reference = context.pack_recipe_reply is not None or any(
+                ":pack:" in item.version_key for item in context.wiki
+            )
+            player_question = blackboard.fact("social.player_message", min_confidence=0.7)
+            player_query = ""
+            if player_question is not None and type(player_question.value) is str:
+                _speaker, separator, text = player_question.value.partition(":")
+                player_query = (text if separator else player_question.value).strip()
+            stale_player_reference = (
+                self._active_operator_question(context) is None
+                and context.pack_recipe_reply not in {None, RECIPE_SCOPE_UNAVAILABLE}
+                and (
+                    player_question is None or not player_question.fresh()
+                    or not any(item.query.strip() == player_query for item in context.wiki)
+                )
+            )
+            if has_pack_reference and (
+                context.pack_recipe_identity is None
+                or context.pack_recipe_identity != identity
+                or stale_player_reference
+            ):
+                context = replace(
+                    context, wiki=(), pack_recipe_reply=RECIPE_SCOPE_UNAVAILABLE,
+                    pack_recipe_identity=None, pack_recipe_status="unknown",
+                )
+            decision = bind_game_chat_authority(self._decide(blackboard, context), blackboard)
+            # Private host binding survives authority rewrites and repairs. It
+            # cannot be proposed through the model's decision JSON schema.
+            if identity is not None:
+                decision._pack_recipe_identity = identity
+            return decision
         finally:
             self._request_context.reset(token)
 
@@ -145,8 +181,15 @@ class HighLevelController:
         """
         question = self._active_operator_question(context)
         latest = blackboard.latest()
-        if question is None or latest is None or context.wiki:
+        if question is None or latest is None:
             return context
+        # A player answer or prior operator question cannot answer this exact
+        # current question merely because it came from the same pack session.
+        if context.wiki or context.pack_recipe_reply is not None:
+            context = replace(
+                context, wiki=(), pack_recipe_reply=None, pack_recipe_identity=None,
+                pack_recipe_status=None,
+            )
         parts = latest.instance_id.split(":")
         if len(parts) < 2 or parts[0] != "bedrock":
             return context
@@ -154,11 +197,21 @@ class HighLevelController:
         if request is not None and request.snapshot().disposition != "pending":
             return context
         if self.pack_recipe_catalog is not None:
-            answer = self.pack_recipe_catalog.lookup(question.text, game_version=parts[1])
+            status = self.pack_recipe_catalog.active_scope_status(blackboard)
+            answer = self.pack_recipe_catalog.lookup_live(question.text, blackboard)
             if answer is not None:
                 if request is not None and request.snapshot().disposition != "pending":
                     return context
-                return replace(context, wiki=(answer.evidence,))
+                return replace(
+                    context, wiki=(answer.evidence,), pack_recipe_reply=answer.chat_reply,
+                    pack_recipe_identity=answer.identity,
+                    pack_recipe_status=status,
+                )
+            if status != "verified" and self.pack_recipe_catalog.is_recipe_query(question.text):
+                return replace(
+                    context, pack_recipe_reply=RECIPE_SCOPE_UNAVAILABLE,
+                    pack_recipe_status=status,
+                )
             if self.pack_recipe_catalog.mentions_pack_content(question.text):
                 return context
         if self.world_search is None:
@@ -200,6 +253,14 @@ class HighLevelController:
                 context = self._with_player_reference(blackboard, context)
             elif not _urgent_safety_required(blackboard):
                 context = self._with_operator_reference(blackboard, context)
+            operator_question = self._active_operator_question(context)
+            if operator_question is not None and context.pack_recipe_reply is not None:
+                # A normalized recipe or explicit scope refusal needs no model
+                # paraphrase. Preserve the existing reply-only operator authority.
+                return CognitionDecision(
+                    chosen_goal_id=f"operator:{operator_question.message_id}",
+                    say=context.pack_recipe_reply,
+                )
             planning_query = (
                 active_operator.text
                 if active_operator is not None
@@ -318,6 +379,7 @@ class HighLevelController:
                 if active_operator is None
                 else _operator_prompt_metadata(active_operator),
                 "wiki_evidence": [_wiki_prompt_payload(item) for item in context.wiki[:2]],
+                "active_recipe_scope": context.pack_recipe_status,
                 "recent_skill_runs": [
                     {
                         "skill": run.skill_id[:64],
