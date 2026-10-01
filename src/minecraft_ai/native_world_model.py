@@ -28,19 +28,15 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 _PLANNER_RULES = (
-    "ERAIS native World Minecraft planner. Use only fresh_facts as observed truth; "
-    "follow active_operator_message first. Choose goal IDs only from goals, select "
-    "skill_id only from skills, and use only its listed parameters. In repair mode "
-    "obey authority_bounds exactly. Never "
-    "invent an observation, item, outcome, or permission. Set game_chat only for a "
-    "fresh authorized player question and "
-    "answer from wiki_evidence. If evidence or a safe action is missing, use "
-    "skill_id null and request a supported perception. Return exactly one JSON "
-    "object, keys in order r,g,s,p,o,c,x,q,w,d,n, no markdown. Use this shape: "
+    "Minecraft planner. Only fresh_facts proves current state. Follow the literal "
+    "active_operator_directive first; obey authority_bounds and safe_fallback. "
+    "Use listed goal/skill IDs and parameters only. Never invent facts or permission. "
+    "Game chat needs fresh player authorization and wiki_evidence. If unsafe or "
+    "unknown, use s=null and admitted q observations. Return only JSON in order "
+    "r,g,s,p,o,c,x,q,w,d,n: "
     '{"r":"brief","g":null,"s":null,"p":{},"o":null,"c":null,'
     '"x":false,"q":[],"w":null,"d":null,"n":[]}'
-    ". For a reply-only "
-    "operator question, use skill_id null, p {}, c null, x false, n [].\nContext:"
+    "\nContext:"
 )
 _REPLY_ONLY_RULES = (
     "ERAIS World Minecraft operator reply. Use only fresh_facts as observed truth. "
@@ -48,6 +44,13 @@ _REPLY_ONLY_RULES = (
     "invent observations or propose actions. Return exactly one JSON object with keys "
     "g, o and q. Use the exact supplied goal ID for g; keep o under 160 characters. "
     "q is an empty list or at most two admitted perception keys.\nContext:"
+)
+_STRUCTURED_REPLY_ONLY_RULES = (
+    "Reply to the literal operator_question using fresh_facts only; missing "
+    "evidence means uncertainty. No game action/chat/plan/research/direction. "
+    "Return only JSON in order r,g,s,p,o,c,x,q,w,d,n; use the exact supplied g, "
+    "s=null,p={},c=null,x=false,w=null,d=null,n=[]. Keep o under160 characters; "
+    "q is [] or up to2 admitted read-only observations.\nContext:"
 )
 
 
@@ -61,7 +64,9 @@ def _short(value: object, limit: int) -> object:
     return None
 
 
-def _compact_context(messages: tuple[ModelMessage, ...]) -> tuple[dict[str, Any], bool]:
+def _compact_context(
+    messages: tuple[ModelMessage, ...], *, authority_bounds: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], bool]:
     payload: dict[str, Any] = {}
     directive: dict[str, Any] | None = None
     auxiliary_payloads: list[dict[str, Any]] = []
@@ -100,13 +105,13 @@ def _compact_context(messages: tuple[ModelMessage, ...]) -> tuple[dict[str, Any]
     for key in ("active_operator_message",):
         if type(payload.get(key)) is dict:
             result[key] = {
-                field: _short(payload[key].get(field), 110)
+                field: payload[key].get(field) if field == "message_id" else _short(payload[key].get(field), 110)
                 for field in ("message_id", "kind", "priority", "status")
                 if field in payload[key]
             }
     if directive is not None:
         result["active_operator_directive"] = {
-            key: _short(directive.get(key), 320)
+            key: directive[key]
             for key in ("message_id", "text", "kind", "priority", "status")
             if key in directive
         }
@@ -132,25 +137,23 @@ def _compact_context(messages: tuple[ModelMessage, ...]) -> tuple[dict[str, Any]
             if type(allowed) is list:
                 compact_bounds["allowed_skills"] = [
                     {
-                        "s": _short(item.get("s"), 80),
-                        "p": [_short(parameter, 48) for parameter in item.get("p", [])[:8]]
+                        "s": item.get("s"),
+                        "p": list(item.get("p", []))
                         if type(item.get("p", [])) is list
                         else [],
                     }
-                    for item in allowed[:8]
+                    for item in allowed
                     if type(item) is dict
                 ]
             requested = bounds.get("requested_skill_ids")
             if type(requested) is list:
-                compact_bounds["requested_skill_ids"] = [_short(item, 80) for item in requested[:8]]
+                compact_bounds["requested_skill_ids"] = list(requested)
             required = bounds.get("required_action_constraints")
             if type(required) is dict:
-                compact_bounds["required_action_constraints"] = {
-                    str(key)[:64]: _short(item, 64) for key, item in list(required.items())[:8]
-                }
+                compact_bounds["required_action_constraints"] = dict(required)
             for key in ("authority_goal_id", "reply_only", "skill_required"):
                 if key in bounds:
-                    compact_bounds[key] = _short(bounds[key], 100)
+                    compact_bounds[key] = bounds[key]
             result["authority_bounds"] = compact_bounds
             if bounds.get("reply_only") is True:
                 reply_only = True
@@ -172,11 +175,9 @@ def _compact_context(messages: tuple[ModelMessage, ...]) -> tuple[dict[str, Any]
                     continue
                 item = fallback[key]
                 if key == "p" and type(item) is dict:
-                    safe_fallback[key] = {
-                        str(name)[:64]: _short(value, 64) for name, value in list(item.items())[:8]
-                    }
+                    safe_fallback[key] = dict(item)
                 else:
-                    safe_fallback[key] = _short(item, 100)
+                    safe_fallback[key] = item
             result["safe_fallback"] = safe_fallback
         for key in ("rejected", "rejected_output"):
             if key in value:
@@ -187,10 +188,22 @@ def _compact_context(messages: tuple[ModelMessage, ...]) -> tuple[dict[str, Any]
                     else json.dumps(rejected, separators=(",", ":")),
                     220,
                 )
+    if authority_bounds is not None:
+        # _complete already parsed this from the original controller contract.
+        # Copy it before menu compaction; never mutate the signed format or let
+        # prose/repair history replace its declared goal, skills or constraints.
+        declared = json.loads(json.dumps(authority_bounds, ensure_ascii=False))
+        declared["allowed_skills"] = [
+            {"s": item["skill_id"], "p": item["parameters"]}
+            for item in declared.get("allowed_skills", [])
+        ]
+        result["authority_bounds"] = declared
     facts = payload.get("fresh_facts")
     if type(facts) is dict:
         priority = (
             "danger.immediate",
+            "danger.drowning",
+            "danger.burning",
             "scene.death",
             "scene.playable",
             "player.health",
@@ -215,14 +228,22 @@ def _compact_context(messages: tuple[ModelMessage, ...]) -> tuple[dict[str, Any]
             result["fresh_facts"] = compact_facts
     goals = payload.get("goals")
     if type(goals) is list and goals:
+        goal_id = result.get("authority_bounds", {}).get("authority_goal_id")
+        rows = [item for item in goals if type(item) is dict]
+        declared_goals = None if authority_bounds is None else authority_bounds.get("goal_ids", [])
+        if declared_goals is not None:
+            rows = [item for item in rows if item.get("id") in declared_goals]
+        active = directive if directive is not None else active_message
+        active_goal = f"operator:{active['message_id']}" if type(active) is dict and type(active.get("message_id")) is str else None
+        mandatory = [item for item in rows if item.get("id") in {goal_id, active_goal} - {None}]
+        selected = mandatory + [item for item in rows if item not in mandatory][:max(0, 2-len(mandatory))]
         result["goals"] = [
             {
-                key: _short(item.get(key), 85)
+                key: item.get(key) if key == "id" else _short(item.get(key), 85)
                 for key in ("id", "description", "source")
                 if key in item
             }
-            for item in goals[:2]
-            if type(item) is dict
+            for item in selected
         ]
     current_plan = payload.get("current_plan")
     if type(current_plan) is dict:
@@ -233,15 +254,18 @@ def _compact_context(messages: tuple[ModelMessage, ...]) -> tuple[dict[str, Any]
         }
     skills = payload.get("skills")
     if type(skills) is list:
+        required_ids = set(result.get("authority_bounds", {}).get("requested_skill_ids", []))
+        rows = [item for item in skills if type(item) is dict]
+        mandatory = [item for item in rows if item.get("skill_id") in required_ids]
+        selected = mandatory + [item for item in rows if item not in mandatory][:max(0, 6-len(mandatory))]
         result["skills"] = [
             {
-                "skill_id": _short(item.get("skill_id"), 80),
+                "skill_id": item.get("skill_id"),
                 "description": _short(item.get("description"), 72),
-                "parameters": [_short(param, 48) for param in item.get("parameters", [])[:8]],
+                "parameters": list(item.get("parameters", [])),
                 "competence": item.get("competence"),
             }
-            for item in skills[:6]
-            if type(item) is dict
+            for item in selected
         ]
     for source, target, limit, count in (
         ("chat_lines", "chat_lines", 100, 2),
@@ -306,7 +330,11 @@ def _compact_context(messages: tuple[ModelMessage, ...]) -> tuple[dict[str, Any]
     if free_text:
         result["repair_or_directive_context"] = free_text[-1][:350]
     if directive is not None and type(directive.get("text")) is str:
-        result["operator_question"] = directive["text"][:280]
+        if reply_only:
+            result["operator_question"] = directive["text"]
+        metadata = result.get("active_operator_message")
+        if type(metadata) is dict and metadata.get("message_id") == directive.get("message_id"):
+            result.pop("active_operator_message")
     return result, reply_only
 
 
@@ -320,7 +348,9 @@ def compact_planner_prompt(
         raise ValueError("native World prompt byte budget is invalid")
     if fits_prompt is not None and not callable(fits_prompt):
         raise ValueError("native World token budget check must be callable")
-    context, reply_only = _compact_context(messages)
+    context, reply_only = _compact_context(
+        messages, authority_bounds=None if response_format is None else response_format["authority"],
+    )
     if response_format is not None:
         # This is already parsed from original controller authority, before
         # lossy prompt compaction. Prose cannot select a different contract mode.
@@ -339,13 +369,23 @@ def compact_planner_prompt(
             "wiki_evidence": context.get("wiki_evidence", []),
         }
         context = compact
-        prefix = f"{_REPLY_ONLY_RULES} Exact g value: {json.dumps(goal_id)}."
+        rules = _STRUCTURED_REPLY_ONLY_RULES if response_format is not None else _REPLY_ONLY_RULES
+        prefix = rules
     else:
         prefix = _PLANNER_RULES
     facts = context.get("fresh_facts", {})
     needs_answer = bool(context.get("operator_question")) or (
         isinstance(facts, dict) and bool(facts.get("social.player_message"))
     )
+    bounds = context.get("authority_bounds", {})
+    required_ids = set(bounds.get("requested_skill_ids", [])) if type(bounds) is dict else set()
+    authority_goal_id = bounds.get("authority_goal_id") if type(bounds) is dict else None
+    mandatory_goal_ids = {authority_goal_id} - {None}
+    active = context.get("active_operator_directive", context.get("active_operator_message"))
+    if type(active) is dict and type(active.get("message_id")) is str:
+        active_goal = f"operator:{active['message_id']}"
+        if any(type(row) is dict and row.get("id") == active_goal for row in context.get("goals", [])):
+            mandatory_goal_ids.add(active_goal)
     while True:
         encoded = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
         prompt = prefix + encoded
@@ -365,8 +405,12 @@ def compact_planner_prompt(
             rows = context.get(key)
             minimum_rows = 1 if key == "skills" or (key == "wiki_evidence" and needs_answer) else 0
             if isinstance(rows, list) and len(rows) > minimum_rows:
-                rows.pop()
-                break
+                removable = [index for index, row in enumerate(rows) if
+                    not (key == "skills" and type(row) is dict and row.get("skill_id") in required_ids)
+                    and not (key == "goals" and type(row) is dict and row.get("id") in mandatory_goal_ids)]
+                if removable:
+                    rows.pop(removable[-1])
+                    break
             if isinstance(rows, dict) and rows:
                 if key == "current_plan":
                     context.pop(key)
@@ -376,27 +420,19 @@ def compact_planner_prompt(
             if isinstance(bounds, dict):
                 allowed = bounds.get("allowed_skills")
                 if isinstance(allowed, list) and len(allowed) > 1:
-                    allowed.pop()
-                    continue
-                if isinstance(allowed, list) and allowed and isinstance(allowed[-1], dict):
-                    parameters = allowed[-1].get("p")
-                    if isinstance(parameters, list) and parameters:
-                        parameters.pop()
+                    removable = [index for index, row in enumerate(allowed) if
+                        type(row) is dict and row.get("s") not in required_ids]
+                    if removable:
+                        allowed.pop(removable[-1])
                         continue
-                requested = bounds.get("requested_skill_ids")
-                if isinstance(requested, list) and requested:
-                    requested.pop()
-                    continue
-                constraints = bounds.get("required_action_constraints")
-                if isinstance(constraints, dict) and constraints:
-                    constraints.pop(next(reversed(constraints)))
-                    continue
-            fallback = context.get("safe_fallback")
-            if isinstance(fallback, dict):
-                parameters = fallback.get("p")
-                if isinstance(parameters, dict) and parameters:
-                    parameters.pop(next(reversed(parameters)))
-                    continue
+            # Descriptions and competence are context, not authority. Keep all
+            # remaining skill IDs/parameter names and required fallback values.
+            optional = [(row, name) for row in context.get("skills", []) if type(row) is dict
+                        for name in ("description", "competence") if name in row]
+            if optional:
+                row, name = optional[-1]
+                row.pop(name)
+                continue
             facts = context.get("fresh_facts")
             if isinstance(facts, dict):
                 removable = [
@@ -405,8 +441,12 @@ def compact_planner_prompt(
                     if key
                     not in {
                         "danger.immediate",
+                        "danger.drowning",
+                        "danger.burning",
                         "scene.death",
                         "scene.playable",
+                        "player.critical_health",
+                        "environment.underwater",
                         "social.player_message",
                         "operator.game_chat_authorized",
                     }
@@ -414,18 +454,13 @@ def compact_planner_prompt(
                 if removable:
                     facts.pop(removable[-1])
                     continue
-            directive = context.get("active_operator_directive")
-            if (
-                isinstance(directive, dict) and isinstance(directive.get("text"), str)
-                and len(directive["text"]) > 160
-            ):
-                directive["text"] = directive["text"][:160]
-                continue
             if len(context.get("repair_or_directive_context", "")) > 120:
                 context["repair_or_directive_context"] = context["repair_or_directive_context"][
                     :120
                 ]
                 continue
+            # An irreducible request is refused. Never fit it by deleting a
+            # literal operator prohibition, action constraint or fallback value.
             raise ValueError("native World planner context exceeds its admitted request budget")
 
 
