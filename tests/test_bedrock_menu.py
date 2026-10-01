@@ -1182,6 +1182,123 @@ def test_disconnect_recovery_never_repeats_beyond_bounded_back_attempts() -> Non
     assert clicks.clicks == [(index, *_disconnected_lines()[2].center) for index in (1, 2)]
 
 
+def _multiplayer_failure_fixture(frame_id: int):
+    """Synthetic recognition control, not a retained real-dialog screenshot."""
+    pixels = bytearray(b"\x20\x20\x20\xff" * 1000 * 600)
+    for y in range(390, 451):
+        start = (y * 1000 + 300) * 4
+        pixels[start:start + 401 * 4] = b"\xbe\xbe\xbe\xff" * 401
+    return _frame(frame_id, bgra=bytes(pixels)), (
+        OcrLine("Multiplayer Connection Failed", 240, 120, 520, 30),
+        OcrLine("Your client is having trouble establishing 3 connection to", 180, 200, 640, 22),
+        OcrLine("multiplayer services. Please check your", 260, 235, 480, 22),
+        OcrLine("Back", 470, 407, 60, 28),
+    )
+
+
+@pytest.mark.parametrize("from_transfer", [False, True])
+@pytest.mark.parametrize("return_route", ["title", "play", "loading-play"])
+def test_multiplayer_failure_returns_via_verified_back_then_configured_server(
+    from_transfer, return_route,
+):
+    frame_id = 2 if from_transfer else 1
+    failure, lines = _multiplayer_failure_fixture(frame_id)
+    frames = ([_frame(1)] if from_transfer else []) + [failure]
+    frames += [_frame(index) for index in range(frame_id + 1, frame_id + 5)]
+    text = {
+        frame_id: lines,
+        frame_id + 1: _lines("Minecraft", "Play", "Settings"),
+        frame_id + 2: _lines("Play", "Worlds", "LAN Games", "BedrockConnect"),
+        frame_id + 3: _lines("ServerList", "Eidos Local Bedrock"),
+    }
+    if return_route == "play":
+        frames.remove(frames[2 if from_transfer else 1])
+    elif return_route == "loading-play":
+        text[frame_id + 1] = _lines("Connecting to world")
+    if from_transfer:
+        text[1] = _lines("ServerList", "Eidos Local Bedrock")
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture(frames), text_reader=_MappedTextReader(text),
+        click_backend=clicks, lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        poll_interval_s=0, sleep=lambda _: None,
+        hud_detector=lambda frame: frame.frame_id == frame_id + 4,
+    )
+    result = navigator.run()
+    assert MenuStage.CONNECTION_FAILED in result.visited
+    assert result.visited[-1] is MenuStage.IN_WORLD
+    assert (frame_id, *lines[-1].center) in clicks.clicks
+    assert clicks.clicks[-2:] == [(frame_id + 2, 500, 320), (frame_id + 3, 500, 200)]
+
+
+@pytest.mark.parametrize("invalid", [
+    "missing_body", "wrong_error", "duplicate_back", "duplicate_heading", "chat_heading",
+    "low_confidence", "nan_confidence", "blank_pixels", "caption_outside_control",
+])
+def test_multiplayer_failure_requires_same_frame_anchors_caption_and_rectangle(invalid):
+    from minecraft_ai.operator.menu import MenuObservation, _transition_click_target
+
+    frame, lines = _multiplayer_failure_fixture(1)
+    lines = list(lines)
+    if invalid == "missing_body":
+        lines.pop(2)
+    elif invalid == "wrong_error":
+        lines[1] = replace(lines[1], text="Unable to connect to world. Outdated client.")
+    elif invalid == "duplicate_back":
+        lines.append(lines[-1])
+    elif invalid == "duplicate_heading":
+        lines.append(lines[0])
+    elif invalid == "chat_heading":
+        lines[0] = replace(lines[0], left=5, top=5)
+    elif invalid == "low_confidence":
+        lines[-1] = replace(lines[-1], confidence=59)
+    elif invalid == "nan_confidence":
+        lines[1] = replace(lines[1], confidence=float("nan"))
+    elif invalid == "blank_pixels":
+        frame = replace(frame, bgra=b"\0" * len(frame.bgra))
+    elif invalid == "caption_outside_control":
+        lines[-1] = replace(lines[-1], top=470)
+    lines = tuple(lines)
+    assert classify_menu_stage(frame, lines, lan_name="BedrockConnect",
+        server_name="Eidos Local Bedrock", hud_detector=lambda _: False) is MenuStage.ERROR
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([frame]), text_reader=_MappedTextReader({1: lines}),
+        click_backend=clicks, lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        hud_detector=lambda _: False,
+    )
+    with pytest.raises(MenuNavigationError, match="reported an error"):
+        navigator.run()
+    assert clicks.clicks == []
+    forged = MenuObservation(frame, lines, MenuStage.CONNECTION_FAILED)
+    with pytest.raises(MenuNavigationError, match="Back caption/control is not verified"):
+        _transition_click_target(forged, navigator._transition_for(forged))
+
+
+def test_multiplayer_failure_back_is_not_repeated_on_an_unchanged_dialog():
+    frames_and_lines = [_multiplayer_failure_fixture(index) for index in range(1, 4)]
+    now = 0.0
+
+    def advance(seconds):
+        nonlocal now
+        now += seconds
+
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([frame for frame, _ in frames_and_lines]),
+        text_reader=_MappedTextReader({frame.frame_id: lines for frame, lines in frames_and_lines}),
+        click_backend=clicks, lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        timeout_s=1, response_timeout_s=.1, poll_interval_s=.1,
+        max_retries=3, clock=lambda: now, sleep=advance, hud_detector=lambda _: False,
+    )
+    with pytest.raises(MenuNavigationError, match="after 1 bounded attempts"):
+        navigator.run()
+    assert clicks.clicks == [(1, *frames_and_lines[0][1][-1].center)]
+
+
 def test_title_fallback_ignores_left_play_now_and_clicks_central_green_play() -> None:
     title = _pixel_frame(
         1,

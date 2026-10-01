@@ -50,6 +50,7 @@ class MenuStage(StrEnum):
     RESOURCE_PACK = "resource-pack"
     CONTENT_LOG = "content-log"
     DISCONNECTED = "disconnected"
+    CONNECTION_FAILED = "connection-failed"
     DEATH = "death"
     LOADING = "loading"
     IN_WORLD = "in-world"
@@ -666,6 +667,11 @@ class BedrockMenuNavigator:
                 destination=MenuStage.TITLE,
                 region=(0.12, 0.64, 0.30, 0.75),
             )
+        if observation.stage == MenuStage.CONNECTION_FAILED:
+            return _Transition(
+                target_text=("back",), destination=MenuStage.TITLE,
+                region=(0.10, 0.10, 0.90, 0.95),
+            )
         if observation.stage == MenuStage.DEATH:
             return _Transition(
                 target_text=("respawn",),
@@ -685,7 +691,9 @@ class BedrockMenuNavigator:
     ) -> tuple[MenuObservation, int]:
         source = observation.stage
         attempts = (
-            1 if source in {MenuStage.UPDATE_NOTICE, MenuStage.CONTENT_LOG} else self.max_retries
+            1 if source in {
+                MenuStage.UPDATE_NOTICE, MenuStage.CONTENT_LOG, MenuStage.CONNECTION_FAILED,
+            } else self.max_retries
         )
         for attempt in range(1, attempts + 1):
             if self.clock() >= deadline:
@@ -734,7 +742,9 @@ class BedrockMenuNavigator:
                     source == MenuStage.BEDROCK_CONNECT
                     and current.stage == MenuStage.RESOURCE_PACK
                 ) or (
-                    source in {MenuStage.DISCONNECTED, MenuStage.UPDATE_NOTICE}
+                    source in {
+                        MenuStage.DISCONNECTED, MenuStage.CONNECTION_FAILED, MenuStage.UPDATE_NOTICE,
+                    }
                     and current.stage in {
                         MenuStage.PLAY, MenuStage.PLAY_TABS, MenuStage.PLAY_SERVERS,
                     }
@@ -744,6 +754,12 @@ class BedrockMenuNavigator:
                     and current.stage == MenuStage.PLAY_TABS
                 ):
                     return current, attempt
+                if (current.stage == MenuStage.CONNECTION_FAILED
+                        and source != MenuStage.CONNECTION_FAILED):
+                    # Only the independently recognized dialog can enter this
+                    # recovery. Its Back control is checked again on that frame;
+                    # generic error screens still stop without further input.
+                    return current, attempt
                 if current.stage == MenuStage.LOADING:
                     current = self._wait_loading(deadline)
                     if (current.frame.frame_id <= clicked_frame.frame_id
@@ -752,6 +768,14 @@ class BedrockMenuNavigator:
                     if current.stage == transition.destination or (
                         source == MenuStage.BEDROCK_CONNECT
                         and current.stage == MenuStage.RESOURCE_PACK
+                    ) or (
+                        current.stage == MenuStage.CONNECTION_FAILED
+                        and source != MenuStage.CONNECTION_FAILED
+                    ) or (
+                        source == MenuStage.CONNECTION_FAILED
+                        and current.stage in {
+                            MenuStage.PLAY, MenuStage.PLAY_TABS, MenuStage.PLAY_SERVERS,
+                        }
                     ):
                         return current, attempt
                     if (
@@ -907,6 +931,8 @@ def classify_menu_stage(
         return MenuStage.CONTENT_LOG
     if _disconnected_dialog_visible(frame, lines):
         return MenuStage.DISCONNECTED
+    if _multiplayer_connection_failure_back(frame, lines) is not None:
+        return MenuStage.CONNECTION_FAILED
     if _resource_pack_dialog_visible(frame, lines):
         return MenuStage.RESOURCE_PACK
 
@@ -1178,6 +1204,68 @@ def _update_play_control(observation: MenuObservation) -> OcrLine:
     raise MenuNavigationError("update Play now caption/control is not uniquely verified")
 
 
+def _multiplayer_connection_failure_back(
+    frame: CapturedFrame, lines: tuple[OcrLine, ...],
+) -> OcrLine | None:
+    """Recognize one connection dialog and its actual screenshot-bound Back.
+
+    The body spelling comes from the observed multiplayer-services failure.
+    Button coordinates come from positioned OCR and its visible rectangle,
+    rather than an assumed location for every error dialog.
+    """
+    if frame.width < 64 or frame.height < 64 or len(frame.bgra) != frame.width * frame.height * 4:
+        return None
+    selected = tuple(
+        line for line in lines
+        if math.isfinite(line.confidence) and line.confidence >= 60
+        and 0 < line.width and 0 < line.height
+        and frame.width * .10 <= line.left < line.left + line.width <= frame.width * .90
+        and frame.height * .10 <= line.top < line.top + line.height <= frame.height * .95
+    )
+    headings = tuple(line for line in selected
+                     if _normalized_text(line.text) == "multiplayer connection failed")
+    backs = tuple(line for line in selected if _normalized_text(line.text) == "back")
+    if len(headings) != 1 or len(backs) != 1:
+        return None
+    heading, back = headings[0], backs[0]
+    if not heading.top + heading.height < back.top:
+        return None
+    body = tuple(line for line in selected
+                 if heading.top + heading.height < line.top
+                 and line.top + line.height < back.top)
+    anchors = (
+        "your client is having trouble establishing",
+        "multiplayer services please check your",
+    )
+    if not all(sum(anchor in _normalized_text(line.text) for line in body) == 1
+               for anchor in anchors):
+        return None
+    # Read only a band around the recognized caption. A second Back caption,
+    # absent rectangle or caption outside that rectangle cannot authorize input.
+    region = (
+        max(.10, back.center[0] / frame.width - .35),
+        max(.10, back.top / frame.height - .06),
+        min(.90, back.center[0] / frame.width + .35),
+        min(.95, (back.top + back.height) / frame.height + .06),
+    )
+    control = _find_dense_neutral_control(
+        frame, region=region, minimum_width_fraction=.18, minimum_height_fraction=.025,
+        description="multiplayer failure Back control",
+    )
+    if control is None:
+        control = _find_dense_green_control(
+            frame, region=region, minimum_width_fraction=.18, minimum_height_fraction=.025,
+            minimum_row_fill_ratio=.65, description="selected multiplayer failure Back control",
+        )
+    if (control is None or control.height > frame.height * .16
+            or not control.left <= back.left < back.left + back.width <= control.left + control.width
+            or not control.top <= back.top < back.top + back.height <= control.top + control.height
+            or abs(control.center[0] - back.center[0]) > control.width * .20
+            or abs(control.center[1] - back.center[1]) > control.height * .40):
+        return None
+    return back
+
+
 def _disconnected_dialog_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
     """Recognize the retained dialog; only its Back to menu action is allowed."""
     return all(
@@ -1367,6 +1455,12 @@ def _transition_click_target(
     observation: MenuObservation,
     transition: _Transition,
 ) -> OcrLine:
+    if observation.stage == MenuStage.CONNECTION_FAILED:
+        target = _multiplayer_connection_failure_back(observation.frame, observation.lines)
+        if (target is None or transition.target_text != ("back",)
+                or transition.destination != MenuStage.TITLE):
+            raise MenuNavigationError("multiplayer failure Back caption/control is not verified")
+        return target
     if observation.stage == MenuStage.BEDROCK_CONNECT:
         form = bedrock_server_form_bounds(observation.frame)
         if (len(observation.frame.bgra) == observation.frame.width * observation.frame.height * 4
