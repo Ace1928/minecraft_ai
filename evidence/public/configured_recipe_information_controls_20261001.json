@@ -1,0 +1,229 @@
+{
+  "bounds": {
+    "address_space_bytes": 536870912,
+    "complete_outer": "67seconds TERM plus3seconds finalKILL =70seconds",
+    "cpu_s": 15,
+    "host_headroom_floor_bytes": 2147483648,
+    "stop_timeout_s": 5,
+    "unit_cpu_affinity": [
+      3
+    ],
+    "unit_cpu_quota_percent": 100,
+    "unit_memory_bytes": 536870912,
+    "unit_runtime_s": 55,
+    "unit_swap_bytes": 0,
+    "whole_worker_wall_s": 45
+  },
+  "claims": {
+    "current_selected_desktop": false,
+    "dense_advantage": false,
+    "live_World_information_path": false,
+    "live_engine_loaded_recipe_bytes": false,
+    "live_gameplay_progress": false,
+    "mastery": false,
+    "model_quality": false,
+    "source_correctness": true
+  },
+  "controls": {
+    "actual": 38,
+    "actual_catalog_case": "gameforge:public_waypoint uses4CopperIngot+4Cobblestone+1Torch to make1PublicWaypoint; source data only, not in-game crafting",
+    "actual_catalog_sha256": "08fa9275017dde760c44eea3b46799833ca01a752a8cd594db4ffeea16963fbf",
+    "actual_configured156_catalog_cases": 1,
+    "actual_loaded_module_origins": 61,
+    "actual_task_affinity_samples": 78,
+    "actual_task_masks": [
+      3
+    ],
+    "blocked_boundaries": [],
+    "errors": 0,
+    "forbidden_modules_present": [],
+    "framework": "Actual full module and unittest; frozen real Pydantic/Pydantic-core schema validation, no evidence stub",
+    "leaked_threads": [],
+    "new_informational_cases": 15,
+    "origin_failures": [],
+    "passed": 38,
+    "post_source_failures": [],
+    "retained_target_identity_cases": 22,
+    "runtime_flags": {
+      "dont_write_bytecode": true,
+      "isolated": 1,
+      "no_site": 1
+    },
+    "schema_distributions": [
+      {
+        "metadata_sha256": "d1e56c3412492512fb6b59a9dfc25ab7af2a8204585cd7bca000513023133394",
+        "name": "pydantic",
+        "record_sha256": "5ab39411ef9c29b210069e69d264a5a66dc70066ed22b53fa174f5ca8464d4a4",
+        "version": "2.13.4"
+      },
+      {
+        "metadata_sha256": "135fa8b2f89473e9191c7078c2164e3ec6c8927a61c2379c2fddcc07f11f3bae",
+        "name": "pydantic_core",
+        "record_sha256": "686b7c23831f45a252b805f78b917a70d5f9624d1dcd17a2f27985ee10392b33",
+        "version": "2.46.4"
+      },
+      {
+        "metadata_sha256": "ee5b6ac64b09274c026051813484025939564067801f485115d9cadc207cf791",
+        "name": "annotated-types",
+        "record_sha256": "bce5ba8544589a5829a587f5ca700959e814a359145ad0ce600f3100f6de3cb8",
+        "version": "0.7.0"
+      },
+      {
+        "metadata_sha256": "c138378fe8f18934ac99de060535c53ec6c13aeed65e94c32641da7ee3192a72",
+        "name": "typing_extensions",
+        "record_sha256": "02f70a4ed6f81c3298a0024ca9dcc6807360938d388360ce3b768243f719cdce",
+        "version": "4.15.0"
+      },
+      {
+        "metadata_sha256": "61096cd0bfe3c7040b6f98c22b02d190fe01936d0ff7616c5134fed02891953a",
+        "name": "typing-inspection",
+        "record_sha256": "4319c4d16400fc6d90b044bac966ce65f5202f2e071da5566d7e67cd96b5127f",
+        "version": "0.4.2"
+      }
+    ],
+    "skipped": 0,
+    "source_files_rehashed": 161
+  },
+  "cost": {
+    "scope": "Distinct accounting scopes; no whole-service throughput or memory advantage inferred.",
+    "supervision": {
+      "cpu_s": 0.032961370000000004,
+      "process_hwm_bytes": 21942272,
+      "wall_s": 1.361704438997549
+    },
+    "unit": {
+      "cpu_ns": 790291000,
+      "memory_peak_bytes": 46891008,
+      "memory_swap_peak_bytes": 0
+    },
+    "worker": {
+      "cpu_s": 0.6360453500000001,
+      "process_hwm_bytes": 61255680,
+      "wall_s": 0.7876344459946267
+    }
+  },
+  "date": "2026-10-01",
+  "game_inputs": 0,
+  "live_controls": 0,
+  "mechanism": {
+    "authority_fields": {
+      "gameplay_authority": false,
+      "live_engine_recipe_bytes_verified": false,
+      "selected_desktop_connection_verified": false
+    },
+    "automatic_fallback": false,
+    "inputs": "Explicit recipe query and exact Bedrock version over one owned content-hashed configured catalog",
+    "new_method": "PackRecipeCatalog.lookup_configured_information",
+    "no_returned_action_or_identity": [
+      "identity",
+      "server_session",
+      "instance_id",
+      "skill",
+      "action",
+      "press",
+      "goal",
+      "chat_reply"
+    ],
+    "prior_methods_AST_unchanged": [
+      "__init__",
+      "active_scope_status",
+      "_scope_status",
+      "active_identity",
+      "is_recipe_query",
+      "lookup_live",
+      "load",
+      "lookup",
+      "_ascii_chat_projection",
+      "mentions_pack_content",
+      "_render_recipe"
+    ],
+    "result": "Source-exact existing recipe renderer text, configured pack versions, catalog/revision/scope pins and mandatory unverified-engine/session notice"
+  },
+  "models": 0,
+  "numerical_imports": 0,
+  "prior_source_preparation": {
+    "001": "Unexecuted. Missing interpreter literal and incorrectly sized/labelled headroom guard repaired in fresh002 before anyGO.",
+    "002": "Only root-admitted actual test attempt; no retry."
+  },
+  "proof_id": "configured-recipe-information-controls-20261001",
+  "raw_pins": {
+    "approved-control-budget.json": {
+      "bytes": 702,
+      "sha256": "c14ac575484b9acbe3fc5634ec3a11cbb6144b1e39b7358be55f68c1bc1f65ff"
+    },
+    "attempt-001/receipt.json": {
+      "bytes": 34801,
+      "sha256": "989a0ab99496f0b0e5a56af4c2cdc947ddebca5bc738b961092d54f9689f5f93"
+    },
+    "attempt-001/unittest.log": {
+      "bytes": 6737,
+      "sha256": "bdb503eeab93d93341a0bc0c2fe587daa6e9fa2710a92a8206ee795b821cfadc"
+    },
+    "proposal.json": {
+      "bytes": 4576,
+      "sha256": "41a76ce5564b677539a0fe2ffd38ce728a25db42c2305d79cb682738a334e57a"
+    },
+    "root-independent-release.json": {
+      "bytes": 588,
+      "sha256": "92b0c514f30c8d312b3109f9792144ff7ab81202f2e0a14f4d3971d8c6e7429e"
+    },
+    "runner.py": {
+      "bytes": 11506,
+      "sha256": "319fea57fb864c00b86d90fa00ae7c15f7e40d67d7c6966d98d6a55ecbb9d86a"
+    },
+    "source-manifest.json": {
+      "bytes": 28420,
+      "sha256": "7494425f7289e30743fdc814dc8757031e4b7bd0278fec7e544ede1eac849f92"
+    },
+    "supervise.py": {
+      "bytes": 10198,
+      "sha256": "4d374efdfe5a13c32cfc0c23771ca846edfe4b5341b1b8210f0d28046973c51a"
+    },
+    "supervision-001/dispatch.json": {
+      "bytes": 2479,
+      "sha256": "114c92f089a8c3e72c7d79f67a46734c4a005873613f8eb7696bacae288298f1"
+    },
+    "supervision-001/preflight.json": {
+      "bytes": 315,
+      "sha256": "54a39695c1620fe705fd94bd93241d98639311113528197290150146f4dfd243"
+    },
+    "supervision-001/release.json": {
+      "bytes": 1030,
+      "sha256": "845b6efa93c282639295a05fe197008a1ca5285fb4667c05f1ba2770e7626590"
+    },
+    "supervision-001/terminal.json": {
+      "bytes": 684,
+      "sha256": "506cfd352359bc3cd53eb45dad4113c349c9472998a86c3ea20b3a252b6d56bc"
+    }
+  },
+  "retirement": {
+    "canonical_lease_operated": false,
+    "cgroup_inode_qualification": false,
+    "exact_worker_pid_start_gone": true,
+    "owned_cgroup_path_absent": true,
+    "root_independent": true,
+    "same_owned_invocation_before_stop": true,
+    "stop_returncode": 0
+  },
+  "schema_version": 1,
+  "scope": "Explicit PackRecipeCatalog configured_snapshot informational lookup. The tool is not a game action, active-world identity, live information deployment or World model qualification.",
+  "source_pins": {
+    "src/minecraft_ai/pack_recipes.py": {
+      "bytes": 19944,
+      "sha256": "e6b2f36861ed7b35cfa9e5ca33b2da8ce177bbadfb43136a35fb5873d0593ffb"
+    },
+    "tests/test_configured_recipe_information.py": {
+      "bytes": 6736,
+      "sha256": "c144a72fc4d740f9363bcb96cadd40c646f2e9600459abd6064a44a7a13bb679"
+    },
+    "tests/test_pack_recipe_identity.py": {
+      "bytes": 4140,
+      "sha256": "722ec4e1d8791057f3277ef1743f98cfa1625d4b3dc81deeabacd8275b103cef"
+    },
+    "tests/test_pack_recipe_targets.py": {
+      "bytes": 7451,
+      "sha256": "da3b5c78c5661d03123c3848f802d3548dfa0cd807aa19d8c69ded53d92d3b6d"
+    }
+  },
+  "status": "38 source controls passed"
+}

@@ -1,0 +1,15 @@
+# Configured recipe reference information
+
+`PackRecipeCatalog.lookup_configured_information()` provides an explicit, read-only recipe reference over a hash-pinned installed/configured catalog. It returns the existing exact recipe text, configured pack versions and catalog/revision/scope hashes. Every answer states that engine loading and the selected client session are unverified and grants no crafting or motor permission.
+
+This method is separate from `lookup_live()`. All 11 earlier catalog methods remain unchanged, including active-identity checks, exact namespace selection, ingredient/output rendering and the normal live recipe gate. The new result does not contain an identity, skill, action, press, goal or chat-delivery field. Returned metadata is independent of catalog storage. Missing or malformed configured provenance, wrong game versions, ambiguous targets and unsupported recipes are refused. No automatic runtime fallback was introduced.
+
+The bounded qualification passed **38 checks**: 15 new informational-reference cases, 22 existing target/identity cases and one reference from the actual configured 1.3.156 export. The actual Waypoint data specifies 4 Copper Ingots, 4 Cobblestone and 1 Torch for 1 Public Waypoint; that check does not establish that crafting works in the live engine. The full catalog module used frozen real Pydantic/Pydantic-core schema dependencies; it did not use an evidence stub. All 161 declared source/dependency/data files were reauthenticated, module origins were admitted, and actual task affinity remained CPU3.
+
+Worker wall time was 0.787634 seconds, CPU 0.636045 seconds and process high-water mark 61,255,680 bytes. The unit separately recorded 0.790291 CPU-seconds, 46,891,008 bytes peak and zero swap. Full supervision took 1.361704 seconds. These scopes are distinct and do not establish service cost, throughput, model quality or a dense advantage.
+
+The worker had 45 wall-seconds, 15 CPU-seconds and 512 MiB address space. The unit had CPU3/100% quota, 512 MiB memory, zero swap, 55 seconds runtime and 5 seconds stop timeout; outer containment was 67 seconds plus 3 seconds final kill. The 512 MiB job required at least 2 GiB available host memory before dispatch. Root independently verified exact worker PID/start retirement and cgroup path absence. No cgroup inode descriptor was retained, so inode-authenticated cgroup identity is not claimed. No numerical lease or model was used.
+
+The earlier 001 source preparation was not executed: root review found a missing interpreter literal and a wrongly sized/labelled headroom guard. Fresh 002 repaired those admission fields before the only test attempt.
+
+This qualification covers the reference method, not a deployed World conversation. Explicit informational-question wiring through shared World cognition is the next separate step. That wiring must preserve the configured/unverified scope and all final game-action authority checks. The [sanitized proof](../evidence/public/configured_recipe_information_controls_20261001.json) records raw-result, source and independent-release hashes.

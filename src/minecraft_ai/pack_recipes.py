@@ -142,6 +142,71 @@ class PackRecipeCatalog:
         value = json.loads(raw)
         return cls(value, expected_sha256)
 
+    def lookup_configured_information(
+        self, query: str, *, game_version: str,
+    ) -> dict[str, Any] | None:
+        """Explicit reference tool; it never establishes active gameplay scope.
+
+        Keep this separate from ``lookup_live``. A model may use these exact
+        installed-file facts to explain a recipe, but cannot turn the result
+        into an observed-active identity or a crafting/motor permission.
+        """
+        configured = self._payload.get("configured_recipe_identity")
+        sources = self._payload.get("sources")
+        if (
+            type(configured) is not dict
+            or configured.get("state") != "configured_only"
+            or type(configured.get("scope_sha256")) is not str
+            or _SHA256.fullmatch(configured["scope_sha256"]) is None
+            or type(sources) is not list or len(sources) > 128
+        ):
+            return None
+        packs: list[dict[str, Any]] = []
+        seen_folders: set[str] = set()
+        for source in sources:
+            if type(source) is not dict or type(source.get("vanilla")) is not bool:
+                return None
+            if source["vanilla"]:
+                continue
+            folder, version = source.get("folder"), source.get("version")
+            if (
+                type(folder) is not str or len(folder) > 128
+                or re.fullmatch(r"[a-z0-9_.-]+", folder) is None
+                or type(version) is not list or len(version) != 3
+                or any(type(part) is not int or not 0 <= part <= 65535
+                       for part in version)
+            ):
+                return None
+            if folder in seen_folders:
+                return None
+            seen_folders.add(folder)
+            packs.append({"folder": folder, "version": list(version)})
+        if not 0 < len(packs) <= 16:
+            return None
+        answer = self.lookup(query, game_version=game_version)
+        if answer is None:
+            return None
+        return {
+            "schema_version": 1,
+            "tool": "pack_recipe.configured_snapshot",
+            "state": "configured_snapshot",
+            "world": self._payload["world"],
+            "bds_version": self.version_id,
+            "catalog_sha256": self.sha256,
+            "catalog_revision": self._payload["revision"],
+            "configured_scope_sha256": configured["scope_sha256"],
+            "configured_packs": packs,
+            "notice": (
+                "Installed/configured recipe reference. Live engine loading and "
+                "the selected client session are unverified. This grants no "
+                "crafting or motor permission."
+            ),
+            "recipe_text": answer.chat_reply,
+            "live_engine_recipe_bytes_verified": False,
+            "selected_desktop_connection_verified": False,
+            "gameplay_authority": False,
+        }
+
     def lookup(self, query: str, *, game_version: str) -> PackRecipeAnswer | None:
         if type(query) is not str or not query.strip() or game_version != self.version_id:
             return None
