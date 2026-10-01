@@ -1,0 +1,128 @@
+{
+  "allocation_results": [
+    {
+      "attempt": "001",
+      "game_inputs": 0,
+      "models": 0,
+      "original_cgroup_device_inode": [
+        31,
+        66477
+      ],
+      "result": {
+        "actual_dependencies": "Frozen real Pydantic/Pillow/PyYAML/platformdirs; fixture HTTP does not import httpx",
+        "count": 8,
+        "declared_cases": 8,
+        "errors": 0,
+        "failed": 1,
+        "other_control_suites_rerun": false,
+        "scope": "Actual current controller version-label and complete recipe reply limits, question freshness/operator priority/refusal, fictional catalog and fake model; no actual model/tokenization/network/game inputs",
+        "skipped": 0
+      },
+      "root_release_sha256": "d6a2accb8ce3071782cde29afc3f02ba5a1c7dbfab5f251fc7a4ae5a18223cd3",
+      "supervisor_wall_seconds": 3.9075397920023534,
+      "worker_CPU_seconds": 1.3843541240000001,
+      "worker_HWM_bytes": 69140480,
+      "worker_wall_seconds": 2.9033547500002896
+    },
+    {
+      "attempt": "002",
+      "game_inputs": 0,
+      "models": 0,
+      "original_cgroup_device_inode": [
+        31,
+        67469
+      ],
+      "result": {
+        "actual_dependencies": "Frozen real Pydantic/Pillow/PyYAML/platformdirs; fixture HTTP does not import httpx",
+        "count": 1,
+        "declared_cases": 1,
+        "errors": 0,
+        "failed": 0,
+        "original_inventory_cases": 8,
+        "other_control_suites_rerun": false,
+        "other_seven_rerun": false,
+        "scope": "Actual current controller version-label and complete recipe reply limits, question freshness/operator priority/refusal, fictional catalog and fake model; no actual model/tokenization/network/game inputs",
+        "skipped": 0
+      },
+      "root_release_sha256": "1d11c453c65cd00c4884f826709619eb53845d0b7344491947cd9dbbbf5ed3c8",
+      "supervisor_wall_seconds": 3.358432813998661,
+      "worker_CPU_seconds": 1.452752385,
+      "worker_HWM_bytes": 67678208,
+      "worker_wall_seconds": 2.2814151529964874
+    }
+  ],
+  "behavior": [
+    "Matching host-derived Core and Content versions label configured CobbleDrock version; live load remains unverified.",
+    "Complete recipe ingredient and output quantities survive within bounded replies; overflow refuses without falsely claiming a console answer.",
+    "Unknown namespaced items do not substitute vanilla wiki answers.",
+    "Pending literal instructions and false action permissions remain unchanged; expired/replaced questions and REFUSED messages receive no reply or action."
+  ],
+  "configured_catalogue": {
+    "activated": false,
+    "actual_engine_recipe_bytes_verified": false,
+    "catalog_bytes": 4647838,
+    "catalog_revision": "7a1fdfd17474ef7fd8e5781664c141aa677887bab751b1f2ba622b908b5e6a67",
+    "catalog_sha256": "564165e82cd20c5afc6e18a76ccb0df7f4b908c3f1997eacf7b7b33075a06edc",
+    "compiled_definitions": 23,
+    "configured_version": [
+      1,
+      3,
+      159
+    ],
+    "items": 2300,
+    "recipes": 2095,
+    "root_release_sha256": "bd5e332c266d5faf18d1281599aa290dc34c1246814f6266244ded2aedd64cf6",
+    "selected_desktop_connection_verified": false,
+    "sources": 60
+  },
+  "contract": "minecraft.configured-recipe-version-label-qualified-source.v1",
+  "controller_after_sha256": "6db37d11f66268454fee094ecca59d1cde5e323fad75a59879b7ed5dee2e74a7",
+  "controller_before_sha256": "02855558341d5013e5f1185f18df6982ca5e205fd2c34f169b0b9c2049afda12",
+  "corrected_actual_attempt": {
+    "both_subcases_passed": true,
+    "executed": 1,
+    "only_changed_fixture_method": "test_expired_or_replaced_original_player_question_suppressed_request_none",
+    "other_seven_rerun": false,
+    "passed": 1,
+    "production_code_unchanged_between_attempts": true
+  },
+  "date": "2026-10-01",
+  "first_actual_attempt_preserved": {
+    "cause": "The original expiry fixture inserted an older observation, correctly ignored by the blackboard; it had not expired the stillfresh original.",
+    "executed": 8,
+    "failed": 1,
+    "passed": 7
+  },
+  "fixture_after_sha256": "a699d4f8d85bf8fd89a3ac8150f6a07412bf78ae5fd826cdc95a0bfedbdb6568",
+  "limits": {
+    "actual_model_quality_qualified": false,
+    "fake_model_and_fictional_recipe_fixtures": true,
+    "game_play_or_mastery_qualified": false,
+    "installed_live_player": false,
+    "recipe_files_do_not_grant_motor_or_observed_live_pack_authority": true
+  },
+  "raw_sha256": {
+    "controls-001/approved-control-budget.json": "eac46956828e407557318d08ae8c622b1bef1ce0e2bdd306c79752937ad8a5c3",
+    "controls-001/attempt-001/receipt.json": "1028e77f7af85aad51ec73a64fce9b031b76d296e7388e8ce27d031aaa8aa50d",
+    "controls-001/attempt-001/unittest.log": "06a39426c608718e7df6e0c6d34f09e1433a6724a849c8baa66df7fc53c3471d",
+    "controls-001/proposal.json": "eb1967c5325299e7f98321c79d8fde1cadf4672da5ff2db611eb4cebbc793d96",
+    "controls-001/root-independent-release.json": "d6a2accb8ce3071782cde29afc3f02ba5a1c7dbfab5f251fc7a4ae5a18223cd3",
+    "controls-001/runner.py": "1d998b35f435d05fff74840d0c23e5b47dc4f8174be5427133f67ddc3af46a24",
+    "controls-001/source-manifest.json": "2d68c16741937c715ce2c30a79df2b89ddd3ced155104433492dc9eda3f3391c",
+    "controls-001/supervise.py": "99d0af669380d1f76f913d1cf63e4dbcf26fc3d144acd8ba1b73a8a349cc8c09",
+    "controls-001/supervision-001/release.json": "2c6a3c0253fb02dc480667b353f4d29f4a5a660278c35ebe5038b291bcee008b",
+    "controls-001/supervision-001/terminal.json": "286fe80274d997380ff1c9b3f3557dd224b0e19bc584fadf6c28dd066ffd433d",
+    "controls-002/approved-control-budget.json": "0290d6b5142639b5dbddaf582b68ac01263cb0662d6feb8fb58246b67af6227b",
+    "controls-002/attempt-001/receipt.json": "b7bdae4ac30baf90089e64abed6b49752ad6e932d6ad8886b3e05420290fc7ba",
+    "controls-002/attempt-001/unittest.log": "e9bf98b5b1975bbf7f5116d5813473adec21f62075a31d016c21969568561e55",
+    "controls-002/proposal.json": "7f63d80a92d2b10ba11b00794573fc9de6763817e9ec213610016bfaf0c36313",
+    "controls-002/root-independent-release.json": "1d11c453c65cd00c4884f826709619eb53845d0b7344491947cd9dbbbf5ed3c8",
+    "controls-002/runner.py": "ea661aec6aa028abbdba0982c159a6949a05091b13813bd04a3eb2a1ca958042",
+    "controls-002/source-manifest.json": "d0900241498565bbe23e2c0f804626751b07c48a6bafbb439b7072ef0068b393",
+    "controls-002/supervise.py": "d02242dd702c8bf204d46444d20f474a85c660326b8673fabfa0d6df566d438c",
+    "controls-002/supervision-001/release.json": "9c243e14364b29b5588669701edfae54407fe8642ad6a391459125ea2fc79a10",
+    "controls-002/supervision-001/terminal.json": "8ce2423032b07cc36b327bc6d7367b6a222993f18d55c8eb91bfdcabd3444983"
+  },
+  "schema_version": 1,
+  "source_commit_before": "acc5848a4a28ebc2d0d8f7f66fc4056de7e9a639"
+}

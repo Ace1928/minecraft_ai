@@ -172,13 +172,38 @@ class HighLevelController:
         return bool(re.match(r"^\s*(?:how\b|what\b|recipe\s+for\b)", query, re.I))
 
 
+    @staticmethod
+    def _configured_reference_label(reference: dict[str, Any]) -> str:
+        """Label only matching host-supplied CobbleDrock source versions."""
+        generic = "Live load unverified. "
+        packs = reference.get("configured_packs")
+        if type(packs) is not list:
+            return generic
+        required = {"cobbledrock_core_bp_1_3_1", "cobbledrock_content_bp_1_3_1"}
+        versions: dict[str, tuple[int, int, int]] = {}
+        for pack in packs:
+            if (type(pack) is not dict or type(pack.get("folder")) is not str
+                    or pack["folder"] not in required):
+                continue
+            folder, version = pack["folder"], pack.get("version")
+            if (folder in versions or type(version) is not list or len(version) != 3
+                    or any(type(part) is not int or not 0 <= part <= 65535
+                           for part in version)):
+                return generic
+            versions[folder] = tuple(version)
+        if set(versions) != required or len(set(versions.values())) != 1:
+            return generic
+        version_text = ".".join(str(part) for part in next(iter(versions.values())))
+        return f"Configured CobbleDrock {version_text}; live load unverified. "
+
+
     def _configured_reference_response(
         self, decision: CognitionDecision, blackboard: CognitionReadView,
         context: CognitionContext,
     ) -> CognitionDecision:
         question = self._active_operator_question(context)
         reference = context.pack_configured_information
-        text = "Live load unverified. " + reference["recipe_text"]
+        text = self._configured_reference_label(reference) + reference["recipe_text"]
         if len(text) > 160:
             # Never truncate quantities/output; the complete reference remains
             # factual context, but cannot be copied into this bounded reply.
@@ -191,7 +216,7 @@ class HighLevelController:
         chat = None
         if question is None and matching_player:
             chat = text if len(text) <= 150 else (
-                "Configured recipe is in the operator console. Live engine loading is unverified."
+                "The configured recipe is too long for this chat reply. Live load is unverified."
             )
         request = self._request_context.get()
         pending_instruction = any(
