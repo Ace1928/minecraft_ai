@@ -60,3 +60,24 @@ established here. A visible terminal response for an irreducible instruction is
 also still open: the current runtime retries with capped backoff rather than
 acknowledging that refusal. Actual typed model qualification remains required
 before rollout; these checks make no quality, cost or throughput claim over dense.
+
+
+## Permanent regression checks
+
+Six focused repository regressions were separately checked against committed
+main `221d384`. They retain the full 2,000-character literal and late prohibitions
+through repair, configured quantities and scope notices, instruction priority,
+the verified direct-source path, revocation without stale identity binding and
+rejection of a model-supplied private marker.
+
+All six passed with a mocked constrained model and fictional recipe/session
+facts. Worker wall time was 2.677 seconds, CPU time 1.383 seconds and process
+high-water mark 68,714,496 bytes; complete supervision took 3.332 seconds. The
+[separate receipt](../evidence/public/literal_configured_recipe_regression_controls_20261001.json)
+retains the bounds, source pins and independent physical retirement check.
+
+These checks did not rerun or replace either earlier 76-case attempt. They made
+no actual model, tokenizer, network, game or production-control calls. Their
+result qualifies the regression code and mocked controller behavior, not live
+planning, gameplay or pack mastery. The live-model and terminal-refusal gaps
+listed above remain open.
