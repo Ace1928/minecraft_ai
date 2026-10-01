@@ -60,6 +60,19 @@ def local_model_inference_available() -> bool:
     return acquired
 
 
+class PlannerRequestBudgetError(ValueError):
+    """Safe compaction exhausted; this is not an inference or grammar failure.
+
+    The optional goal comes only from the original typed operator authority.
+    Runtime publication must still independently admit the current request.
+    No private instruction is included in the exception's text.
+    """
+
+    def __init__(self, *, operator_goal_id: str | None = None) -> None:
+        super().__init__("native World planner context exceeds its admitted request budget")
+        self.operator_goal_id = operator_goal_id
+
+
 class ModelMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 

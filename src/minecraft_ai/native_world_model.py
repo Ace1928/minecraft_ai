@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from .models import ModelMessage, ModelResponse, local_model_inference_lane
+from .models import ModelMessage, ModelResponse, PlannerRequestBudgetError, local_model_inference_lane
 
 MODEL_ID = "erais-native-qwen3"
 MAX_PROMPT_BYTES = 2048
@@ -375,6 +375,19 @@ def compact_planner_prompt(
     context, reply_only = _compact_context(
         messages, authority_bounds=None if response_format is None else response_format["authority"],
     )
+    # Bind failure only to a literal directive and the independently declared
+    # original goal. Compacted prose, rejected model text and player chat do not
+    # authorize a terminal operator response.
+    directive = context.get("active_operator_directive")
+    refusal_goal = None
+    if type(directive) is dict and response_format is not None:
+        message_id = directive.get("message_id")
+        authority_goal = response_format["authority"].get("authority_goal_id")
+        if (type(message_id) is str and authority_goal == f"operator:{message_id}"
+                and directive.get("status") in {"queued", "delivered"}
+                and directive.get("kind") in {"instruction", "correction", "question"}
+                and type(directive.get("text")) is str):
+            refusal_goal = authority_goal
     if response_format is not None:
         # This is already parsed from original controller authority, before
         # lossy prompt compaction. Prose cannot select a different contract mode.
@@ -487,7 +500,7 @@ def compact_planner_prompt(
                 continue
             # An irreducible request is refused. Never fit it by deleting a
             # literal operator prohibition, action constraint or fallback value.
-            raise ValueError("native World planner context exceeds its admitted request budget")
+            raise PlannerRequestBudgetError(operator_goal_id=refusal_goal)
 
 
 def _read_private_file(path_value: str, *, limit: int) -> bytes:

@@ -13,7 +13,9 @@ from minecraft_ai.execution import initiation_satisfied
 from minecraft_ai.control.execution import visible_oak_trunk
 from minecraft_ai.grounded_perception import resolve_grounded_output_keys
 from minecraft_ai.model_requests import ModelRequestLifecycle
-from minecraft_ai.models import LanguageModel, ModelMessage, ModelRequestAttempt, ModelResponse
+from minecraft_ai.models import (
+    LanguageModel, ModelMessage, ModelRequestAttempt, ModelResponse, PlannerRequestBudgetError,
+)
 from minecraft_ai.perception import CognitionReadView
 from minecraft_ai.skills import SkillFailureCode, SkillLibrary, SkillOutcome, SkillRun
 from minecraft_ai.skills.recovery import select_learned_recovery
@@ -724,6 +726,12 @@ class HighLevelController:
                     })
             self.metrics.last_error = None
             return decision
+        except PlannerRequestBudgetError as exc:
+            # This typed pre-inference refusal belongs to the original request.
+            # Returning an idle/replan decision here would retry it forever.
+            self.metrics.failures += 1
+            self.metrics.last_error = f"{type(exc).__name__}: {exc}"
+            raise
         except Exception as exc:
             self.metrics.failures += 1
             self.metrics.last_error = f"{type(exc).__name__}: {exc}"

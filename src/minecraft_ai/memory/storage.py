@@ -50,6 +50,7 @@ def _message_authority(message: OperatorMessage) -> dict[str, object]:
         "status", "delivered_ns", "acknowledged_ns", "response_text",
     })
     content["archived"] = message.status == OperatorMessageStatus.ARCHIVED
+    content["refused"] = message.status == OperatorMessageStatus.REFUSED
     content["correction_consumed"] = (
         message.kind == OperatorMessageKind.CORRECTION
         and message.status == OperatorMessageStatus.ACKNOWLEDGED
@@ -915,11 +916,16 @@ class StateDatabase:
             if row is None:
                 raise KeyError(message_id)
             current = OperatorMessage.model_validate_json(row[0])
+            if (current.status == OperatorMessageStatus.REFUSED
+                    and status not in {OperatorMessageStatus.REFUSED, OperatorMessageStatus.ARCHIVED}):
+                raise OperatorResponseAdmissionError("refused operator request is terminal")
             changes: dict[str, object] = {"status": status}
             if status == OperatorMessageStatus.DELIVERED:
                 changes["delivered_ns"] = timestamp_ns
             elif status == OperatorMessageStatus.ACKNOWLEDGED:
                 changes["acknowledged_ns"] = timestamp_ns
+                changes["response_text"] = response_text
+            elif status == OperatorMessageStatus.REFUSED:
                 changes["response_text"] = response_text
             updated = current.model_copy(update=changes)
             self._store_operator_message(updated)

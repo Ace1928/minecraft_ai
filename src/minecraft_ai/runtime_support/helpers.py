@@ -1176,7 +1176,8 @@ def _active_operator_messages(
     the next decision. Once those are handled, the newest acknowledged
     instruction remains the current directive. A correction authorizes one
     accepted bounded attempt, so an acknowledged correction acts as a
-    tombstone: it is no longer active and an older instruction must not
+    tombstone. A refused request is also terminal: neither it nor an older
+    acknowledged instruction can resume after restart. An older instruction must not
     silently regain control underneath it. Persistent multi-project
     commitments belong in the goal portfolio rather than an ever-growing
     motor prompt.
@@ -1208,13 +1209,15 @@ def _active_operator_messages(
     acknowledged = tuple(
         message
         for message in messages
-        if message.status == OperatorMessageStatus.ACKNOWLEDGED
-        and message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+        if (message.status == OperatorMessageStatus.REFUSED
+            or (message.status == OperatorMessageStatus.ACKNOWLEDGED
+                and message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}))
     )
     if not acknowledged:
         return ()
     newest = max(acknowledged, key=lambda message: message.created_ns)
-    return (newest,) if newest.kind == OperatorMessageKind.INSTRUCTION else ()
+    return (newest,) if (newest.status == OperatorMessageStatus.ACKNOWLEDGED
+                        and newest.kind == OperatorMessageKind.INSTRUCTION) else ()
 
 def _selected_operator_message_id(
     decision: CognitionDecision,

@@ -49,6 +49,7 @@ class OperatorMessageStatus(StrEnum):
     QUEUED = "queued"
     DELIVERED = "delivered"
     ACKNOWLEDGED = "acknowledged"
+    REFUSED = "refused"
     ARCHIVED = "archived"
 
 

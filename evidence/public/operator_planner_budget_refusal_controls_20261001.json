@@ -1,0 +1,323 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "complete_supervision_wall_s": 6.45771409599547,
+      "engineering_outcome": "26 passes; one fixture identity error retained",
+      "manager_retained_before_stop_CPU_s": 2.080925,
+      "manager_retained_before_stop_MemoryPeak_bytes": 50638848,
+      "manager_retained_before_stop_MemorySwapPeak_bytes": 0,
+      "provenance": {
+        "actual_loaded_module_origins": 160,
+        "actual_model_tokenizer_calls": 0,
+        "actual_task_affinity_samples": 55,
+        "all_actual_worker_affinity": [
+          3
+        ],
+        "canonical_lease_acquired": false,
+        "game_inputs": 0,
+        "guard_origin_source_import_thread_failures": 0,
+        "live_controls": 0,
+        "numerical_imports": 0,
+        "snapshot_files_reauthenticated_after": 494
+      },
+      "result": {
+        "cases_run": 27,
+        "errors": 1,
+        "failed": 0,
+        "passed": 26,
+        "skipped": 0
+      },
+      "retirement": {
+        "cgroup_inode_authenticated": false,
+        "exact_PID_start_gone": true,
+        "original_cgroup_path_absent": true,
+        "same_owned_invocation": true,
+        "stop_returncode": 0
+      },
+      "root_independent_release_sha256": "9058242c8ae395e3c2bcc293fe93b1fc8db11682c9596f7b77a1bad73c139769",
+      "supervisor_CPU_s": 0.093092712,
+      "supervisor_process_HWM_bytes": 22872064,
+      "worker_CPU_s": 1.8458442659999998,
+      "worker_process_HWM_bytes": 69255168,
+      "worker_wall_s": 5.850235940000857
+    },
+    {
+      "attempt": 2,
+      "complete_supervision_wall_s": 3.2780498760039336,
+      "engineering_outcome": "only the affected corrected fixture passed",
+      "manager_retained_before_stop_CPU_s": 1.663925,
+      "manager_retained_before_stop_MemoryPeak_bytes": 50044928,
+      "manager_retained_before_stop_MemorySwapPeak_bytes": 0,
+      "provenance": {
+        "actual_loaded_module_origins": 160,
+        "actual_model_tokenizer_calls": 0,
+        "actual_task_affinity_samples": 4,
+        "all_actual_worker_affinity": [
+          3
+        ],
+        "canonical_lease_acquired": false,
+        "game_inputs": 0,
+        "guard_origin_source_import_thread_failures": 0,
+        "live_controls": 0,
+        "numerical_imports": 0,
+        "snapshot_files_reauthenticated_after": 494
+      },
+      "result": {
+        "cases_run": 1,
+        "errors": 0,
+        "failed": 0,
+        "passed": 1,
+        "skipped": 0
+      },
+      "retirement": {
+        "cgroup_inode_authenticated": false,
+        "exact_PID_start_gone": true,
+        "original_cgroup_path_absent": true,
+        "same_owned_invocation": true,
+        "stop_returncode": 0
+      },
+      "root_independent_release_sha256": "f63f5ca3ab3b9b521bce9e87543e388c4a0fe1d993e440049552f15f568545d7",
+      "supervisor_CPU_s": 0.088359461,
+      "supervisor_process_HWM_bytes": 22814720,
+      "worker_CPU_s": 1.415803844,
+      "worker_process_HWM_bytes": 68915200,
+      "worker_wall_s": 2.2955054699996253
+    }
+  ],
+  "bounds": {
+    "AllowedCPUs": "3",
+    "CPUAffinity": "3",
+    "CPUQuota": "100%",
+    "MemoryMax": 536870912,
+    "MemorySwapMax": 0,
+    "RuntimeMaxSec": 55,
+    "TimeoutStopSec": 5,
+    "address_space_bytes": 536870912,
+    "complete_bound_s": 70,
+    "cpu_s": 15,
+    "host_MemAvailable_min": 2147483648,
+    "outer_kill_s": 3,
+    "outer_term_s": 67,
+    "worker_wall_s": 45
+  },
+  "cost_accounting_limit": "Worker and supervisor process high-water marks and retained pre-stop manager counters are distinct; not summed or represented as a final whole-unit memory measurement.",
+  "coverage": [
+    "Full2000-character instruction and late prohibitions retained through safe compaction, with original typed goal bound before question projection",
+    "Dedicated typed error reaches runtime through actual controller; generic ValueError/grammar failure and cancellation remain separate",
+    "Current pending request gets a durable REFUSED/plain response, no acknowledgement date, skill action, task outcome or learning-success credit",
+    "Original intent/model/instance/plan/execution/deadline and stop/pause/input-release checks precede publication; after-write loss rolls back response and intent revision",
+    "SQLite and narrowly acquired intent-lock contention hold repeated planning; known stale ownership retires locally before cooldown or any DB admission",
+    "Refused history blocks restart replay; buffered delivery is drained and status-update downgrade is refused; fresh pending requests and existing acknowledged instructions keep their separate semantics"
+  ],
+  "evidence_date": "2026-10-01",
+  "limits": [
+    "No live source installation, browser/API request, game input, profile or service change is established; family player remains paused/disconnected at this source checkpoint.",
+    "These fixture results establish no actual World inference, tokenizer quality, gameplay progress, learning quality, pack mastery or dense quality/resource/throughput superiority.",
+    "The added metadata deadline and transactional admission bind terminal refusal only. Successful unbound/bound decision publication remains on its previous paths; no new general successful-decision guarantee is claimed.",
+    "Only exhausted safe compaction with matching original typed pending operator authority may publish this refusal. Automatic/player-only budget failures and unmatched original authority retain previous failure handling.",
+    "Downgrade protection is in update_operator_message_status; direct trusted save_operator_message remains a separate intent-writing API and is not claimed blocked.",
+    "REFUSED adds an enum value in existing JSON storage, without schema migration/new timestamp. Older readers cannot parse it: rollback requires a compatible reader/fix-forward, never whole-database rollback.",
+    "Cgroup inode was not captured; ownership is bound by authenticated invocation, exact PID/start and original cgroup path retirement only."
+  ],
+  "operator_UI_source_inspection": {
+    "GET_messages_status_filter": false,
+    "additional_UI_source_change": false,
+    "live_API_or_browser_verification": false,
+    "path": "src/minecraft_ai/operator/server.py",
+    "renderer_displays_any_response_text": true,
+    "renderer_displays_status": true,
+    "sha256": "91f798e08e85ce93f6416354184a3a5db6173f306932415af6bf9b14a6923edf"
+  },
+  "operator_response": "This instruction is too long for the current planner; try one task at a time.",
+  "permanent_test": {
+    "cases": 27,
+    "corrected_only_method": "test_existing_plan_model_instance_execution_and_deadline_are_checked",
+    "path": "tests/test_planner_budget_terminal.py",
+    "sha256": "d0ca93f7d7342095eb5a59f0cff7614db0f5304aeffeb331564eb03fa9b63e09",
+    "unchanged_other26_fixture_AST": true
+  },
+  "production_sources": [
+    {
+      "after_sha256": "02855558341d5013e5f1185f18df6982ca5e205fd2c34f169b0b9c2049afda12",
+      "before_sha256": "c183e66fb9461668223f1e0db756edc99305a96e78fb7d50dc4c089f8448c1be",
+      "bytes": 68828,
+      "path": "src/minecraft_ai/cognition/controller.py"
+    },
+    {
+      "after_sha256": "ed39831c9ed4ed8b5042a418e9d1876b6e8d834b37d9cc59588c9d46bcfcdc76",
+      "before_sha256": "26e0b2123f4a1b1a9db916f75cb01c111ba895cf8c578acd3b98c2e9d1e3d1f3",
+      "bytes": 5280,
+      "path": "src/minecraft_ai/memory/social.py"
+    },
+    {
+      "after_sha256": "e908e1ce249d910220cd03301c65d9c971ed529dd0e35fe2cfe7faf42ba3c2c8",
+      "before_sha256": "360a4b4636abe9e88bbad2a880b749f3fc5d4c6eedf69d07e70314b1ea923ddb",
+      "bytes": 46585,
+      "path": "src/minecraft_ai/memory/storage.py"
+    },
+    {
+      "after_sha256": "ba054e5767f2a82b1416ee63ddf8261d099f30e45ce89b9a1cdd756993c0b4bc",
+      "before_sha256": "4e8f91b1562912d6e037f2e50cb48d4a44163f4c6452f3cf811a73388bd21880",
+      "bytes": 15887,
+      "path": "src/minecraft_ai/models.py"
+    },
+    {
+      "after_sha256": "cd29551e9e1a716dcc160cbf13b371d59c2b1f1e1c952f25a62f75362905aef7",
+      "before_sha256": "587d308dc30b2a8c1e534584d9801bd855eebcdd6b6d050e27c08daefa265ee4",
+      "bytes": 37430,
+      "path": "src/minecraft_ai/native_world_model.py"
+    },
+    {
+      "after_sha256": "248f7c491451cc6670b08ae4d46de01b2efecd43cf8cbb5a7867ce2affe8e5d9",
+      "before_sha256": "bd3ee76cf2e29b80ff9f39257039687e44ad30bc7e6d611d3bbf9cb0074c9267",
+      "bytes": 275388,
+      "path": "src/minecraft_ai/runtime.py"
+    },
+    {
+      "after_sha256": "346d30e66cd5ad283a2cc71b45a817330a82525dc8fcb6af0261ab33a2c376f7",
+      "before_sha256": "3cdb7a8a37fbc4eed1b170a2f79dc3fc75c6353dc8d437a44acb89c592809d2a",
+      "bytes": 48238,
+      "path": "src/minecraft_ai/runtime_support/helpers.py"
+    }
+  ],
+  "raw_proof_pins": {
+    "attempt_001/approved-control-budget.json": {
+      "bytes": 708,
+      "sha256": "1e15ba86e33c341fec59ac40c07f7aab2cf6733592e33da4c74e77cdb7244a92"
+    },
+    "attempt_001/attempt-001/receipt.json": {
+      "bytes": 55466,
+      "sha256": "f712a14619a392094a8cbb0e4ddca4b559359a6276b62747030efcb3f91f1d93"
+    },
+    "attempt_001/attempt-001/unittest.log": {
+      "bytes": 6488,
+      "sha256": "797ea3ce3c4ed953ee4aad73a9d15c8d2cff30f00065f786adcfb9e638bcd10d"
+    },
+    "attempt_001/proposal.json": {
+      "bytes": 4560,
+      "sha256": "07f348aee9b375a0e182bdc69bdde2bedee99159bf8d7f3ff35a7736ec1bcb61"
+    },
+    "attempt_001/root-independent-release.json": {
+      "bytes": 2419,
+      "sha256": "9058242c8ae395e3c2bcc293fe93b1fc8db11682c9596f7b77a1bad73c139769"
+    },
+    "attempt_001/root-source-review.json": {
+      "bytes": 453,
+      "sha256": "19840f4f55965444192139632c524f3a8c65aaffdd6c27896db0b3de875077ee"
+    },
+    "attempt_001/runner.py": {
+      "bytes": 11404,
+      "sha256": "0f388b3597d4fd8d4faeea1ac6f486c1528b9603f22a906c9dc302aa901241d0"
+    },
+    "attempt_001/snapshot/tests/test_planner_budget_terminal.py": {
+      "bytes": 25947,
+      "sha256": "831d6c30f1f0ce6def7227c2853bdc6fe9326f41e390b0cc953c335370514a1f"
+    },
+    "attempt_001/source-manifest.json": {
+      "bytes": 106684,
+      "sha256": "321917e5e9565f63b408eb4a57be268cbf37aac189b9aa876ef1800a635cf4bb"
+    },
+    "attempt_001/supervise.py": {
+      "bytes": 10204,
+      "sha256": "7dad5a83e4a2ea9bf5bba920ff5f5d05a466d7a6e1c6e2e9efd37d5bb48649de"
+    },
+    "attempt_001/supervision-001/dispatch.json": {
+      "bytes": 2503,
+      "sha256": "08212b19ade5a6c479862a3475a3e27cf563cc45b24f57ee2cf9dbb4bab61a51"
+    },
+    "attempt_001/supervision-001/preflight.json": {
+      "bytes": 315,
+      "sha256": "455a8927ec557a1a6825f78c9966a76a8f31e5ea8177b562bc6450e7b1134b06"
+    },
+    "attempt_001/supervision-001/release.json": {
+      "bytes": 1026,
+      "sha256": "90f945d51c0bf69fd1431475866c296a2536e33ab6a0ea64e7e0450bd95af084"
+    },
+    "attempt_001/supervision-001/terminal.json": {
+      "bytes": 687,
+      "sha256": "02d16b22fd6c9b31ecac55bb8f639808329549c76fdc2321f2161d3feb001f1a"
+    },
+    "attempt_002/approved-control-budget.json": {
+      "bytes": 708,
+      "sha256": "5ece219f9a2ccc6f47942cd539cafcb09e709ee81af4defcee43588c430c3683"
+    },
+    "attempt_002/attempt-001/receipt.json": {
+      "bytes": 43852,
+      "sha256": "cfa886292a3f1fcd14a22f069e6ff8e5bcafdc345c502faf66ffad747e94c3cf"
+    },
+    "attempt_002/attempt-001/unittest.log": {
+      "bytes": 300,
+      "sha256": "084c7be40f7bdf13f35bdc17be1bea4baaec07af693d0741d1b998445fcb44cd"
+    },
+    "attempt_002/proposal.json": {
+      "bytes": 5496,
+      "sha256": "8398ac900d81d831fdb8149ae058c54a94344300a4f18ebda48a03607358b03d"
+    },
+    "attempt_002/root-independent-release.json": {
+      "bytes": 2361,
+      "sha256": "f63f5ca3ab3b9b521bce9e87543e388c4a0fe1d993e440049552f15f568545d7"
+    },
+    "attempt_002/root-source-review.json": {
+      "bytes": 254,
+      "sha256": "6dda829a1facf0e3acea1c3e75051d60bef45a6bb8cb361389e06d146563ab5f"
+    },
+    "attempt_002/runner.py": {
+      "bytes": 11482,
+      "sha256": "6db31e6da0f5cd96d200b3e713292cfebc9de7265f40f0e1d8709084fe2b6e1b"
+    },
+    "attempt_002/snapshot/tests/test_planner_budget_terminal.py": {
+      "bytes": 26520,
+      "sha256": "d0ca93f7d7342095eb5a59f0cff7614db0f5304aeffeb331564eb03fa9b63e09"
+    },
+    "attempt_002/source-manifest.json": {
+      "bytes": 106645,
+      "sha256": "3d85f6edc5593b202f34d79a64d134934e8283f8d01c2e5559e9456191c05898"
+    },
+    "attempt_002/supervise.py": {
+      "bytes": 10204,
+      "sha256": "bc72d19c018e831b5cb582d3dd3d2e8be4ebc1b2dfb612d6a800af5c3e4c5eb3"
+    },
+    "attempt_002/supervision-001/dispatch.json": {
+      "bytes": 2503,
+      "sha256": "a735c5f2b0374190e9bc8317653de8bd684c61a76b877441a8a848a777b9fe51"
+    },
+    "attempt_002/supervision-001/preflight.json": {
+      "bytes": 315,
+      "sha256": "f3962cb4b59948ea7f74519631607632ac1683421c029c54d3e49fa15e451395"
+    },
+    "attempt_002/supervision-001/release.json": {
+      "bytes": 1028,
+      "sha256": "24199d0e48af3c13908a75d4d0dd4d9c33db70d0472590b31826108cdc39a24a"
+    },
+    "attempt_002/supervision-001/terminal.json": {
+      "bytes": 685,
+      "sha256": "f0fe3cce0bd63de6261a6e01fabd24c3bf82a5bd889571113e7babc7417555c6"
+    },
+    "source_004/production.diff": {
+      "bytes": 26124,
+      "sha256": "32fbe4f96724768eee628dfd47ac1c3a4c44780ff483f2a34410a4e60042cec7"
+    },
+    "source_004/proposal.json": {
+      "bytes": 6482,
+      "sha256": "01d90d34cc8aca15126a1c1298d27016548bf9f4143eb16776cd1877498c6505"
+    },
+    "source_004/source-manifest.json": {
+      "bytes": 1900,
+      "sha256": "226520f3e9b761c220beca5cd75b8ee31dbd5b024433d05758bb37729cdd0203"
+    }
+  },
+  "result": {
+    "coverage_across_attempts": [
+      26,
+      1
+    ],
+    "distinct_cases_covered": 27,
+    "first_fixture_error_retained": true,
+    "prior76_and6_controls_rerun": false,
+    "single_clean_27_case_run": false
+  },
+  "schema_version": 1,
+  "scope": "Terminal operator-budget refusal engineering; actual runtime/compactor/storage with fake provider, clock and pool; no actual model or game",
+  "source_base_commit": "a43ea05028dbf19967133205d0463b42908afe23"
+}

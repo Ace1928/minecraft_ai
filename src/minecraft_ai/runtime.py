@@ -49,7 +49,7 @@ from .grounded_perception import (
     resolve_grounded_output_keys,
 )
 from .memory import MemoryKind, MemoryRecord, MemoryStore
-from .models import BoundCognitionModel, local_model_inference_available
+from .models import BoundCognitionModel, PlannerRequestBudgetError, local_model_inference_available
 from .model_requests import ModelRequestLifecycle, RequestBinding
 from .outcome_verifier import OutcomeSignal, OutcomeVerification
 from .perception import (
@@ -274,6 +274,22 @@ class _KeepalivePredictionEvidence:
     disqualified: bool = False
 
 
+_PLANNER_BUDGET_RESPONSE = (
+    "This instruction is too long for the current planner; try one task at a time."
+)
+
+
+@dataclass(frozen=True)
+class _PlannerBudgetRefusalBinding:
+    message: OperatorMessage
+    operator_revision: int
+    model: object
+    instance_id: str
+    execution_revision: int
+    plan_state: tuple[str | None, tuple[str, ...], int, int, object]
+    deadline_ns: int
+
+
 @dataclass
 class AgentRuntime:
     perception: RealtimePerceptionService
@@ -324,6 +340,13 @@ class AgentRuntime:
     _bound_cognition_requests: dict[
         concurrent.futures.Future[CognitionDecision], tuple[ModelRequestLifecycle, object],
     ] = field(default_factory=dict, init=False, repr=False)
+    _planner_budget_bindings: dict[
+        concurrent.futures.Future[CognitionDecision], _PlannerBudgetRefusalBinding,
+    ] = field(default_factory=dict, init=False, repr=False)
+    _pending_planner_budget_refusal: _PlannerBudgetRefusalBinding | None = field(
+        default=None, init=False, repr=False,
+    )
+    _planner_budget_retry_ns: int = field(default=0, init=False)
     _pool: SingleWorkerDaemonExecutor = field(init=False)
     _last_decision: CognitionDecision | None = field(default=None, init=False)
     _pending_operator_message_ids: tuple[str, ...] = field(default=(), init=False)
@@ -585,12 +608,14 @@ class AgentRuntime:
         # Keep only the release conclusion, not the supervisor's full status.
         self._shutdown_results["actuator_release"] = inputs_released
         def retire_cognition_requests() -> None:
-            for future in tuple(getattr(self, "_bound_cognition_requests", {})):
+            for future in tuple(set(getattr(self, "_bound_cognition_requests", {}))
+                                | set(getattr(self, "_planner_budget_bindings", {}))):
                 cleanup("cognition_request", partial(self._reject_bound_cognition,
                     future, "runtime_shutdown",
                 ))
 
         cleanup("cognition_registry", retire_cognition_requests)
+        self._pending_planner_budget_refusal = None
         cleanup("cognition_pool", lambda: self._pool.shutdown(wait=False, cancel_futures=True))
 
         def cancel_terminal() -> None:
@@ -2128,7 +2153,7 @@ class AgentRuntime:
             try:
                 context = self.state_db.load_operator_context(statuses={
                     OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
-                    OperatorMessageStatus.ACKNOWLEDGED,
+                    OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED,
                 }, limit=20)
             except (sqlite3.Error, ValueError, RuntimeError):
                 return None
@@ -3091,6 +3116,10 @@ class AgentRuntime:
     def _start_cognition_if_due(self) -> bool | None:
         if self.operator_request_only is not None:
             return None
+        if self._flush_planner_budget_refusal():
+            # Durability can wait for the short storage cooldown; the same
+            # failed literal must not consume another planner call meanwhile.
+            return None
         if self._yield_keepalive_to_operator():
             return True
         perception_probe = getattr(self, "_cognition_perception_probe", None)
@@ -3233,6 +3262,7 @@ class AgentRuntime:
                         OperatorMessageStatus.DELIVERED,
                         timestamp_ns=time.time_ns(),
                     )
+        refusal_binding = self._capture_planner_budget_binding(context, now_ns=now)
         if self.high_level is None:
             engine = BootstrapCognitionPolicy(self.skills)
             self._pending_decision = self._pool.submit(
@@ -3251,6 +3281,8 @@ class AgentRuntime:
                 self.blackboard,
                 context,
             )
+        if refusal_binding is not None:
+            self._planner_budget_bindings[self._pending_decision] = refusal_binding
         self._last_cognition_ns = now
         self._cognition_requested = False
         self._pending_execution_revision = self._execution_revision
@@ -3261,6 +3293,142 @@ class AgentRuntime:
                     perception_probe, cognition_future=self._pending_decision,
                 )
         return None
+
+    @staticmethod
+    def _planner_budget_message_authority(message: OperatorMessage) -> dict[str, Any]:
+        return message.model_dump(mode="json", exclude={
+            "status", "delivered_ns", "acknowledged_ns", "response_text",
+        })
+
+    def _planner_budget_plan_state(self) -> tuple[str | None, tuple[str, ...], int, int, object]:
+        return (self._plan_goal_id, self._plan_steps, self._plan_index,
+                self._plan_started_ns, copy.deepcopy(self._plan_graph))
+
+    def _capture_planner_budget_binding(
+        self, context: CognitionContext, *, now_ns: int,
+    ) -> _PlannerBudgetRefusalBinding | None:
+        # Capture only original, currently selected ordinary pending authority.
+        # This binds terminal errors; it does not change successful publication.
+        database = self.state_db
+        model = getattr(self.high_level, "model", None)
+        selected = context.operator_messages
+        latest = self.blackboard.raw_latest()
+        if database is None or model is None or not selected or latest is None:
+            return None
+        message = selected[0]
+        if (message.direction_request_id is not None
+                or message.kind not in {OperatorMessageKind.INSTRUCTION,
+                                       OperatorMessageKind.CORRECTION, OperatorMessageKind.QUESTION}
+                or message.status not in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}):
+            return None
+        try:
+            current = database.load_operator_context(
+                statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}, limit=20,
+            )
+            active = _active_operator_messages(current.messages)
+            if (not active or self._planner_budget_message_authority(active[0])
+                    != self._planner_budget_message_authority(message)):
+                return None
+            deadline = now_ns + self.cognition_request_timeout_ms * 1_000_000
+            if message.execution_budget is not None:
+                remaining = message.created_ns + message.execution_budget.timeout_ms * 1_000_000 - time.time_ns()
+                if remaining <= 0 or message.created_ns > time.time_ns():
+                    return None
+                deadline = min(deadline, now_ns + remaining)
+            return _PlannerBudgetRefusalBinding(
+                message, current.revision, model, latest.instance_id,
+                self._execution_revision, self._planner_budget_plan_state(), deadline,
+            )
+        except (ValueError, RuntimeError, sqlite3.Error):
+            return None
+
+    def _planner_budget_owner_current(self, binding: _PlannerBudgetRefusalBinding) -> bool:
+        latest = self.blackboard.raw_latest()
+        return not (
+            self._stop.is_set() or operator_pause_latched() or emergency_stop_latched()
+            or self._input_release_pending_ns is not None
+            or self._execution_revision != binding.execution_revision
+            or self._planner_budget_plan_state() != binding.plan_state
+            or getattr(self.high_level, "model", None) is not binding.model
+            or latest is None or latest.instance_id != binding.instance_id
+            or time.monotonic_ns() >= binding.deadline_ns
+        )
+
+    def _publish_planner_budget_refusal(self, binding: _PlannerBudgetRefusalBinding) -> bool:
+        database = self.state_db
+        if database is None:
+            return False
+        with ExitStack() as locks:
+            try:
+                locks.enter_context(operator_intent_lock(timeout_s=0.05))
+            except RuntimeError as error:
+                # Only acquisition executes in this boundary. The accepted
+                # lock signals contention with RuntimeError; database and
+                # publication errors below are not reclassified as lock busy.
+                raise TimeoutError("operator intent admission unavailable") from error
+            with database.admit_operator_revision(binding.operator_revision) as current:
+                if not current or not self._planner_budget_owner_current(binding):
+                    return False
+                context = database.load_operator_context(
+                    statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}, limit=20,
+                )
+                active = _active_operator_messages(context.messages)
+                if (not active or self._planner_budget_message_authority(active[0])
+                        != self._planner_budget_message_authority(binding.message)):
+                    return False
+                updated = database.update_operator_message_status(
+                    binding.message.message_id, OperatorMessageStatus.REFUSED,
+                    timestamp_ns=time.time_ns(), response_text=_PLANNER_BUDGET_RESPONSE,
+                    admission=lambda: self._planner_budget_owner_current(binding),
+                )
+                # Refusal itself advances intent once. A nested writer or lost
+                # owner after the update must roll back, not publish stale text.
+                if (database.operator_revision() != binding.operator_revision + 1
+                        or updated.status != OperatorMessageStatus.REFUSED
+                        or not self._planner_budget_owner_current(binding)):
+                    raise OperatorResponseAdmissionError("planner refusal authority changed")
+        # A delayed delivery receipt must not turn this terminal request back
+        # into pending after the durable refusal has committed.
+        self._pending_operator_status_updates.pop(binding.message.message_id, None)
+        self.metrics.operator_responses += 1
+        self._clear_cognition_retry()
+        self._cognition_requested = False
+        return True
+
+    def _flush_planner_budget_refusal(self) -> bool:
+        """Return true while a current refusal awaits durable storage; no model work."""
+        binding = getattr(self, "_pending_planner_budget_refusal", None)
+        if binding is None:
+            return False
+        # Known local revocation needs no writer or intent-lock acquisition.
+        # Check before cooldown too: a perpetually busy writer must not retain
+        # an expired/replaced owner and block a fresh request indefinitely.
+        if not self._planner_budget_owner_current(binding):
+            self._pending_planner_budget_refusal = None
+            self._planner_budget_retry_ns = 0
+            self._cognition_requested = True
+            self._clear_storage_error_if_drained()
+            return False
+        now = time.monotonic_ns()
+        if now < getattr(self, "_planner_budget_retry_ns", 0):
+            return True
+        try:
+            committed = self._publish_planner_budget_refusal(binding)
+        except (sqlite3.OperationalError, TimeoutError) as error:
+            if isinstance(error, sqlite3.OperationalError) and not _sqlite_writer_contention(error):
+                raise
+            self._planner_budget_retry_ns = now + 1_000_000_000
+            self.metrics.storage_contentions += 1
+            self.metrics.last_storage_error = "Planner refusal awaits durable storage."
+            return True
+        except OperatorResponseAdmissionError:
+            committed = False
+        self._pending_planner_budget_refusal = None
+        self._planner_budget_retry_ns = 0
+        if not committed:
+            self._cognition_requested = True
+        self._clear_storage_error_if_drained()
+        return False
 
     def _uses_bound_cognition(self) -> bool:
         controller = self.high_level
@@ -3295,7 +3463,7 @@ class AgentRuntime:
                     raise RuntimeError("operator changed during cognition snapshot")
                 if not operator.messages:
                     operator = self.state_db.load_operator_context(
-                        statuses={OperatorMessageStatus.ACKNOWLEDGED}, limit=20,
+                        statuses={OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED}, limit=20,
                     )
                 # Keep the target and semantic snapshot on the captured revision.
                 self._merge_operator_target()
@@ -3372,6 +3540,7 @@ class AgentRuntime:
     def _reject_bound_cognition(
         self, future: concurrent.futures.Future[CognitionDecision], reason: str,
     ) -> None:
+        getattr(self, "_planner_budget_bindings", {}).pop(future, None)
         record = getattr(self, "_bound_cognition_requests", {}).pop(future, None)
         if record is not None:
             request, model = record
@@ -3686,7 +3855,7 @@ class AgentRuntime:
             if messages:
                 return None
             acknowledged = self.state_db.load_operator_messages(
-                statuses={OperatorMessageStatus.ACKNOWLEDGED}, limit=20,
+                statuses={OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED}, limit=20,
             )
             if _active_operator_messages(acknowledged) or (
                 len(acknowledged) == 20 and not any(
@@ -3784,6 +3953,22 @@ class AgentRuntime:
         self._pending_decision = None
         try:
             decision = future.result()
+        except PlannerRequestBudgetError as error:
+            binding = getattr(self, "_planner_budget_bindings", {}).get(future)
+            self._reject_bound_cognition(future, "planner_budget_refused")
+            self._last_cognition_ns = time.monotonic_ns()
+            self._pending_operator_message_ids = ()
+            self._pending_operator_message_kinds = {}
+            if (binding is not None
+                    and error.operator_goal_id == f"operator:{binding.message.message_id}"):
+                self._pending_planner_budget_refusal = binding
+                self._planner_budget_retry_ns = 0
+                self._flush_planner_budget_refusal()
+            else:
+                # No matching original operator authority: retain ordinary
+                # failure handling, never label an unrelated task refused.
+                self._schedule_cognition_retry(now_ns=self._last_cognition_ns)
+            return
         except Exception:
             self._reject_bound_cognition(future, "result_failed")
             now = time.monotonic_ns()
@@ -3791,6 +3976,7 @@ class AgentRuntime:
             self._pending_operator_message_ids = ()
             self._schedule_cognition_retry(now_ns=now)
             return
+        getattr(self, "_planner_budget_bindings", {}).pop(future, None)
         now = time.monotonic_ns()
         self._last_cognition_ns = now
         if decision.pack_recipe_identity is not None and not recipe_identity_matches(
@@ -4400,7 +4586,7 @@ class AgentRuntime:
         if database is not None and context_key.startswith("operator:"):
             try:
                 messages = database.load_operator_messages(
-                    statuses={OperatorMessageStatus.ACKNOWLEDGED}, limit=20,
+                    statuses={OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED}, limit=20,
                 )
             except sqlite3.Error:
                 self._cognition_requested = True
@@ -5086,6 +5272,7 @@ class AgentRuntime:
             or self._pending_runtime_events
             or self._pending_memories
             or self._pending_operator_status_updates
+            or getattr(self, "_pending_planner_budget_refusal", None) is not None
         ):
             self.metrics.last_storage_error = None
 
@@ -5276,7 +5463,8 @@ class AgentRuntime:
             )[:20]
             if not messages:
                 messages = tuple(message for message in operator_context.messages
-                                 if message.status == OperatorMessageStatus.ACKNOWLEDGED)[:20]
+                                 if message.status in {OperatorMessageStatus.ACKNOWLEDGED,
+                                                       OperatorMessageStatus.REFUSED})[:20]
             operator_messages = _active_operator_messages(messages)
         elif self.state_db is not None:
             messages = self.state_db.load_operator_messages(
@@ -5288,7 +5476,7 @@ class AgentRuntime:
             )
             if not messages:
                 messages = self.state_db.load_operator_messages(
-                    statuses={OperatorMessageStatus.ACKNOWLEDGED},
+                    statuses={OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED},
                     limit=20,
                 )
             operator_messages = _active_operator_messages(messages)
