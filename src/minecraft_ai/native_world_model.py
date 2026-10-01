@@ -8,6 +8,7 @@ parser and authority checks remain downstream.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -62,6 +63,64 @@ def _short(value: object, limit: int) -> object:
     if isinstance(value, list):
         return [_short(item, limit) for item in value[:2]]
     return None
+
+
+def _compact_mining_history(rows: object) -> dict[str, Any] | None:
+    """Carry past tool outcomes, never current pack/state or action authority.
+
+    Runtime MiningKnowledge has already matched each belief to one declared
+    ruleset/block/tool key. Its scope may be only a random session ID; neither
+    a descriptive ruleset nor this digest proves engine-loaded pack contents.
+    Reject ambiguous scopes/counts instead of combining unrelated experiments.
+    Omit display names/instructions; keep canonical ASCII identifiers literally.
+    """
+    if type(rows) is not list or not 0 < len(rows) <= 4:
+        return None
+    count_fields = {
+        "observed_breaks": "breaks", "observed_harvests": "harvests",
+        "observed_nonharvests": "nonharvests", "observed_pickups": "pickups",
+        "censored_attempts": "censored",
+    }
+    scope = None
+    pairs: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        if type(row) is not dict:
+            continue
+        row_scope, block, tool = (row.get(key) for key in ("scope", "block", "tool"))
+        if (type(row_scope) is not str or not 0 < len(row_scope) <= 512
+                or type(block) is not str or not 0 < len(block) <= 256
+                or type(tool) is not str or not 0 < len(tool) <= 256
+                or re.fullmatch(r"(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+", block, re.ASCII) is None
+                or re.fullmatch(r"(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+", tool, re.ASCII) is None):
+            continue
+        if any(type(row.get(key)) is not int or not 0 <= row[key] < 2**63
+               for key in count_fields):
+            continue
+        if scope is not None and row_scope != scope:
+            return None
+        scope = row_scope
+        counts = {name: row[key] for key, name in count_fields.items()}
+        if not any(counts.values()):
+            continue
+        entry = {"block": block, "tool": tool, **counts}
+        key = (block, tool)
+        if key in pairs and pairs[key] != entry:
+            return None
+        pairs[key] = entry
+    if scope is None or not pairs:
+        return None
+    outcomes = sorted(pairs.values(), key=lambda row: (
+        -row["pickups"], -row["harvests"], -row["breaks"], row["censored"],
+        row["block"], row["tool"],
+    ))[:2]
+    return {
+        "declared_scope_sha256": hashlib.sha256(scope.encode("utf-8")).hexdigest(),
+        "scope_kind": "session" if scope.startswith("session:") else "unattested_ruleset",
+        "current_pack_verified": False, "current_state_verified": False,
+        "gameplay_authority": False,
+        "semantics": "Past outcomes only; missing pickup is inconclusive.",
+        "outcomes": outcomes,
+    }
 
 
 def _compact_context(
@@ -222,6 +281,9 @@ def _compact_context(
             for item in declared.get("allowed_skills", [])
         ]
         result["authority_bounds"] = declared
+    mining_history = _compact_mining_history(payload.get("mining_evidence"))
+    if mining_history is not None:
+        result["mining_history"] = mining_history
     facts = payload.get("fresh_facts")
     if type(facts) is dict:
         priority = (
@@ -433,6 +495,7 @@ def compact_planner_prompt(
         ):
             return prompt
         for key in (
+            "mining_history",
             "wiki_evidence",
             "recent_skill_runs",
             "chat_lines",
@@ -451,7 +514,7 @@ def compact_planner_prompt(
                     rows.pop(removable[-1])
                     break
             if isinstance(rows, dict) and rows:
-                if key == "current_plan":
+                if key in {"current_plan", "mining_history"}:
                     context.pop(key)
                     break
         else:

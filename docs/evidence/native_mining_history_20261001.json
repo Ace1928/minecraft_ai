@@ -1,0 +1,153 @@
+{
+  "actual_controls": {
+    "actual_loaded_origins": 52,
+    "actual_task_affinity": [
+      3
+    ],
+    "affinity_samples": 18,
+    "attempts": 1,
+    "dependency_files": 328,
+    "errors": 0,
+    "executed": 8,
+    "failed": 0,
+    "names": [
+      "test_exact_names_counts_and_ranked_bounded_distinct_pairs",
+      "test_extra_instructions_rules_and_current_slot_are_not_transported",
+      "test_bad_shapes_counts_and_empty_history_omit_without_coercion",
+      "test_mixed_rulesets_omit_instead_of_merging_or_claiming_pack_match",
+      "test_duplicate_outcomes_are_not_recounted_and_conflicts_are_omitted",
+      "test_scope_kind_preserves_unknown_current_pack_and_private_label",
+      "test_history_is_optional_before_literal_permissions_and_fallback",
+      "test_operator_reply_does_not_gain_historical_mining_or_action_authority"
+    ],
+    "origin_or_import_or_boundary_or_thread_failures": [],
+    "passed": 8,
+    "scope": "Actual compactor using synthetic immutable history and fixture fit predicate; no owner tokenizer/model/API/runtime/game operation",
+    "skipped": 0,
+    "source_files_authenticated": 489
+  },
+  "behavior": [
+    "At most two distinct historical block/tool outcome pairs from up to four source rows reach existing shared World planning context.",
+    "Only exact lowercase canonical ASCII identifiers; display names, malformed labels and instructions omitted without normalization, truncation, guessing or registry attestation.",
+    "Exact break, harvest, nonharvest, pickup and censored counts; mixed scopes or conflicting duplicates omit the summary.",
+    "No current slots/equipment, rule metadata, raw scope names or action authority; hashed scope is not engine-loaded pack proof.",
+    "Optional history drops first as a unit under pressure; full original literal, constraints, fallback and typed budget refusal stay intact.",
+    "Reply-only planning excludes history."
+  ],
+  "bounds": {
+    "CPUAffinity": [
+      3
+    ],
+    "CPUQuota_percent": 100,
+    "address_space_bytes": 536870912,
+    "complete_outer_bound_seconds": 70,
+    "host_MemAvailable_min_bytes": 2147483648,
+    "outer_TERM_seconds": 67,
+    "outer_final_KILL_seconds": 3,
+    "unit_memory_max_bytes": 536870912,
+    "unit_runtime_seconds": 45,
+    "unit_stop_seconds": 5,
+    "unit_swap_max_bytes": 0,
+    "worker_CPU_seconds": 15,
+    "worker_wall_seconds": 40
+  },
+  "contract": "minecraft.native-mining-history-qualified-source.v1",
+  "costs": {
+    "accounting_limit": "Worker lifetime process HWM and terminal manager unit peak have different scopes. These are control costs, not complete serving costs.",
+    "complete_supervisor_wall_seconds": 1.4002754139946774,
+    "supervisor_CPU_seconds": 0.07960599200000001,
+    "supervisor_HWM_bytes": 25116672,
+    "terminal_manager_CPU_ns": 703778000,
+    "terminal_manager_MemoryPeak_bytes": 31002624,
+    "terminal_manager_swap_peak_bytes": 0,
+    "worker_CPU_seconds": 0.56501722,
+    "worker_HWM_bytes": 45748224,
+    "worker_wall_seconds": 0.8301893550014938
+  },
+  "date": "2026-10-01",
+  "explicit_limits": {
+    "actual_World_request_or_model_quality_qualified": false,
+    "association_owner_migrated": false,
+    "cross_session_family_reuse_qualified": false,
+    "current_engine_loaded_pack_verified": false,
+    "game_inputs": 0,
+    "gameplay_progress_or_mastery_qualified": false,
+    "live_player_installed": false,
+    "numerical_or_canonical_lease_operations": 0,
+    "performance_or_dense_superiority_qualified": false,
+    "runtime_settings_database_checkpoint_changes": false,
+    "source_engineering_only": true,
+    "stable_family_pack_scope_qualified": false,
+    "typical_512_token_history_retention_qualified": false
+  },
+  "fixture_sha256": "beb97e29c54fe4c3e7852d64e8ef340a9f7f12b4d4b1a22693a038518e687f9b",
+  "raw_sha256": {
+    "controls-001/approved-control-budget.json": "a4a1738094e150ae3f8136eee289cb87719842a2a847611e643e538890ee08e2",
+    "controls-001/attempt-001/receipt.json": "187a1bf2c639fde76c6cdca5715f43ac2911322a21cabbff6c5230926f150414",
+    "controls-001/attempt-001/unittest.log": "21ea59692f69377499f2a89e7b037908da69fa8865f671d6e4f863af0731d2ea",
+    "controls-001/proposal.json": "240b57f2e4550095d6ad44b4a00b3c3751b46f84a594130188c06d6b618740c4",
+    "controls-001/root-control-admission.json": "5cd98d538b64fbbf8d280bff4e5f6626d00401dfa31d15f92cc1cc455c16a7b0",
+    "controls-001/root-independent-release.json": "1f2ce3febd6d0366ba3ee243adc6b3610ac26af1ac4b3ca93c50dd2c1ea812d6",
+    "controls-001/runner.py": "55ccfa68a48ea42d722cfbc93dc7d6e263ece345a8d7c7013925b20618958684",
+    "controls-001/source-manifest.json": "1c9c8bcbed4d27e1b03cfbc9dd980c714eaffccd2bb3974db5cd126b22d5775b",
+    "controls-001/source-preparation-negative.json": "f77799e754bff3e265f1a9aa9f35b6ac8feba7d27903a4c8b33cd23c22e3d676",
+    "controls-001/supervise.py": "59771a1c402a9e1d66d39d2e59f7105682d9f38ecd8d1b5873af028a4c3081d7",
+    "controls-001/supervision-001/dispatch.json": "668a75101c33fb17dafe87d1a62beb237a7bda6f52ef3ddf901e10276330bc51",
+    "controls-001/supervision-001/preflight.json": "cfb6aada4716a93f47452527b44bb24f5f721e7c5a7fb7c26f32280d57b236e1",
+    "controls-001/supervision-001/release.json": "ce61b470f9ba831c148d4f3af8fdb57edd02ca67cc49d148faa3f4df42401d04",
+    "controls-001/supervision-001/terminal.json": "5f3bb14897984439839931e578baf5bc92bd736f65c321163d62c3ac27c5e934",
+    "main-integration-001/source-preparation-negative.json": "79b058e1cc4a92d30cd1dc5dfac338595d16aee173f30548a8ac9e6c26d83ea9",
+    "source-001/proposal.json": "493d5b8aa958986da2bc201a4aa825494a57ba45d1e9b616014df8e4178e35e9",
+    "source-002/identifier-only-successor.patch": "6511a6d99455ace152ecc11f7ac7544a59226c208de2ff505d3a69f78f9de176",
+    "source-002/malformed-fixture-successor.patch": "6cf4a39e09e42cda54c26d615baee018dd628d32092ca9e8b5e60d6a2fb19065",
+    "source-002/native_world_model.patch": "bf2d29fd89051d300859e586431802e9667a400a114c7def70c7de46be802236",
+    "source-002/proposal.json": "40942c7f479599865f476d7996f98081a907ef6aaff06a9bc7da07f16faa37b4",
+    "source-002/source-manifest.json": "57f884e3be4c918d2d7b1b81c79cea972362e4b476caca831d621c9af97f8631",
+    "source-002/test_native_mining_history.py": "beb97e29c54fe4c3e7852d64e8ef340a9f7f12b4d4b1a22693a038518e687f9b"
+  },
+  "release": {
+    "cgroup_inode_authentication_claim": false,
+    "exact_worker_PID_start_physically_gone": true,
+    "independent_root_accepted": true,
+    "initial_cgroup_device_inode_recorded": false,
+    "named_cgroup_path_physically_absent": true,
+    "owned_invocation_stop_returncode": 0,
+    "root_release_sha256": "1f2ce3febd6d0366ba3ee243adc6b3610ac26af1ac4b3ca93c50dd2c1ea812d6"
+  },
+  "schema_version": 1,
+  "source_after_sha256": "73f560bb4e7de70e369c71ea2dcc7c135dab621737fa5ac0acb74391d095f7b1",
+  "source_before_sha256": "cd29551e9e1a716dcc160cbf13b371d59c2b1f1e1c952f25a62f75362905aef7",
+  "source_commit_before": "a2b08b5bee23656c07f2e8ec75e69b7486c6ba32",
+  "source_compatibility": {
+    "added_helpers": [
+      "_compact_mining_history"
+    ],
+    "controller_changed": false,
+    "modified_existing_functions": [
+      "_compact_context",
+      "compact_planner_prompt"
+    ],
+    "privacy_prefix_literal_grammar_budget_preserved": true,
+    "unchanged_top_level_functions_and_classes": [
+      "NativeWorldCognitionModel",
+      "_read_private_file",
+      "_short"
+    ]
+  },
+  "source_preparation_negatives": [
+    {
+      "cause": "Verification used filename stem instead of existing supervisor_sha256 metadata key; written helper bytes unchanged.",
+      "error": "KeyError: supervise_sha256",
+      "material_runtime_change": false,
+      "raw_sha256": "f77799e754bff3e265f1a9aa9f35b6ac8feba7d27903a4c8b33cd23c22e3d676",
+      "scope": "Builder verification only before controls/dispatch"
+    },
+    {
+      "cause": "Verifier used imagined class name; corrected to actual AST NativeWorldCognitionModel.",
+      "error": "AssertionError",
+      "main_or_control_changes": false,
+      "raw_sha256": "79b058e1cc4a92d30cd1dc5dfac338595d16aee173f30548a8ac9e6c26d83ea9",
+      "scope": "Main integration verifier before candidate writes"
+    }
+  ]
+}
