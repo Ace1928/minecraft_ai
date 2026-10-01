@@ -47,8 +47,17 @@ def active_recipe_identity(view: CognitionReadView) -> ActiveRecipeIdentity | No
         or not 0 < fact.expires_after_ms <= 5000 or not fact.fresh(now)
     ):
         return None
+    return decode_active_recipe_identity(fact.value, latest.instance_id)
+
+
+def decode_active_recipe_identity(
+    payload: str, instance_id: str,
+) -> ActiveRecipeIdentity | None:
+    """Share the scalar contract with the host observation file reader."""
+    if len(payload) > 2048:
+        return None
     try:
-        value = json.loads(fact.value)
+        value = json.loads(payload)
     except (ValueError, TypeError, RecursionError):
         return None
     fields = ActiveRecipeIdentity.__dataclass_fields__
@@ -61,8 +70,8 @@ def active_recipe_identity(view: CognitionReadView) -> ActiveRecipeIdentity | No
                for key in fields)
         or any(_SHA256.fullmatch(value[key]) is None
                for key in ("scope_sha256", "catalog_sha256"))
-        or value["instance_id"] != latest.instance_id
-        or not latest.instance_id.startswith("bedrock:" + value["bds_version"] + ":")
+        or value["instance_id"] != instance_id
+        or not instance_id.startswith("bedrock:" + value["bds_version"] + ":")
     ):
         return None
     return ActiveRecipeIdentity(**{key: value[key] for key in fields})

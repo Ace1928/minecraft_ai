@@ -31,6 +31,7 @@ from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_
 from .daemon_executor import SingleWorkerDaemonExecutor
 from .episodes import RuntimeEvent
 from .pack_recipes import PackRecipeCatalog
+from .pack_observer import RecipeObservationReader
 from .pack_scope import (
     ActiveRecipeIdentity, RECIPE_SCOPE_UNAVAILABLE, recipe_identity_matches,
 )
@@ -281,6 +282,7 @@ class AgentRuntime:
     lease_id: str
     high_level: HighLevelController | None = None
     pack_recipe_catalog: PackRecipeCatalog | None = None
+    recipe_observer: RecipeObservationReader | None = None
     memories: MemoryStore = field(default_factory=MemoryStore)
     social: SocialState = field(default_factory=SocialState)
     custom_goals: list[Goal] = field(default_factory=list)
@@ -682,6 +684,8 @@ class AgentRuntime:
             self.metrics.stale_frame_skips += 1
             self.metrics.consecutive_stale_frames += 1
             self._release_and_reconcile_inputs()
+            if self.recipe_observer is not None:
+                self.recipe_observer.revoke(self.blackboard)
             self.telemetry.publish(self._telemetry_payload(state="capture-stalled"))
             if self.metrics.consecutive_stale_frames >= self.stale_frame_consecutive_limit:
                 raise RuntimeError(
@@ -691,6 +695,8 @@ class AgentRuntime:
             return
         self.metrics.frames += 1
         self.metrics.last_capture_ms = (time.perf_counter() - capture_started) * 1000.0
+        if self.recipe_observer is not None:
+            self.recipe_observer.poll(self.blackboard)
         self._merge_operator_target()
         self._merge_policy_perception()
         if self.perception.stale():
@@ -704,6 +710,8 @@ class AgentRuntime:
             # stale capture, so a command failure here is tolerated — the lease
             # revocation path and release_all remain the authoritative release.
             self._release_and_reconcile_inputs()
+            if self.recipe_observer is not None:
+                self.recipe_observer.revoke(self.blackboard)
             self.telemetry.publish(self._telemetry_payload(state="capture-stalled"))
             if self.metrics.consecutive_stale_frames >= self.stale_frame_consecutive_limit:
                 raise RuntimeError(
@@ -5178,6 +5186,10 @@ class AgentRuntime:
             }
             for key, fact in sorted(fresh_facts.items())
         }
+        perception_status["recipe_observation"] = (
+            {"state": "disabled", "reason": "not_configured"}
+            if self.recipe_observer is None else self.recipe_observer.status()
+        )
         latest = self.blackboard.latest()
         perception_status["tracks"] = (
             [] if latest is None else [track.model_dump(mode="json") for track in latest.tracks]

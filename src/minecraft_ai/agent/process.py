@@ -14,6 +14,7 @@ from minecraft_ai.config import RuntimeConfig, app_paths, load_config
 from minecraft_ai.datasets import DatasetSource, DatasetSourceType, TrajectoryManifest
 from minecraft_ai.execution import SkillExecutor
 from minecraft_ai.pack_recipes import PackRecipeCatalog
+from minecraft_ai.pack_observer import RecipeObservationReader
 from minecraft_ai.resident_broker_model import configured_model
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorPolicy
 from minecraft_ai.perception import PerceptionBlackboard
@@ -158,6 +159,15 @@ def main(argv: list[str] | None = None) -> int:
         ):
             capture = PublishedFrameCapture(capture, capture_owner)
         capture_probe = capture.capture()
+        recipe_observer = None
+        if config.pack_recipe_observation is not None:
+            if pack_recipe_catalog is None:
+                raise ValueError("recipe observer requires the reviewed recipe catalog")
+            recipe_observer = RecipeObservationReader(
+                Path(config.pack_recipe_observation),
+                capture.owner if isinstance(capture, PublishedFrameCapture) else None,
+                pack_recipe_catalog,
+            )
 
         high_level: HighLevelController | None = None
         if config.high_level.enabled:
@@ -274,6 +284,8 @@ def main(argv: list[str] | None = None) -> int:
             trajectory_disabled_reason=trajectory_disabled_reason,
         )
 
+        if recipe_observer is not None:
+            runtime_kwargs["recipe_observer"] = recipe_observer
         run_agent_runtime(runtime_kwargs, factory_config=config.runtime_factory)
         return 0
     except RuntimeStartupCleanupIncomplete:
