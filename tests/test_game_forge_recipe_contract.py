@@ -94,7 +94,12 @@ class GameForgeRecipeContractTests(unittest.TestCase):
         digest = self.producer.export_library(library, output)
         return PackRecipeCatalog.load(output, digest), library, output, digest
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux observer envelope contract")
     def test_active_world_snapshot_reaches_existing_cognition_and_chat_authority(self):
+        from minecraft_ai.agent.lifecycle import AgentProcess
+        from minecraft_ai.pack_observer import RecipeObservationReader
+        from minecraft_ai.platforms.frame_cache import owner_manifest
+        from minecraft_ai.pack_scope import recipe_identity_matches
         from minecraft_ai.builtin_skills import build_bootstrap_skill_library
         from minecraft_ai.cognition import HighLevelController
         from minecraft_ai.game_chat import game_chat_authority_matches
@@ -129,8 +134,7 @@ class GameForgeRecipeContractTests(unittest.TestCase):
                     instance_id=instance,
                     width=32,
                     height=32,
-                    facts=(
-                        active_fact(catalog, instance),
+                    facts=((active_fact(catalog, instance),) if target is not None else ()) + (
                         PerceptionFact(
                             key="social.player_message",
                             value="FixturePlayer: How do I craft blue:beacon?",
@@ -144,6 +148,29 @@ class GameForgeRecipeContractTests(unittest.TestCase):
             )
 
         publish()
+        # Host connection/loaded-stack proof is fictional; actual file delivery
+        # must carry the real producer's reviewed artifact pin without rebasing TTL.
+        owner = AgentProcess(
+            pid=os.getpid(), started_ns=now, display=":fixture", window_id=42,
+            instance_id=board.raw_latest().instance_id, role="generalist",
+            proc_start_ticks=123, command_sha256="a" * 64,
+        )
+        observation = self.root / "fictional-host-observation.json"
+        observation.write_text(json.dumps({
+            "schema_version": 1, "boot_id": "fictional-boot",
+            "capture_owner": owner_manifest(owner), "observed_ns": now,
+            "expires_after_ms": 5000,
+            "identity": json.loads(active_fact(catalog, owner.instance_id).value),
+        }))
+        observation.chmod(0o600)
+        reader = RecipeObservationReader(observation, owner, catalog)
+        with (
+            patch.object(AgentProcess, "load", return_value=owner),
+            patch("minecraft_ai.pack_observer._boot_id", return_value="fictional-boot"),
+            patch("minecraft_ai.pack_observer._agent_process_state", return_value="verified-live"),
+        ):
+            reader.poll(board)
+        self.assertEqual(reader.status()["state"], "delivered")
         runtime = object.__new__(AgentRuntime)
         runtime.role = get_role("generalist")
         runtime.custom_goals = []
@@ -188,6 +215,10 @@ class GameForgeRecipeContractTests(unittest.TestCase):
         replacement = PerceptionBlackboard()
         publish("bedrock:1.26.52.3:replacement-session", target=replacement)
         self.assertFalse(game_chat_authority_matches(decision, replacement))
+        observation.unlink()
+        reader.poll(board)
+        self.assertFalse(recipe_identity_matches(decision._pack_recipe_identity, board))
+        self.assertIsNone(catalog.lookup_live("craft blue:beacon", board))
         with patch("time.monotonic_ns", return_value=now + 31_000_000_000):
             self.assertFalse(game_chat_authority_matches(decision, board))
             self.assertIsNone(

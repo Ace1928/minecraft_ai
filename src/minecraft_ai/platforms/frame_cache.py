@@ -37,7 +37,8 @@ class CaptureSource(Protocol):
     def close(self) -> None: ...
 
 
-def _owner_payload(process: AgentProcess) -> dict[str, object]:
+def owner_manifest(process: AgentProcess) -> dict[str, object]:
+    """Exact selected capture generation; discovery candidates are not owners."""
     return {
         "pid": process.pid,
         "started_ns": process.started_ns,
@@ -74,7 +75,7 @@ class PublishedFrameCapture:
         self.path = path
         self._last_publish_ns = 0
         self._published_identity: tuple[int, int] | None = None
-        self._capture_recovery_owner = _owner_payload(owner)
+        self._capture_recovery_owner = owner_manifest(owner)
         self._capture_recovery_source = source
         self._image_reconnect_pending = False
         self._consecutive_image_timeouts = 0
@@ -85,7 +86,7 @@ class PublishedFrameCapture:
         if (
             type(source) is not IsolatedX11Capture
             or source is not self._capture_recovery_source
-            or _owner_payload(self.owner) != self._capture_recovery_owner
+            or owner_manifest(self.owner) != self._capture_recovery_owner
             or self.owner.allow_host_capture is not False
             or source.display_name != self.owner.display
             or source.target_window_id != self.owner.window_id
@@ -136,7 +137,7 @@ class PublishedFrameCapture:
             raise ValueError("invalid spectator frame geometry")
         metadata = {
             "schema_version": 1,
-            "owner": _owner_payload(self.owner),
+            "owner": owner_manifest(self.owner),
             "frame_id": frame.frame_id,
             "captured_ns": frame.captured_ns,
             "width": frame.width,
@@ -198,7 +199,7 @@ def read_agent_frame(
             if not 0 < header_size <= MAX_HEADER_BYTES:
                 return None
             metadata = json.loads(stream.read(header_size))
-            expected_owner = _owner_payload(process)
+            expected_owner = owner_manifest(process)
             owner = metadata.get("owner") if type(metadata) is dict else None
             if (
                 type(metadata) is not dict or type(metadata.get("schema_version")) is not int

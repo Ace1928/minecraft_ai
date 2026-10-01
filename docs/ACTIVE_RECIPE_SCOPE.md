@@ -75,3 +75,13 @@ Until this observer is present and the snapshot is re-exported/pinned, recipe
 advice remains explicitly unavailable. No deployment configuration or world
 was changed. Live acceptance requires the serving owner's resource admission;
 production services continue to run on the desktop.
+
+## Optional runtime delivery follow-up
+
+The source now includes an opt-in, bounded same-host file reader using the
+actual published capture owner and existing process identity. It revokes
+missing/stale/ambiguous evidence on capture cycles. The host writer and actual
+loaded-stack/client-connection attestation remain absent. See
+[RECIPE_OBSERVER_ACTIVATION.md](RECIPE_OBSERVER_ACTIVATION.md) for the envelope,
+tested limits and exact desktop activation prerequisites. The reader's
+presence does not change the earlier pass's historical validation claims.
