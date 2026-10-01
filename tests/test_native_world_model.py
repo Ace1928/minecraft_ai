@@ -648,6 +648,7 @@ def test_recipe_compound_phrase_wins_only_at_same_intent_position(
 
 
 def test_runtime_context_uses_pinned_family_recipe_for_fresh_player_chat(monkeypatch):
+    from test_pack_recipe_scope import active_fact
     now = time.monotonic_ns()
     blackboard = PerceptionBlackboard()
     blackboard.publish(
@@ -680,6 +681,14 @@ def test_runtime_context_uses_pinned_family_recipe_for_fresh_player_chat(monkeyp
     runtime.pack_recipe_catalog = PackRecipeCatalog(
         _catalog_payload(), hashlib.sha256(b"catalog bytes").hexdigest()
     )
+    runtime.pack_recipe_catalog._payload["configured_recipe_identity"] = {
+        "state": "configured_only", "scope_sha256": "c" * 64,
+    }
+    blackboard.publish(FrameState(
+        frame_id=2, captured_ns=time.monotonic_ns(),
+        instance_id=runtime.perception.instance_id, width=1280, height=720,
+        facts=(active_fact(runtime.pack_recipe_catalog, runtime.perception.instance_id),),
+    ))
     runtime._recent_skill_runs = deque(maxlen=8)
     runtime._plan_steps = ()
     runtime._plan_index = 0
@@ -747,6 +756,7 @@ def test_native_world_controller_recipe_reaches_existing_leased_chat_contract(mo
     from minecraft_ai.cognition import CognitionContext, HighLevelController
     from minecraft_ai.game_chat import game_chat_authority_matches
     from minecraft_ai.supervisor import Supervisor
+    from test_pack_recipe_scope import active_fact
 
     class ChatBackend:
         backend_id = "synthetic-chat-contract"
@@ -787,6 +797,14 @@ def test_native_world_controller_recipe_reaches_existing_leased_chat_contract(mo
         ),),
     ))
     catalog = PackRecipeCatalog(_catalog_payload(), "a" * 64)
+    catalog._payload["configured_recipe_identity"] = {
+        "state": "configured_only", "scope_sha256": "c" * 64,
+    }
+    board.publish(FrameState(
+        frame_id=2, captured_ns=time.monotonic_ns(),
+        instance_id="bedrock:1.26.52.3:synthetic-family-chat", width=32, height=32,
+        facts=(active_fact(catalog, "bedrock:1.26.52.3:synthetic-family-chat"),),
+    ))
     answer = catalog.lookup("How do I craft a Poké Ball?", game_version="1.26.52.3")
     assert answer is not None
     runtime_id = "b" * 32
@@ -851,6 +869,7 @@ def test_native_world_controller_recipe_reaches_existing_leased_chat_contract(mo
     context = CognitionContext(
         role=get_role("generalist"), goals=(), memories=(), promises=(), wiki=(answer.evidence,),
         pack_recipe_reply=answer.chat_reply,
+        pack_recipe_identity=catalog.active_identity(board), pack_recipe_status="verified",
     )
     controller = HighLevelController(model, build_bootstrap_skill_library())
     decision = controller.decide(board.cognition_snapshot(), context)

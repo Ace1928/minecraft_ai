@@ -20,6 +20,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from minecraft_ai.pack_recipes import PackRecipeCatalog
+from test_pack_recipe_scope import active_fact
 
 
 @unittest.skipUnless(
@@ -129,6 +130,7 @@ class GameForgeRecipeContractTests(unittest.TestCase):
                     width=32,
                     height=32,
                     facts=(
+                        active_fact(catalog, instance),
                         PerceptionFact(
                             key="social.player_message",
                             value="FixturePlayer: How do I craft blue:beacon?",
@@ -169,7 +171,9 @@ class GameForgeRecipeContractTests(unittest.TestCase):
             latency_ms=0,
             text='{"s":null}',
         )
-        controller = HighLevelController(model, build_bootstrap_skill_library())
+        controller = HighLevelController(
+            model, build_bootstrap_skill_library(), pack_recipe_catalog=catalog,
+        )
         decision = controller.decide(board, context)
         self.assertEqual(decision.game_chat, expected)
         self.assertTrue(game_chat_authority_matches(decision, board))
@@ -191,7 +195,14 @@ class GameForgeRecipeContractTests(unittest.TestCase):
             )
 
     def test_pack_update_changes_answer_and_invalidates_old_file_pin(self):
+        from minecraft_ai.perception import PerceptionBlackboard
+        from test_pack_recipe_scope import publish
         old, library, output, pin = self.export()
+        board = PerceptionBlackboard()
+        instance = "bedrock:1.26.52.3:client-42"
+        publish(board, active_fact(old, instance))
+        query = "How do I craft blue:beacon?"
+        self.assertIsNotNone(old.lookup_live(query, board))
         raw_before = output.read_bytes()
         recipe = self.runtime / "behavior_packs/blue/recipes/beacon.json"
         document = json.loads(recipe.read_text())
@@ -203,7 +214,13 @@ class GameForgeRecipeContractTests(unittest.TestCase):
         self.assertNotEqual(raw_before, output.read_bytes())
         with self.assertRaisesRegex(ValueError, "digest or size"):
             PackRecipeCatalog.load(output, pin)
-        query = "How do I craft blue:beacon?"
+        self.assertNotEqual(library["configured_recipe_identity"],
+                            updated_library["configured_recipe_identity"])
+        self.assertIsNone(current.lookup_live(query, board))
+        publish(board, active_fact(current, instance))
+        self.assertEqual(old.active_scope_status(board), "mismatch")
+        self.assertIsNone(old.lookup_live(query, board))
+        self.assertIn("make 6 Beacons", current.lookup_live(query, board).chat_reply)
         self.assertIn(
             "make 3 Beacons", old.lookup(query, game_version="1.26.52.3").chat_reply
         )

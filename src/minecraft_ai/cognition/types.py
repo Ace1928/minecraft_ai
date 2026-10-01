@@ -17,6 +17,7 @@ from minecraft_ai.social import (
     Promise,
 )
 from minecraft_ai.wiki import WikiEvidence
+from minecraft_ai.pack_scope import ActiveRecipeIdentity
 
 _WOOD_INVENTORY_AUDIT_SKILLS = frozenset({"craft_wood_planks", "open_inventory"})
 
@@ -73,6 +74,11 @@ class CognitionDecision(BaseModel):
 
     _model_origin: DecisionModelOrigin | None = PrivateAttr(default=None)
     _chat_authority: DecisionChatAuthority | None = PrivateAttr(default=None)
+    _pack_recipe_identity: ActiveRecipeIdentity | None = PrivateAttr(default=None)
+
+    @property
+    def pack_recipe_identity(self) -> ActiveRecipeIdentity | None:
+        return self._pack_recipe_identity
 
     @property
     def chat_authority(self) -> DecisionChatAuthority | None:
@@ -169,6 +175,8 @@ class CognitionContext:
     # Exact answer from the hash-pinned active-pack recipe snapshot, if the
     # current fresh player-chat line asks about a supported recipe.
     pack_recipe_reply: str | None = None
+    pack_recipe_identity: ActiveRecipeIdentity | None = None
+    pack_recipe_status: str | None = None
 
 
 @dataclass

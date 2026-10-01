@@ -1,0 +1,84 @@
+{
+  "contract": "minecraft-ai.game-forge-active-recipe-scope-verification.v1",
+  "minecraft_base_sha": "372918bec5183918cf31c1b95b336cda7e753461",
+  "game_forge_original_base_sha": "673436a95bd7e81e7c00f7561faf9eacfb29b505",
+  "game_forge_latest_base_sha": "e68782555c70b480afe13d92d51289ee33d24405",
+  "before": {
+    "configured_catalog_without_active_identity_returned_recipe": true,
+    "regression_failures": 1
+  },
+  "focused_after": {
+    "passed": 110,
+    "excluded": 1,
+    "wall_seconds": 1.94,
+    "max_rss_kib": 72964
+  },
+  "final_admission_checks": {
+    "passed": 26,
+    "wall_seconds": 1.17,
+    "max_rss_kib": 79856,
+    "real_plan_graph_compensation": true
+  },
+  "storage_checks": {
+    "passed": 6,
+    "wall_seconds": 0.93,
+    "max_rss_kib": 66900,
+    "actual_scope_gated_response_commit_and_rollback": true
+  },
+  "unscoped_db_retry_regression": {
+    "passed": 1,
+    "wall_seconds": 2.28,
+    "max_rss_kib": 101456
+  },
+  "producer_crafting_checks": {
+    "passed": 16,
+    "wall_seconds": 0.2,
+    "max_rss_kib": 25044
+  },
+  "broader_partial_run": {
+    "passed": 253,
+    "new_test_fixture_failures": 2,
+    "wall_seconds": 8.1,
+    "max_rss_kib": 188052,
+    "failures_later_corrected_and_targeted_cases_passed": true
+  },
+  "targeted_typecheck": {
+    "files": [
+      "src/minecraft_ai/pack_scope.py",
+      "src/minecraft_ai/pack_recipes.py"
+    ],
+    "passed": true,
+    "whole_repository_qualified": false
+  },
+  "static_review_findings_fixed": [
+    "scope lost in deferred operator ACK",
+    "reused answer for different operator/player target",
+    "plan graph not restored on rejected publication",
+    "scope change inside SQLite response write"
+  ],
+  "actual_model_loaded": false,
+  "actual_server_started": false,
+  "world_mutation": false,
+  "deployed": false,
+  "skill_learning_claimed": false,
+  "not_run": [
+    "native ERAIS leased transport integration (deselected)",
+    "full repository suites/builds",
+    "live desktop observer/active-stack attestation",
+    "physical Minecraft crafting/chat input"
+  ],
+  "next_bounded_step": "Desktop owner to establish actual client/world/server run/active recipe stack correlation and publish/revoke the fresh observation; live access needs serving-owner admission.",
+  "tested_source_sha256": {
+    "src/minecraft_ai/pack_scope.py": "eb213e8c2562e4761400d52812490983ef58e958a9817b80bdacc41922258e7d",
+    "src/minecraft_ai/pack_recipes.py": "039979d9f7091a5e198524fc139999bcb42d6731e8e0d38a2653c70255b43520",
+    "src/minecraft_ai/cognition/controller.py": "cedcea394714b1ffb63a961773e25bac302416e3e0680f4659010c006786fef9",
+    "src/minecraft_ai/cognition/types.py": "bf53cf3894f63c7788ebe5ac86932ade290aa3c341929cdf8ae60a427c8b1708",
+    "src/minecraft_ai/runtime.py": "6642ff12d9f7a395504fb85ac3b73ec12119a67500cd295e734989d7435ae716",
+    "src/minecraft_ai/game_chat.py": "3a945456c14fbc238f0d2c7a6f44263f2f77ec0ba29be4d739f6d0a3c9f912b8",
+    "src/minecraft_ai/memory/storage.py": "360a4b4636abe9e88bbad2a880b749f3fc5d4c6eedf69d07e70314b1ea923ddb",
+    "src/minecraft_ai/storage.pyi": "86ed60d3686465dc44ec972c56a2694951bbf5916bf785e37e8e759f3414a370",
+    "tests/test_pack_recipe_scope.py": "a1958faa0d77e16c1b8ae9aa72833a9d9a5e795c8d049e81fc4a649ab1307338",
+    "tests/test_bound_cognition_runtime.py": "8d5f64602e2943244f8073baa843bea37c1c7294f877589fb66373b17a30d9e1",
+    "tests/test_game_forge_recipe_contract.py": "16fc55a64ee770dd2c950a3fc0673cf7d6e03d0ec1b3ba785f20eb9d2e79bd2a"
+  }
+}
