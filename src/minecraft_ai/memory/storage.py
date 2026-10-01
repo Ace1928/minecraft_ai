@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +31,10 @@ if TYPE_CHECKING:
 SCHEMA_VERSION = 8
 MAX_OPERATOR_REVISION = (1 << 63) - 1
 _OPERATOR_REVISION_KEY = "operator_authority_revision"
+
+
+class OperatorResponseAdmissionError(RuntimeError):
+    """A response lost its host observation before its write could commit."""
 
 
 @dataclass(frozen=True)
@@ -893,8 +897,17 @@ class StateDatabase:
         *,
         timestamp_ns: int,
         response_text: str | None = None,
+        admission: Callable[[], bool] | None = None,
     ) -> OperatorMessage:
+        """Keep optional bounded observation admission inside the writer transaction.
+
+        The callback only reads host metadata: no inference, input or I/O. Check
+        after acquiring the writer (which may wait), then immediately before
+        commit. A lost scope rolls back the entire response/status write.
+        """
         with self._transaction(write=True):
+            if admission is not None and not admission():
+                raise OperatorResponseAdmissionError("operator response scope changed")
             row = self.connection.execute(
                 "SELECT payload FROM operator_messages WHERE message_id=?",
                 (message_id,),
@@ -910,6 +923,8 @@ class StateDatabase:
                 changes["response_text"] = response_text
             updated = current.model_copy(update=changes)
             self._store_operator_message(updated)
+            if admission is not None and not admission():
+                raise OperatorResponseAdmissionError("operator response scope changed")
             return updated
 
     def save_trajectory_manifest(self, manifest: TrajectoryManifest) -> None:

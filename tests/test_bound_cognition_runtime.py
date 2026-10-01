@@ -1210,3 +1210,48 @@ def test_cognition_request_deadline_covers_one_local_repair() -> None:
     default = AgentRuntime.__dataclass_fields__["cognition_request_timeout_ms"].default
     assert default >= 120_000
     assert default <= 300_000
+
+
+@pytest.mark.parametrize("during_exit", [False, True])
+def test_pack_session_change_at_final_admission_rejects_and_restores_metadata(
+    harness: _Harness, during_exit: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from test_pack_recipe_scope import active_fact, publish, scope_catalog
+    catalog = scope_catalog()
+    monkeypatch.setattr(time, "monotonic_ns", lambda: harness.clock[0])
+    board = PerceptionBlackboard()
+    instance = "bedrock:1.26.52.3:client-42"
+    publish(board, active_fact(catalog, instance))
+    harness.board = harness.runtime.blackboard = board
+    request, decision = harness.completed_candidate()
+    from minecraft_ai.plan_graph import plan_graph_from_steps
+    harness.runtime.skills = build_bootstrap_skill_library()
+    previous_graph = plan_graph_from_steps(
+        ("Observe prior fictional shelter",), goal_id="prior-fictional-goal",
+    )
+    harness.runtime._plan_graph = previous_graph
+    harness.runtime._plan_steps = previous_graph.sequential_labels()
+    harness.runtime._plan_goal_id = "prior-fictional-goal"
+    harness.runtime._warm_plan_specialists = Mock()
+    harness.runtime._adopt_plan_if_revised = AgentRuntime._adopt_plan_if_revised.__get__(
+        harness.runtime, AgentRuntime,
+    )
+    decision = decision.model_copy(update={"chosen_goal_id": "new-fictional-goal"})
+    decision._pack_recipe_identity = catalog.active_identity(board)
+    previous_decision = harness.runtime._last_decision
+    previous_plan = harness.runtime._plan_steps
+
+    def change_session() -> None:
+        harness.clock[0] += 1
+        publish(board, active_fact(catalog, instance, session="changed-fictional-run"))
+
+    if during_exit:
+        harness.database.before_exit = change_session
+    else:
+        change_session()
+    assert not harness.admit(request, decision)
+    assert request.snapshot().disposition == "publication_failed"
+    assert harness.runtime._last_decision is previous_decision
+    assert harness.runtime._plan_steps == previous_plan
+    assert harness.runtime._plan_graph is previous_graph
+    assert harness.adapter.active_publication is None

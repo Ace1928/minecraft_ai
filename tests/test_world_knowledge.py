@@ -187,14 +187,18 @@ def _operator_context(*, kind=OperatorMessageKind.QUESTION,
     ),))
 
 
-def test_operator_recipe_reference_reaches_reply_only_model_without_game_authority():
+def test_operator_recipe_reference_reaches_reply_only_channel_without_game_authority():
     evidence = WikiEvidence(
         title="Poké Ball recipe — family pack", extract="4 red apricorns and 1 copper ingot.",
         retrieved_ns=time.time_ns(), query="How do I craft a Poké Ball?",
         version_key="bedrock:1.26.52.3:pack:" + "a" * 64, confidence=1,
     )
     pack = Mock(spec=PackRecipeCatalog)
-    pack.lookup.return_value = SimpleNamespace(evidence=evidence)
+    pack.active_scope_status.return_value = "verified"
+    pack.active_identity.return_value = None
+    pack.lookup_live.return_value = SimpleNamespace(
+        evidence=evidence, chat_reply="4 red apricorns and 1 copper ingot.", identity=None,
+    )
     service = Mock()
     model = Mock(spec=["complete_constrained"])
     model.complete_constrained.return_value = ModelResponse(
@@ -209,11 +213,9 @@ def test_operator_recipe_reference_reaches_reply_only_model_without_game_authori
     board = _blackboard(query="Kid: Where is copper?")
     before = board.raw_latest()
     decision = controller.decide(board, _operator_context())
-    pack.lookup.assert_called_once_with("How do I craft a Poké Ball?", game_version="1.26.52.3")
+    pack.lookup_live.assert_called_once_with("How do I craft a Poké Ball?", board)
     service.search.assert_not_called()
-    payload = json.loads(model.complete_constrained.call_args.args[0][1].content)
-    assert payload["wiki_evidence"][0]["version"] == evidence.version_key[:80]
-    assert payload["skills"] == []
+    model.complete_constrained.assert_not_called()
     assert decision.say == "4 red apricorns and 1 copper ingot."
     assert decision.skill_id is decision.game_chat is decision.research_query is None
     assert decision.skill_parameters == {} and not decision.plan_steps
@@ -226,6 +228,9 @@ def test_operator_recipe_reference_reaches_reply_only_model_without_game_authori
 def test_operator_reference_cannot_replace_authority_or_invent_pack_answers(case):
     pack = Mock(spec=PackRecipeCatalog)
     pack.lookup.return_value = None
+    pack.lookup_live.return_value = None
+    pack.active_scope_status.return_value = "verified"
+    pack.is_recipe_query.return_value = True
     pack.mentions_pack_content.return_value = True
     service = Mock()
     controller = HighLevelController(
@@ -245,7 +250,7 @@ def test_operator_reference_cannot_replace_authority_or_invent_pack_answers(case
     assert controller._with_operator_reference(board, ctx) is ctx
     service.search.assert_not_called()
     if case != "pack_unknown":
-        pack.lookup.assert_not_called()
+        pack.lookup_live.assert_not_called()
 
 
 def test_operator_vanilla_question_uses_existing_private_search_filter(monkeypatch, tmp_path):

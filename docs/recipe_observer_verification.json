@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "validation_kind": "fictional_offline_contract_only",
+  "consumer_base": "ea94d64397f2ad027fc1dedd83c5eea2e7389e29",
+  "producer_base": "1438b457fef8aa26a42388a44ffaccfc66a461ec",
+  "source_sha256": {
+    "src/minecraft_ai/pack_observer.py": "007181835123f1cd66d3c9ff9a0fd476c94d9c84359ec9223818c9a6c1921c72",
+    "src/minecraft_ai/pack_scope.py": "8d88f921869455fdbf534c10213896fd53175b51fd331a034447e6fbe1ca3882",
+    "src/minecraft_ai/platforms/frame_cache.py": "3f2ded80c46bb64eacb2147d37094b147148ce890c57632965fd014550f7b9db",
+    "src/minecraft_ai/runtime.py": "1f995a843e00647072a941b69ccbeecb7f66d0e1d43cff73dbd5990f5f59561c",
+    "src/minecraft_ai/agent/process.py": "0fdc1b08d6eb1104d56d6b3f506b897f1c153c4add36c5c863efd19c940d3fef",
+    "src/minecraft_ai/config.py": "c49b1e25f7026a5f48165c8939bb13e393bedd33ebf4654bb6ee4d5f6a697a45",
+    "tests/test_pack_observer.py": "8332ad44ec6363426ebc023ede475b4cd3337aad653440ee731efb8838416127",
+    "tests/test_game_forge_recipe_contract.py": "14d5f3ae8cf1f8757ed7674d609eaf36d4697af933c0113c834417c878016b12"
+  },
+  "checks": [
+    {
+      "kind": "focused_consumer_recipe_delivery_scope_frame_cache_bound_runtime_cross_repo_export",
+      "passed": 203,
+      "peak_rss_kib": 74448,
+      "elapsed_seconds": 2.3,
+      "timeout_seconds": 30,
+      "command": "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src:tests GAME_FORGE_KIT=<game_forge-kit> python3 -m pytest -q tests/test_pack_observer.py tests/test_pack_recipe_scope.py tests/test_game_forge_recipe_contract.py tests/test_agent_frame_cache.py tests/test_bound_cognition_runtime.py"
+    },
+    {
+      "kind": "producer_owned_launch_dashboard_projection_and_concurrent_clock",
+      "passed": 24,
+      "peak_rss_kib": 30580,
+      "elapsed_seconds": 1.37,
+      "timeout_seconds": 20
+    },
+    {
+      "kind": "ruff_changed_files",
+      "result": "passed"
+    },
+    {
+      "kind": "mypy_scope_and_observer_follow_imports_skip",
+      "result": "passed"
+    },
+    {
+      "kind": "diff_whitespace",
+      "result": "passed"
+    }
+  ],
+  "desktop_activation": "blocked_missing_loaded_stack_selected_client_connection_reviewed_catalog_pin_and_admitted_writer",
+  "limits": [
+    "No live game/observer/deployment/config changes",
+    "No real crafting/model-quality/learning qualification",
+    "Same-host Linux boot/process observer contract; fixtures skip unsupported platforms",
+    "Full suite not run locally; remote baseline CI failures reported separately"
+  ]
+}

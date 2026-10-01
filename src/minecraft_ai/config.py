@@ -162,6 +162,7 @@ class RuntimeConfig(BaseModel):
     vision_language: ModelConfig = Field(default_factory=ModelConfig)
     pack_recipe_catalog: str | None = Field(default=None, min_length=1, max_length=4096)
     pack_recipe_catalog_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    pack_recipe_observation: str | None = Field(default=None, min_length=1, max_length=4096)
     # Semantic/LATENT body (normally STEVE-1). Existing configurations retain
     # this field and behavior; the specialized body slots below are optional.
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
@@ -177,6 +178,8 @@ class RuntimeConfig(BaseModel):
     def _validate_native_world_and_pack_files(self) -> RuntimeConfig:
         if (self.pack_recipe_catalog is None) != (self.pack_recipe_catalog_sha256 is None):
             raise ValueError("pack recipe catalog path and SHA-256 must be configured together")
+        if self.pack_recipe_observation is not None and self.pack_recipe_catalog is None:
+            raise ValueError("pack recipe observation requires a reviewed catalog and pin")
         for name in ("high_level", "vision_language"):
             model = getattr(self, name)
             if model.provider == "erais-native-world":

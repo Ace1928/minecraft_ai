@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from .cognition.types import CognitionDecision, DecisionChatAuthority
+from .pack_scope import recipe_identity_matches
 from .perception import CognitionReadView, PerceptionBlackboard
 from .perception_service import (
     BEDROCK_HUD_SAFETY_SOURCE,
@@ -49,6 +50,8 @@ def game_chat_authority_matches(
     latest = view.raw_latest()
     fact = view.fact(authority.key, min_confidence=0.7)
     return (
+        recipe_identity_matches(decision.pack_recipe_identity, view)
+        and
         latest is not None and latest.instance_id == authority.instance_id
         and fact is not None and bool(fact.value) and fact.fresh()
         and fact.value == authority.value and type(fact.value) is type(authority.value)

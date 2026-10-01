@@ -32,6 +32,10 @@ from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_
 from .daemon_executor import SingleWorkerDaemonExecutor
 from .episodes import RuntimeEvent
 from .pack_recipes import PackRecipeCatalog
+from .pack_observer import RecipeObservationReader
+from .pack_scope import (
+    ActiveRecipeIdentity, RECIPE_SCOPE_UNAVAILABLE, recipe_identity_matches,
+)
 from .game_chat import game_chat_authority_matches, game_chat_delivery_admitted
 from .emergency import emergency_stop_latched
 from .execution import ExecutionTick, SkillExecutor, initiation_satisfied
@@ -94,7 +98,7 @@ from .social import (
 )
 from .telemetry import TelemetryPublisher
 from .trajectory import ActionOrigin, ActionProvenance, TrajectoryRecorder
-from .storage import OperatorContextSnapshot, StateDatabase
+from .storage import OperatorContextSnapshot, OperatorResponseAdmissionError, StateDatabase
 from .supervisor import operator_intent_lock, operator_pause_latched, send_command
 from .platforms.bedrock_x11 import CapturedFrame, ImageCaptureTimeout
 
@@ -279,6 +283,7 @@ class AgentRuntime:
     lease_id: str
     high_level: HighLevelController | None = None
     pack_recipe_catalog: PackRecipeCatalog | None = None
+    recipe_observer: RecipeObservationReader | None = None
     memories: MemoryStore = field(default_factory=MemoryStore)
     social: SocialState = field(default_factory=SocialState)
     custom_goals: list[Goal] = field(default_factory=list)
@@ -326,7 +331,7 @@ class AgentRuntime:
     )
     _pending_operator_status_updates: dict[
         str,
-        tuple[OperatorMessageStatus, int, str | None],
+        tuple[OperatorMessageStatus, int, str | None, ActiveRecipeIdentity | None],
     ] = field(default_factory=dict, init=False)
     _operator_attempts: dict[str, OperatorAttempt] = field(default_factory=dict, init=False)
     _recent_skill_runs: deque[SkillRun] = field(
@@ -682,6 +687,8 @@ class AgentRuntime:
             self.metrics.stale_frame_skips += 1
             self.metrics.consecutive_stale_frames += 1
             self._release_and_reconcile_inputs()
+            if self.recipe_observer is not None:
+                self.recipe_observer.revoke(self.blackboard)
             self.telemetry.publish(self._telemetry_payload(state="capture-stalled"))
             if self.metrics.consecutive_stale_frames >= self.stale_frame_consecutive_limit:
                 raise RuntimeError(
@@ -691,6 +698,8 @@ class AgentRuntime:
             return
         self.metrics.frames += 1
         self.metrics.last_capture_ms = (time.perf_counter() - capture_started) * 1000.0
+        if self.recipe_observer is not None:
+            self.recipe_observer.poll(self.blackboard)
         self._merge_operator_target()
         self._merge_policy_perception()
         if self.perception.stale():
@@ -704,6 +713,8 @@ class AgentRuntime:
             # stale capture, so a command failure here is tolerated — the lease
             # revocation path and release_all remain the authoritative release.
             self._release_and_reconcile_inputs()
+            if self.recipe_observer is not None:
+                self.recipe_observer.revoke(self.blackboard)
             self.telemetry.publish(self._telemetry_payload(state="capture-stalled"))
             if self.metrics.consecutive_stale_frames >= self.stale_frame_consecutive_limit:
                 raise RuntimeError(
@@ -3215,12 +3226,14 @@ class AgentRuntime:
         previous = (
             self._last_decision, self._plan_steps, self._plan_goal_id,
             self._plan_index, self._plan_started_ns,
+            getattr(self, "_plan_graph", None),
         )
 
         def restore_metadata() -> None:
             (
                 self._last_decision, self._plan_steps, self._plan_goal_id,
                 self._plan_index, self._plan_started_ns,
+                self._plan_graph,
             ) = previous
 
         def publish() -> None:
@@ -3238,6 +3251,9 @@ class AgentRuntime:
                                 or self._execution_revision != binding.execution_revision
                                 or self.high_level is None or self.high_level.model is not model
                                 or latest is None or latest.instance_id != binding.instance_id
+                                or not recipe_identity_matches(
+                                    decision.pack_recipe_identity, self.blackboard,
+                                )
                                 or time.monotonic_ns() >= binding.deadline_ns):
                             raise RuntimeError("publication_authority_changed")
                         if decision.skill_id is not None:
@@ -3262,6 +3278,8 @@ class AgentRuntime:
                         self._last_decision = decision
                         if adopt_plan:
                             self._adopt_plan_if_revised(decision)
+                if not recipe_identity_matches(decision.pack_recipe_identity, self.blackboard):
+                    raise RuntimeError("pack_identity_changed_during_publication")
             except BaseException:
                 restore_metadata()
                 raise
@@ -3570,6 +3588,14 @@ class AgentRuntime:
             return
         now = time.monotonic_ns()
         self._last_cognition_ns = now
+        if decision.pack_recipe_identity is not None and not recipe_identity_matches(
+            decision.pack_recipe_identity, self.blackboard,
+        ):
+            self._reject_bound_cognition(future, "pack_identity_changed")
+            self._pending_operator_message_ids = ()
+            self._pending_operator_message_kinds = {}
+            self._cognition_requested = True
+            return
         record = getattr(self, "_bound_cognition_requests", {}).get(future)
         if record is not None and not self._preflight_bound_cognition(record):
             self._reject_bound_cognition(future, "consumption_authority_changed")
@@ -3678,6 +3704,12 @@ class AgentRuntime:
                 self._schedule_cognition_retry(now_ns=now)
                 return
         else:
+            if decision.pack_recipe_identity is not None and not recipe_identity_matches(
+                decision.pack_recipe_identity, self.blackboard,
+            ):
+                self._pending_operator_message_ids = ()
+                self._cognition_requested = True
+                return
             self._last_decision = decision
             if idle_stall_run_id is None and not missing_target_referent:
                 self._adopt_plan_if_revised(decision)
@@ -3700,6 +3732,7 @@ class AgentRuntime:
                     OperatorMessageStatus.ACKNOWLEDGED,
                     timestamp_ns=time.time_ns(),
                     response_text=response,
+                    recipe_identity=decision.pack_recipe_identity,
                 )
             self._pending_operator_message_ids = ()
             self._pending_operator_message_kinds = {}
@@ -3755,6 +3788,11 @@ class AgentRuntime:
         if self._game_chat_completed_ns is not None:
             # Typing may have changed focus even when delivery is unconfirmed.
             # No new skill can be selected from the pre-chat captured scene.
+            return
+        if decision.pack_recipe_identity is not None and not recipe_identity_matches(
+            decision.pack_recipe_identity, self.blackboard,
+        ):
+            self._cognition_requested = True
             return
         if decision.skill_id is not None:
             running = self.executor.run
@@ -4751,6 +4789,7 @@ class AgentRuntime:
         *,
         timestamp_ns: int,
         response_text: str | None = None,
+        recipe_identity: ActiveRecipeIdentity | None = None,
     ) -> bool:
         """Commit an operator transition or retain it for bounded retry.
 
@@ -4761,14 +4800,31 @@ class AgentRuntime:
         """
         if self.state_db is None:
             return False
-        update = (status, timestamp_ns, response_text)
+        if recipe_identity is not None and not recipe_identity_matches(
+            recipe_identity, self.blackboard,
+        ):
+            self._pending_operator_status_updates.pop(message_id, None)
+            self._cognition_requested = True
+            self._clear_storage_error_if_drained()
+            return False
+        update = (status, timestamp_ns, response_text, recipe_identity)
         try:
-            self.state_db.update_operator_message_status(
-                message_id,
-                status,
-                timestamp_ns=timestamp_ns,
-                response_text=response_text,
-            )
+            if recipe_identity is None:
+                self.state_db.update_operator_message_status(
+                    message_id, status, timestamp_ns=timestamp_ns,
+                    response_text=response_text,
+                )
+            else:
+                self.state_db.update_operator_message_status(
+                    message_id, status, timestamp_ns=timestamp_ns,
+                    response_text=response_text,
+                    admission=lambda: recipe_identity_matches(recipe_identity, self.blackboard),
+                )
+        except OperatorResponseAdmissionError:
+            self._pending_operator_status_updates.pop(message_id, None)
+            self._cognition_requested = True
+            self._clear_storage_error_if_drained()
+            return False
         except KeyError:
             self._pending_operator_status_updates.pop(message_id, None)
             return False
@@ -4794,12 +4850,13 @@ class AgentRuntime:
             return
         self._last_operator_storage_retry_ns = now
         for message_id, update in tuple(self._pending_operator_status_updates.items()):
-            status, timestamp_ns, response_text = update
+            status, timestamp_ns, response_text, recipe_identity = update
             if not self._persist_operator_message_status(
                 message_id,
                 status,
                 timestamp_ns=timestamp_ns,
                 response_text=response_text,
+                recipe_identity=recipe_identity,
             ):
                 return
 
@@ -5032,6 +5089,8 @@ class AgentRuntime:
             memories = (inspection, *memories[:19])
         wiki = ()
         pack_recipe_reply = None
+        pack_recipe_identity = None
+        pack_recipe_status = None
         active_operator_pending = any(
             message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
             for message in operator_messages
@@ -5051,15 +5110,18 @@ class AgentRuntime:
             and isinstance(player_chat.value, str)
         ):
             _speaker, separator, query = player_chat.value.partition(":")
-            version_parts = self.perception.instance_id.split(":")
-            game_version = version_parts[1] if len(version_parts) > 1 else ""
-            answer = pack_recipe_catalog.lookup(
-                query if separator else player_chat.value,
-                game_version=game_version,
-            )
+            query = query if separator else player_chat.value
+            pack_recipe_status = pack_recipe_catalog.active_scope_status(blackboard)
+            answer = pack_recipe_catalog.lookup_live(query, blackboard)
             if answer is not None:
                 wiki = (answer.evidence,)
                 pack_recipe_reply = answer.chat_reply
+                pack_recipe_identity = answer.identity
+            elif (
+                pack_recipe_status != "verified"
+                and pack_recipe_catalog.is_recipe_query(query)
+            ):
+                pack_recipe_reply = RECIPE_SCOPE_UNAVAILABLE
         return CognitionContext(
             role=self.role,
             goals=goals,
@@ -5068,6 +5130,8 @@ class AgentRuntime:
             promises=self.social.active_promises(),
             wiki=wiki,
             pack_recipe_reply=pack_recipe_reply,
+            pack_recipe_identity=pack_recipe_identity,
+            pack_recipe_status=pack_recipe_status,
             operator_messages=operator_messages,
             recent_skill_runs=tuple(self._recent_skill_runs),
             current_plan=self._plan_steps,
@@ -5314,6 +5378,10 @@ class AgentRuntime:
             }
             for key, fact in sorted(fresh_facts.items())
         }
+        perception_status["recipe_observation"] = (
+            {"state": "disabled", "reason": "not_configured"}
+            if self.recipe_observer is None else self.recipe_observer.status()
+        )
         latest = self.blackboard.latest()
         perception_status["tracks"] = (
             [] if latest is None else [track.model_dump(mode="json") for track in latest.tracks]
