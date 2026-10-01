@@ -8,6 +8,8 @@ import yaml
 from platformdirs import user_config_dir, user_data_dir
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .control.request_only import RequestOnlyConfig
+
 
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -158,6 +160,7 @@ class RuntimeConfig(BaseModel):
     stale_frame_consecutive_limit: int = Field(default=3, ge=1, le=20)
     lease_renew_ms: int = Field(default=500, ge=100, le=2000)
     runtime_factory: RuntimeFactoryConfig | None = None
+    operator_request_only: RequestOnlyConfig | None = None
     high_level: ModelConfig = Field(default_factory=ModelConfig)
     vision_language: ModelConfig = Field(default_factory=ModelConfig)
     pack_recipe_catalog: str | None = Field(default=None, min_length=1, max_length=4096)

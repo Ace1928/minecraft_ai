@@ -12,7 +12,7 @@ import time
 import uuid
 from collections.abc import Callable
 from collections import deque
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, cast
@@ -27,6 +27,7 @@ from .cognition import (
 )
 from .cognition.prompts import _explicit_action_constraints
 from .control.operator_budget import OperatorAttempt
+from .control.request_only import LiteralRequestFence, RequestOnlyConfig, camera_only_spec, skill_digest
 from .action_levels import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
 from .daemon_executor import SingleWorkerDaemonExecutor
@@ -291,6 +292,7 @@ class AgentRuntime:
     mining_ruleset_id: str | None = None
     motor_hz: float = 20.0
     cognition_hz: float = 0.5
+    operator_request_only: RequestOnlyConfig | None = None
     # A local VLM decision plus one bounded semantic repair can exceed a minute
     # on the managed machine; a shorter deadline silently discards completed
     # decisions and re-enters planning, which starves every skill.
@@ -334,6 +336,8 @@ class AgentRuntime:
         tuple[OperatorMessageStatus, int, str | None, ActiveRecipeIdentity | None],
     ] = field(default_factory=dict, init=False)
     _operator_attempts: dict[str, OperatorAttempt] = field(default_factory=dict, init=False)
+    _literal_request_fence: LiteralRequestFence | None = field(default=None, init=False)
+    _request_only_inputs_released: bool = field(default=False, init=False)
     _recent_skill_runs: deque[SkillRun] = field(
         default_factory=lambda: deque(maxlen=8),
         init=False,
@@ -393,6 +397,13 @@ class AgentRuntime:
     _planks_failure_memory_initialized: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
+        if self.operator_request_only is not None:
+            if not isinstance(self.operator_request_only, RequestOnlyConfig):
+                raise ValueError("request-only mode requires its validated configuration")
+            self._literal_request_fence = LiteralRequestFence(
+                self.operator_request_only, time.time_ns(),
+                time.monotonic_ns() + self.operator_request_only.wait_timeout_ms * 1_000_000,
+            )
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz < 0:
             raise ValueError(
                 "motor/cognition frequencies must be positive and semantic nonnegative"
@@ -488,7 +499,7 @@ class AgentRuntime:
             self._lease_thread = lease_thread
             if self._stop.is_set():
                 return
-            if self.perception.active_vlm is not None:
+            if self.perception.active_vlm is not None and self.operator_request_only is None:
                 self.perception.active_vlm.start()
             if self._stop.is_set():
                 return
@@ -512,10 +523,12 @@ class AgentRuntime:
             self._merge_operator_target()
             if self._stop.is_set():
                 return
-            self._start_cognition_if_due()
+            if self.operator_request_only is None:
+                self._start_cognition_if_due()
             if self._stop.is_set():
                 return
-            self._warmup_policy()
+            if self.operator_request_only is None:
+                self._warmup_policy()
             while not self._stop.is_set():
                 tick_started = time.perf_counter()
                 self.tick()
@@ -621,6 +634,8 @@ class AgentRuntime:
         ))
 
     def _warmup_policy(self) -> None:
+        if self.operator_request_only is not None:
+            return
         warmup = getattr(self.executor.policy, "warmup", None)
         if not callable(warmup):
             return
@@ -633,6 +648,182 @@ class AgentRuntime:
             # Keep the agent available on its fallback route while surfacing the
             # exact checkpoint startup failure in operator telemetry.
             self._policy_warmup_error = f"{type(exc).__name__}: {exc}"
+
+    def _finish_request_only(self, reason: str) -> None:
+        fence = self._literal_request_fence
+        if fence is None:
+            raise RuntimeError("request-only owner missing")
+        fence.finish(reason)
+        # Always release, even when the skill/authority receipt is unavailable.
+        # A failed acknowledgement leaves the normal pending-release gate armed.
+        released = False
+        try:
+            released = self._release_and_reconcile_inputs()
+            run = self.executor.run
+            if (run is not None and run.run_id == fence.run_id
+                    and run.outcome == SkillOutcome.RUNNING):
+                self.executor.expire_operator_attempt(
+                    now_ns=time.monotonic_ns(), reason=f"operator.attempt_request_only:{reason}",
+                )
+                self._record_terminal_run(self.executor.run, advance_plan=False)
+                self._execution_revision += 1
+        finally:
+            # Persisting an expiry can fail independently of physical release.
+            # Retain an early acknowledgement, or retry the still-pending
+            # release even when terminal bookkeeping raised. The fence never
+            # reopens; normal runtime cleanup remains the final release owner.
+            if not released:
+                self._release_and_reconcile_inputs()
+
+    def _tick_request_only(self) -> None:
+        """One literal survey through the existing policy/executor, then hold.
+
+        Capture and release stay available. Death, modal/unsafe scenes abort
+        this camera-only window; they do not grant an uncounted respawn/click.
+        Ordinary scene recovery can be requested separately after this owner is
+        retired. No cognition, VLM query, inventory direction or recovery goal
+        is called from this branch.
+        """
+        fence = self._literal_request_fence
+        if fence is None:
+            raise RuntimeError("request-only owner missing")
+        self._flush_pending_skill_stats()
+        self._flush_pending_learning_records()
+        self._flush_pending_operator_status_updates()
+        if not self._request_only_inputs_released:
+            self._request_only_inputs_released = self._release_and_reconcile_inputs()
+            return  # Observe a new frame after the physical release.
+        if fence.state == "terminal":
+            self.telemetry.publish(self._telemetry_payload(state="request-only-held"))
+            return
+        if fence.state == "waiting" and time.monotonic_ns() >= fence.waiting_deadline_ns:
+            self._finish_request_only("no_request_deadline")
+            return
+        if not self._headroom_scene_is_safe():
+            if fence.state == "running":
+                self._finish_request_only("scene_unavailable")
+            self.telemetry.publish(self._telemetry_payload(state="request-only-held"))
+            return
+        if self.state_db is None:
+            self._finish_request_only("durable_authority_missing")
+            return
+        if fence.state == "waiting":
+            try:
+                with operator_intent_lock(timeout_s=0.05):
+                    if self._stop.is_set() or operator_pause_latched() or emergency_stop_latched():
+                        return
+                    snapshot = self.state_db.load_operator_context(limit=1000)
+                    pending = tuple(message for message in snapshot.messages if message.status in {
+                        OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+                    })
+                    # Do not guess between concurrent/paid/question requests or
+                    # replay an old delivered instruction after a restart.
+                    if len(pending) != 1:
+                        return
+                    message = pending[0]
+                    spec = self.skills.get(fence.config.skill_id)
+                    if fence.admission_reason(message, spec) is not None:
+                        return
+                    attempt = OperatorAttempt.admit(
+                        message, wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns(),
+                    )
+                    if attempt.terminal_reason is not None:
+                        fence.finish(attempt.terminal_reason)
+                        return
+                    if not initiation_satisfied(spec, self.blackboard):
+                        return
+                    with self.state_db.admit_operator_revision(snapshot.revision) as current:
+                        if not current:
+                            return
+                        if not self._persist_operator_message_status(
+                            message.message_id, OperatorMessageStatus.ACKNOWLEDGED,
+                            timestamp_ns=time.time_ns(), response_text="Starting the bounded survey.",
+                        ):
+                            return
+                        fence.bind(message, spec, attempt,
+                                   revision=self.state_db.operator_revision(), run_id=uuid.uuid4().hex)
+                        self._operator_attempts[fence.context_key] = attempt
+                # No database/operator lock spans policy construction/warmup.
+                self._start_skill(
+                    spec, source=SkillStartSource.COGNITION, run_id=fence.run_id,
+                    context_key=fence.context_key,
+                    parameters=spec.action_permissions.model_dump(),
+                    instruction=spec.policy_instruction,
+                )
+            except (sqlite3.Error, RuntimeError):
+                self._finish_request_only("authority_unavailable")
+                return
+        run = self.executor.run
+        try:
+            snapshot = self.state_db.load_operator_context(limit=1000)
+            reason = fence.check(snapshot, run, self.skills.get(fence.config.skill_id),
+                                 now_ns=time.monotonic_ns())
+        except (sqlite3.Error, ValueError, KeyError):
+            reason = "authority_unavailable"
+        if reason is not None:
+            self._finish_request_only(reason)
+            return
+        if run is None or run.outcome != SkillOutcome.RUNNING:
+            self._finish_request_only("skill_terminal")
+            return
+        self._merge_policy_perception()
+        motor_started = time.perf_counter()
+        result = self.executor.tick(
+            self.blackboard, sequence=self._sequence, now_ns=time.monotonic_ns(),
+            capture=getattr(self.perception, "last_capture", None),
+        )
+        result = self._expire_operator_result(result)
+        sent = None
+        if result.action is not None:
+            sent = self._send_motor(result.action, execution=result)
+        self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
+        if sent is False:
+            self._finish_request_only("motor_admission_refused")
+            return
+        if result.run.outcome != SkillOutcome.RUNNING:
+            self._record_terminal_run(result.run, outcome_verification=result.outcome_verification,
+                                      advance_plan=False)
+            self._finish_request_only(f"skill_{result.run.outcome.value}")
+        self.telemetry.publish(self._telemetry_payload(state="request-only-survey"))
+
+    @contextmanager
+    def _request_only_motor_authority(self, action: MotorAction, execution: ExecutionTick | None):
+        """Keep the final request/revision/deadline check across actual dispatch."""
+        if self.operator_request_only is None:
+            yield True
+            return
+        fence = self._literal_request_fence
+        # Mandatory releases do not acquire positive-action authority.
+        release_only = not (action.keys_down or action.buttons_down or action.mouse_dx
+                            or action.mouse_dy or action.cursor_x is not None)
+        if release_only:
+            yield True
+            return
+        if (fence is None or self.state_db is None or action.keys_down or action.buttons_down
+                or action.camera_semantics != "world" or action.cursor_x is not None):
+            if fence is not None:
+                fence.finish("camera_press_refused")
+            yield False
+            return
+        stack = ExitStack()
+        try:
+            stack.enter_context(operator_intent_lock(timeout_s=0.05))
+            current = stack.enter_context(self.state_db.admit_operator_revision(fence.operator_revision))
+            snapshot = self.state_db.load_operator_context(limit=1000)
+            run = self.executor.run if execution is None else execution.run
+            reason = fence.check(snapshot, run, self.skills.get(fence.config.skill_id),
+                                 now_ns=time.monotonic_ns())
+            if not current or self._stop.is_set() or operator_pause_latched() or emergency_stop_latched():
+                reason = "request_authority_changed"
+        except (sqlite3.Error, RuntimeError, ValueError, KeyError):
+            stack.close()
+            fence.finish("authority_unavailable")
+            yield False
+            return
+        with stack:
+            if reason is not None:
+                fence.finish(reason)
+            yield reason is None
 
     def allow_fresh_capture(self, observation: CaptureObservation | None) -> bool:
         """Optional bounded, observation-only continuation veto for local adapters.
@@ -701,7 +892,8 @@ class AgentRuntime:
         if self.recipe_observer is not None:
             self.recipe_observer.poll(self.blackboard)
         self._merge_operator_target()
-        self._merge_policy_perception()
+        if self.operator_request_only is None:
+            self._merge_policy_perception()
         if self.perception.stale():
             self.metrics.stale_frame_skips += 1
             self.metrics.consecutive_stale_frames += 1
@@ -733,6 +925,9 @@ class AgentRuntime:
         if self._await_post_chat_capture(frame):
             return
         if not self._continue_after_capture():
+            return
+        if self.operator_request_only is not None:
+            self._tick_request_only()
             return
         if self._expire_current_operator_attempt():
             # Expiration releases the old goal. Verified death/modal recovery
@@ -2211,18 +2406,19 @@ class AgentRuntime:
                 running, action, self.perception.last_capture,
             )
         try:
-            with direction_boundary as record_direction_action:
-                # Other admission work may wait. Recheck the same owner clock
-                # immediately before the irreversible actuator boundary.
-                if not self._operator_motor_admitted(execution):
-                    return False
-                accepted = send_command(
-                    "motor-action",
-                    lease_id=self.lease_id,
-                    action=action.model_dump(mode="json"),
-                )
-                if record_direction_action is not None:
-                    record_direction_action(accepted)
+            with self._request_only_motor_authority(action, execution) as request_admitted:
+                if request_admitted:
+                    with direction_boundary as record_direction_action:
+                        # Other admission work may wait. Recheck the same owner
+                        # clock immediately before the actuator boundary.
+                        if not self._operator_motor_admitted(execution):
+                            return False
+                        accepted = send_command(
+                            "motor-action", lease_id=self.lease_id,
+                            action=action.model_dump(mode="json"),
+                        )
+                        if record_direction_action is not None:
+                            record_direction_action(accepted)
         except Exception:
             # Pause/stop can land after the preflight check while an already-running
             # tick is crossing the supervisor boundary. That revocation is an
@@ -2232,6 +2428,9 @@ class AgentRuntime:
                 self._stop.set()
                 return
             raise
+        if not request_admitted:
+            self._finish_request_only("motor_admission_refused")
+            return False
         self._note_keepalive_prediction(execution, action, provenance)
         if (
             action.camera_semantics == "world"
@@ -2296,6 +2495,8 @@ class AgentRuntime:
         return True
 
     def _request_semantics_if_due(self, frame_id: int) -> None:
+        if self.operator_request_only is not None:
+            return
         # semantic_hz=0 is event-only active perception. Explicit questions from
         # cognition and bounded GUI transactions are still permitted events.
         if self.perception.active_vlm is None:
@@ -2888,6 +3089,8 @@ class AgentRuntime:
         )
 
     def _start_cognition_if_due(self) -> bool | None:
+        if self.operator_request_only is not None:
+            return None
         if self._yield_keepalive_to_operator():
             return True
         perception_probe = getattr(self, "_cognition_perception_probe", None)
@@ -3549,6 +3752,8 @@ class AgentRuntime:
         return newest.run_id
 
     def _consume_cognition_decision(self) -> None:
+        if self.operator_request_only is not None:
+            return
         if getattr(self, "_headroom_recovery", None) is not None:
             # A decision completed against pre-recovery pixels cannot take the
             # executor while the bounded recovery owns a stable scene. In the
@@ -4216,6 +4421,8 @@ class AgentRuntime:
         return True
 
     def _deliver_game_chat(self, decision: CognitionDecision) -> bool:
+        if self.operator_request_only is not None:
+            return False
         """Deliver a bound reply through the existing lease, never another agent."""
         text = _authorized_game_chat(
             decision, self.blackboard, already_replied_ns=self._last_player_chat_replied_ns,
@@ -4433,6 +4640,19 @@ class AgentRuntime:
         self, spec: SkillSpec, kwargs: dict[str, Any],
     ) -> SkillRun | None:
         context_key = str(kwargs.get("context_key", "default"))
+        fence = self._literal_request_fence
+        if self.operator_request_only is not None and (
+            fence is None or fence.state != "running" or context_key != fence.context_key
+            or kwargs.get("run_id") != fence.run_id or spec.skill_id != fence.config.skill_id
+            or not camera_only_spec(spec) or skill_digest(spec) != fence.spec_sha256
+            or self._stop.is_set() or operator_pause_latched() or emergency_stop_latched()
+        ):
+            now = time.monotonic_ns()
+            return SkillRun(
+                run_id=kwargs.get("run_id", uuid.uuid4().hex), skill_id=spec.skill_id,
+                started_ns=now, ended_ns=now, context_key=context_key,
+                outcome=SkillOutcome.CANCELLED, failure_reason="operator.request_only:unrequested_skill",
+            )
         attempt = getattr(self, "_operator_attempts", {}).get(context_key)
         if attempt is not None:
             reason = attempt.start(now_ns=time.monotonic_ns())
@@ -5414,6 +5634,8 @@ class AgentRuntime:
         return {
             "schema_version": 1,
             "reasoning_standby": standby_status(self),
+            "operator_request_only": None if self._literal_request_fence is None
+            else self._literal_request_fence.status(),
             "state": state,
             "role": self.role.role_id,
             "lease_id": self.lease_id,

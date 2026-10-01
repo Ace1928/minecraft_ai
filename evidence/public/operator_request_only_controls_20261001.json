@@ -1,0 +1,204 @@
+{
+  "base_commit": "57159627921a3572becc18d3c1523eaa62fe2199",
+  "claim_limits": [
+    "No live game/client/server/profile/pause changes, model or numerical imports, learning-owner migration, camera performance qualification, deployment or game mastery",
+    "Controls use actual Minecraft runtime/executor and temporary realSQLite; sensors/policies/actuator are simulated",
+    "Worker HWM, manager peak and full supervision costs are separate measurements; no benchmark speed comparison",
+    "002setup refusal and003failures are retained; successful004 did not overwrite or retry consumed authorities",
+    "Accepted ERAIS factory propagation is source-confirmed; separate source-derived constructor controls have not run",
+    "Existing defaultNone legacy paths are covered; optionalmode has not been enabled in a productionprofile"
+  ],
+  "evidence_kind": "mocked_actual_runtime_engineering_controls",
+  "production_and_control_source_pins": {
+    "src/minecraft_ai/agent/process.py": {
+      "bytes": 13654,
+      "sha256": "19e504049961639b843b46159d94c5ffffc83763a3919fe55ba1d7eccfbfdd5d"
+    },
+    "src/minecraft_ai/config.py": {
+      "bytes": 12294,
+      "sha256": "3291354fa052405f13eaa6f1ad8b6f93d408de7f0c872a58c00b0c5a288d855d"
+    },
+    "src/minecraft_ai/control/request_only.py": {
+      "bytes": 4728,
+      "sha256": "bb91573cf748442d2c5a70c88d324b35890e039e8e347e0491b1d1a1c1d549ac"
+    },
+    "src/minecraft_ai/runtime.py": {
+      "bytes": 265110,
+      "sha256": "bd3ee76cf2e29b80ff9f39257039687e44ad30bc7e6d611d3bbf9cb0074c9267"
+    },
+    "tests/test_request_only_runtime.py": {
+      "bytes": 18152,
+      "sha256": "cc37c187fa18623dc699386063bea45e0bfe61bd6d179d559934713617d091c5"
+    }
+  },
+  "qualification": "optional literal camera survey runtime admission fence; waiting and terminal states do not grant autonomy",
+  "recorded_date": "2026-10-01",
+  "resource_bounds": {
+    "outer_complete_supervision_bound_s": 55,
+    "unit_cpu": "CPU0,quota100percent",
+    "unit_memory_max_bytes": 536870912,
+    "unit_runtime_max_s": 45,
+    "unit_stop_s": 5,
+    "unit_swap_max_bytes": 0,
+    "worker_address_space_bytes": 536870912,
+    "worker_cpu_s": 15,
+    "worker_wall_s": 40
+  },
+  "runs": [
+    {
+      "attempt": "002",
+      "complete_supervision_wall_s": null,
+      "controls": {
+        "failed": 0,
+        "passed": 0,
+        "planned_new_cases": 33,
+        "started": 0
+      },
+      "integrity": {
+        "blocked_attempts": [
+          {
+            "kind": "nonfixture_write"
+          }
+        ],
+        "leaked_threads": [],
+        "loaded_source_origins": 0,
+        "numerical_modules_present": [],
+        "origin_failures": [],
+        "post_source_failures": [],
+        "source_files_rehashed": 199
+      },
+      "interpretation": "Setup refusal before test collection: strict filesystem guard rejected pytest default /dev/null logging.",
+      "outcome": "failed",
+      "physical_release": {
+        "owned_cgroup_absent": true,
+        "released": true,
+        "same_invocation_before_stop": true,
+        "stop_returncode": 0,
+        "worker_exact_start_gone": true
+      },
+      "raw_sha256": {
+        "attempt-001/raw-proof.json": "0d406f8c49ac0dd3e711af699f67f0a39b394159c9cbd9c9c251df8318e31c6e",
+        "dispatch-preflight.json": "80ef54176730e99103328ece416d53dedab4991bbf7f6eac0841cbfba0142df9",
+        "dispatch.json": "e5a02eaec8ad91faa32ec8912ed2a4e313ea45a99eac601ddb41ed2e09b008d6",
+        "proposal.json": "9041ba89598c6c1f0a06b6597e15f6ae365697eb6810c99add57b7ed88f5d496",
+        "pure_controls.py": "2192fe6b869a5e2953cf45c431469b8728adc2ae77bf480ab52fc6e0db8dcfe2",
+        "release-proof.json": "3b380574364d48614366631d87e8bc0476427635124392ee829f2201fc3211a5",
+        "source-manifest.json": "197c44ff7e3e31e22ffaec4b19282c7e33a06af37da844059da29a4fda136b7f",
+        "terminal-sample.json": "dda833afcbb0e88d78d026a231a8d515b499ec8d4ad8c46a164e46313b95e84f",
+        "unit.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "unit.stdout": "0b47e6a75cff2f8a87fc39fd70eac4d6906b2e46dcab3af6aefe7e90e1ad5c72"
+      },
+      "unit_cost": {
+        "CPUUsageNSec": "393865000",
+        "MemoryPeak": "3346432",
+        "MemorySwapPeak": "0"
+      },
+      "worker_cost": {
+        "cpu_s": 0.251669575,
+        "process_hwm_bytes": 33796096,
+        "wall_s": 0.5409107769992261
+      }
+    },
+    {
+      "attempt": "003",
+      "complete_supervision_wall_s": 10.45670680799958,
+      "controls": {
+        "failed": 9,
+        "passed": 98,
+        "planned_new_cases": 33,
+        "started": 107
+      },
+      "integrity": {
+        "blocked_attempts": [],
+        "leaked_threads": [],
+        "loaded_source_origins": 111,
+        "numerical_modules_present": [],
+        "origin_failures": [],
+        "post_source_failures": [],
+        "source_files_rehashed": 199
+      },
+      "interpretation": "Actual-runtime controls exposed a terminal reason-prefix incompatibility; early input release was attempted before rejected bookkeeping.",
+      "outcome": "failed",
+      "physical_release": {
+        "owned_cgroup_absent": true,
+        "released": true,
+        "same_invocation_before_stop": true,
+        "stop_returncode": 0,
+        "worker_exact_start_gone": true
+      },
+      "raw_sha256": {
+        "attempt-001/raw-proof.json": "8181e1f7203279b7e4953f4a5c65f00db7157cfd5602c8a8557fe06692a8fde6",
+        "dispatch-preflight.json": "08482ce43a74c8c33602383d66c7fbf583c3a759b1b3bdb6d5165e547d486312",
+        "dispatch.json": "4f71e8fd443e5eec75f706a84548cbcbdbe95fa1e59e8067cf79f0ec758e8e45",
+        "proposal.json": "c6909cedeb4be0c0f0726622eca4b99758a3da5e18558cc03999deda8fbc93fa",
+        "pure_controls.py": "2ea62f2b246f2ff5717d0d5d780cca5d445fa27734077224897edb5aa0d384a8",
+        "release-proof.json": "789c70e47bd0f014e421704a1fdcf3d1bdab9c5e269b322bfb31abbf48144b5c",
+        "source-manifest.json": "197c44ff7e3e31e22ffaec4b19282c7e33a06af37da844059da29a4fda136b7f",
+        "terminal-sample.json": "ccd8bf6eeef59de403b15812e43e3df0c966d72f6b5d06ff567bce7744f018cc",
+        "unit.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "unit.stdout": "e4cd034ef1a8c59a49be601b8a9af39665dd82c1e2961cd38f2688f84847bb4b"
+      },
+      "unit_cost": {
+        "CPUUsageNSec": "4796993000",
+        "MemoryPeak": "78958592",
+        "MemorySwapPeak": "0"
+      },
+      "worker_cost": {
+        "cpu_s": 4.554686601,
+        "process_hwm_bytes": 87801856,
+        "wall_s": 9.792122408001887
+      }
+    },
+    {
+      "attempt": "004",
+      "complete_supervision_wall_s": 5.56343487200138,
+      "controls": {
+        "failed": 0,
+        "passed": 109,
+        "planned_new_cases": 35,
+        "started": 109
+      },
+      "integrity": {
+        "blocked_attempts": [],
+        "leaked_threads": [],
+        "loaded_source_origins": 111,
+        "numerical_modules_present": [],
+        "origin_failures": [],
+        "post_source_failures": [],
+        "source_files_rehashed": 199
+      },
+      "interpretation": "Material source fix uses admitted executor reason and finally retries unacknowledged release; all35new and74existing controls pass.",
+      "outcome": "passed",
+      "physical_release": {
+        "owned_cgroup_absent": true,
+        "released": true,
+        "same_invocation_before_stop": true,
+        "stop_returncode": 0,
+        "worker_exact_start_gone": true
+      },
+      "raw_sha256": {
+        "attempt-001/raw-proof.json": "cce148e76cd79f9bfcc0c86d3153f2b8143243a1967f4fe2d76be884280ecab7",
+        "dispatch-preflight.json": "c273da1a81635333b598625126e230fad7006d5a550ff840eeeb69cf0de6a113",
+        "dispatch.json": "0dc5b8409efc77ca34fa4eedb0fa50a3f7e005e388b9f8ed0b7e8e1a0ee71b78",
+        "proposal.json": "d888c95f1faabf5dae0b3336b4313b59dd942a3e323abae4f7130f3c7f190a66",
+        "pure_controls.py": "e8c3468535b29471b24c4b0856cbbf3e9da24a0a58aa09ba33440d8202e7abc0",
+        "release-proof.json": "5ac83da714f10b5a43fd11bb5ed92d188603dee21a71a6fb786664dbd91769b6",
+        "source-manifest.json": "13329a07dfe64a40d0d4847390dda3f8724ef0be2a8560d5293ed3bc0b8cd689",
+        "terminal-sample.json": "b18498046deaf7d508f8b02f3d3f193b540cff736f12fdf60d6b34d7c1406737",
+        "unit.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "unit.stdout": "12597b26ac5380cf8996372281a7889880facca95ef3ba4cf20f163d15a0cc46"
+      },
+      "unit_cost": {
+        "CPUUsageNSec": "2533225000",
+        "MemoryPeak": "61034496",
+        "MemorySwapPeak": "0"
+      },
+      "worker_cost": {
+        "cpu_s": 2.281756096,
+        "process_hwm_bytes": 67682304,
+        "wall_s": 5.0124273100009304
+      }
+    }
+  ],
+  "schema_version": 1
+}

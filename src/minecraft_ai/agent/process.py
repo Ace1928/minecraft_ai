@@ -277,6 +277,7 @@ def main(argv: list[str] | None = None) -> int:
             mining_ruleset_id=config.mining_ruleset_id,
             motor_hz=config.motor_hz,
             cognition_hz=config.cognition_hz,
+            operator_request_only=config.operator_request_only,
             semantic_hz=config.semantic_hz,
             lease_renew_ms=config.lease_renew_ms,
             stale_frame_consecutive_limit=config.stale_frame_consecutive_limit,
