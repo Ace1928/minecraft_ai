@@ -114,14 +114,14 @@ class PackRecipeCatalog:
             r"(?<![a-z0-9_./:@-])(?:with|using|from|for)(?![a-z0-9_./:@-])",
             target_clause, maxsplit=1,
         )[0]
-        before_intent = query.casefold()[:intent_match.start()]
+        prefix_before_intent = query.casefold()[:intent_match.start()]
         if re.match(
-            r"^\s*(?:with|using|from|for)(?![a-z0-9_./:@-])", before_intent,
+            r"^\s*(?:with|using|from|for)(?![a-z0-9_./:@-])", prefix_before_intent,
         ):
-            before_intent = ""  # An ingredient prelude is not the requested output.
+            prefix_before_intent = ""  # An ingredient prelude is not the output.
         explicit_targets = {
             match.group().rstrip(".")
-            for clause in (before_intent, target_clause)
+            for clause in (prefix_before_intent, target_clause)
             for match in _ITEM_KEY.finditer(clause)
         }
         if len(explicit_targets) > 1:

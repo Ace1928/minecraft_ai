@@ -12,8 +12,8 @@
     "errors": "0",
     "skipped": "0"
   },
-  "focused_wall_seconds": 1.59,
-  "focused_max_rss_kib": 72132,
+  "focused_wall_seconds": 1.41,
+  "focused_max_rss_kib": 72284,
   "producer_crafting_checks": {
     "passed": 15,
     "wall_seconds": 0.16,
@@ -43,8 +43,16 @@
   ],
   "next_bounded_gap": "Bind the configured snapshot to verified current world/session and active-stack identity; invalidate prior evidence on change. Requires service-owner admission before live checks.",
   "tested_source_sha256": {
-    "src/minecraft_ai/pack_recipes.py": "eb69f194b2b2b572d984d619255d88bc7dcf2db88ea2ba870d87bd4a1a808506",
+    "src/minecraft_ai/pack_recipes.py": "6a7385242cd0761656f93c37fa64f15c2c899a37598b60dcd87b665c235ea2f4",
     "tests/test_pack_recipe_targets.py": "da3b5c78c5661d03123c3848f802d3548dfa0cd807aa19d8c69ded53d92d3b6d",
     "tests/test_game_forge_recipe_contract.py": "ef631898eee8c24d89fdac283494a2c8e8efbc033b50de4d510892477b0cba40"
-  }
+  },
+  "targeted_mypy": {
+    "command": "mypy --follow-imports=skip src/minecraft_ai/pack_recipes.py",
+    "passed": true,
+    "wall_seconds": 1.1,
+    "max_rss_kib": 94268,
+    "whole_repository_qualified": false
+  },
+  "ci_regression_fixed": "Rename string prefix variable so before_intent retains its existing integer rank type; remote CI identified two introduced mypy errors."
 }
