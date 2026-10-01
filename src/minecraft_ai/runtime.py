@@ -26,6 +26,7 @@ from .cognition import (
     planks_retry_requires_wood,
 )
 from .cognition.prompts import _explicit_action_constraints
+from .control.operator_budget import OperatorAttempt
 from .action_levels import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
 from .daemon_executor import SingleWorkerDaemonExecutor
@@ -327,6 +328,7 @@ class AgentRuntime:
         str,
         tuple[OperatorMessageStatus, int, str | None],
     ] = field(default_factory=dict, init=False)
+    _operator_attempts: dict[str, OperatorAttempt] = field(default_factory=dict, init=False)
     _recent_skill_runs: deque[SkillRun] = field(
         default_factory=lambda: deque(maxlen=8),
         init=False,
@@ -667,7 +669,8 @@ class AgentRuntime:
     def tick(self) -> None:
         # Capture is synchronous and precedes action selection. A later tick's
         # deterministic hotbar evidence can only arrive after _send_motor below
-        # returns; a rejected send raises, while a suppressed send stops the run.
+        # returns; a rejected send raises, while budget suppression ends this
+        # tick without authorizing a recovery from its unsent action.
         capture_started = time.perf_counter()
         try:
             frame = self.perception.capture_once()
@@ -719,6 +722,11 @@ class AgentRuntime:
         if self._await_post_chat_capture(frame):
             return
         if not self._continue_after_capture():
+            return
+        if self._expire_current_operator_attempt():
+            # Expiration releases the old goal. Verified death/modal recovery
+            # retains its existing independent authority after that release.
+            self._route_observed_scene_recovery()
             return
         self._flush_pending_skill_stats()
         self._flush_pending_learning_records()
@@ -802,6 +810,9 @@ class AgentRuntime:
             now_ns=time.monotonic_ns(),
             capture=getattr(self.perception, "last_capture", None),
         )
+        # A policy call may finish after admission's deadline. A timely check
+        # before inference is insufficient authority to send its late action.
+        result = self._expire_operator_result(result)
         self._merge_policy_perception()
         result, headroom_deadline_expired = self._expire_late_headroom_child(result)
         continuation = getattr(self, "_gather_acquisition_continuation", None)
@@ -925,11 +936,15 @@ class AgentRuntime:
             gather_handoff or (verified_gather_collection and not gather_collection_complete)
         ):
             self._gather_acquisition_continuation = None
+        sent: bool | None = None
         try:
             if result.action is not None:
-                self._send_motor(result.action, execution=result)
+                sent = self._send_motor(result.action, execution=result)
+                if sent is False:
+                    self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
+                    return
         finally:
-            if result.run.outcome != SkillOutcome.RUNNING:
+            if sent is not False and result.run.outcome != SkillOutcome.RUNNING:
                 if recorded_verification is None:
                     self._record_terminal_run(
                         result.run,
@@ -1369,17 +1384,19 @@ class AgentRuntime:
                 return
             reorient_mouse_dy = _headroom_reorient_mouse_dy(current_pitch)
             if reorient_mouse_dy:
-                recovery.reorientation_moved = True
-                self._send_motor(
+                sent = self._send_motor(
                     MotorAction(
                         sequence=self._sequence,
                         mouse_dy=reorient_mouse_dy,
                         camera_semantics="world",
                     )
                 )
+                if sent is False:
+                    return
                 if self._stop.is_set():
                     self._clear_headroom_recovery(recovery)
                     return
+                recovery.reorientation_moved = True
                 _restore_policy_world_camera(
                     self.executor.policy,
                     pitch_units=current_pitch + reorient_mouse_dy,
@@ -1789,13 +1806,15 @@ class AgentRuntime:
         mouse_dy = _headroom_reorient_mouse_dy(current_pitch)
         if not mouse_dy:
             return False
-        self._send_motor(
+        sent = self._send_motor(
             MotorAction(
                 sequence=getattr(self, "_sequence", 0),
                 mouse_dy=mouse_dy,
                 camera_semantics="world",
             )
         )
+        if sent is False or self._stop.is_set():
+            return False
         executor = getattr(self, "executor", None)
         policy = None if executor is None else getattr(executor, "policy", None)
         _restore_policy_world_camera(policy, pitch_units=current_pitch + mouse_dy)
@@ -2079,7 +2098,11 @@ class AgentRuntime:
         context_key = "scene-recovery"
         parent_run_id = None
         if running is not None and running.outcome == SkillOutcome.RUNNING:
-            context_key = running.context_key
+            context_key = (
+                "scene-recovery"
+                if running.context_key in getattr(self, "_operator_attempts", {})
+                else running.context_key
+            )
             parent_run_id = running.run_id
             cancelled = self.executor.cancel()
             try:
@@ -2140,13 +2163,15 @@ class AgentRuntime:
         action: MotorAction,
         *,
         execution: ExecutionTick | None = None,
-    ) -> None:
+    ) -> bool | None:
         if self._stop.is_set() or operator_pause_latched():
             self._gather_acquisition_continuation = None
             self._stop.set()
             return
         if self._input_release_pending_ns is not None:
             raise RuntimeError("input release acknowledgement is pending")
+        if not self._operator_motor_admitted(execution):
+            return False
         # The supervisor lease has one global replay counter, while learned
         # policy bodies and synthetic controllers maintain independent local
         # counters. Runtime rebases a lagging route onto the wire counter, but
@@ -2176,6 +2201,10 @@ class AgentRuntime:
             )
         try:
             with direction_boundary as record_direction_action:
+                # Other admission work may wait. Recheck the same owner clock
+                # immediately before the irreversible actuator boundary.
+                if not self._operator_motor_admitted(execution):
+                    return False
                 accepted = send_command(
                     "motor-action",
                     lease_id=self.lease_id,
@@ -2253,6 +2282,7 @@ class AgentRuntime:
         observer = getattr(self.executor.policy, "observe_accepted_action", None)
         if callable(observer):
             observer(action=action, capture=self.perception.last_capture)
+        return True
 
     def _request_semantics_if_due(self, frame_id: int) -> None:
         # semantic_hz=0 is event-only active perception. Explicit questions from
@@ -3729,13 +3759,16 @@ class AgentRuntime:
         if decision.skill_id is not None:
             running = self.executor.run
             if running is not None and running.outcome == SkillOutcome.RUNNING:
-                if self._should_nest_option(running.skill_id, decision.skill_id):
+                child_context = decision.chosen_goal_id or running.context_key
+                if self._should_nest_option(running.skill_id, decision.skill_id) and (
+                    running.context_key not in getattr(self, "_operator_attempts", {})
+                    or child_context == running.context_key
+                ):
                     spec = self.skills.get(decision.skill_id)
-                    self._request_policy_warm(spec.action_level)
-                    self.executor.push_child(
+                    self._push_child_skill(
                         spec,
                         run_id=uuid.uuid4().hex,
-                        context_key=decision.chosen_goal_id or running.context_key,
+                        context_key=child_context,
                         parameters=decision.skill_parameters,
                         instruction=decision.instruction,
                     )
@@ -4315,6 +4348,9 @@ class AgentRuntime:
         origin: SkillDecisionOrigin | None = None, parent_run_id: str | None = None,
         **kwargs: Any,
     ) -> SkillRun:
+        refused = self._admit_operator_skill_start(spec, kwargs)
+        if refused is not None:
+            return refused
         self._request_policy_warm(spec.action_level)
         self._warm_plan_specialists(skip_skill_id=spec.skill_id)
         run = self.executor.start(spec, **kwargs)
@@ -4347,6 +4383,161 @@ class AgentRuntime:
                 "Skill-start observer failed: %s", type(error).__name__,
             )
         return run
+
+    def _push_child_skill(self, spec: SkillSpec, **kwargs: Any) -> SkillRun:
+        refused = self._admit_operator_skill_start(spec, kwargs)
+        if refused is not None:
+            return refused
+        self._request_policy_warm(spec.action_level)
+        return self.executor.push_child(spec, **kwargs)
+
+    def _admit_operator_skill_start(
+        self, spec: SkillSpec, kwargs: dict[str, Any],
+    ) -> SkillRun | None:
+        context_key = str(kwargs.get("context_key", "default"))
+        attempt = getattr(self, "_operator_attempts", {}).get(context_key)
+        if attempt is not None:
+            reason = attempt.start(now_ns=time.monotonic_ns())
+            if reason is not None:
+                running = self.executor.run
+                if running is not None and running.context_key == context_key and (
+                    running.outcome == SkillOutcome.RUNNING
+                ):
+                    expired = self._expire_operator_result(ExecutionTick(run=running, action=None))
+                    self._record_terminal_run(expired.run, advance_plan=False)
+                    self._execution_revision += 1
+                else:
+                    self._close_operator_attempt(context_key)
+                    self._release_and_reconcile_inputs()
+                now = time.monotonic_ns()
+                refused = SkillRun(
+                    run_id=kwargs.get("run_id", uuid.uuid4().hex),
+                    skill_id=spec.skill_id, started_ns=now, ended_ns=now,
+                    context_key=context_key, parameters=kwargs.get("parameters", {}),
+                    outcome=SkillOutcome.TIMED_OUT, failure_reason=reason,
+                )
+                self._record_terminal_run(refused, advance_plan=False)
+                return refused
+        return None
+
+    def _remember_operator_attempts(
+        self, messages: tuple[OperatorMessage, ...],
+    ) -> tuple[OperatorMessage, ...]:
+        attempts = getattr(self, "_operator_attempts", None)
+        if attempts is None:
+            attempts = self._operator_attempts = {}
+        if not attempts and not any(message.execution_budget is not None for message in messages):
+            return messages
+        now, wall = time.monotonic_ns(), time.time_ns()
+        # Retain exhausted owners for this runtime's lifetime. Evicting one
+        # while a decision or suspended option still names it would turn an
+        # exhausted bounded context into an apparently unbounded context.
+        result = []
+        for message in messages:
+            context_key = f"operator:{message.message_id}"
+            owner = attempts.get(context_key)
+            if owner is None and message.execution_budget is not None:
+                owner = attempts[context_key] = OperatorAttempt.admit(
+                    message, wall_ns=wall, monotonic_ns=now,
+                )
+            if owner is not None:
+                owner.bind(message)
+                reason = owner.check(now_ns=now)
+                if reason is not None:
+                    self._close_operator_attempt(context_key)
+                    if message.status in {
+                        OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+                    }:
+                        self._persist_operator_message_status(
+                            message.message_id, OperatorMessageStatus.ACKNOWLEDGED,
+                            timestamp_ns=wall, response_text=f"Request refused: {reason}.",
+                        )
+                    # Selection happens before this filter: an old instruction
+                    # must not regain authority underneath the exhausted one.
+                    continue
+            result.append(message)
+        return tuple(result)
+
+    def _close_operator_attempt(self, context_key: str) -> None:
+        if getattr(self, "_plan_goal_id", None) == context_key:
+            self._plan_steps = ()
+            self._plan_graph = None
+            self._plan_goal_id = None
+            self._plan_index = 0
+        recovery = getattr(self, "_headroom_recovery", None)
+        if recovery is not None and recovery.context_key == context_key:
+            self._clear_headroom_recovery(recovery)
+        collection = getattr(self, "_gather_acquisition_continuation", None)
+        if collection is not None and collection.context_key == context_key:
+            self._gather_acquisition_continuation = None
+
+    def _expire_operator_result(self, result: ExecutionTick) -> ExecutionTick:
+        owner = getattr(self, "_operator_attempts", {}).get(result.run.context_key)
+        if owner is None:
+            return result
+        now = time.monotonic_ns()
+        reason = owner.check(now_ns=now)
+        if reason is None:
+            return result
+        self._close_operator_attempt(result.run.context_key)
+        # Independent physical acknowledgement stays mandatory. Failed release
+        # leaves the existing pending-release gate armed; no action is returned.
+        self._release_and_reconcile_inputs()
+        if self.executor.run is not None and self.executor.run.run_id == result.run.run_id:
+            self.executor.expire_operator_attempt(now_ns=now, reason=reason)
+        expired = result.run.model_copy(update={
+            "outcome": SkillOutcome.TIMED_OUT, "ended_ns": now,
+            "failure_reason": reason, "failure_code": None,
+        })
+        return replace(result, run=expired, action=None, recovery_skills=(),
+                       motor_intent=None, policy_proposal=None, outcome_verification=None)
+
+    def _expire_current_operator_attempt(self) -> bool:
+        run = self.executor.run
+        recovery = getattr(self, "_headroom_recovery", None)
+        if recovery is not None:
+            owner = getattr(self, "_operator_attempts", {}).get(recovery.context_key)
+            if owner is not None and owner.check(now_ns=time.monotonic_ns()) is not None:
+                if (run is not None and run.outcome == SkillOutcome.RUNNING
+                        and run.context_key == recovery.context_key):
+                    # The active child owns the same release/terminal operation.
+                    # Do not send a second physical release for its parent.
+                    expired = self._expire_operator_result(ExecutionTick(run=run, action=None))
+                    self._record_terminal_run(expired.run, advance_plan=False)
+                    self._execution_revision += 1
+                    return True
+                self._close_operator_attempt(recovery.context_key)
+                self._release_and_reconcile_inputs()
+                if run is None or run.outcome != SkillOutcome.RUNNING:
+                    return True
+        if run is None or run.outcome != SkillOutcome.RUNNING:
+            return False
+        result = ExecutionTick(run=run, action=None)
+        expired = self._expire_operator_result(result)
+        if expired is result:
+            return False
+        self._record_terminal_run(expired.run, advance_plan=False)
+        self._execution_revision += 1
+        return True
+
+    def _operator_motor_admitted(self, execution: ExecutionTick | None) -> bool:
+        recovery = getattr(self, "_headroom_recovery", None)
+        run = self.executor.run if execution is None else execution.run
+        context_key = (
+            recovery.context_key if execution is None and recovery is not None
+            else None if run is None else run.context_key
+        )
+        owner = getattr(self, "_operator_attempts", {}).get(context_key)
+        if owner is None or owner.check(now_ns=time.monotonic_ns()) is None:
+            return True
+        if run is not None and run.context_key == context_key:
+            expired = self._expire_operator_result(ExecutionTick(run=run, action=None))
+            self._record_terminal_run(expired.run, advance_plan=False)
+            self._execution_revision += 1
+        else:
+            self._close_operator_attempt(context_key)
+            self._release_and_reconcile_inputs()
+        return False
 
     def _record_terminal_run(
         self,
@@ -4824,6 +5015,7 @@ class AgentRuntime:
                     limit=20,
                 )
             operator_messages = _active_operator_messages(messages)
+        operator_messages = self._remember_operator_attempts(operator_messages)
         inspection = self._headroom_inspection_memory
         if (
             inspection is not None

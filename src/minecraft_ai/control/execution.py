@@ -1611,6 +1611,19 @@ class SkillExecutor:
             terminal=True,
         )
 
+    def expire_operator_attempt(self, *, now_ns: int, reason: str) -> ExecutionTick:
+        """End the request and its suspended options without policy callbacks.
+
+        This records the timeout only. Physical release still belongs to the
+        runtime's independently acknowledged supervisor operation.
+        """
+        if not reason.startswith("operator.attempt_"):
+            raise ValueError("operator attempt terminal reason required")
+        if self._run is None or self._spec is None:
+            raise RuntimeError("no skill is running")
+        self._option_stack.clear()
+        return self._finish(SkillOutcome.TIMED_OUT, now_ns, reason, terminal=True)
+
     def _finish(
         self,
         outcome: SkillOutcome,

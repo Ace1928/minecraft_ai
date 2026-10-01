@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 
 class PromiseStatus(StrEnum):
@@ -52,6 +52,15 @@ class OperatorMessageStatus(StrEnum):
     ARCHIVED = "archived"
 
 
+class OperatorExecutionBudget(BaseModel):
+    """Total request lifetime and total ordinary skill starts, including recovery."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    timeout_ms: StrictInt = Field(ge=50, le=300_000)
+    max_skills: StrictInt = Field(ge=1, le=16)
+
+
 class OperatorMessage(BaseModel):
     """Durable high-level input from the local operator surface.
 
@@ -75,6 +84,17 @@ class OperatorMessage(BaseModel):
     # message endpoint cannot supply these fields; the receipt owns authority.
     direction_request_id: str | None = None
     direction_attempt_id: str | None = None
+    execution_budget: OperatorExecutionBudget | None = None
+
+    @model_validator(mode="after")
+    def validate_execution_budget(self) -> OperatorMessage:
+        if self.execution_budget is not None and (
+            self.kind not in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+            or self.direction_request_id is not None
+            or self.direction_attempt_id is not None
+        ):
+            raise ValueError("execution budget requires an ordinary instruction or correction")
+        return self
 
 
 class Promise(BaseModel):

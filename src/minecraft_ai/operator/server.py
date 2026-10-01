@@ -1068,7 +1068,7 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
         return cast(dict[str, Any], payload)
 
     def _post_message(self, payload: dict[str, Any]) -> None:
-        allowed = {"text", "kind", "priority", "author"}
+        allowed = {"text", "kind", "priority", "author", "execution_budget"}
         unexpected = sorted(set(payload) - allowed)
         if unexpected:
             raise ValueError(f"unsupported fields: {', '.join(unexpected)}")
@@ -1079,6 +1079,7 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             kind=OperatorMessageKind(str(payload.get("kind", "instruction"))),
             priority=float(payload.get("priority", 0.8)),
             author=str(payload.get("author", "operator")).strip()[:80] or "operator",
+            execution_budget=payload.get("execution_budget"),
         )
         with StateDatabase(app_paths().state_db) as database:
             database.save_operator_message(message)
