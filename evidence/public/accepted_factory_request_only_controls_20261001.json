@@ -1,0 +1,77 @@
+{
+  "accepted_factory_source_sha256": "25123a88a3ecba2d3167d87267a538e55ef63992f79c643fae160f65dce8725e",
+  "claim_limits": [
+    "No whole ERAIS module import, actual association/NPZ/model initialization, numerical workload or live factory assembly",
+    "No live Minecraft controls, service/profile/pause/sourceinstallation, camera/gameplay/mastery or modelquality qualification",
+    "This does not qualify the separately prepared accepted7aec+budget compatibleoverlay",
+    "WorkerHWM, manager peak and whole supervision costs remain distinct",
+    "The actual main factory retention audit source is pinned separately; these3cases test accepted construction propagation, not a complete service startup"
+  ],
+  "complete_supervision_wall_s": 2.1873160720024316,
+  "declared_bounds": {
+    "complete_supervision_wall_s": 55,
+    "observed_cost_scopes": "Worker HWM and manager accounting are distinct measurements, not a single full-lifetime peak. Complete supervision includes admission, dispatch, sampling and authenticated physical cleanup.",
+    "unit": {
+      "AllowedCPUs": "0",
+      "CPUQuota": "100%",
+      "KillMode": "control-group",
+      "MemoryMax": 536870912,
+      "MemorySwapMax": 0,
+      "Restart": "no",
+      "RuntimeMaxSec": 45,
+      "TimeoutStopSec": 5
+    },
+    "worker": {
+      "address_space_bytes": 536870912,
+      "cpu_s": 15,
+      "installed_before": "pytest and production imports",
+      "wall_s": 40
+    }
+  },
+  "evidence_kind": "source_derived_accepted_factory_constructor_controls",
+  "integrity": {
+    "blocked_attempts": [],
+    "leaked_threads": [],
+    "loaded_minecraft_origins": 94,
+    "numerical_modules_present": [],
+    "origin_failures": [],
+    "post_source_failures": [],
+    "source_files_rehashed": 202
+  },
+  "manager_cost": {
+    "CPUUsageNSec": "1484947000",
+    "MemoryPeak": "51625984",
+    "MemorySwapPeak": "0"
+  },
+  "minecraft_main_qualification_base_commit": "57159627921a3572becc18d3c1523eaa62fe2199",
+  "physical_release": {
+    "owned_cgroup_absent": true,
+    "released": true,
+    "same_invocation_before_stop": true,
+    "stop_returncode": 0,
+    "worker_exact_start_gone": true
+  },
+  "qualified": "Exact accepted _runtime_type/create_runtime function ASTs retain request-only/defaultNone supplied fields through the real Minecraft AgentRuntime constructor and refuse cancelled construction. Association/observer construction replaced by fakes.",
+  "raw_sha256": {
+    "approved-control-budget.json": "919b2387f69073872dac36336426da16be6bb9da6abd8e5c6be659f919ae912c",
+    "attempt-001/raw-proof.json": "9bf0256ac58c7c7d9c46ea4a9e428eb37852cc11587e4646de4eaf8122e8db03",
+    "dispatch-preflight.json": "efdbf759f65195ef09ada9d692348657f3570078524b8b1d2ee38d4869b1e430",
+    "dispatch.json": "81501038b6c8caef76dcd496d94e916b91dbae7a5bc39e75b17a2c3baccc443e",
+    "proposal.json": "80c06404f3b6f8a99646da999cde11408be7df6fb26b080acf4d79424f134425",
+    "pure_controls.py": "e34b341727fbf28e75221a76b9ac589a48f5d1300dfdf540f7a9ae3d0392882c",
+    "release-proof.json": "73f2af60e1ef8025055c8e8ab02aa9272128b4f050f487cf7b808579f97d689b",
+    "root-independent-release.json": "8e1d400039511ee2b19d2f83c478b983e41805987bbb17e223246c94e04630fb",
+    "source-manifest.json": "3892edf74843b784c121dcaadb178740c3573e6a92fb8971072a299aea221cf3",
+    "terminal-sample.json": "333629d9e154756711b349ec0f9d596bac568d4f4b6ace227874f6c98c495009",
+    "unit.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unit.stdout": "2fac095b607a3098c31bd16abea685565efb1dd7ceed3938c4d2c4d6c27a421f"
+  },
+  "recorded_date": "2026-10-01",
+  "schema_version": 1,
+  "tested_controls": 3,
+  "worker_cost": {
+    "cpu_s": 1.2375625099999998,
+    "process_hwm_bytes": 64835584,
+    "wall_s": 1.68612179900083
+  }
+}

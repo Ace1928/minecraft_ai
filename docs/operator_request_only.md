@@ -78,6 +78,11 @@ The raw-source and retained-result hashes, failures, bounds and qualification
 limits are in [the public engineering proof](../evidence/public/operator_request_only_controls_20261001.json).
 
 The accepted ERAIS factory forwards all runtime constructor arguments unchanged,
-and the existing Minecraft factory checks supplied field identity. Separate
-source-derived constructor controls are still prospective. The production
-profile and explicit operator pause have not been changed by this work.
+and the existing Minecraft factory checks supplied field identity. A separate
+three-case check of the exact accepted factory functions passed with the real
+runtime constructor and mocked association/observer initialization. Its bounds,
+costs and independent physical release are retained in [the separate constructor
+proof](../evidence/public/accepted_factory_request_only_controls_20261001.json).
+It proves argument propagation, not actual model/NPZ loading, live factory
+assembly or compatibility of the separately prepared deployment overlay. The
+production profile and explicit operator pause have not been changed by this work.
