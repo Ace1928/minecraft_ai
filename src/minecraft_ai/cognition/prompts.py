@@ -384,7 +384,7 @@ def _operator_prompt_payload(message: OperatorMessage) -> dict[str, object]:
         "message_id": message.message_id[:128],
         "created_ns": message.created_ns,
         "author": message.author[:64],
-        "text": message.text[:_MAX_OPERATOR_PROMPT_TEXT_CHARS],
+        "text": message.text,
         "kind": message.kind.value,
         "priority": message.priority,
         "status": message.status.value,

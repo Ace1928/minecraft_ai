@@ -75,6 +75,7 @@ class CognitionDecision(BaseModel):
     _model_origin: DecisionModelOrigin | None = PrivateAttr(default=None)
     _chat_authority: DecisionChatAuthority | None = PrivateAttr(default=None)
     _pack_recipe_identity: ActiveRecipeIdentity | None = PrivateAttr(default=None)
+    _configured_recipe_reference: bool = PrivateAttr(default=False)
 
     @property
     def pack_recipe_identity(self) -> ActiveRecipeIdentity | None:
@@ -177,6 +178,9 @@ class CognitionContext:
     pack_recipe_reply: str | None = None
     pack_recipe_identity: ActiveRecipeIdentity | None = None
     pack_recipe_status: str | None = None
+    # Factual configured-file information; the worker regenerates it.
+    pack_configured_information: dict[str, Any] | None = None
+    pack_configured_question: str | None = None
 
 
 @dataclass
@@ -202,6 +206,8 @@ class _DecisionRepairBounds:
     requested_skill_ids: tuple[str, ...] = ()
     reply_only: bool = False
     allowed_goal_ids: tuple[str, ...] = ()
+    # The immutable original operator literal is separate from sampler authority.
+    literal_operator: OperatorMessage | None = None
 
     def __post_init__(self) -> None:
         if self.reply_only and (

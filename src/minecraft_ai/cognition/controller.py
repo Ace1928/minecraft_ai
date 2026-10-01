@@ -92,6 +92,8 @@ class HighLevelController:
         # deliberately irrelevant, and even a legacy nested call clears it.
         token = self._request_context.set(request)
         try:
+            context = replace(context, pack_configured_information=None,
+                              pack_configured_question=None)
             identity = (
                 self.pack_recipe_catalog.active_identity(blackboard)
                 if self.pack_recipe_catalog is not None
@@ -125,11 +127,101 @@ class HighLevelController:
             decision = bind_game_chat_authority(self._decide(blackboard, context), blackboard)
             # Private host binding survives authority rewrites and repairs. It
             # cannot be proposed through the model's decision JSON schema.
-            if identity is not None:
+            if identity is not None and not decision._configured_recipe_reference:
                 decision._pack_recipe_identity = identity
             return decision
         finally:
             self._request_context.reset(token)
+
+    def _configured_reference(
+        self, query: str, blackboard: CognitionReadView,
+    ) -> dict[str, Any] | None:
+        """Read installed-file information without attesting the current game."""
+        catalog = self.pack_recipe_catalog
+        latest = blackboard.latest()
+        request = self._request_context.get()
+        if (
+            catalog is None or latest is None
+            or not self._configured_catalog_only()
+            or catalog.active_scope_status(blackboard) == "verified"
+            or (request is not None and request.snapshot().disposition != "pending")
+        ):
+            return None
+        parts = latest.instance_id.split(":")
+        if len(parts) < 2 or parts[0] != "bedrock":
+            return None
+        answer = catalog.lookup_configured_information(query, game_version=parts[1])
+        if request is not None and request.snapshot().disposition != "pending":
+            return None
+        return answer
+
+
+    def _configured_catalog_only(self) -> bool:
+        catalog = self.pack_recipe_catalog
+        if catalog is None:
+            return False
+        configured = catalog._payload.get("configured_recipe_identity")
+        return type(configured) is dict and configured.get("state") == "configured_only"
+
+
+    @staticmethod
+    def _informational_recipe_question(query: str) -> bool:
+        # A recipe instruction is not silently reclassified as an information request.
+        return bool(re.match(r"^\s*(?:how\b|what\b|recipe\s+for\b)", query, re.I))
+
+
+    def _configured_reference_response(
+        self, decision: CognitionDecision, blackboard: CognitionReadView,
+        context: CognitionContext,
+    ) -> CognitionDecision:
+        question = self._active_operator_question(context)
+        reference = context.pack_configured_information
+        text = "Live load unverified. " + reference["recipe_text"]
+        if len(text) > 160:
+            # Never truncate quantities/output; the complete reference remains
+            # factual context, but cannot be copied into this bounded reply.
+            text = "Configured recipe found. Its full scoped answer exceeds this reply limit. Live load is unverified."
+        player = blackboard.fact("social.player_message", min_confidence=0.7)
+        matching_player = False
+        if player is not None and player.fresh() and type(player.value) is str:
+            _speaker, separator, query = player.value.partition(":")
+            matching_player = (query if separator else player.value).strip() == context.pack_configured_question
+        chat = None
+        if question is None and matching_player:
+            chat = text if len(text) <= 150 else (
+                "Configured recipe is in the operator console. Live engine loading is unverified."
+            )
+        request = self._request_context.get()
+        pending_instruction = any(
+            message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+            and message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+            for message in context.operator_messages
+        )
+        valid = (
+            not pending_instruction
+            and (request is None or (
+                request.snapshot().disposition == "pending"
+                and time.monotonic_ns() < request.binding.deadline_ns
+            ))
+            and (matching_player if question is None
+                 else question.text == context.pack_configured_question)
+        )
+        if pending_instruction:
+            # Preserve the highest-authority decision and its plan; reference
+            # projection must not substitute a fresh chat question for it.
+            return decision
+        result = decision.model_copy(update={
+            "chosen_goal_id": None if question is None else f"operator:{question.message_id}",
+            "skill_id": None, "skill_parameters": {}, "request_replan": False,
+            "ask_perception": (), "research_query": None, "instruction": None,
+            "plan_steps": (), "say": text if valid else None,
+            "game_chat": chat if valid else None,
+        })
+        # Informational projection cannot inherit an observed-live binding.
+        result._pack_recipe_identity = None
+        result._configured_recipe_reference = True
+        return result
+
 
     def _with_player_reference(
         self, blackboard: CognitionReadView, context: CognitionContext,
@@ -139,6 +231,20 @@ class HighLevelController:
         Pack recipes already supplied by the runtime are authoritative here.
         General vanilla snippets are explanatory references, not game facts.
         """
+        if any(message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+               and message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+               for message in context.operator_messages):
+            return context
+        question = blackboard.fact("social.player_message", min_confidence=0.7)
+        if question is not None and question.fresh() and type(question.value) is str:
+            _speaker, separator, query = question.value.partition(":")
+            query = (query if separator else question.value).strip()
+            if self._informational_recipe_question(query):
+                reference = self._configured_reference(query, blackboard)
+                if reference is not None and question.fresh():
+                    return replace(context, wiki=(), pack_recipe_reply=None,
+                        pack_recipe_identity=None, pack_recipe_status=None,
+                        pack_configured_information=reference, pack_configured_question=query)
         if self.world_search is None or context.wiki or context.pack_recipe_reply is not None:
             return context
         question = blackboard.fact("social.player_message", min_confidence=0.7)
@@ -196,6 +302,11 @@ class HighLevelController:
         request = self._request_context.get()
         if request is not None and request.snapshot().disposition != "pending":
             return context
+        reference = self._configured_reference(question.text, blackboard)
+        if reference is not None:
+            return replace(context, wiki=(), pack_recipe_reply=None,
+                pack_recipe_identity=None, pack_recipe_status=None,
+                pack_configured_information=reference, pack_configured_question=question.text)
         if self.pack_recipe_catalog is not None:
             status = self.pack_recipe_catalog.active_scope_status(blackboard)
             answer = self.pack_recipe_catalog.lookup_live(question.text, blackboard)
@@ -379,6 +490,7 @@ class HighLevelController:
                 if active_operator is None
                 else _operator_prompt_metadata(active_operator),
                 "wiki_evidence": [_wiki_prompt_payload(item) for item in context.wiki[:2]],
+                "configured_recipe_reference": context.pack_configured_information,
                 "active_recipe_scope": context.pack_recipe_status,
                 "recent_skill_runs": [
                     {
@@ -510,6 +622,8 @@ class HighLevelController:
                 ),
             )
             decision = self._complete(messages, repair_bounds=repair_bounds)
+            if context.pack_configured_information is not None:
+                return self._configured_reference_response(decision, blackboard, context)
             player_chat = blackboard.fact("social.player_message", min_confidence=0.7)
             active_operator_pending = any(
                 message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
@@ -995,6 +1109,7 @@ class HighLevelController:
                 return _DecisionRepairBounds(
                     allowed_skills=(), authority_goal_id=f"operator:{question.message_id}",
                     reply_only=True,
+                    literal_operator=question,
                 )
             active = next(
                 (
@@ -1029,6 +1144,7 @@ class HighLevelController:
             authority_goal_id=None if active is None else f"operator:{active.message_id}",
             required_action_constraints=constraints,
             requested_skill_ids=requested_skill_ids,
+            literal_operator=active,
             allowed_goal_ids=(
                 tuple(goal.goal_id for goal in _selected_goals(
                     context.goals, active_goal_id=context.plan_goal_id,

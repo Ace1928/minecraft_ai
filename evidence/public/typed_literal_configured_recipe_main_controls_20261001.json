@@ -1,0 +1,292 @@
+{
+  "actual_model_qualification": false,
+  "attempts": [
+    {
+      "actual_loaded_module_origins": 171,
+      "actual_model_tokenizer_calls": 0,
+      "actual_status": "failed",
+      "actual_task_affinity_samples": 153,
+      "all_actual_task_affinity": [
+        3
+      ],
+      "attempt": "001",
+      "canonical_lease_acquired": false,
+      "cases_run": 76,
+      "costs": {
+        "accounting_limit": "Worker process HWM, supervisor process HWM and manager retained pre-stop metrics have distinct accounting. They are not summed or advertised as a complete memory measurement.",
+        "complete_supervision_wall_s": 6.45740494599886,
+        "manager_retained_before_owned_stop_CPU_s": 2.774717,
+        "manager_retained_before_owned_stop_MemoryPeak_bytes": 76279808,
+        "manager_retained_before_owned_stop_MemorySwapPeak_bytes": 0,
+        "supervisor_CPU_s": 0.106133211,
+        "supervisor_process_HWM_bytes": 25858048,
+        "worker_CPU_s": 2.295562533,
+        "worker_process_HWM_bytes": 93409280,
+        "worker_wall_s": 5.1787499810016016
+      },
+      "errors": 2,
+      "failures": 0,
+      "game_inputs": 0,
+      "live_controls": 0,
+      "no_guard_origin_import_source_thread_failures": true,
+      "numerical_imports": 0,
+      "passed": 74,
+      "physical_release": {
+        "cgroup_inode_authenticated": false,
+        "exact_PID_start_gone": true,
+        "original_cgroup_path_absent": true,
+        "same_owned_invocation_before_stop": true,
+        "stop_returncode": 0
+      },
+      "retained_negative": "74 cases passed and two harness/fixture errors remained: verified recipe fastpath correctly performed zero HTTP, so fixture38 indexed an absent completion; scoped SQLite assertions passed but cleanup audit resolved a relative dir_fd filename against CWD.",
+      "skipped": 0,
+      "source_files_reauthenticated_after": 500
+    },
+    {
+      "actual_loaded_module_origins": 166,
+      "actual_model_tokenizer_calls": 0,
+      "actual_status": "passed",
+      "actual_task_affinity_samples": 6,
+      "all_actual_task_affinity": [
+        3
+      ],
+      "attempt": "002",
+      "canonical_lease_acquired": false,
+      "cases_run": 2,
+      "costs": {
+        "accounting_limit": "Worker process HWM, supervisor process HWM and manager retained pre-stop metrics have distinct accounting. They are not summed or advertised as a complete memory measurement.",
+        "complete_supervision_wall_s": 3.2555618099941057,
+        "manager_retained_before_owned_stop_CPU_s": 1.851115,
+        "manager_retained_before_owned_stop_MemoryPeak_bytes": 74117120,
+        "manager_retained_before_owned_stop_MemorySwapPeak_bytes": 0,
+        "supervisor_CPU_s": 0.09732631300000001,
+        "supervisor_process_HWM_bytes": 25645056,
+        "worker_CPU_s": 1.4818227160000002,
+        "worker_process_HWM_bytes": 92360704,
+        "worker_wall_s": 1.9499206079999567
+      },
+      "errors": 0,
+      "failures": 0,
+      "game_inputs": 0,
+      "live_controls": 0,
+      "material_repair": "Production five-file source unchanged. Fixture38 verifies zero HTTP, actual lookup_live source reply and private session identity. Audit resolves each actual directory FD with fstat/readlink then preserves private-attempt containment; outside/unknown/deleted targets refuse. Only the two affected cases rerun; other74 not rerun.",
+      "no_guard_origin_import_source_thread_failures": true,
+      "numerical_imports": 0,
+      "passed": 2,
+      "physical_release": {
+        "cgroup_inode_authenticated": false,
+        "exact_PID_start_gone": true,
+        "original_cgroup_path_absent": true,
+        "same_owned_invocation_before_stop": true,
+        "stop_returncode": 0
+      },
+      "skipped": 0,
+      "source_files_reauthenticated_after": 500
+    }
+  ],
+  "base_main_commit": "3a42e6d4642898688fc7d23581728835ce548b6b",
+  "checks": [
+    "Full validated 2000-character operator text and late action prohibitions retained in initial and both repair prompts; typed authority remains separate",
+    "Configured catalogue source is informational, is disabled for verified live scope and is reobserved for the current question",
+    "Pending operator instruction/correction retains priority over player chat; model-proposed action/plan/research is removed from configured informational answers",
+    "Modern native owner, typed format and selected model-origin rules retained; arbitrary schema/grammar downgrade refused",
+    "Private configured marker is consumed before attaching an earlier observed recipe identity; scope revocation cannot rebind informational reply",
+    "Existing modern namespace, secondary output, identity rendering, receiver and scoped SQLite response checks retained; runtime/motor safety not replaced"
+  ],
+  "configured_catalog": {
+    "bds_version": "1.26.52.3",
+    "content_version": "1.3.156",
+    "craft_execution": false,
+    "identity_verified": false,
+    "motor_permission": false,
+    "scope": "configured_snapshot",
+    "sha256": "08fa9275017dde760c44eea3b46799833ca01a752a8cd594db4ffeea16963fbf",
+    "verified_loaded": false,
+    "world": "PokemonFamily"
+  },
+  "dense_quality_cost_advantage_qualified": false,
+  "evidence_date": "2026-10-01",
+  "gameplay_mastery_qualified": false,
+  "limits": [
+    "No actual model, tokenizer, live capture, server query, game input, learning-checkpoint mutation, service/profile change or live installation occurred in these controls",
+    "Configured family156 catalogue is a versioned on-disk snapshot; neither actual engine-loaded bytes nor selected client connection to a current server session are established",
+    "The installed family player remains the older accepted-compatible source plus its one-file compactor successor. Main-source correctness does not establish deployed gameplay",
+    "Typed Native adapter uses the existing unbound runtime path with request=None. These fixtures do not establish a new bound120-second request deadline or operator-revision compare-and-swap guarantee",
+    "Visible terminal response for an irreducible too-long instruction remains open; current runtime retains capped retry backoff without a terminal acknowledgement",
+    "Actual shared World structured generation must pass separately before live source rollout. Successful mocks do not establish useful planning, traversal, Pok\u00e9mon pack mastery, continual-learning quality or superiority to dense",
+    "Helper recorded invocation, PID/start and cgroup path; it did not record a cgroup inode. No inode-authenticated physical cgroup identity is claimed"
+  ],
+  "live_installed": false,
+  "production_files": {
+    "cognition/controller.py": {
+      "before_sha256": "cedcea394714b1ffb63a961773e25bac302416e3e0680f4659010c006786fef9",
+      "bytes": 68460,
+      "candidate_sha256": "c183e66fb9461668223f1e0db756edc99305a96e78fb7d50dc4c089f8448c1be"
+    },
+    "cognition/prompts.py": {
+      "before_sha256": "900831ee8dc62999f63cbe7e30a9e5a82ef2c01223c97c0bc4060f46ff947497",
+      "bytes": 25925,
+      "candidate_sha256": "8e3768a1b9746f6afcce3b4609cb685edec38d3c5f5ee4a29d692c5e71aafd87"
+    },
+    "cognition/repair.py": {
+      "before_sha256": "2199b27f64d8159430852be6921039291048ec4b0dc1ad78c7c226822245fa4a",
+      "bytes": 10892,
+      "candidate_sha256": "5433ec4b4bdbecd7c67dc9f51ce26a87bc449401e512e57da26fe2c7608b206d"
+    },
+    "cognition/types.py": {
+      "before_sha256": "bf53cf3894f63c7788ebe5ac86932ade290aa3c341929cdf8ae60a427c8b1708",
+      "bytes": 9307,
+      "candidate_sha256": "d41be19cda2606fad2b7c64e0b49668d054e1750c6160238afd8d063f9593d52"
+    },
+    "native_world_model.py": {
+      "before_sha256": "a8b6ac02c8b14d06e976084b8798ef34969ddf36372d04aee7e64ccc46fe75af",
+      "bytes": 36607,
+      "candidate_sha256": "587d308dc30b2a8c1e534584d9801bd855eebcdd6b6d050e27c08daefa265ee4"
+    }
+  },
+  "raw_proof_pins": {
+    "main-controls-001/approved-control-budget.json": {
+      "bytes": 713,
+      "sha256": "334714ce4f10989729e97537f24a0181193ba6f2fcd7d938f033beb65bed3e13"
+    },
+    "main-controls-001/attempt-001/receipt.json": {
+      "bytes": 78186,
+      "sha256": "ba4b275f63bfa9608a3a32a5b217f1acb9dd4390af66f6cec94a8322e89798d0"
+    },
+    "main-controls-001/attempt-001/unittest.log": {
+      "bytes": 15519,
+      "sha256": "a09a85070da8480632d0c2860d9e8e0bdadaee1c58bd43f8bf97300a4aa6c928"
+    },
+    "main-controls-001/proposal.json": {
+      "bytes": 3439,
+      "sha256": "0aa1566781edbba90e415778ce93bb5d80181d862d41da6ca4f9d7f68cdf23f3"
+    },
+    "main-controls-001/root-independent-release.json": {
+      "bytes": 3268,
+      "sha256": "2725758a8732ac3c07f3c74e38b6e7c2900e89f514d45bf10b4180d4a2e41bee"
+    },
+    "main-controls-001/root-review-GO.json": {
+      "bytes": 519,
+      "sha256": "10bcd1a818e571dc9f446ca1f2b380c75ec1a74ad0d0bcf332ecdee7562749ab"
+    },
+    "main-controls-001/runner.py": {
+      "bytes": 10583,
+      "sha256": "4231ef49cba4aad6995d7c06565639d7862a3e1086315119905d8db10c29881a"
+    },
+    "main-controls-001/snapshot/tests/coherent_controls.py": {
+      "bytes": 34739,
+      "sha256": "a871c61ff910b1772a186080634d5acb20edbb4fa856b80bcff5a321898c6a81"
+    },
+    "main-controls-001/source-manifest.json": {
+      "bytes": 80715,
+      "sha256": "5370e8b822500b06f6b8c4c6c8a1bc2fc5b091f91b6fb843a1a11880f8f0f908"
+    },
+    "main-controls-001/supervise.py": {
+      "bytes": 10209,
+      "sha256": "b9952add5f52317ad5c1cd3b10606f9a896f679f1cf4f28a7d5868f9a2533f20"
+    },
+    "main-controls-001/supervision-001/dispatch.json": {
+      "bytes": 2512,
+      "sha256": "c9248d56f89dcc3bc8ee6b8c3ba87079533ff4e14ce35ab0da881ed859a60f04"
+    },
+    "main-controls-001/supervision-001/release.json": {
+      "bytes": 1018,
+      "sha256": "60950bfb04e79fff46dfa6891a485db0ea5f92c7ece5c04b77bcca3740392685"
+    },
+    "main-controls-001/supervision-001/terminal.json": {
+      "bytes": 687,
+      "sha256": "f67cb2ea952d5050262ed35331724e2a3da4c7440284ca059ca18b36827d36f2"
+    },
+    "main-controls-002/approved-control-budget.json": {
+      "bytes": 713,
+      "sha256": "25ffb4b7150b9248b81064a6155251306180cb49872e6241785995e012f16065"
+    },
+    "main-controls-002/attempt-001/receipt.json": {
+      "bytes": 46666,
+      "sha256": "ef34ca89661b0fd3d43823790b4e3c98f8e715f468eeafd28d8fd8cacecce93f"
+    },
+    "main-controls-002/attempt-001/unittest.log": {
+      "bytes": 445,
+      "sha256": "9f909884248112fb95e8b40b84bae06d081f999b6d010519b37857d2cf089b9d"
+    },
+    "main-controls-002/proposal.json": {
+      "bytes": 3943,
+      "sha256": "83851e4cb0f21ae2745c7517b18e5952573819227df6c56254df732ceaab6ff2"
+    },
+    "main-controls-002/root-independent-release.json": {
+      "bytes": 2980,
+      "sha256": "db09b8337ed3d96ff1b8df86b4cd513a6cec7c781942dff83288b3cb504f06db"
+    },
+    "main-controls-002/root-review-GO.json": {
+      "bytes": 535,
+      "sha256": "2df3fd438de044f5318ee603bb044abeb360853b5e62016791e28b5ed95c97e4"
+    },
+    "main-controls-002/runner.py": {
+      "bytes": 12297,
+      "sha256": "5ee5f8838c7fc8158feca1b4a400b173d53ac78c1c028b2b47c7dae5b0ebef84"
+    },
+    "main-controls-002/snapshot/tests/coherent_controls.py": {
+      "bytes": 34971,
+      "sha256": "a9395b4818baf8145e9c0a3bdf20b7c36813e24def1b102c235e890fd8d5472b"
+    },
+    "main-controls-002/source-manifest.json": {
+      "bytes": 80715,
+      "sha256": "244f525dc68d3860dee5a5a168b639b2bbff57e477c375732d130ec57c08a412"
+    },
+    "main-controls-002/supervise.py": {
+      "bytes": 10209,
+      "sha256": "2618a36ce7c51db580ef23d3148ca3159e07885ce9ea0d799cb6236936c3ff29"
+    },
+    "main-controls-002/supervision-001/dispatch.json": {
+      "bytes": 2513,
+      "sha256": "e33095d70dfc703cdbdcefa9f054b7c0c8ed6f6b343e1fba2b7cde1d2beaf63d"
+    },
+    "main-controls-002/supervision-001/release.json": {
+      "bytes": 1028,
+      "sha256": "af5ba876f2499419374221b2fe0c131947c5decaa5c898a44e77a97fe09137a0"
+    },
+    "main-controls-002/supervision-001/terminal.json": {
+      "bytes": 685,
+      "sha256": "d65be31e62f769d673ca83844e1861fff058787e4feb0906b227d713de9168bf"
+    },
+    "source-proposal-002/main-application-001.json": {
+      "bytes": 1225,
+      "sha256": "450e6677e6391a07c0c58d8cdbcf30faf9fa59186fbb4c661d67fbc9da653070"
+    },
+    "source-proposal-002/proposal.json": {
+      "bytes": 6785,
+      "sha256": "46378a9c48d8f4255e82db0a27f2d2c126c80913e80694554bd5f1d52aa81af3"
+    }
+  },
+  "resource_limits": {
+    "host_MemAvailable_min_bytes": 2147483648,
+    "unit_AllowedCPUs": [
+      3
+    ],
+    "unit_CPUAffinity": [
+      3
+    ],
+    "unit_CPUQuota": "100%",
+    "unit_MemoryMax_bytes": 536870912,
+    "unit_MemorySwapMax_bytes": 0,
+    "unit_RuntimeMax_s": 55,
+    "unit_TimeoutStop_s": 5,
+    "whole_outer_TERM_s": 67,
+    "whole_outer_containment_s": 70,
+    "whole_outer_final_KILL_s": 3,
+    "worker_CPU_s": 15,
+    "worker_address_space_bytes": 536870912,
+    "worker_wall_s": 45
+  },
+  "retained_modern_files": {
+    "pack_recipes.py": "e6b2f36861ed7b35cfa9e5ca33b2da8ce177bbadfb43136a35fb5873d0593ffb",
+    "pack_scope.py": "8d88f921869455fdbf534c10213896fd53175b51fd331a034447e6fbe1ca3882",
+    "runtime.py": "bd3ee76cf2e29b80ff9f39257039687e44ad30bc7e6d611d3bbf9cb0074c9267"
+  },
+  "schema_version": 1,
+  "scope": "modern-main typed Minecraft adapter, full operator literal and configured-only recipe information; engineering fixtures",
+  "single_clean_76_pass_run": false,
+  "source_proposal_sha256": "46378a9c48d8f4255e82db0a27f2d2c126c80913e80694554bd5f1d52aa81af3",
+  "status": "76 unique cases covered across two attempts; first attempt failed, material fixture/harness repair qualified only two affected cases",
+  "unchanged_methods_ast_verified": 63
+}

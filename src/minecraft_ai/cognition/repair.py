@@ -13,7 +13,7 @@ from .constants import (
     _MAX_REPAIR_REASON_CHARS,
     _SEMANTIC_REPAIR_SYSTEM,
 )
-from .prompts import _operator_question_perception_keys
+from .prompts import _operator_question_perception_keys, _operator_prompt_payload
 from .types import (
     CognitionDecision,
     DecisionModelOrigin,
@@ -43,6 +43,22 @@ def _compact_wire_payload(decision: CognitionDecision) -> dict[str, object]:
         payload["q"] = tuple(question[:160] for question in decision.ask_perception[:2])
     return payload
 
+def _literal_operator_messages(bounds: _DecisionRepairBounds) -> tuple[ModelMessage, ...]:
+    """Retain the same trusted literal in repairs, never model-supplied content."""
+    if bounds.literal_operator is None:
+        return ()
+    return (ModelMessage(
+        role="user",
+        content=(
+            "ACTIVE OPERATOR DIRECTIVE (highest authority; follow this literal current "
+            "request and do not substitute an older task): "
+            + json.dumps(_operator_prompt_payload(bounds.literal_operator),
+                         separators=(",", ":"))
+        ),
+    ),)
+
+
+
 def _json_repair_messages(
     rejected_output: str,
     bounds: _DecisionRepairBounds,
@@ -59,6 +75,7 @@ def _json_repair_messages(
     return (
         ModelMessage(role="system", content=_JSON_REPAIR_SYSTEM),
         ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
+        *_literal_operator_messages(bounds),
     )
 
 def _semantic_repair_messages(
@@ -86,6 +103,7 @@ def _semantic_repair_messages(
     return (
         ModelMessage(role="system", content=_SEMANTIC_REPAIR_SYSTEM),
         ModelMessage(role="user", content=json.dumps(payload, separators=(",", ":"))),
+        *_literal_operator_messages(bounds),
     )
 
 def _enforce_repair_bounds(

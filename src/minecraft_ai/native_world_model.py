@@ -102,6 +102,30 @@ def _compact_context(
         elif type(value) is dict:
             auxiliary_payloads.append(value)
     result: dict[str, Any] = {}
+    reference = payload.get("configured_recipe_reference")
+    if type(reference) is dict:
+        required = ("live_engine_recipe_bytes_verified", "selected_desktop_connection_verified", "gameplay_authority")
+        recipe = reference.get("recipe_text")
+        catalog = reference.get("catalog_sha256")
+        packs = reference.get("configured_packs")
+        if (
+            reference.get("state") != "configured_snapshot"
+            or any(reference.get(key) is not False for key in required)
+            or type(recipe) is not str or not 0 < len(recipe) <= 150
+            or type(catalog) is not str or re.fullmatch(r"[0-9a-f]{64}", catalog) is None
+            or type(packs) is not list or not 0 < len(packs) <= 16
+            or any(type(pack) is not dict or type(pack.get("version")) is not list
+                   or len(pack["version"]) != 3
+                   or any(type(part) is not int or not 0 <= part <= 65535
+                          for part in pack["version"]) for pack in packs)
+        ):
+            raise ValueError("configured recipe reference does not grant verified state or actions")
+        result["configured_recipe_reference"] = {
+            "scope": "configured_snapshot", "engine_loaded": False,
+            "selected_client_session": False, "gameplay_authority": False,
+            "catalog_sha256": catalog, "recipe_text": recipe,
+            "pack_versions": sorted({".".join(map(str, pack["version"])) for pack in packs}),
+        }
     for key in ("active_operator_message",):
         if type(payload.get(key)) is dict:
             result[key] = {
@@ -368,6 +392,8 @@ def compact_planner_prompt(
             "fresh_facts": context.get("fresh_facts", {}),
             "wiki_evidence": context.get("wiki_evidence", []),
         }
+        if context.get("configured_recipe_reference") is not None:
+            compact["configured_recipe_reference"] = context["configured_recipe_reference"]
         context = compact
         rules = _STRUCTURED_REPLY_ONLY_RULES if response_format is not None else _REPLY_ONLY_RULES
         prefix = rules
