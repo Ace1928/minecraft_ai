@@ -33,6 +33,29 @@ def _normalize(value: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", ascii_text))
 
 
+def configured_recipe_label(reference: dict[str, Any]) -> str:
+    """Label only matching host-supplied CobbleDrock source versions."""
+    generic = "Live load unverified. "
+    packs = reference.get("configured_packs")
+    if type(packs) is not list:
+        return generic
+    required = {"cobbledrock_core_bp_1_3_1", "cobbledrock_content_bp_1_3_1"}
+    versions: dict[str, tuple[int, int, int]] = {}
+    for pack in packs:
+        if (type(pack) is not dict or type(pack.get("folder")) is not str
+                or pack["folder"] not in required):
+            continue
+        folder, version = pack["folder"], pack.get("version")
+        if (folder in versions or type(version) is not list or len(version) != 3
+                or any(type(part) is not int or not 0 <= part <= 65535
+                       for part in version)):
+            return generic
+        versions[folder] = tuple(version)
+    if set(versions) != required or len(set(versions.values())) != 1:
+        return generic
+    version_text = ".".join(str(part) for part in next(iter(versions.values())))
+    return f"Configured CobbleDrock {version_text}; live load unverified. "
+
 @dataclass(frozen=True, slots=True)
 class PackRecipeAnswer:
     evidence: WikiEvidence
@@ -183,7 +206,12 @@ class PackRecipeCatalog:
             packs.append({"folder": folder, "version": list(version)})
         if not 0 < len(packs) <= 16:
             return None
-        answer = self.lookup(query, game_version=game_version)
+        # One bound covers the full scoped reply, including its configured
+        # version label. The ordinary/live recipe path keeps its old budget.
+        reply_limit = 150 - len(configured_recipe_label({"configured_packs": packs}))
+        answer = self.lookup(
+            query, game_version=game_version, _configured_reply_limit=reply_limit,
+        )
         if answer is None:
             return None
         return {
@@ -207,7 +235,14 @@ class PackRecipeCatalog:
             "gameplay_authority": False,
         }
 
-    def lookup(self, query: str, *, game_version: str) -> PackRecipeAnswer | None:
+    def lookup(
+        self, query: str, *, game_version: str,
+        _configured_reply_limit: int | None = None,
+    ) -> PackRecipeAnswer | None:
+        if _configured_reply_limit is not None and (
+            type(_configured_reply_limit) is not int or not 1 <= _configured_reply_limit <= 150
+        ):
+            return None
         if type(query) is not str or not query.strip() or game_version != self.version_id:
             return None
         intent_match = _RECIPE_INTENT.search(query.casefold())
@@ -300,7 +335,10 @@ class PackRecipeCatalog:
         rendered: list[str] = []
         sources: list[str] = []
         for recipe in matches:
-            line = self._render_recipe(recipe, items, output_key=selected_id)
+            line = self._render_recipe(
+                recipe, items, output_key=selected_id,
+                configured_reply_limit=_configured_reply_limit,
+            )
             if line is not None:
                 rendered.append(line)
                 source = recipe.get("source")
@@ -323,7 +361,7 @@ class PackRecipeCatalog:
         )
         # Keep the in-game line short and source-exact; metadata stays in cognition.
         reply = self._ascii_chat_projection(rendered[0])
-        if reply is None or len(reply) > 150:
+        if reply is None or len(reply) > (_configured_reply_limit or 150):
             return None
         return PackRecipeAnswer(evidence=evidence, chat_reply=reply)
 
@@ -367,6 +405,7 @@ class PackRecipeCatalog:
     @staticmethod
     def _render_recipe(
         recipe: dict[str, Any], items: dict[str, Any], *, output_key: str | None = None,
+        configured_reply_limit: int | None = None,
     ) -> str | None:
         ingredients = recipe.get("ingredients")
         outputs = recipe.get("outputs")
@@ -452,8 +491,18 @@ class PackRecipeCatalog:
             "s" if output_count != 1 and not output_name.casefold().endswith("s") else ""
         )
         line = f"At a {station}, use {joined} to make {output_count} {plural_output}."
-        if arrangement and len(line) + len(arrangement) <= 150:
+        reply_limit = 150 if configured_reply_limit is None else configured_reply_limit
+        if arrangement and len(line) + len(arrangement) <= reply_limit:
             line = (
                 f"At a {station}, use {joined} to make {output_count} {plural_output}.{arrangement}"
             )
+        if configured_reply_limit is not None and len(line) > reply_limit:
+            # Render the same selected output, all ingredients and station.
+            # Drop only optional grid formatting; never slice names or counts.
+            compact_ingredients = " + ".join(
+                f"{count} {name}" for name, count, _item_id in ingredient_rows
+            )
+            line = f"{output_count} {plural_output} <- {compact_ingredients}; {station}."
+            if len(line) > reply_limit:
+                return None
         return line

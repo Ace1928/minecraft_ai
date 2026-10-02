@@ -1,0 +1,82 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "complete_supervision_wall_seconds": 3.3661252230085665,
+      "failure": {
+        "message": "actual source controls failed; retain unittest.log",
+        "type": "RuntimeError"
+      },
+      "managed_cpu_ns": 1571713000,
+      "managed_memory_peak_bytes": 51449856,
+      "managed_swap_peak_bytes": 0,
+      "proposal_sha256": "7c1db2780073f56e0cdcba1d11894ad39482bb0e01e4d9a6c147ce516b633164",
+      "receipt_sha256": "8f1b0f7a68d9865c6293934b639202d6083947fd01216aff9523ae297bf09de6",
+      "release_sha256": "c1d69f23a4fdbc9b06682dc2e58d242a654f4d81ccf520867c53592adb507375",
+      "source_manifest_sha256": "c6791cce66e3beefbea57645e9dd829b8b3690862b34324767cd8db281eef64f",
+      "status": "failed",
+      "tests": {
+        "actual_dependencies": "Frozen real Pydantic/Pillow/PyYAML/platformdirs; fixture HTTP does not import httpx",
+        "count": 11,
+        "declared_cases": 11,
+        "errors": 0,
+        "failed": 1,
+        "new_cases": 8,
+        "other_control_suites_rerun": false,
+        "retained_exact_reply_cases": 3,
+        "scope": "Actual configured catalogue/controller compact150reply, complete ingredients/output/station and unchanged version/scope/freshness/authority; fictional catalogue and fake model only",
+        "skipped": 0
+      },
+      "worker_and_cgroup_retired": true,
+      "worker_cpu_seconds": 1.360676118,
+      "worker_hwm_bytes": 69705728,
+      "worker_wall_seconds": 2.3556427489966154
+    },
+    {
+      "attempt": 2,
+      "complete_supervision_wall_seconds": 2.2392719550116453,
+      "failure": null,
+      "managed_cpu_ns": 1594748000,
+      "managed_memory_peak_bytes": 51355648,
+      "managed_swap_peak_bytes": 0,
+      "proposal_sha256": "8511e282f11ac75240a3fe56b2a30409e6e22105bffebec9ac261c9c490838eb",
+      "receipt_sha256": "437451daa5280f0854ebf7e5e0c028b30e6f7e1561166094fc12c4fec6b61696",
+      "release_sha256": "ab457c34c2fc68a0a06df2e648b980870a8fe6ce7381db32e6ae8dd140ff0949",
+      "source_manifest_sha256": "ef8914e231b591a086f24a9228afb80f050052d5a112e0a00ac5718bcecdffba",
+      "status": "passed",
+      "tests": {
+        "actual_dependencies": "Frozen real Pydantic/Pillow/PyYAML/platformdirs; fixture HTTP does not import httpx",
+        "count": 11,
+        "declared_cases": 11,
+        "errors": 0,
+        "failed": 0,
+        "new_cases": 8,
+        "other_control_suites_rerun": false,
+        "retained_exact_reply_cases": 3,
+        "scope": "Actual configured catalogue/controller compact150reply, complete ingredients/output/station and unchanged version/scope/freshness/authority; fictional catalogue and fake model only",
+        "skipped": 0
+      },
+      "worker_and_cgroup_retired": true,
+      "worker_cpu_seconds": 1.390881129,
+      "worker_hwm_bytes": 69689344,
+      "worker_wall_seconds": 1.5553024889959488
+    }
+  ],
+  "before_commit": "e1457b7fa81c2754b980752e38f788d390a3e7ca",
+  "before_source_hashes": {
+    "src/minecraft_ai/cognition/controller.py": "6db37d11f66268454fee094ecca59d1cde5e323fad75a59879b7ed5dee2e74a7",
+    "src/minecraft_ai/pack_recipes.py": "e6b2f36861ed7b35cfa9e5ca33b2da8ce177bbadfb43136a35fb5873d0593ffb"
+  },
+  "game_inputs": 0,
+  "live_pack_applicability": false,
+  "live_service_changes": 0,
+  "qualified_source_hashes": {
+    "src/minecraft_ai/cognition/controller.py": "539e39d711a00a83c3704de339f562fa8ab5c94305336e4ce0f2b6714a18e82f",
+    "src/minecraft_ai/pack_recipes.py": "753a69b8d40e869bc4df75f9a9e2db4af4790e68e7dac0e03effb2610eeb079f",
+    "tests/test_configured_recipe_compact_reply.py": "cd2e00cc13f6a0212dda5da7433fba00fd47e2dea337971cd8dc2361a5d5be47"
+  },
+  "quality_mastery_or_dense_superiority_claim": false,
+  "real_model_calls": 0,
+  "schema_version": 1,
+  "scope": "configured-source recipe renderer and controller, fictional catalogues and fake model responses"
+}

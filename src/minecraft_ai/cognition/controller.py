@@ -61,7 +61,7 @@ from .types import (
     _WOOD_INVENTORY_AUDIT_SKILLS,
     _without_model_origin,
 )
-from minecraft_ai.pack_recipes import PackRecipeCatalog
+from minecraft_ai.pack_recipes import PackRecipeCatalog, configured_recipe_label
 from minecraft_ai.world_knowledge import WorldMinecraftSearch
 from minecraft_ai.game_chat import bind_game_chat_authority
 from minecraft_ai.pack_scope import RECIPE_SCOPE_UNAVAILABLE, active_recipe_identity
@@ -174,27 +174,7 @@ class HighLevelController:
 
     @staticmethod
     def _configured_reference_label(reference: dict[str, Any]) -> str:
-        """Label only matching host-supplied CobbleDrock source versions."""
-        generic = "Live load unverified. "
-        packs = reference.get("configured_packs")
-        if type(packs) is not list:
-            return generic
-        required = {"cobbledrock_core_bp_1_3_1", "cobbledrock_content_bp_1_3_1"}
-        versions: dict[str, tuple[int, int, int]] = {}
-        for pack in packs:
-            if (type(pack) is not dict or type(pack.get("folder")) is not str
-                    or pack["folder"] not in required):
-                continue
-            folder, version = pack["folder"], pack.get("version")
-            if (folder in versions or type(version) is not list or len(version) != 3
-                    or any(type(part) is not int or not 0 <= part <= 65535
-                           for part in version)):
-                return generic
-            versions[folder] = tuple(version)
-        if set(versions) != required or len(set(versions.values())) != 1:
-            return generic
-        version_text = ".".join(str(part) for part in next(iter(versions.values())))
-        return f"Configured CobbleDrock {version_text}; live load unverified. "
+        return configured_recipe_label(reference)
 
 
     def _configured_reference_response(
