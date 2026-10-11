@@ -117,7 +117,7 @@ def camera_view_mean_absolute_error(
     if len(first_bgra) != expected_bytes or len(second_bgra) != expected_bytes:
         raise ValueError("camera restoration comparison received invalid frame bytes")
     try:
-        import cv2
+        cv2 = import_module("cv2")
     except ImportError as exc:  # pragma: no cover - covered by optional-extra packaging
         raise RuntimeError(
             "install the camera-calibration extra to compare Bedrock camera frames"

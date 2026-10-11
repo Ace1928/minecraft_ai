@@ -1006,6 +1006,88 @@ def test_bedrock_connect_waits_through_retained_external_transfer_ocr() -> None:
     assert clicks.clicks == [(1, 500, 200)]
 
 
+def _trusted_server_dialog_fixture(
+    frame_id: int,
+) -> tuple[CapturedFrame, tuple[OcrLine, ...]]:
+    pixels = bytearray(b"\x18\x18\x18\xff" * 1000 * 600)
+    for y in range(330, 411):
+        start = (y * 1000 + 250) * 4
+        pixels[start : start + 501 * 4] = b"\xc8\xc8\xc8\xff" * 501
+    return CapturedFrame(frame_id, frame_id, 1000, 600, bytes(pixels)), (
+        OcrLine("Trust this server?", 300, 120, 300, 30),
+        OcrLine("You are connecting to 192.168.4.166:19136 for the", 280, 190, 440, 30),
+        OcrLine("first time. Only trust servers you recognize.", 300, 235, 400, 30),
+        OcrLine("Trust and Join", 420, 360, 160, 30),
+    )
+
+
+def test_exact_configured_local_endpoint_can_accept_first_connection_trust() -> None:
+    frame, lines = _trusted_server_dialog_fixture(1)
+    assert classify_menu_stage(
+        frame,
+        lines,
+        lan_name="BedrockConnect",
+        server_name="Pokemon Family - CobbleDrock",
+        hud_detector=lambda _frame: False,
+    ) is MenuStage.TRUST_SERVER
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([frame, _frame(2)]),
+        text_reader=_MappedTextReader({1: lines}),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Pokemon Family - CobbleDrock", "192.168.4.166", 19136),
+        poll_interval_s=0,
+        sleep=lambda _seconds: None,
+        hud_detector=lambda current: current.frame_id == 2,
+    )
+    result = navigator.run()
+    assert result.visited == (MenuStage.TRUST_SERVER, MenuStage.IN_WORLD)
+    assert clicks.clicks == [(1, 500, 375)]
+
+
+def test_first_connection_trust_rejects_an_endpoint_other_than_the_catalog_entry() -> None:
+    frame, lines = _trusted_server_dialog_fixture(1)
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([frame]),
+        text_reader=_MappedTextReader({1: lines}),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Pokemon Family - CobbleDrock", "127.0.0.1", 19136),
+        poll_interval_s=0,
+        sleep=lambda _seconds: None,
+        hud_detector=lambda _frame: False,
+    )
+    with pytest.raises(MenuNavigationError, match="endpoint and Trust and Join control"):
+        navigator.run()
+    assert clicks.clicks == []
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["missing_body", "duplicate_join", "low_confidence", "no_control"],
+)
+def test_first_connection_trust_requires_complete_same_frame_evidence(invalid: str) -> None:
+    frame, original = _trusted_server_dialog_fixture(1)
+    lines = list(original)
+    if invalid == "missing_body":
+        lines.pop(2)
+    elif invalid == "duplicate_join":
+        lines.append(lines[-1])
+    elif invalid == "low_confidence":
+        lines[-1] = replace(lines[-1], confidence=59)
+    else:
+        frame = replace(frame, bgra=b"\0" * len(frame.bgra))
+    assert classify_menu_stage(
+        frame,
+        tuple(lines),
+        lan_name="BedrockConnect",
+        server_name="Pokemon Family - CobbleDrock",
+        hud_detector=lambda _frame: False,
+    ) is MenuStage.UNKNOWN
+
+
 @pytest.mark.parametrize("text", ["Connecting tao external", "Connecting external"])
 def test_partial_external_heading_is_not_a_global_loading_anchor(text: str) -> None:
     assert classify_menu_stage(

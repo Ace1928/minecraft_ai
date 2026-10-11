@@ -47,6 +47,7 @@ class MenuStage(StrEnum):
     PLAY_SERVERS = "play-servers"
     PLAY = "play"
     BEDROCK_CONNECT = "bedrock-connect"
+    TRUST_SERVER = "trust-server"
     RESOURCE_PACK = "resource-pack"
     CONTENT_LOG = "content-log"
     DISCONNECTED = "disconnected"
@@ -709,6 +710,15 @@ class BedrockMenuNavigator:
                 destination=MenuStage.IN_WORLD,
                 region=(0.10, 0.10, 0.90, 0.95),
             )
+        if observation.stage == MenuStage.TRUST_SERVER:
+            return _Transition(
+                target_text=(
+                    "trust and join",
+                    f"{self.server.address}:{self.server.port}",
+                ),
+                destination=MenuStage.IN_WORLD,
+                region=(0.25, 0.52, 0.75, 0.72),
+            )
         if observation.stage == MenuStage.DISCONNECTED:
             return _Transition(
                 target_text=("back to menu",),
@@ -796,7 +806,7 @@ class BedrockMenuNavigator:
                 if (
                     current.stage == transition.destination
                     or (
-                        source == MenuStage.BEDROCK_CONNECT
+                        source in {MenuStage.BEDROCK_CONNECT, MenuStage.TRUST_SERVER}
                         and current.stage == MenuStage.RESOURCE_PACK
                     )
                     or (
@@ -838,7 +848,7 @@ class BedrockMenuNavigator:
                     if (
                         current.stage == transition.destination
                         or (
-                            source == MenuStage.BEDROCK_CONNECT
+                            source in {MenuStage.BEDROCK_CONNECT, MenuStage.TRUST_SERVER}
                             and current.stage == MenuStage.RESOURCE_PACK
                         )
                         or (
@@ -857,18 +867,24 @@ class BedrockMenuNavigator:
                     ):
                         return current, attempt
                     if (
-                        source == MenuStage.BEDROCK_CONNECT
+                        source in {MenuStage.BEDROCK_CONNECT, MenuStage.TRUST_SERVER}
                         and transition.destination == MenuStage.IN_WORLD
                         and current.stage == MenuStage.UNKNOWN
                         and (
                             self.clock() < response_deadline
-                            or bedrock_server_form_bounds(current.frame) is not None
+                            or (
+                                source == MenuStage.BEDROCK_CONNECT
+                                and bedrock_server_form_bounds(current.frame) is not None
+                            )
                         )
                     ):
                         # A transfer can briefly lose its loading caption.
                         # Spend only the original response budget observing;
                         # no retry click and no new spelling-based authority.
-                        if bedrock_server_form_bounds(current.frame) is not None:
+                        if (
+                            source == MenuStage.BEDROCK_CONNECT
+                            and bedrock_server_form_bounds(current.frame) is not None
+                        ):
                             response_deadline = deadline
                         continue
                     self._raise_unexpected(source, transition.destination, current)
@@ -1027,6 +1043,8 @@ def classify_menu_stage(
         return MenuStage.CONNECTION_FAILED
     if _resource_pack_dialog_visible(frame, lines):
         return MenuStage.RESOURCE_PACK
+    if _trust_server_join_control(frame, lines) is not None:
+        return MenuStage.TRUST_SERVER
 
     error_phrases = (
         "unable to connect",
@@ -1610,10 +1628,100 @@ def _find_click_target(
     return candidates[0][1]
 
 
+def _trust_server_join_control(
+    frame: CapturedFrame,
+    lines: tuple[OcrLine, ...],
+    *,
+    expected_endpoint: str | None = None,
+) -> OcrLine | None:
+    """Return the screenshot-bound Trust and Join caption for one local endpoint.
+
+    Classification may recognize the dialog without choosing an endpoint. The
+    actual transition repeats every anchor check and additionally requires the
+    exact address and port selected from the local BedrockConnect catalog.
+    """
+
+    if frame.width < 640 or frame.height < 360 or len(frame.bgra) != frame.width * frame.height * 4:
+        return None
+    selected = tuple(
+        line
+        for line in lines
+        if math.isfinite(line.confidence)
+        and line.confidence >= 60
+        and 0 < line.width
+        and 0 < line.height
+        and frame.width * 0.20 <= line.left < line.left + line.width <= frame.width * 0.80
+        and frame.height * 0.12 <= line.top < line.top + line.height <= frame.height * 0.82
+    )
+    headings = tuple(
+        line for line in selected if _normalized_text(line.text) == "trust this server"
+    )
+    joins = tuple(line for line in selected if _normalized_text(line.text) == "trust and join")
+    if len(headings) != 1 or len(joins) != 1:
+        return None
+    heading, join = headings[0], joins[0]
+    normalized = _normalized_text(" ".join(line.text for line in selected))
+    if (
+        "you are connecting to" not in normalized
+        or "first time only trust servers you recognize" not in normalized
+        or not heading.top + heading.height < join.top
+    ):
+        return None
+    endpoint_lines = tuple(
+        line
+        for line in selected
+        if "you are connecting to" in _normalized_text(line.text)
+        and re.search(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}(?!\d)", line.text)
+    )
+    if len(endpoint_lines) != 1:
+        return None
+    if expected_endpoint is not None:
+        observed = re.findall(
+            r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}(?!\d)",
+            endpoint_lines[0].text,
+        )
+        if observed != [expected_endpoint]:
+            return None
+    control = _find_dense_neutral_control(
+        frame,
+        region=(0.25, 0.52, 0.75, 0.72),
+        minimum_width_fraction=0.30,
+        minimum_height_fraction=0.045,
+        description="trusted local server join control",
+    )
+    if (
+        control is None
+        or control.height > frame.height * 0.16
+        or not control.left <= join.left < join.left + join.width <= control.left + control.width
+        or not control.top <= join.top < join.top + join.height <= control.top + control.height
+        or abs(control.center[0] - join.center[0]) > control.width * 0.20
+        or abs(control.center[1] - join.center[1]) > control.height * 0.40
+    ):
+        return None
+    return join
+
+
 def _transition_click_target(
     observation: MenuObservation,
     transition: _Transition,
 ) -> OcrLine:
+    if observation.stage == MenuStage.TRUST_SERVER:
+        if (
+            len(transition.target_text) != 2
+            or transition.target_text[0] != "trust and join"
+            or transition.destination != MenuStage.IN_WORLD
+        ):
+            raise MenuNavigationError("trusted-server transition contract is invalid")
+        target = _trust_server_join_control(
+            observation.frame,
+            observation.lines,
+            expected_endpoint=transition.target_text[1],
+        )
+        if target is None:
+            raise MenuNavigationError(
+                "trusted-server endpoint and Trust and Join control are not verified"
+            )
+        return target
     if observation.stage == MenuStage.CONNECTION_FAILED:
         target = _multiplayer_connection_failure_back(observation.frame, observation.lines)
         if (
