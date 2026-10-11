@@ -11,12 +11,16 @@ import json
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
+from minecraft_ai.perception import PerceptionBlackboard
+from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
+from minecraft_ai.safety import MotorAction
+from minecraft_ai.skills import SkillRun
 from minecraft_ai.storage import StateDatabase
 from .models import (
     DirectionsDiscovery,
@@ -159,7 +163,7 @@ def _compute_fingerprint(req: DirectionsRequest) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _control_epoch(sup):
+def _control_epoch(sup: dict[str, Any]) -> int:
     # release_count counts ordinary input releases, not authority generations.
     # The exact lease is also retained and compared, so this JS-safe integer
     # is only a public generation reference, never the sole authority check.
@@ -345,7 +349,17 @@ class DirectionsGateway:
                     qualification=qualification,
                 )
 
-    def _admit_conn(self, sdb, request, spec, fingerprint, now_ns, deadline_ns, *, qualification):
+    def _admit_conn(
+        self,
+        sdb: StateDatabase,
+        request: DirectionsRequest,
+        spec: SupportedInstruction,
+        fingerprint: str,
+        now_ns: int,
+        deadline_ns: int,
+        *,
+        qualification: bool,
+    ) -> DirectionsReceipt:
         conn = sdb.connection
         # Check idempotency
         existing = conn.execute(
@@ -434,23 +448,35 @@ class DirectionsGateway:
         row = conn.execute(
             "SELECT * FROM paid_directions WHERE request_id=?", (request.request_id,)
         ).fetchone()
+        if row is None:
+            raise RuntimeError("direction receipt was not persisted")
         return self._row_to_receipt(row)
 
     @staticmethod
-    def _row(sdb, request_id, member_id=None):
+    def _row(
+        sdb: StateDatabase,
+        request_id: str,
+        member_id: str | None = None,
+    ) -> sqlite3.Row:
         sdb.connection.row_factory = sqlite3.Row
         row = sdb.connection.execute(
             "SELECT * FROM paid_directions WHERE request_id=?", (request_id,)
         ).fetchone()
         if row is None or (member_id is not None and row["member_id"] != member_id):
             raise NotFoundError("Direction request not found for member.")
-        return row
+        return cast(sqlite3.Row, row)
 
     @staticmethod
-    def _terminal(row):
+    def _terminal(row: sqlite3.Row) -> bool:
         return row["state"] not in {"queued", "running"}
 
-    def _revoke_conn(self, sdb, row, state, reason):
+    def _revoke_conn(
+        self,
+        sdb: StateDatabase,
+        row: sqlite3.Row,
+        state: DirectionsState,
+        reason: str,
+    ) -> None:
         if self._terminal(row):
             return
         self._update_state_conn(
@@ -460,7 +486,11 @@ class DirectionsGateway:
             row["message_id"], OperatorMessageStatus.ARCHIVED, timestamp_ns=time.time_ns()
         )
 
-    def _continuity_reason(self, row, sup):
+    def _continuity_reason(
+        self,
+        row: sqlite3.Row,
+        sup: dict[str, Any],
+    ) -> str | None:
         if time.time_ns() > row["deadline_ns"]:
             return "deadline_exceeded"
         server = (
@@ -511,12 +541,17 @@ class DirectionsGateway:
             self._revoke_conn(sdb, row, DirectionsState.CANCELLED, reason)
             return self._row_to_receipt(self._row(sdb, request_id))
 
-    def _evaluate_outcome(self, row, spec, events):
+    def _evaluate_outcome(
+        self,
+        row: sqlite3.Row,
+        spec: SupportedInstruction,
+        events: object,
+    ) -> None:
         # Retained compatibility hook: unbound or scene-recovery events cannot
         # turn a legacy receipt into a paid success. finish_step owns evidence.
         return None
 
-    def next_pending(self):
+    def next_pending(self) -> dict[str, Any] | None:
         with StateDatabase(self.db_path) as sdb:
             sdb.connection.row_factory = sqlite3.Row
             row = sdb.connection.execute(
@@ -525,7 +560,7 @@ class DirectionsGateway:
             ).fetchone()
             return None if row is None else dict(row)
 
-    def claim(self, request_id):
+    def claim(self, request_id: str) -> dict[str, Any] | None:
         with StateDatabase(self.db_path) as sdb, sdb._transaction(write=True):
             row = self._row(sdb, request_id)
             reason = self._continuity_reason(row, self._query_supervisor())
@@ -549,7 +584,13 @@ class DirectionsGateway:
             )
             return dict(self._row(sdb, request_id))
 
-    def start_step(self, request_id, attempt_id, skill_id, run_id):
+    def start_step(
+        self,
+        request_id: str,
+        attempt_id: str,
+        skill_id: str,
+        run_id: str,
+    ) -> dict[str, str | bool]:
         with StateDatabase(self.db_path) as sdb, sdb._transaction(write=True):
             row = self._authorize_conn(sdb, request_id, attempt_id)
             steps = sdb.connection.execute(
@@ -571,7 +612,12 @@ class DirectionsGateway:
                 **{key: False for key in _SUPPORTED_MAP[row["instruction_id"]].prohibited_actions},
             }
 
-    def _authorize_conn(self, sdb, request_id, attempt_id):
+    def _authorize_conn(
+        self,
+        sdb: StateDatabase,
+        request_id: str,
+        attempt_id: str,
+    ) -> sqlite3.Row:
         row = self._row(sdb, request_id)
         if (
             row["attempt_id"] != attempt_id
@@ -585,10 +631,17 @@ class DirectionsGateway:
         return row
 
     @contextmanager
-    def motor_authority(self, run, action, capture):
+    def motor_authority(
+        self,
+        run: SkillRun,
+        action: MotorAction,
+        capture: CapturedFrame | None,
+    ) -> Iterator[Callable[[dict[str, object]], None]]:
         """Serialize revocation with actual dispatch, enforcing the catalogue at the wire."""
         request_id = run.parameters["direction_request_id"]
         attempt_id = run.parameters["direction_attempt_id"]
+        if not isinstance(request_id, str) or not isinstance(attempt_id, str):
+            raise ControlUnavailableError("Direction authority identifiers are invalid.")
         with StateDatabase(self.db_path) as sdb, sdb._transaction(write=True):
             self._authorize_conn(sdb, request_id, attempt_id)
             step = sdb.connection.execute(
@@ -619,7 +672,7 @@ class DirectionsGateway:
                 raise ControlUnavailableError("Direction action lacks a captured source frame.")
             stamp = time.monotonic_ns()
 
-            def accepted(response):
+            def accepted(response: dict[str, object]) -> None:
                 accepted_ns = (
                     response.get("accepted_monotonic_ns") if isinstance(response, dict) else None
                 )
@@ -675,7 +728,14 @@ class DirectionsGateway:
         if dispatch_error is not None:
             raise dispatch_error
 
-    def finish_step(self, request_id, attempt_id, run, blackboard, capture):
+    def finish_step(
+        self,
+        request_id: str,
+        attempt_id: str,
+        run: SkillRun,
+        blackboard: PerceptionBlackboard,
+        capture: CapturedFrame | None,
+    ) -> bool:
         from minecraft_ai.perception_service import BEDROCK_HUD_SAFETY_SOURCE
 
         with StateDatabase(self.db_path) as sdb, sdb._transaction(write=True):

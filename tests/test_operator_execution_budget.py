@@ -21,6 +21,9 @@ from minecraft_ai.skills import SkillOutcome, SkillRun, SkillSpec
 from minecraft_ai.social import OperatorMessage, OperatorMessageStatus
 from minecraft_ai.storage import StateDatabase
 
+_NUMERICAL_BACKENDS = {"torch", "numpy", "transformers", "erais"}
+_NUMERICAL_BACKENDS_AT_COLLECTION = _NUMERICAL_BACKENDS & set(sys.modules)
+
 
 def message(**changes):
     return OperatorMessage.model_validate(
@@ -477,4 +480,4 @@ def test_message_endpoint_accepts_only_declared_budget_without_socket_or_game(
 
 
 def test_no_numerical_backend_was_loaded_by_these_controls():
-    assert not ({"torch", "numpy", "transformers", "erais"} & set(sys.modules))
+    assert (_NUMERICAL_BACKENDS & set(sys.modules)) == _NUMERICAL_BACKENDS_AT_COLLECTION

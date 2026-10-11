@@ -37,7 +37,7 @@ def rig(monkeypatch, tmp_path):
 
     @contextmanager
     def lock(**kwargs):
-        assert kwargs["timeout_s"] <= .05 and not intent.held
+        assert kwargs["timeout_s"] <= 0.05 and not intent.held
         intent.held = True
         try:
             yield
@@ -49,20 +49,35 @@ def rig(monkeypatch, tmp_path):
     commands = []
     database = StateDatabase(tmp_path / "only-fixture.sqlite")
     policy = SimpleNamespace(
-        policy_id="fixture-only", reset=Mock(return_value=MotorAction(sequence=0)),
-        notify_inputs_released=Mock(), close=Mock(), warmup=Mock(), request_warm=Mock(),
+        policy_id="fixture-only",
+        reset=Mock(return_value=MotorAction(sequence=0)),
+        notify_inputs_released=Mock(),
+        close=Mock(),
+        warmup=Mock(),
+        request_warm=Mock(),
         status=Mock(return_value={"policy_id": "fixture-only"}),
         observe_accepted_action=Mock(),
-        act=Mock(side_effect=lambda board, intent, **kw: MotorAction(
-            sequence=kw["sequence"], mouse_dx=15, keys_down=("w", "q", "e", "space", "1"),
-            buttons_down=("left", "right"), duration_ms=50,
-        )),
+        act=Mock(
+            side_effect=lambda board, intent, **kw: MotorAction(
+                sequence=kw["sequence"],
+                mouse_dx=15,
+                keys_down=("w", "q", "e", "space", "1"),
+                buttons_down=("left", "right"),
+                duration_ms=50,
+            )
+        ),
     )
-    vision = SimpleNamespace(start=Mock(), stop=Mock(), available=Mock(return_value=True),
-                             status=Mock(return_value={}))
+    vision = SimpleNamespace(
+        start=Mock(), stop=Mock(), available=Mock(return_value=True), status=Mock(return_value={})
+    )
     perception = SimpleNamespace(
-        instance_id="fixture-only", last_capture=None, active_vlm=vision, fast_perception=None,
-        stale=Mock(return_value=False), close=Mock(), request_semantics=Mock(),
+        instance_id="fixture-only",
+        last_capture=None,
+        active_vlm=vision,
+        fast_perception=None,
+        stale=Mock(return_value=False),
+        close=Mock(),
+        request_semantics=Mock(),
     )
     unsafe = [False]
 
@@ -70,24 +85,47 @@ def rig(monkeypatch, tmp_path):
         clock.mono += 100_000_000
         clock.wall += 100_000_000
         previous = board.raw_latest()
-        frame = FrameState(frame_id=0 if previous is None else previous.frame_id + 1,
-                           captured_ns=clock.mono, instance_id="fixture-only", width=32, height=32)
+        frame = FrameState(
+            frame_id=0 if previous is None else previous.frame_id + 1,
+            captured_ns=clock.mono,
+            instance_id="fixture-only",
+            width=32,
+            height=32,
+        )
         board.publish(frame)
-        board.merge_semantics(instance_id="fixture-only", facts=tuple(
-            PerceptionFact(key=key, value=value, confidence=1.0, observed_ns=clock.mono,
-                           source=BEDROCK_HUD_SAFETY_SOURCE, expires_after_ms=500)
-            for key, value in (("scene.playable", True), ("scene.mode", "world"),
-                               ("scene.death", unsafe[0]))
-        ))
+        board.merge_semantics(
+            instance_id="fixture-only",
+            facts=tuple(
+                PerceptionFact(
+                    key=key,
+                    value=value,
+                    confidence=1.0,
+                    observed_ns=clock.mono,
+                    source=BEDROCK_HUD_SAFETY_SOURCE,
+                    expires_after_ms=500,
+                )
+                for key, value in (
+                    ("scene.playable", True),
+                    ("scene.mode", "world"),
+                    ("scene.death", unsafe[0]),
+                )
+            ),
+        )
         perception.last_capture = SimpleNamespace(captured_ns=clock.mono)
         return frame
 
     perception.capture_once = Mock(side_effect=capture)
     value = AgentRuntime(
-        perception=perception, blackboard=board, executor=SkillExecutor(policy),
-        skills=build_bootstrap_skill_library(), role=get_role("generalist"), lease_id="fixture",
-        state_db=database, operator_request_only=RequestOnlyConfig(),
-        high_level=SimpleNamespace(decide=Mock()), telemetry=SimpleNamespace(publish=Mock()),
+        perception=perception,
+        blackboard=board,
+        executor=SkillExecutor(policy),
+        skills=build_bootstrap_skill_library(),
+        role=get_role("generalist"),
+        lease_id="fixture",
+        state_db=database,
+        operator_request_only=RequestOnlyConfig(),
+        high_level=SimpleNamespace(decide=Mock()),
+        telemetry=SimpleNamespace(publish=Mock()),
     )
     value._telemetry_payload = Mock(side_effect=lambda **kw: kw)
     value._flush_pending_skill_stats = Mock()
@@ -98,8 +136,13 @@ def rig(monkeypatch, tmp_path):
     policy.merge_perception = Mock(return_value=False)
     value._await_post_chat_capture = Mock(return_value=False)
     forbidden = {}
-    for name in ("_keepalive_horizon_reorient", "_explore_keep_alive", "_route_observed_scene_recovery",
-                 "_start_current_plan_skill", "_deliver_game_chat"):
+    for name in (
+        "_keepalive_horizon_reorient",
+        "_explore_keep_alive",
+        "_route_observed_scene_recovery",
+        "_start_current_plan_skill",
+        "_deliver_game_chat",
+    ):
         forbidden[name] = Mock(side_effect=AssertionError("unrequested work"))
         setattr(value, name, forbidden[name])
     inventory = Mock(side_effect=AssertionError("unrequested inventory direction"))
@@ -116,14 +159,23 @@ def rig(monkeypatch, tmp_path):
         return {}
 
     monkeypatch.setattr(runtime_module, "send_command", send)
-    result = SimpleNamespace(runtime=value, clock=clock, commands=commands, policy=policy,
-                             database=database, unsafe=unsafe, release_ok=release_ok,
-                             forbidden=forbidden, inventory=inventory, intent=intent)
+    result = SimpleNamespace(
+        runtime=value,
+        clock=clock,
+        commands=commands,
+        policy=policy,
+        database=database,
+        unsafe=unsafe,
+        release_ok=release_ok,
+        forbidden=forbidden,
+        inventory=inventory,
+        intent=intent,
+    )
     try:
         yield result
     finally:
         if value._lease_thread is not None:
-            value._lease_thread.join(.5)
+            value._lease_thread.join(0.5)
             assert not value._lease_thread.is_alive()
         value._pool.shutdown(wait=False, cancel_futures=True)
         assert value._pool.wait_closed(1)
@@ -137,8 +189,13 @@ def rig(monkeypatch, tmp_path):
 
 
 def enqueue(rig, **changes):
-    data = dict(message_id="fresh-fixture", created_ns=rig.clock.wall, text="survey_surroundings",
-                kind="correction", execution_budget={"timeout_ms": 1200, "max_skills": 1})
+    data = dict(
+        message_id="fresh-fixture",
+        created_ns=rig.clock.wall,
+        text="survey_surroundings",
+        kind="correction",
+        execution_budget={"timeout_ms": 1200, "max_skills": 1},
+    )
     data.update(changes)
     message = OperatorMessage.model_validate(data)
     rig.database.save_operator_message(message)
@@ -153,8 +210,15 @@ def begin(rig):
     assert rig.runtime.executor.run.skill_id == "survey_surroundings"
 
 
-@pytest.mark.parametrize("bad", [{"skill_id": "explore_forward"}, {"allow_attack": True},
-                                  {"wait_timeout_ms": True}, {"wait_timeout_ms": 180001}])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"skill_id": "explore_forward"},
+        {"allow_attack": True},
+        {"wait_timeout_ms": True},
+        {"wait_timeout_ms": 180001},
+    ],
+)
 def test_closed_scope_configuration(bad):
     with pytest.raises(ValidationError):
         RuntimeConfig(operator_request_only=bad)
@@ -180,14 +244,21 @@ def test_actual_startup_and_waiting_tick_do_not_start_models_or_autonomy(rig):
     value._shutdown_runtime.assert_called_once()
 
 
-@pytest.mark.parametrize("changes", [
-    {"text": "please look around"}, {"text": "explore_forward"}, {"execution_budget": None},
-    {"execution_budget": {"timeout_ms": 12001, "max_skills": 1}},
-    {"execution_budget": {"timeout_ms": 1200, "max_skills": 2}},
-    {"status": "delivered"}, {"status": "acknowledged"},
-    {"created_ns": 1}, {"kind": "question", "execution_budget": None},
-    {"direction_request_id": "paid", "execution_budget": None},
-])
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"text": "please look around"},
+        {"text": "explore_forward"},
+        {"execution_budget": None},
+        {"execution_budget": {"timeout_ms": 12001, "max_skills": 1}},
+        {"execution_budget": {"timeout_ms": 1200, "max_skills": 2}},
+        {"status": "delivered"},
+        {"status": "acknowledged"},
+        {"created_ns": 1},
+        {"kind": "question", "execution_budget": None},
+        {"direction_request_id": "paid", "execution_budget": None},
+    ],
+)
 def test_actual_tick_refuses_unqualified_or_replayed_requests(rig, changes):
     rig.runtime.tick()
     enqueue(rig, **changes)
@@ -230,7 +301,9 @@ def test_deadline_and_later_queue_never_restore_autonomy_or_replay_owner(rig):
 
 
 @pytest.mark.parametrize("acknowledged", [False, True])
-def test_expiry_exception_still_releases_and_cannot_restore_autonomy(rig, monkeypatch, acknowledged):
+def test_expiry_exception_still_releases_and_cannot_restore_autonomy(
+    rig, monkeypatch, acknowledged
+):
     begin(rig)
     rig.commands.clear()
     rig.release_ok[0] = acknowledged
@@ -265,6 +338,7 @@ def test_slow_real_policy_return_is_charged_and_cannot_dispatch(rig):
     def late(board, intent, **kwargs):
         rig.clock.mono += 2_000_000_000
         return MotorAction(sequence=kwargs["sequence"], mouse_dx=20)
+
     rig.policy.act.side_effect = late
     rig.runtime.tick()
     enqueue(rig)
@@ -274,15 +348,22 @@ def test_slow_real_policy_return_is_charged_and_cannot_dispatch(rig):
     rig.policy.observe_accepted_action.assert_not_called()
 
 
-@pytest.mark.parametrize("press", [dict(keys_down=("w",)), dict(buttons_down=("left",)),
-                                  dict(mouse_dx=20, camera_semantics="cursor"),
-                                  dict(cursor_x=.5, cursor_y=.5, camera_semantics="cursor")])
+@pytest.mark.parametrize(
+    "press",
+    [
+        dict(keys_down=("w",)),
+        dict(buttons_down=("left",)),
+        dict(mouse_dx=20, camera_semantics="cursor"),
+        dict(cursor_x=0.5, cursor_y=0.5, camera_semantics="cursor"),
+    ],
+)
 def test_direct_wire_caller_cannot_escape_camera_mask_or_get_acceptance(rig, press):
     begin(rig)
     rig.commands.clear()
     prior = rig.runtime.metrics.motor_actions
-    result = ExecutionTick(run=rig.runtime.executor.run,
-                           action=MotorAction(sequence=rig.runtime._sequence, **press))
+    result = ExecutionTick(
+        run=rig.runtime.executor.run, action=MotorAction(sequence=rig.runtime._sequence, **press)
+    )
     assert rig.runtime._send_motor(result.action, execution=result) is False
     assert not any(command == "motor-action" for command, _ in rig.commands)
     assert rig.runtime.metrics.motor_actions == prior
@@ -293,6 +374,7 @@ def test_changed_authority_after_policy_cannot_cross_actual_wire_boundary(rig):
     def changing(board, intent, **kwargs):
         enqueue(rig, message_id="superseding", text="explore_forward")
         return MotorAction(sequence=kwargs["sequence"], mouse_dx=20)
+
     rig.policy.act.side_effect = changing
     rig.runtime.tick()
     enqueue(rig)
@@ -343,8 +425,10 @@ def test_wire_wait_is_charged_again_at_final_boundary(rig, monkeypatch):
             yield current
 
     monkeypatch.setattr(rig.database, "admit_operator_revision", waiting)
-    result = ExecutionTick(run=rig.runtime.executor.run,
-                           action=MotorAction(sequence=rig.runtime._sequence, mouse_dx=20))
+    result = ExecutionTick(
+        run=rig.runtime.executor.run,
+        action=MotorAction(sequence=rig.runtime._sequence, mouse_dx=20),
+    )
     assert rig.runtime._send_motor(result.action, execution=result) is False
     assert not any(command == "motor-action" for command, _ in rig.commands)
 
@@ -392,7 +476,7 @@ def test_refused_actual_skill_start_enters_terminal_hold_without_retry(rig, monk
 
 def test_cursor_pair_invariant_refuses_lone_coordinate():
     with pytest.raises(ValidationError):
-        MotorAction(sequence=0, cursor_y=.5, camera_semantics="cursor")
+        MotorAction(sequence=0, cursor_y=0.5, camera_semantics="cursor")
 
 
 def test_none_mode_retains_existing_cognition_startup_and_legacy_tick_branch(rig, monkeypatch):
@@ -417,7 +501,9 @@ def test_none_mode_retains_existing_cognition_startup_and_legacy_tick_branch(rig
     monkeypatch.setattr(value, "_publish_player_chat_facts", Mock())
     inventory = Mock(return_value=True)
     monkeypatch.setattr("minecraft_ai.directions.runtime.tick_inventory_direction", inventory)
-    monkeypatch.setattr("minecraft_ai.operator.standby.apply_reasoning_standby", Mock(return_value=False))
+    monkeypatch.setattr(
+        "minecraft_ai.operator.standby.apply_reasoning_standby", Mock(return_value=False)
+    )
     AgentRuntime.tick(value)
     rig.policy.merge_perception.assert_called_once()
     inventory.assert_called_once()

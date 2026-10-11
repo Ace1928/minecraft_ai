@@ -172,11 +172,16 @@ class TesseractMenuTextReader:
             if _away_overlay_visible(frame, away_lines):
                 return away_lines
         lines: tuple[OcrLine, ...] = ()
-        if _find_dense_green_control(
-            frame, region=(0.05, 0.72, 0.97, 0.90),
-            minimum_width_fraction=0.65, minimum_height_fraction=0.035,
-            description="possible update continuation control",
-        ) is not None:
+        if (
+            _find_dense_green_control(
+                frame,
+                region=(0.05, 0.72, 0.97, 0.90),
+                minimum_width_fraction=0.65,
+                minimum_height_fraction=0.035,
+                description="possible update continuation control",
+            )
+            is not None
+        ):
             left, top = int(frame.width * 0.60), int(frame.height * 0.20)
             panel = image.crop((left, top, int(frame.width * 0.94), int(frame.height * 0.56)))
             lines = tuple(
@@ -186,15 +191,16 @@ class TesseractMenuTextReader:
         if not _update_notice_visible(frame, lines):
             lines = self._read_image(image)
         if any(
-            math.isfinite(line.confidence) and line.confidence >= 60
+            math.isfinite(line.confidence)
+            and line.confidence >= 60
             and _normalized_text(line.text) == "content log history"
-            and .35 <= line.center[0] / frame.width <= .65
-            and .02 <= line.center[1] / frame.height <= .08
+            and 0.35 <= line.center[0] / frame.width <= 0.65
+            and 0.02 <= line.center[1] / frame.height <= 0.08
             for line in lines
         ):
-            for x0, x1 in ((.055, .25), (.36, .49)):
-                left, top = int(frame.width * x0), int(frame.height * .885)
-                caption = image.crop((left, top, int(frame.width * x1), int(frame.height * .945)))
+            for x0, x1 in ((0.055, 0.25), (0.36, 0.49)):
+                left, top = int(frame.width * x0), int(frame.height * 0.885)
+                caption = image.crop((left, top, int(frame.width * x1), int(frame.height * 0.945)))
                 lines += tuple(
                     replace(line, left=line.left + left, top=line.top + top)
                     for line in self._read_image(caption, input_scale=1, single_line=True)
@@ -205,11 +211,14 @@ class TesseractMenuTextReader:
             not _resource_pack_dialog_visible(frame, lines)
             and _resource_pack_dialog_body_visible(frame, lines)
             and _find_dense_green_control(
-                frame, region=(0.25, 0.50, 0.75, 0.67),
-                minimum_width_fraction=0.40, minimum_height_fraction=0.05,
+                frame,
+                region=(0.25, 0.50, 0.75, 0.67),
+                minimum_width_fraction=0.40,
+                minimum_height_fraction=0.05,
                 minimum_row_fill_ratio=0.65,
                 description="possible resource-pack download control",
-            ) is not None
+            )
+            is not None
         ):
             # The animated backdrop can corrupt sparse full-frame heading OCR.
             # A positioned body and wide control only authorize another read;
@@ -237,24 +246,29 @@ class TesseractMenuTextReader:
                 for line in self._read_image(caption, input_scale=1)
             )
         if not any("loading" in _normalized_text(line.text) for line in lines) and any(
-            math.isfinite(line.confidence) and line.confidence >= 60
+            math.isfinite(line.confidence)
+            and line.confidence >= 60
             and _normalized_text(line.text) == "cancel"
-            and .40 <= line.center[0] / frame.width <= .60
-            and .52 <= line.center[1] / frame.height <= .65
+            and 0.40 <= line.center[0] / frame.width <= 0.60
+            and 0.52 <= line.center[1] / frame.height <= 0.65
             for line in lines
         ):
             # A busy panorama can hide the gray loading-panel title from full
             # frame OCR. This crop can authorize waiting, never another input.
-            left, top = int(frame.width * .35), int(frame.height * .34)
-            caption = image.crop((left, top, int(frame.width * .65), int(frame.height * .39)))
+            left, top = int(frame.width * 0.35), int(frame.height * 0.34)
+            caption = image.crop((left, top, int(frame.width * 0.65), int(frame.height * 0.39)))
             headings = tuple(
                 replace(line, left=line.left + left, top=line.top + top)
                 for line in self._read_image(caption, input_scale=1, single_line=True)
             )
             if any(
-                math.isfinite(line.confidence) and line.confidence >= 60
-                and _normalized_text(line.text) in {
-                    "loading resource packs", "downloading resource packs", "generating world",
+                math.isfinite(line.confidence)
+                and line.confidence >= 60
+                and _normalized_text(line.text)
+                in {
+                    "loading resource packs",
+                    "downloading resource packs",
+                    "generating world",
                 }
                 for line in headings
             ):
@@ -266,9 +280,16 @@ class TesseractMenuTextReader:
         # screenshot-relative and require the exact title before using crops.
         server_form = bedrock_server_form_bounds(frame)
         if server_form is not None and not any(
-            any(anchor in _normalized_text(line.text) for anchor in (
-                "minecraft", "worlds", "disconnected from host", "you died", "tou died",
-            ))
+            any(
+                anchor in _normalized_text(line.text)
+                for anchor in (
+                    "minecraft",
+                    "worlds",
+                    "disconnected from host",
+                    "you died",
+                    "tou died",
+                )
+            )
             for line in lines
         ):
             # The observed transfer form can move right while the survival
@@ -276,17 +297,22 @@ class TesseractMenuTextReader:
             # exact positioned title is still required before caption OCR.
             shift = server_form[0] - 510 / 1920
             panel_left, panel_top = int(frame.width * (0.275 + shift)), int(frame.height * 0.13)
-            panel = image.crop((
-                panel_left, panel_top,
-                int(frame.width * (0.725 + shift)), int(frame.height * 0.845),
-            ))
+            panel = image.crop(
+                (
+                    panel_left,
+                    panel_top,
+                    int(frame.width * (0.725 + shift)),
+                    int(frame.height * 0.845),
+                )
+            )
             panel_lines = tuple(
                 replace(line, left=line.left + panel_left, top=line.top + panel_top)
                 for line in self._read_image(panel, input_scale=1)
             )
             if any(
                 _normalized_text(line.text).replace(" ", "") == "serverlist"
-                and math.isfinite(line.confidence) and line.confidence >= 60
+                and math.isfinite(line.confidence)
+                and line.confidence >= 60
                 and 0.13 <= line.center[1] / frame.height <= 0.22
                 and server_form[0] <= line.center[0] / frame.width <= server_form[2]
                 for line in panel_lines
@@ -296,10 +322,14 @@ class TesseractMenuTextReader:
                     center_y = 0.325 + row * 0.1185
                     left = int(frame.width * (0.37 + shift))
                     top = int(frame.height * (center_y - 0.025))
-                    caption = image.crop((
-                        left, top, int(frame.width * (0.685 + shift)),
-                        int(frame.height * (center_y + 0.025)),
-                    ))
+                    caption = image.crop(
+                        (
+                            left,
+                            top,
+                            int(frame.width * (0.685 + shift)),
+                            int(frame.height * (center_y + 0.025)),
+                        )
+                    )
                     captions.extend(
                         replace(line, left=line.left + left, top=line.top + top)
                         for line in self._read_image(caption, input_scale=1, single_line=True)
@@ -308,16 +338,24 @@ class TesseractMenuTextReader:
                 # Prefer an isolated caption over a duplicate panel reading
                 # of the same text on the same row; distinct rows stay distinct
                 # so ambiguous server names still fail closed at selection.
-                remaining = tuple(line for line in panel_lines if not any(
-                    _normalized_text(line.text) == _normalized_text(caption.text)
-                    and abs(line.center[1] - caption.center[1]) < frame.height * 0.035
-                    for caption in captions
-                ))
+                remaining = tuple(
+                    line
+                    for line in panel_lines
+                    if not any(
+                        _normalized_text(line.text) == _normalized_text(caption.text)
+                        and abs(line.center[1] - caption.center[1]) < frame.height * 0.035
+                        for caption in captions
+                    )
+                )
                 return remaining + tuple(captions)
         return lines
 
     def _read_image(
-        self, image: Image.Image, *, input_scale: int | None = None, single_line: bool = False,
+        self,
+        image: Image.Image,
+        *,
+        input_scale: int | None = None,
+        single_line: bool = False,
     ) -> tuple[OcrLine, ...]:
         # Bedrock's pixel font is substantially more reliable in Tesseract at
         # enlarged nearest-neighbour scale for small captures. A full-HD frame
@@ -410,7 +448,8 @@ class NestedXTestMenuInput:
 
         window = self._display.create_resource_object("window", self.target_window_id)
         owner = window.get_full_property(
-            self._display.intern_atom("_NET_WM_PID"), self._x.AnyPropertyType,
+            self._display.intern_atom("_NET_WM_PID"),
+            self._x.AnyPropertyType,
         )
         if owner is None or len(owner.value) != 1:
             raise IsolationError("Minecraft menu window has no unique process owner")
@@ -421,13 +460,11 @@ class NestedXTestMenuInput:
         return pid, identity[0]
 
     def click(self, frame: CapturedFrame, x: int, y: int) -> None:
-        if (not self._input_permitted()
-                or self._game_identity() != self._game_process_identity):
+        if not self._input_permitted() or self._game_identity() != self._game_process_identity:
             raise MenuNavigationError("menu input interlock is not clear; no click was sent")
         now_ns = time.monotonic_ns()
-        if (
-            not 0 <= now_ns - frame.captured_ns <= 15_000_000_000
-            or frame.captured_ns <= getattr(self, "_last_clicked_capture_ns", 0)
+        if not 0 <= now_ns - frame.captured_ns <= 15_000_000_000 or frame.captured_ns <= getattr(
+            self, "_last_clicked_capture_ns", 0
         ):
             raise MenuNavigationError("stale or replayed menu frame; no click was sent")
         last_click_ns = getattr(self, "_last_click_ns", None)
@@ -474,9 +511,7 @@ class NestedXTestMenuInput:
                 or self._window.get_geometry().width != width
                 or self._window.get_geometry().height != height
             ):
-                raise MenuNavigationError(
-                    "menu input interlock is not clear; no click was sent"
-                )
+                raise MenuNavigationError("menu input interlock is not clear; no click was sent")
             self._last_clicked_capture_ns = frame.captured_ns
             self._last_click_ns = time.monotonic_ns()
             try:
@@ -537,9 +572,19 @@ class BedrockMenuNavigator:
     ) -> None:
         if not lan_name.strip():
             raise ValueError("LAN world name is required")
-        if (not all(math.isfinite(value) for value in (
-                timeout_s, response_timeout_s, poll_interval_s,
-            )) or timeout_s <= 0 or response_timeout_s <= 0 or poll_interval_s < 0):
+        if (
+            not all(
+                math.isfinite(value)
+                for value in (
+                    timeout_s,
+                    response_timeout_s,
+                    poll_interval_s,
+                )
+            )
+            or timeout_s <= 0
+            or response_timeout_s <= 0
+            or poll_interval_s < 0
+        ):
             raise ValueError("menu navigation timing must be positive")
         if max_retries < 1 or max_retries > 5:
             raise ValueError("menu navigation retries must be in [1, 5]")
@@ -611,17 +656,20 @@ class BedrockMenuNavigator:
     def _transition_for(self, observation: MenuObservation) -> _Transition:
         if observation.stage == MenuStage.CONTENT_LOG:
             return _Transition(
-                target_text=("close content log",), destination=MenuStage.IN_WORLD,
+                target_text=("close content log",),
+                destination=MenuStage.IN_WORLD,
                 region=(0.95, 0.02, 0.99, 0.08),
             )
         if observation.stage == MenuStage.RESOURCE_PACK:
             return _Transition(
-                target_text=("download everything & join",), destination=MenuStage.IN_WORLD,
+                target_text=("download everything & join",),
+                destination=MenuStage.IN_WORLD,
                 region=(0.25, 0.50, 0.75, 0.67),
             )
         if observation.stage == MenuStage.UPDATE_NOTICE:
             return _Transition(
-                target_text=("play now",), destination=MenuStage.TITLE,
+                target_text=("play now",),
+                destination=MenuStage.TITLE,
                 region=(0.05, 0.72, 0.97, 0.90),
             )
         if observation.stage == MenuStage.STARTUP_POPUP:
@@ -669,7 +717,8 @@ class BedrockMenuNavigator:
             )
         if observation.stage == MenuStage.CONNECTION_FAILED:
             return _Transition(
-                target_text=("back",), destination=MenuStage.TITLE,
+                target_text=("back",),
+                destination=MenuStage.TITLE,
                 region=(0.10, 0.10, 0.90, 0.95),
             )
         if observation.stage == MenuStage.DEATH:
@@ -678,9 +727,7 @@ class BedrockMenuNavigator:
                 destination=MenuStage.IN_WORLD,
                 region=(0.25, 0.52, 0.75, 0.75),
             )
-        raise MenuNavigationError(
-            f"no safe transition exists from {observation.stage.value}"
-        )
+        raise MenuNavigationError(f"no safe transition exists from {observation.stage.value}")
 
     def _perform_transition(
         self,
@@ -691,9 +738,14 @@ class BedrockMenuNavigator:
     ) -> tuple[MenuObservation, int]:
         source = observation.stage
         attempts = (
-            1 if source in {
-                MenuStage.UPDATE_NOTICE, MenuStage.CONTENT_LOG, MenuStage.CONNECTION_FAILED,
-            } else self.max_retries
+            1
+            if source
+            in {
+                MenuStage.UPDATE_NOTICE,
+                MenuStage.CONTENT_LOG,
+                MenuStage.CONNECTION_FAILED,
+            }
+            else self.max_retries
         )
         for attempt in range(1, attempts + 1):
             if self.clock() >= deadline:
@@ -709,7 +761,8 @@ class BedrockMenuNavigator:
             self.click_backend.click(observation.frame, x, y)
             response_timeout = (
                 max(20.0, self.response_timeout_s)
-                if source == MenuStage.UPDATE_NOTICE else self.response_timeout_s
+                if source == MenuStage.UPDATE_NOTICE
+                else self.response_timeout_s
             )
             response_deadline = min(deadline, self.clock() + response_timeout)
             while self.clock() < deadline:
@@ -728,8 +781,10 @@ class BedrockMenuNavigator:
                     and transition.destination == MenuStage.IN_WORLD
                     and (
                         bedrock_server_form_bounds(current.frame) is not None
-                        or (current.stage == MenuStage.UNKNOWN
-                            and _external_connection_heading_visible(current))
+                        or (
+                            current.stage == MenuStage.UNKNOWN
+                            and _external_connection_heading_visible(current)
+                        )
                     )
                 ):
                     # The retained transfer heading was OCR'd as "Connecting
@@ -738,52 +793,77 @@ class BedrockMenuNavigator:
                     # retained transfer form extend observation to the loading bound.
                     # It never permits another click or changes other screens.
                     response_deadline = deadline
-                if current.stage == transition.destination or (
-                    source == MenuStage.BEDROCK_CONNECT
-                    and current.stage == MenuStage.RESOURCE_PACK
-                ) or (
-                    source in {
-                        MenuStage.DISCONNECTED, MenuStage.CONNECTION_FAILED, MenuStage.UPDATE_NOTICE,
-                    }
-                    and current.stage in {
-                        MenuStage.PLAY, MenuStage.PLAY_TABS, MenuStage.PLAY_SERVERS,
-                    }
-                ) or (
-                    source in {MenuStage.TITLE, MenuStage.PLAY_SERVERS}
-                    and transition.destination == MenuStage.PLAY
-                    and current.stage == MenuStage.PLAY_TABS
+                if (
+                    current.stage == transition.destination
+                    or (
+                        source == MenuStage.BEDROCK_CONNECT
+                        and current.stage == MenuStage.RESOURCE_PACK
+                    )
+                    or (
+                        source
+                        in {
+                            MenuStage.DISCONNECTED,
+                            MenuStage.CONNECTION_FAILED,
+                            MenuStage.UPDATE_NOTICE,
+                        }
+                        and current.stage
+                        in {
+                            MenuStage.PLAY,
+                            MenuStage.PLAY_TABS,
+                            MenuStage.PLAY_SERVERS,
+                        }
+                    )
+                    or (
+                        source in {MenuStage.TITLE, MenuStage.PLAY_SERVERS}
+                        and transition.destination == MenuStage.PLAY
+                        and current.stage == MenuStage.PLAY_TABS
+                    )
                 ):
                     return current, attempt
-                if (current.stage == MenuStage.CONNECTION_FAILED
-                        and source != MenuStage.CONNECTION_FAILED):
+                if (
+                    current.stage == MenuStage.CONNECTION_FAILED
+                    and source != MenuStage.CONNECTION_FAILED
+                ):
                     # Only the independently recognized dialog can enter this
                     # recovery. Its Back control is checked again on that frame;
                     # generic error screens still stop without further input.
                     return current, attempt
                 if current.stage == MenuStage.LOADING:
                     current = self._wait_loading(deadline)
-                    if (current.frame.frame_id <= clicked_frame.frame_id
-                            or current.frame.captured_ns <= clicked_frame.captured_ns):
+                    if (
+                        current.frame.frame_id <= clicked_frame.frame_id
+                        or current.frame.captured_ns <= clicked_frame.captured_ns
+                    ):
                         continue
-                    if current.stage == transition.destination or (
-                        source == MenuStage.BEDROCK_CONNECT
-                        and current.stage == MenuStage.RESOURCE_PACK
-                    ) or (
-                        current.stage == MenuStage.CONNECTION_FAILED
-                        and source != MenuStage.CONNECTION_FAILED
-                    ) or (
-                        source == MenuStage.CONNECTION_FAILED
-                        and current.stage in {
-                            MenuStage.PLAY, MenuStage.PLAY_TABS, MenuStage.PLAY_SERVERS,
-                        }
+                    if (
+                        current.stage == transition.destination
+                        or (
+                            source == MenuStage.BEDROCK_CONNECT
+                            and current.stage == MenuStage.RESOURCE_PACK
+                        )
+                        or (
+                            current.stage == MenuStage.CONNECTION_FAILED
+                            and source != MenuStage.CONNECTION_FAILED
+                        )
+                        or (
+                            source == MenuStage.CONNECTION_FAILED
+                            and current.stage
+                            in {
+                                MenuStage.PLAY,
+                                MenuStage.PLAY_TABS,
+                                MenuStage.PLAY_SERVERS,
+                            }
+                        )
                     ):
                         return current, attempt
                     if (
                         source == MenuStage.BEDROCK_CONNECT
                         and transition.destination == MenuStage.IN_WORLD
                         and current.stage == MenuStage.UNKNOWN
-                        and (self.clock() < response_deadline
-                             or bedrock_server_form_bounds(current.frame) is not None)
+                        and (
+                            self.clock() < response_deadline
+                            or bedrock_server_form_bounds(current.frame) is not None
+                        )
                     ):
                         # A transfer can briefly lose its loading caption.
                         # Spend only the original response budget observing;
@@ -844,7 +924,10 @@ class BedrockMenuNavigator:
         raise MenuNavigationError("away wake did not reveal a playable HUD; no repeat click sent")
 
     def _wait_loading(
-        self, deadline: float, *, waiting_stage: MenuStage = MenuStage.LOADING,
+        self,
+        deadline: float,
+        *,
+        waiting_stage: MenuStage = MenuStage.LOADING,
     ) -> MenuObservation:
         while self.clock() < deadline:
             self.sleep(self.poll_interval_s)
@@ -898,15 +981,24 @@ class BedrockMenuNavigator:
         _update_play_control(observation)
         fresh = self.capture.capture()
         old = observation.frame
-        if ((fresh.width, fresh.height) != (old.width, old.height)
-                or fresh.frame_id <= old.frame_id or fresh.captured_ns <= old.captured_ns):
+        if (
+            (fresh.width, fresh.height) != (old.width, old.height)
+            or fresh.frame_id <= old.frame_id
+            or fresh.captured_ns <= old.captured_ns
+        ):
             raise MenuNavigationError("update notice capture identity/geometry changed")
-        images = [Image.frombytes("RGB", (frame.width, frame.height), frame.bgra, "raw", "BGRX")
-                  for frame in (old, fresh)]
+        images = [
+            Image.frombytes("RGB", (frame.width, frame.height), frame.bgra, "raw", "BGRX")
+            for frame in (old, fresh)
+        ]
         for region in ((0.60, 0.20, 0.94, 0.56), (0.05, 0.77, 0.97, 0.86)):
             x0, y0, x1, y1 = region
-            bounds = (int(x0 * old.width), int(y0 * old.height),
-                      int(x1 * old.width), int(y1 * old.height))
+            bounds = (
+                int(x0 * old.width),
+                int(y0 * old.height),
+                int(x1 * old.width),
+                int(y1 * old.height),
+            )
             if images[0].crop(bounds).tobytes() != images[1].crop(bounds).tobytes():
                 raise MenuNavigationError("update notice changed after recognition; no click sent")
         self._require_input_permitted()
@@ -988,10 +1080,7 @@ def classify_menu_stage(
     if (
         "genwars" in compact
         or "have you tried the action-packed" in text
-        or (
-            "brave the unknown" in text
-            and "dungeons ii is here" in text
-        )
+        or ("brave the unknown" in text and "dungeons ii is here" in text)
     ):
         return MenuStage.STARTUP_POPUP
 
@@ -1018,8 +1107,7 @@ def classify_menu_stage(
         if any(_text_match_score(line.text, anchor) >= 0.86 for line in lines)
     }
     if lan_label_visible and (
-        any(anchor in text for anchor in ("worlds", "lan games", "play"))
-        or len(play_tabs) >= 2
+        any(anchor in text for anchor in ("worlds", "lan games", "play")) or len(play_tabs) >= 2
     ):
         return MenuStage.PLAY
 
@@ -1051,8 +1139,10 @@ def classify_menu_stage(
         # Two positioned tabs plus the empty-state text authorize waiting only.
         return MenuStage.PLAY_TABS
 
-    if "minecraft" in text and "play" in text and any(
-        anchor in text for anchor in ("settings", "marketplace", "dressing room")
+    if (
+        "minecraft" in text
+        and "play" in text
+        and any(anchor in text for anchor in ("settings", "marketplace", "dressing room"))
     ):
         return MenuStage.TITLE
 
@@ -1101,13 +1191,17 @@ def _content_log_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bo
         ("copy to clipboard", (0.01, 0.85, 0.26, 0.98)),
         ("clear", (0.30, 0.85, 0.50, 0.98)),
     )
-    return all(any(
-        math.isfinite(line.confidence) and line.confidence >= 60
-        and x0 <= line.center[0] / frame.width <= x1
-        and y0 <= line.center[1] / frame.height <= y1
-        and target in _normalized_text(line.text)
-        for line in lines
-    ) for target, (x0, y0, x1, y1) in anchors)
+    return all(
+        any(
+            math.isfinite(line.confidence)
+            and line.confidence >= 60
+            and x0 <= line.center[0] / frame.width <= x1
+            and y0 <= line.center[1] / frame.height <= y1
+            and target in _normalized_text(line.text)
+            for line in lines
+        )
+        for target, (x0, y0, x1, y1) in anchors
+    )
 
 
 def _content_log_close_control(frame: CapturedFrame) -> OcrLine | None:
@@ -1124,17 +1218,31 @@ def _content_log_close_control(frame: CapturedFrame) -> OcrLine | None:
     if not (0.007 <= width / frame.width <= 0.015 and abs(width - height) <= 1):
         return None
     glyph = mask.crop(bounds).resize((10, 10), Image.Resampling.NEAREST)
-    expected = ("##......##", "##......##", "..##..##..", "..##..##..", "....##....",
-                "....##....", "..##..##..", "..##..##..", "##......##", "##......##")
-    if any(bool(glyph.getpixel((x, y))) != (expected[y][x] == "#")
-           for y in range(10) for x in range(10)):
+    expected = (
+        "##......##",
+        "##......##",
+        "..##..##..",
+        "..##..##..",
+        "....##....",
+        "....##....",
+        "..##..##..",
+        "..##..##..",
+        "##......##",
+        "##......##",
+    )
+    if any(
+        bool(glyph.getpixel((x, y))) != (expected[y][x] == "#")
+        for y in range(10)
+        for x in range(10)
+    ):
         return None
     return OcrLine("close content log", left + x0, top + y0, width, height)
 
 
 def _resource_pack_dialog_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
     heading = any(
-        math.isfinite(line.confidence) and line.confidence >= 35
+        math.isfinite(line.confidence)
+        and line.confidence >= 35
         and 0.25 <= line.center[0] / frame.width <= 0.75
         and 0.18 <= line.center[1] / frame.height <= 0.29
         and _text_match_score(line.text, "download resource packs") >= 0.75
@@ -1144,68 +1252,101 @@ def _resource_pack_dialog_visible(frame: CapturedFrame, lines: tuple[OcrLine, ..
 
 
 def _resource_pack_dialog_body_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
-    body = _normalized_text(" ".join(line.text for line in lines
-        if math.isfinite(line.confidence) and line.confidence >= 35
-        and 0.25 <= line.center[0] / frame.width <= 0.75
-        and 0.28 <= line.center[1] / frame.height <= 0.46))
+    body = _normalized_text(
+        " ".join(
+            line.text
+            for line in lines
+            if math.isfinite(line.confidence)
+            and line.confidence >= 35
+            and 0.25 <= line.center[0] / frame.width <= 0.75
+            and 0.28 <= line.center[1] / frame.height <= 0.46
+        )
+    )
     return "requires players" in body and "download all" in body
 
 
 def _away_overlay_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
-    text = _normalized_text(" ".join(
-        line.text for line in lines
-        if line.confidence >= 60
-        and frame.width * 0.35 <= line.left < line.left + line.width <= frame.width * 0.75
-        and frame.height * 0.65 <= line.top < line.top + line.height <= frame.height * 0.86
-    ))
-    return all(phrase in text for phrase in (
-        "been away for a bit", "any button to jump back", "into the game",
-    ))
+    text = _normalized_text(
+        " ".join(
+            line.text
+            for line in lines
+            if line.confidence >= 60
+            and frame.width * 0.35 <= line.left < line.left + line.width <= frame.width * 0.75
+            and frame.height * 0.65 <= line.top < line.top + line.height <= frame.height * 0.86
+        )
+    )
+    return all(
+        phrase in text
+        for phrase in (
+            "been away for a bit",
+            "any button to jump back",
+            "into the game",
+        )
+    )
 
 
 def _update_notice_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
     """Require three independent, positioned anchors from the retained update notice."""
     if frame.width <= 0 or frame.height <= 0:
         return False
-    selected = tuple(line for line in lines if math.isfinite(line.confidence)
-                     and line.confidence >= 70
-                     and frame.width * 0.60 <= line.left < line.left + line.width
-                     <= frame.width * 0.94
-                     and line.height > 0)
-    return all(sum(
-        y0 <= line.center[1] / frame.height <= y1 and bool(pattern.fullmatch(
-            _normalized_text(line.text),
-        )) for line in selected
-    ) == 1 for pattern, y0, y1 in (
-        (re.compile(r"wilderness (?:bound|eound|edund)"), 0.20, 0.29),
-        (re.compile(r"(?:[mh]inecraft )?\d{1,3}(?: \d{1,3}){1,3} update"), 0.29, 0.36),
-        (re.compile(r"wilderness bound sets off on"), 0.36, 0.42),
-    ))
+    selected = tuple(
+        line
+        for line in lines
+        if math.isfinite(line.confidence)
+        and line.confidence >= 70
+        and frame.width * 0.60 <= line.left < line.left + line.width <= frame.width * 0.94
+        and line.height > 0
+    )
+    return all(
+        sum(
+            y0 <= line.center[1] / frame.height <= y1
+            and bool(
+                pattern.fullmatch(
+                    _normalized_text(line.text),
+                )
+            )
+            for line in selected
+        )
+        == 1
+        for pattern, y0, y1 in (
+            (re.compile(r"wilderness (?:bound|eound|edund)"), 0.20, 0.29),
+            (re.compile(r"(?:[mh]inecraft )?\d{1,3}(?: \d{1,3}){1,3} update"), 0.29, 0.36),
+            (re.compile(r"wilderness bound sets off on"), 0.36, 0.42),
+        )
+    )
 
 
 def _update_play_control(observation: MenuObservation) -> OcrLine:
     if not _update_notice_visible(observation.frame, observation.lines):
         raise MenuNavigationError("update notice anchors are not verified")
     control = _find_dense_green_control(
-        observation.frame, region=(0.05, 0.72, 0.97, 0.90),
-        minimum_width_fraction=0.65, minimum_height_fraction=0.035,
+        observation.frame,
+        region=(0.05, 0.72, 0.97, 0.90),
+        minimum_width_fraction=0.65,
+        minimum_height_fraction=0.035,
         description="update continuation control",
     )
-    captions = tuple(line for line in observation.lines
-                     if _normalized_text(line.text) == "play now"
-                     and math.isfinite(line.confidence) and line.confidence >= 70)
+    captions = tuple(
+        line
+        for line in observation.lines
+        if _normalized_text(line.text) == "play now"
+        and math.isfinite(line.confidence)
+        and line.confidence >= 70
+    )
     if control is not None and control.height <= observation.frame.height * 0.12:
         if len(captions) == 1:
             line = captions[0]
-            if (control.left <= line.left < line.left + line.width <= control.left + control.width
-                    and control.top <= line.top < line.top + line.height
-                    <= control.top + control.height):
+            if (
+                control.left <= line.left < line.left + line.width <= control.left + control.width
+                and control.top <= line.top < line.top + line.height <= control.top + control.height
+            ):
                 return line
     raise MenuNavigationError("update Play now caption/control is not uniquely verified")
 
 
 def _multiplayer_connection_failure_back(
-    frame: CapturedFrame, lines: tuple[OcrLine, ...],
+    frame: CapturedFrame,
+    lines: tuple[OcrLine, ...],
 ) -> OcrLine | None:
     """Recognize one connection dialog and its actual screenshot-bound Back.
 
@@ -1216,52 +1357,69 @@ def _multiplayer_connection_failure_back(
     if frame.width < 64 or frame.height < 64 or len(frame.bgra) != frame.width * frame.height * 4:
         return None
     selected = tuple(
-        line for line in lines
-        if math.isfinite(line.confidence) and line.confidence >= 60
-        and 0 < line.width and 0 < line.height
-        and frame.width * .10 <= line.left < line.left + line.width <= frame.width * .90
-        and frame.height * .10 <= line.top < line.top + line.height <= frame.height * .95
+        line
+        for line in lines
+        if math.isfinite(line.confidence)
+        and line.confidence >= 60
+        and 0 < line.width
+        and 0 < line.height
+        and frame.width * 0.10 <= line.left < line.left + line.width <= frame.width * 0.90
+        and frame.height * 0.10 <= line.top < line.top + line.height <= frame.height * 0.95
     )
-    headings = tuple(line for line in selected
-                     if _normalized_text(line.text) == "multiplayer connection failed")
+    headings = tuple(
+        line for line in selected if _normalized_text(line.text) == "multiplayer connection failed"
+    )
     backs = tuple(line for line in selected if _normalized_text(line.text) == "back")
     if len(headings) != 1 or len(backs) != 1:
         return None
     heading, back = headings[0], backs[0]
     if not heading.top + heading.height < back.top:
         return None
-    body = tuple(line for line in selected
-                 if heading.top + heading.height < line.top
-                 and line.top + line.height < back.top)
+    body = tuple(
+        line
+        for line in selected
+        if heading.top + heading.height < line.top and line.top + line.height < back.top
+    )
     anchors = (
         "your client is having trouble establishing",
         "multiplayer services please check your",
     )
-    if not all(sum(anchor in _normalized_text(line.text) for line in body) == 1
-               for anchor in anchors):
+    if not all(
+        sum(anchor in _normalized_text(line.text) for line in body) == 1 for anchor in anchors
+    ):
         return None
     # Read only a band around the recognized caption. A second Back caption,
     # absent rectangle or caption outside that rectangle cannot authorize input.
     region = (
-        max(.10, back.center[0] / frame.width - .35),
-        max(.10, back.top / frame.height - .06),
-        min(.90, back.center[0] / frame.width + .35),
-        min(.95, (back.top + back.height) / frame.height + .06),
+        max(0.10, back.center[0] / frame.width - 0.35),
+        max(0.10, back.top / frame.height - 0.06),
+        min(0.90, back.center[0] / frame.width + 0.35),
+        min(0.95, (back.top + back.height) / frame.height + 0.06),
     )
     control = _find_dense_neutral_control(
-        frame, region=region, minimum_width_fraction=.18, minimum_height_fraction=.025,
+        frame,
+        region=region,
+        minimum_width_fraction=0.18,
+        minimum_height_fraction=0.025,
         description="multiplayer failure Back control",
     )
     if control is None:
         control = _find_dense_green_control(
-            frame, region=region, minimum_width_fraction=.18, minimum_height_fraction=.025,
-            minimum_row_fill_ratio=.65, description="selected multiplayer failure Back control",
+            frame,
+            region=region,
+            minimum_width_fraction=0.18,
+            minimum_height_fraction=0.025,
+            minimum_row_fill_ratio=0.65,
+            description="selected multiplayer failure Back control",
         )
-    if (control is None or control.height > frame.height * .16
-            or not control.left <= back.left < back.left + back.width <= control.left + control.width
-            or not control.top <= back.top < back.top + back.height <= control.top + control.height
-            or abs(control.center[0] - back.center[0]) > control.width * .20
-            or abs(control.center[1] - back.center[1]) > control.height * .40):
+    if (
+        control is None
+        or control.height > frame.height * 0.16
+        or not control.left <= back.left < back.left + back.width <= control.left + control.width
+        or not control.top <= back.top < back.top + back.height <= control.top + control.height
+        or abs(control.center[0] - back.center[0]) > control.width * 0.20
+        or abs(control.center[1] - back.center[1]) > control.height * 0.40
+    ):
         return None
     return back
 
@@ -1275,7 +1433,8 @@ def _disconnected_dialog_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...
             and x0 <= line.center[0] / frame.width <= x1
             and y0 <= line.center[1] / frame.height <= y1
             for line in lines
-        ) == 1
+        )
+        == 1
         for text, (x0, y0, x1, y1) in (
             ("disconnected from host", (0.30, 0.22, 0.70, 0.38)),
             ("back to menu", (0.12, 0.64, 0.30, 0.75)),
@@ -1290,8 +1449,10 @@ def _external_connection_heading_visible(observation: MenuObservation) -> bool:
         and 0.20 <= line.center[0] / observation.frame.width <= 0.80
         and 0.20 <= line.center[1] / observation.frame.height <= 0.85
         and re.fullmatch(
-            r"connecting (?:to|tao) external(?: server)?", _normalized_text(line.text),
-        ) is not None
+            r"connecting (?:to|tao) external(?: server)?",
+            _normalized_text(line.text),
+        )
+        is not None
         for line in observation.lines
     )
 
@@ -1330,9 +1491,7 @@ def load_configured_local_server(
 
     if requested_name is not None:
         matches = [
-            server
-            for server in servers
-            if server.name.casefold() == requested_name.casefold()
+            server for server in servers if server.name.casefold() == requested_name.casefold()
         ]
         if len(matches) != 1:
             raise MenuNavigationError(
@@ -1457,18 +1616,24 @@ def _transition_click_target(
 ) -> OcrLine:
     if observation.stage == MenuStage.CONNECTION_FAILED:
         target = _multiplayer_connection_failure_back(observation.frame, observation.lines)
-        if (target is None or transition.target_text != ("back",)
-                or transition.destination != MenuStage.TITLE):
+        if (
+            target is None
+            or transition.target_text != ("back",)
+            or transition.destination != MenuStage.TITLE
+        ):
             raise MenuNavigationError("multiplayer failure Back caption/control is not verified")
         return target
     if observation.stage == MenuStage.BEDROCK_CONNECT:
         form = bedrock_server_form_bounds(observation.frame)
-        if (len(observation.frame.bgra) == observation.frame.width * observation.frame.height * 4
-                and form is None):
+        if (
+            len(observation.frame.bgra) == observation.frame.width * observation.frame.height * 4
+            and form is None
+        ):
             raise MenuNavigationError("server-form chrome is not verified; no input sent")
         if form is not None:
             if not any(
-                math.isfinite(line.confidence) and line.confidence >= 60
+                math.isfinite(line.confidence)
+                and line.confidence >= 60
                 and _normalized_text(line.text).replace(" ", "") == "serverlist"
                 and form[0] <= line.center[0] / observation.frame.width <= form[2]
                 and 0.13 <= line.center[1] / observation.frame.height <= 0.22
@@ -1477,27 +1642,41 @@ def _transition_click_target(
                 raise MenuNavigationError("server-form title is not verified; no input sent")
             # A label must be unique inside a real visible row. Do not use a
             # prefix from chat or the half-rendered transfer overlay as authority.
-            server_target = _find_click_target(observation, transition.target_text,
-                region=(form[0] + 60 / 1920, 0.26, form[2] - 70 / 1920, 0.84))
+            server_target = _find_click_target(
+                observation,
+                transition.target_text,
+                region=(form[0] + 60 / 1920, 0.26, form[2] - 70 / 1920, 0.84),
+            )
             if not math.isfinite(server_target.confidence) or server_target.confidence < 35:
                 raise MenuNavigationError("server-form caption is not verified; no input sent")
-            row = min((0.325 + index * 0.1185 for index in range(5)),
-                key=lambda y: abs(y - server_target.center[1] / observation.frame.height))
+            row = min(
+                (0.325 + index * 0.1185 for index in range(5)),
+                key=lambda y: abs(y - server_target.center[1] / observation.frame.height),
+            )
             if abs(row - server_target.center[1] / observation.frame.height) > 0.035:
                 raise MenuNavigationError("server caption is outside a visible row; no input sent")
-            region = (form[0] + 60 / 1920, row - 0.06,
-                      form[2] - 80 / 1920, row + 0.06)
-            control = _find_dense_neutral_control(observation.frame, region=region,
-                minimum_width_fraction=0.18, minimum_height_fraction=0.045,
-                description="verified server row")
+            region = (form[0] + 60 / 1920, row - 0.06, form[2] - 80 / 1920, row + 0.06)
+            control = _find_dense_neutral_control(
+                observation.frame,
+                region=region,
+                minimum_width_fraction=0.18,
+                minimum_height_fraction=0.045,
+                description="verified server row",
+            )
             if control is None:
-                control = _find_dense_green_control(observation.frame, region=region,
-                    minimum_width_fraction=0.25, minimum_height_fraction=0.045,
-                    description="verified selected server row")
-            if (control is None
-                    or control.width < observation.frame.width * 0.25
-                    or not control.left <= server_target.center[0] <= control.left + control.width
-                    or not control.top <= server_target.center[1] <= control.top + control.height):
+                control = _find_dense_green_control(
+                    observation.frame,
+                    region=region,
+                    minimum_width_fraction=0.25,
+                    minimum_height_fraction=0.045,
+                    description="verified selected server row",
+                )
+            if (
+                control is None
+                or control.width < observation.frame.width * 0.25
+                or not control.left <= server_target.center[0] <= control.left + control.width
+                or not control.top <= server_target.center[1] <= control.top + control.height
+            ):
                 raise MenuNavigationError("server row pixels are not verified; no input sent")
             return server_target
     if observation.stage == MenuStage.CONTENT_LOG:
@@ -1511,13 +1690,20 @@ def _transition_click_target(
         if not _resource_pack_dialog_visible(observation.frame, observation.lines):
             raise MenuNavigationError("resource-pack dialog is not verified")
         target = _find_click_target(observation, transition.target_text, region=transition.region)
-        control = _find_dense_green_control(observation.frame, region=transition.region,
-            minimum_width_fraction=0.40, minimum_height_fraction=0.05,
+        control = _find_dense_green_control(
+            observation.frame,
+            region=transition.region,
+            minimum_width_fraction=0.40,
+            minimum_height_fraction=0.05,
             minimum_row_fill_ratio=0.65,
-            description="resource-pack download control")
-        if (control is None or target.confidence < 35
-                or not control.left <= target.center[0] <= control.left + control.width
-                or not control.top <= target.center[1] <= control.top + control.height):
+            description="resource-pack download control",
+        )
+        if (
+            control is None
+            or target.confidence < 35
+            or not control.left <= target.center[0] <= control.left + control.width
+            or not control.top <= target.center[1] <= control.top + control.height
+        ):
             raise MenuNavigationError("resource-pack download control is not verified")
         return target
     if observation.stage == MenuStage.UPDATE_NOTICE:
@@ -1606,10 +1792,7 @@ def _matched_title_menu_anchors(
     for target, (x0, y0, x1, y1) in anchors:
         for line in lines:
             center_x, center_y = line.center
-            if not (
-                x0 <= center_x / frame.width <= x1
-                and y0 <= center_y / frame.height <= y1
-            ):
+            if not (x0 <= center_x / frame.width <= x1 and y0 <= center_y / frame.height <= y1):
                 continue
             if _text_match_score(line.text, target) >= 0.64:
                 matched.add(target)
@@ -1714,9 +1897,7 @@ def _find_dense_neutral_control(
     def is_light(x: int, y: int) -> bool:
         offset = (y * frame.width + x) * 4
         blue, green, red = (int(value) for value in source[offset : offset + 3])
-        return min(blue, green, red) >= 170 and max(blue, green, red) - min(
-            blue, green, red
-        ) <= 40
+        return min(blue, green, red) >= 170 and max(blue, green, red) - min(blue, green, red) <= 40
 
     qualifying_rows: list[int] = []
     minimum_row_pixels = max(1, int(frame.width * minimum_width_fraction))
@@ -1776,9 +1957,7 @@ def _find_dense_green_control(
     qualifying_rows: list[int] = []
     # Button lettering can interrupt otherwise dense green rows. Keep the full
     # geometric width gate below while allowing an explicit text occupancy.
-    minimum_row_pixels = max(
-        1, int(frame.width * minimum_width_fraction * minimum_row_fill_ratio)
-    )
+    minimum_row_pixels = max(1, int(frame.width * minimum_width_fraction * minimum_row_fill_ratio))
     for y in range(y0, y1):
         if sum(is_green(x, y) for x in range(x0, x1)) >= minimum_row_pixels:
             qualifying_rows.append(y)

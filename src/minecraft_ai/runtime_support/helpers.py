@@ -141,6 +141,7 @@ _HEADROOM_STABLE_SUCCESSOR_FRAMES = 2
 
 _GATHER_ACQUISITIONS_REQUIRED = 3
 
+
 def _headroom_deadline_ns(active_vlm: object, *, now_ns: int) -> int:
     """Bound recovery without imposing a competing timeout on the VLM call.
 
@@ -166,6 +167,7 @@ def _headroom_deadline_ns(active_vlm: object, *, now_ns: int) -> int:
     )
     return now_ns + int(budget_s * 1_000_000_000)
 
+
 def _headroom_reorient_mouse_dy(current_pitch_units: int) -> int:
     """Return one bounded delta toward the calibrated near-ground pose."""
 
@@ -177,6 +179,7 @@ def _headroom_reorient_mouse_dy(current_pitch_units: int) -> int:
         min(_HEADROOM_REORIENT_MAX_ABS_DY, delta),
     )
 
+
 def _restore_policy_world_camera(policy: object, *, pitch_units: int) -> None:
     """Synchronize learned routes after a runtime-owned physical camera action."""
 
@@ -185,12 +188,14 @@ def _restore_policy_world_camera(policy: object, *, pitch_units: int) -> None:
         return
     restore(estimated_pitch_units=pitch_units)
 
+
 def _expected_keepalive_expiry(run: SkillRun) -> bool:
     return (
         run.outcome == SkillOutcome.TIMED_OUT
         and run.context_key == _EXPLORE_KEEPALIVE_CONTEXT
         and run.skill_id in _BOUNDED_KEEPALIVE_SKILL_IDS
     )
+
 
 _GUI_PLAN_SKILLS = frozenset(
     {
@@ -221,22 +226,31 @@ def _plan_step_requests_inventory_transition(skill_id: str, step: str) -> bool:
     normalized = " ".join(step.casefold().replace("_", " ").replace("-", " ").split())
     if skill_id == "open_inventory":
         prefixes = {
-            "open inventory", "open the inventory", "inspect inventory",
-            "inspect the inventory", "check inventory", "check the inventory",
-            "audit inventory", "audit the inventory", "view inventory", "view the inventory",
+            "open inventory",
+            "open the inventory",
+            "inspect inventory",
+            "inspect the inventory",
+            "check inventory",
+            "check the inventory",
+            "audit inventory",
+            "audit the inventory",
+            "view inventory",
+            "view the inventory",
         }
         return any(
-            normalized == prefix or normalized.startswith(f"{prefix} ")
-            for prefix in prefixes
+            normalized == prefix or normalized.startswith(f"{prefix} ") for prefix in prefixes
         )
     if skill_id == "close_open_inventory":
         prefixes = {
-            "close inventory", "close the inventory", "exit inventory",
-            "exit the inventory", "leave inventory", "leave the inventory",
+            "close inventory",
+            "close the inventory",
+            "exit inventory",
+            "exit the inventory",
+            "leave inventory",
+            "leave the inventory",
         }
         return any(
-            normalized == prefix or normalized.startswith(f"{prefix} ")
-            for prefix in prefixes
+            normalized == prefix or normalized.startswith(f"{prefix} ") for prefix in prefixes
         )
     if skill_id == "activate_visible_gui_control":
         words = set(normalized.split())
@@ -247,6 +261,7 @@ def _plan_step_requests_inventory_transition(skill_id: str, step: str) -> bool:
             )
         )
     return True
+
 
 def _verified_log_break(verification: OutcomeVerification | None) -> bool:
     """Return whether exact bound mining evidence identifies a vanilla log."""
@@ -262,7 +277,9 @@ def _verified_log_break(verification: OutcomeVerification | None) -> bool:
     target = verification.target_kind.casefold().removeprefix("minecraft:")
     return target == "log" or target.endswith("_log")
 
+
 _COLLECTABLE_DROP_KINDS = frozenset({"log", "dirt"})
+
 
 def _verified_collectable_break(verification: OutcomeVerification | None) -> str | None:
     """Return the exact drop item kind for a verified break, else ``None``.
@@ -283,6 +300,7 @@ def _verified_collectable_break(verification: OutcomeVerification | None) -> str
     kind = drop_item_kind_for_break_kind(verification.target_kind)
     return kind if kind in _COLLECTABLE_DROP_KINDS else None
 
+
 def _verified_oak_log_break(verification: OutcomeVerification | None) -> bool:
     """Accept only the oak species covered by the deterministic count observer."""
 
@@ -290,9 +308,9 @@ def _verified_oak_log_break(verification: OutcomeVerification | None) -> bool:
         return False
     target = verification.target_kind
     return bool(
-        isinstance(target, str)
-        and target.casefold().removeprefix("minecraft:") == "oak_log"
+        isinstance(target, str) and target.casefold().removeprefix("minecraft:") == "oak_log"
     )
+
 
 def _exact_frozen_log_count(fact: PerceptionFact | None, run: SkillRun) -> int | None:
     """Validate a canonical pre-attack count without expiring its frozen snapshot."""
@@ -310,6 +328,7 @@ def _exact_frozen_log_count(fact: PerceptionFact | None, run: SkillRun) -> int |
     ):
         return None
     return fact.value
+
 
 def _verified_gather_acquisition(
     result: ExecutionTick,
@@ -338,6 +357,7 @@ def _verified_gather_acquisition(
         and exact_count == continuation.last_exact_count + 1
     )
 
+
 def _verified_obstacle_stall(result: ExecutionTick) -> bool:
     """Accept an action-bound traversal stall, independent of model or skill name."""
 
@@ -352,6 +372,7 @@ def _verified_obstacle_stall(result: ExecutionTick) -> bool:
         and verification.signal == OutcomeSignal.LOCOMOTION_STALLED
     )
 
+
 def _verified_block_break(result: ExecutionTick) -> bool:
     verification = result.outcome_verification
     return bool(
@@ -363,6 +384,7 @@ def _verified_block_break(result: ExecutionTick) -> bool:
         and verification.status == OutcomeStatus.SUCCEEDED
         and verification.signal == OutcomeSignal.BLOCK_BROKEN
     )
+
 
 def _verified_traversal_progress(result: ExecutionTick) -> bool:
     """Accept only a transaction-owned retry's exact locomotion progress proof."""
@@ -377,6 +399,7 @@ def _verified_traversal_progress(result: ExecutionTick) -> bool:
         and verification.signal == OutcomeSignal.LOCOMOTION_PROGRESS
     )
 
+
 def _verified_headroom_retry(
     result: ExecutionTick,
     recovery: _HeadroomRecovery | None,
@@ -390,6 +413,7 @@ def _verified_headroom_retry(
         and recovery.context_key == result.run.context_key
         and _verified_traversal_progress(result)
     )
+
 
 def _headroom_retry_advances_plan(
     result: ExecutionTick,
@@ -410,10 +434,8 @@ def _headroom_retry_advances_plan(
     if recovery.context_key == _EXPLORE_KEEPALIVE_CONTEXT:
         return False
     expected_context = plan_goal_id or "default"
-    return bool(
-        0 <= plan_index < len(plan_steps)
-        and recovery.context_key == expected_context
-    )
+    return bool(0 <= plan_index < len(plan_steps) and recovery.context_key == expected_context)
+
 
 def _headroom_clear_target(
     blackboard: PerceptionBlackboard,
@@ -449,9 +471,7 @@ def _headroom_clear_target(
     source_hash = blackboard.fact(
         "recovery.crosshair.frame_dhash", min_confidence=1.0, now_ns=now_ns
     )
-    current_hash = blackboard.fact(
-        "frame.crosshair_block_dhash", min_confidence=1.0, now_ns=now_ns
-    )
+    current_hash = blackboard.fact("frame.crosshair_block_dhash", min_confidence=1.0, now_ns=now_ns)
     current_grid = blackboard.fact(
         "frame.crosshair_block_rgb_grid", min_confidence=1.0, now_ns=now_ns
     )
@@ -486,8 +506,10 @@ def _headroom_clear_target(
         rule = mining_knowledge.rule(normalized_kind, tool)
         if rule is not None and rule.can_break is False:
             return None
-        if not ((rule is not None and rule.can_break is True)
-                or mining_knowledge.belief(normalized_kind, tool).breaks >= 3):
+        if not (
+            (rule is not None and rule.can_break is True)
+            or mining_knowledge.belief(normalized_kind, tool).breaks >= 3
+        ):
             return None
     latest = blackboard.latest()
     raw_latest = blackboard.raw_latest()
@@ -542,11 +564,13 @@ def _headroom_clear_target(
         observed_ns=observed_ns,
     )
 
+
 def _semantic_deadline_ms(semantic_hz: float) -> int:
     """Bound request lifetime independently from a slower query cadence."""
     if semantic_hz <= 0:
         raise ValueError("periodic semantic frequency must be positive")
     return min(10_000, max(250, int(1000 / semantic_hz)))
+
 
 def _accepted_action_provenance(
     execution: ExecutionTick | None,
@@ -559,9 +583,8 @@ def _accepted_action_provenance(
     status = {} if execution is None else execution.policy_status
     is_reset = execution is not None and execution.action_origin == ActionOrigin.RESET
     synthetic_owner = bool(
-        execution is None or (
-            execution.action_origin == ActionOrigin.SYNTHETIC and execution.policy_proposal is None
-        )
+        execution is None
+        or (execution.action_origin == ActionOrigin.SYNTHETIC and execution.policy_proposal is None)
     )
     if synthetic_owner:
         # A controller-generated action did not consume the policy's diagnostic
@@ -676,9 +699,11 @@ def _accepted_action_provenance(
     )
     if execution is not None:
         provenance.validate_skill_binding(
-            skill_id=execution.run.skill_id, skill_run_id=execution.run.run_id,
+            skill_id=execution.run.skill_id,
+            skill_run_id=execution.run.run_id,
         )
     return provenance
+
 
 def _trajectory_outcome_annotations(
     execution: ExecutionTick | None,
@@ -690,9 +715,7 @@ def _trajectory_outcome_annotations(
         execution.run.outcome != SkillOutcome.SUCCEEDED
         or verification.run_id != execution.run.run_id
         or verification.status != OutcomeStatus.SUCCEEDED
-        or verification.signal not in {
-            OutcomeSignal.BLOCK_BROKEN, OutcomeSignal.RESOURCE_ACQUIRED
-        }
+        or verification.signal not in {OutcomeSignal.BLOCK_BROKEN, OutcomeSignal.RESOURCE_ACQUIRED}
     ):
         return {}, ()
     event_suffix = verification.signal.value.replace("_", "-")
@@ -700,6 +723,7 @@ def _trajectory_outcome_annotations(
         {verification.signal.value: verification.confidence},
         (f"skill-run:{execution.run.run_id}:{event_suffix}",),
     )
+
 
 def _reported_action_level(
     execution: ExecutionTick | None,
@@ -728,6 +752,7 @@ def _reported_action_level(
             pass
     return ActionLevel.RAW
 
+
 def _condition_target_track_id(
     intent: MotorIntent | None,
     blackboard: PerceptionBlackboard,
@@ -746,6 +771,7 @@ def _condition_target_track_id(
         return None
     return max(candidates, key=lambda track: track.confidence).track_id
 
+
 def _semantic_refresh_allowed(
     *,
     cognition_requested: bool,
@@ -758,9 +784,11 @@ def _semantic_refresh_allowed(
         cognition_requested or cognition_pending or operator_message_pending or not worker_available
     )
 
+
 def _sqlite_writer_contention(exc: sqlite3.OperationalError) -> bool:
     detail = str(exc).casefold()
     return "locked" in detail or "busy" in detail
+
 
 def _terminal_run_event(
     run: SkillRun,
@@ -810,6 +838,7 @@ def _terminal_run_event(
         payload=payload,
     )
 
+
 def _verified_outcome_event(
     run: SkillRun,
     verification: OutcomeVerification,
@@ -821,9 +850,7 @@ def _verified_outcome_event(
         run.outcome != SkillOutcome.SUCCEEDED
         or verification.run_id != run.run_id
         or verification.status != OutcomeStatus.SUCCEEDED
-        or verification.signal not in {
-            OutcomeSignal.BLOCK_BROKEN, OutcomeSignal.RESOURCE_ACQUIRED
-        }
+        or verification.signal not in {OutcomeSignal.BLOCK_BROKEN, OutcomeSignal.RESOURCE_ACQUIRED}
     ):
         return None
     payload: dict[str, str | int | float | bool] = {
@@ -848,6 +875,7 @@ def _verified_outcome_event(
         trajectory_id=trajectory_id,
         payload=payload,
     )
+
 
 def _terminal_run_memory(
     run: SkillRun,
@@ -913,9 +941,7 @@ def _terminal_run_memory(
                 "verified_outcome": outcome_verification.signal.value,
                 "verified_outcome_confidence": outcome_verification.confidence,
                 "verified_outcome_monotonic_ns": outcome_verification.observed_ns,
-                "verified_outcome_evidence_json": json.dumps(
-                    outcome_verification.evidence_keys
-                ),
+                "verified_outcome_evidence_json": json.dumps(outcome_verification.evidence_keys),
             }
         )
         if outcome_verification.target_kind is not None:
@@ -950,6 +976,7 @@ def _terminal_run_memory(
         metadata=metadata,
     )
 
+
 def _skill_stats_totals(stats: Iterable[SkillStats]) -> dict[str, int]:
     totals = {
         "succeeded": 0,
@@ -965,6 +992,7 @@ def _skill_stats_totals(stats: Iterable[SkillStats]) -> dict[str, int]:
         totals["cancelled"] += item.cancellations
         totals["attempts"] += item.attempts
     return totals
+
 
 def _operator_target_facts(
     target: Track,
@@ -1031,6 +1059,7 @@ def _operator_target_facts(
     )
     return tuple(facts)
 
+
 def _first_feasible_recovery(
     skills: SkillLibrary,
     recovery_ids: tuple[str, ...],
@@ -1045,6 +1074,7 @@ def _first_feasible_recovery(
             return candidate
     return None
 
+
 def _compatible_recovery_parameters(
     failed_run: SkillRun,
     recovery: SkillSpec,
@@ -1056,6 +1086,7 @@ def _compatible_recovery_parameters(
         for name in recovery.parameters
         if name in failed_run.parameters
     }
+
 
 def _observed_scene_recovery(
     skills: SkillLibrary,
@@ -1107,6 +1138,7 @@ def _observed_scene_recovery(
     candidate = skills.get(skill_id)
     return candidate if initiation_satisfied(candidate, blackboard) else None
 
+
 def _scene_claim_is_fresh(blackboard: PerceptionBlackboard) -> bool:
     """True when the current mode claim was observed on the live frame hash.
 
@@ -1124,6 +1156,7 @@ def _scene_claim_is_fresh(blackboard: PerceptionBlackboard) -> bool:
         return perceptual_hash_distance(observed.value, current.value) <= 6
     except ValueError:
         return False
+
 
 def _standing_goal_skill(goal: Goal, blackboard: PerceptionBlackboard) -> str | None:
     """Map a standing-goal description to the bootstrap skill that realizes it.
@@ -1157,6 +1190,7 @@ def _standing_goal_skill(goal: Goal, blackboard: PerceptionBlackboard) -> str | 
         return "explore_forward"
     return None
 
+
 def _int_fact(blackboard: PerceptionBlackboard, *keys: str) -> int:
     for key in keys:
         fact = blackboard.fact(key, min_confidence=0.3)
@@ -1166,6 +1200,7 @@ def _int_fact(blackboard: PerceptionBlackboard, *keys: str) -> int:
             except (TypeError, ValueError):
                 continue
     return 0
+
 
 def _active_operator_messages(
     messages: tuple[OperatorMessage, ...],
@@ -1209,15 +1244,27 @@ def _active_operator_messages(
     acknowledged = tuple(
         message
         for message in messages
-        if (message.status == OperatorMessageStatus.REFUSED
-            or (message.status == OperatorMessageStatus.ACKNOWLEDGED
-                and message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}))
+        if (
+            message.status == OperatorMessageStatus.REFUSED
+            or (
+                message.status == OperatorMessageStatus.ACKNOWLEDGED
+                and message.kind
+                in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+            )
+        )
     )
     if not acknowledged:
         return ()
     newest = max(acknowledged, key=lambda message: message.created_ns)
-    return (newest,) if (newest.status == OperatorMessageStatus.ACKNOWLEDGED
-                        and newest.kind == OperatorMessageKind.INSTRUCTION) else ()
+    return (
+        (newest,)
+        if (
+            newest.status == OperatorMessageStatus.ACKNOWLEDGED
+            and newest.kind == OperatorMessageKind.INSTRUCTION
+        )
+        else ()
+    )
+
 
 def _selected_operator_message_id(
     decision: CognitionDecision,
@@ -1228,6 +1275,7 @@ def _selected_operator_message_id(
         return None
     selected = decision.chosen_goal_id.removeprefix(prefix)
     return selected if selected in pending_message_ids else None
+
 
 def _authorized_game_chat(
     decision: CognitionDecision,
@@ -1251,10 +1299,7 @@ def _authorized_game_chat(
             continue
         if not fact.fresh():
             continue
-        if (
-            already_replied_ns is not None
-            and fact.observed_ns <= already_replied_ns
-        ):
+        if already_replied_ns is not None and fact.observed_ns <= already_replied_ns:
             continue
         return decision.game_chat
     return None

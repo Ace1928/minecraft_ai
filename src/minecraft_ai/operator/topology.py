@@ -77,10 +77,19 @@ def _active_motor_route(policy: dict[str, Any]) -> dict[str, Any]:
     route_id = policy.get("active_route")
     if route_id == "direct":
         return policy
-    key = {"semantic": "primary", "raw_motion": "raw_motion", "gui": "gui"}.get(
-        route_id, "primary" if route_id is None else None)
+    key: str | None
+    if route_id is None:
+        key = "primary"
+    elif isinstance(route_id, str):
+        key = {"semantic": "primary", "raw_motion": "raw_motion", "gui": "gui"}.get(
+            route_id
+        )
+    else:
+        key = None
     if key is not None and isinstance(policy.get(key), dict):
-        return policy[key]
+        selected = policy[key]
+        assert isinstance(selected, dict)
+        return selected
     # A standalone policy has no router; retained specialists do not own its
     # current action and must not supply its latency or activity.
     return policy if route_id is None and policy.get("policy_id") else {}
@@ -132,7 +141,13 @@ def build_topology(
     models = models if isinstance(models, dict) else {}
 
     capture_ms = telemetry.get("last_capture_ms")
-    capture_activity = 1.0 if type(capture_ms) in (int, float) and 0 <= capture_ms < 250 else 0.0
+    capture_activity = (
+        1.0
+        if isinstance(capture_ms, (int, float))
+        and not isinstance(capture_ms, bool)
+        and 0 <= capture_ms < 250
+        else 0.0
+    )
     facts = (telemetry.get("perception") or {}).get("fresh_facts") if isinstance(
         telemetry.get("perception"), dict) else None
     perception_activity = _clamp(len(facts) / 8) if isinstance(facts, dict) else 0.0
@@ -149,9 +164,16 @@ def build_topology(
         and observation.get("state") == "acting"
         and action.get("kind") in {"prediction", "prediction_hold"}
     )
-    policy_activity = 1.0 if policy_available and active_skill and (
-        direct_readout or (type(inference_ms) in (int, float) and 0 <= inference_ms < 250)
-    ) else 0.0
+    recent_inference = (
+        isinstance(inference_ms, (int, float))
+        and not isinstance(inference_ms, bool)
+        and 0 <= inference_ms < 250
+    )
+    policy_activity = (
+        1.0
+        if policy_available and active_skill and (direct_readout or recent_inference)
+        else 0.0
+    )
     skills_activity = 1.0 if active_skill and agent.get("alive") is True else 0.0
     recording = telemetry.get("trajectory_recording")
     recording = recording if isinstance(recording, dict) else {}
@@ -237,7 +259,7 @@ def build_topology(
     }
 
 
-def _model_detail(model: dict[str, Any]) -> str | None:
+def _model_detail(model: object) -> str | None:
     if not isinstance(model, dict) or not model.get("available"):
         return "unavailable"
     return (f"{_integer(model.get('calls'))} calls · "

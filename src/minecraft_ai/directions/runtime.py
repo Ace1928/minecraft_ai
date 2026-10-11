@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from typing import Any
 
 from minecraft_ai.cognition.prompts import _urgent_safety_required
 from minecraft_ai.directions.gateway import (
@@ -20,7 +21,7 @@ from minecraft_ai.runtime_support.types import SkillStartSource
 from minecraft_ai.skills import SkillOutcome
 
 
-def _release(runtime):
+def _release(runtime: Any) -> None:
     run = runtime.executor.run
     if run is not None and run.outcome == SkillOutcome.RUNNING:
         cancelled = runtime.executor.cancel()
@@ -31,7 +32,12 @@ def _release(runtime):
     runtime._cognition_requested = True
 
 
-def _start(runtime, gateway, receipt, skill_id):
+def _start(
+    runtime: Any,
+    gateway: DirectionsGateway,
+    receipt: dict[str, Any],
+    skill_id: str,
+) -> None:
     run_id = uuid.uuid4().hex
     parameters = gateway.start_step(receipt["request_id"], receipt["attempt_id"], skill_id, run_id)
     runtime._start_skill(
@@ -43,7 +49,7 @@ def _start(runtime, gateway, receipt, skill_id):
     )
 
 
-def tick_inventory_direction(runtime) -> bool:
+def tick_inventory_direction(runtime: Any) -> bool:
     """Return true only when this typed transaction owns the current tick."""
     database = runtime.state_db
     if database is None:

@@ -10,9 +10,9 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from collections import deque
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, cast
@@ -27,7 +27,12 @@ from .cognition import (
 )
 from .cognition.prompts import _explicit_action_constraints
 from .control.operator_budget import OperatorAttempt
-from .control.request_only import LiteralRequestFence, RequestOnlyConfig, camera_only_spec, skill_digest
+from .control.request_only import (
+    LiteralRequestFence,
+    RequestOnlyConfig,
+    camera_only_spec,
+    skill_digest,
+)
 from .action_levels import ActionLevel
 from .curriculum import CurriculumCandidate, CurriculumScheduler, role_standing_goals
 from .daemon_executor import SingleWorkerDaemonExecutor
@@ -35,7 +40,9 @@ from .episodes import RuntimeEvent
 from .pack_recipes import PackRecipeCatalog
 from .pack_observer import RecipeObservationReader
 from .pack_scope import (
-    ActiveRecipeIdentity, RECIPE_SCOPE_UNAVAILABLE, recipe_identity_matches,
+    ActiveRecipeIdentity,
+    RECIPE_SCOPE_UNAVAILABLE,
+    recipe_identity_matches,
 )
 from .game_chat import game_chat_authority_matches, game_chat_delivery_admitted
 from .emergency import emergency_stop_latched
@@ -52,8 +59,10 @@ from .memory import MemoryKind, MemoryRecord, MemoryStore
 from .models import BoundCognitionModel, PlannerRequestBudgetError, local_model_inference_available
 from .model_requests import ModelRequestLifecycle, RequestBinding
 from .outcome_verifier import OutcomeSignal, OutcomeVerification
+from .wiki import WikiEvidence
 from .perception import (
     ActivePerceptionQuery,
+    FrameState,
     EvidenceRegion,
     PerceptionBlackboard,
     CognitionBlackboardSnapshot,
@@ -184,79 +193,79 @@ from minecraft_ai.runtime_support.types import (
 )
 
 __all__ = [
-    'AgentRuntime',
-    'RuntimeMetrics',
-    'SkillDecisionOrigin',
-    'SkillStartSource',
-    '_ATOMIC_SKILL_IDS',
-    '_BOUNDED_KEEPALIVE_SKILL_IDS',
-    '_COGNITION_PERCEPTION_ACTION_GRACE_NS',
-    '_COGNITION_PERCEPTION_GROUNDING_TIMEOUT_NS',
-    '_COGNITION_PERCEPTION_HANDOFF_TIMEOUT_NS',
-    '_COGNITION_PERCEPTION_SETTLE_TIMEOUT_NS',
-    '_COGNITION_RETRY_BASE_NS',
-    '_COGNITION_RETRY_MAX_NS',
-    '_CRAFT_SEMANTIC_LATENCY_MARGIN',
-    '_CRAFT_SEMANTIC_MAX_REQUIRED_BUDGET_MS',
-    '_CognitionPerceptionProbe',
-    '_CraftSemanticProbe',
-    '_EXPLORE_KEEPALIVE_CONTEXT',
-    '_GATHER_ACQUISITIONS_REQUIRED',
-    '_GatherAcquisitionContinuation',
-    '_HEADROOM_MIN_TIMEOUT_S',
-    '_HEADROOM_REORIENT_MAX_ABS_DY',
-    '_HEADROOM_REORIENT_TARGET_PITCH_UNITS',
-    '_HEADROOM_REORIENT_TARGET_TOLERANCE_UNITS',
-    '_HEADROOM_SETTLE_TIMEOUT_NS',
-    '_HEADROOM_STABLE_SUCCESSOR_FRAMES',
-    '_HEADROOM_TIMEOUT_MARGIN_S',
-    '_HEADROOM_TIMEOUT_MULTIPLIER',
-    '_HEADROOM_TRANSACTION_MAX_S',
-    '_HeadroomRecovery',
-    '_HeadroomTarget',
-    '_OPERATOR_FOLLOWUP_DELAY_NS',
-    '_PLANKS_NO_LOGS_REASON',
-    '_PLANKS_RETRY_CLEAR_MEMORY',
-    '_RECORDED_RUN_ID_LIMIT',
-    '_WOOD_INVENTORY_AUDIT_SKILLS',
-    '_accepted_action_provenance',
-    '_active_operator_messages',
-    '_authorized_game_chat',
-    '_compatible_recovery_parameters',
-    '_condition_target_track_id',
-    '_exact_frozen_log_count',
-    '_expected_keepalive_expiry',
-    '_first_feasible_recovery',
-    '_headroom_clear_target',
-    '_headroom_deadline_ns',
-    '_headroom_reorient_mouse_dy',
-    '_headroom_retry_advances_plan',
-    '_int_fact',
-    '_observed_scene_recovery',
-    '_operator_target_facts',
-    '_plan_step_matches_skill',
-    '_plan_step_requests_inventory_transition',
-    '_reported_action_level',
-    '_restore_policy_world_camera',
-    '_scene_claim_is_fresh',
-    '_selected_operator_message_id',
-    '_semantic_deadline_ms',
-    '_semantic_refresh_allowed',
-    '_skill_stats_totals',
-    '_sqlite_writer_contention',
-    '_standing_goal_skill',
-    '_terminal_run_event',
-    '_terminal_run_memory',
-    '_trajectory_outcome_annotations',
-    '_verified_block_break',
-    '_verified_collectable_break',
-    '_verified_gather_acquisition',
-    '_verified_headroom_retry',
-    '_verified_log_break',
-    '_verified_oak_log_break',
-    '_verified_obstacle_stall',
-    '_verified_outcome_event',
-    '_verified_traversal_progress',
+    "AgentRuntime",
+    "RuntimeMetrics",
+    "SkillDecisionOrigin",
+    "SkillStartSource",
+    "_ATOMIC_SKILL_IDS",
+    "_BOUNDED_KEEPALIVE_SKILL_IDS",
+    "_COGNITION_PERCEPTION_ACTION_GRACE_NS",
+    "_COGNITION_PERCEPTION_GROUNDING_TIMEOUT_NS",
+    "_COGNITION_PERCEPTION_HANDOFF_TIMEOUT_NS",
+    "_COGNITION_PERCEPTION_SETTLE_TIMEOUT_NS",
+    "_COGNITION_RETRY_BASE_NS",
+    "_COGNITION_RETRY_MAX_NS",
+    "_CRAFT_SEMANTIC_LATENCY_MARGIN",
+    "_CRAFT_SEMANTIC_MAX_REQUIRED_BUDGET_MS",
+    "_CognitionPerceptionProbe",
+    "_CraftSemanticProbe",
+    "_EXPLORE_KEEPALIVE_CONTEXT",
+    "_GATHER_ACQUISITIONS_REQUIRED",
+    "_GatherAcquisitionContinuation",
+    "_HEADROOM_MIN_TIMEOUT_S",
+    "_HEADROOM_REORIENT_MAX_ABS_DY",
+    "_HEADROOM_REORIENT_TARGET_PITCH_UNITS",
+    "_HEADROOM_REORIENT_TARGET_TOLERANCE_UNITS",
+    "_HEADROOM_SETTLE_TIMEOUT_NS",
+    "_HEADROOM_STABLE_SUCCESSOR_FRAMES",
+    "_HEADROOM_TIMEOUT_MARGIN_S",
+    "_HEADROOM_TIMEOUT_MULTIPLIER",
+    "_HEADROOM_TRANSACTION_MAX_S",
+    "_HeadroomRecovery",
+    "_HeadroomTarget",
+    "_OPERATOR_FOLLOWUP_DELAY_NS",
+    "_PLANKS_NO_LOGS_REASON",
+    "_PLANKS_RETRY_CLEAR_MEMORY",
+    "_RECORDED_RUN_ID_LIMIT",
+    "_WOOD_INVENTORY_AUDIT_SKILLS",
+    "_accepted_action_provenance",
+    "_active_operator_messages",
+    "_authorized_game_chat",
+    "_compatible_recovery_parameters",
+    "_condition_target_track_id",
+    "_exact_frozen_log_count",
+    "_expected_keepalive_expiry",
+    "_first_feasible_recovery",
+    "_headroom_clear_target",
+    "_headroom_deadline_ns",
+    "_headroom_reorient_mouse_dy",
+    "_headroom_retry_advances_plan",
+    "_int_fact",
+    "_observed_scene_recovery",
+    "_operator_target_facts",
+    "_plan_step_matches_skill",
+    "_plan_step_requests_inventory_transition",
+    "_reported_action_level",
+    "_restore_policy_world_camera",
+    "_scene_claim_is_fresh",
+    "_selected_operator_message_id",
+    "_semantic_deadline_ms",
+    "_semantic_refresh_allowed",
+    "_skill_stats_totals",
+    "_sqlite_writer_contention",
+    "_standing_goal_skill",
+    "_terminal_run_event",
+    "_terminal_run_memory",
+    "_trajectory_outcome_annotations",
+    "_verified_block_break",
+    "_verified_collectable_break",
+    "_verified_gather_acquisition",
+    "_verified_headroom_retry",
+    "_verified_log_break",
+    "_verified_oak_log_break",
+    "_verified_obstacle_stall",
+    "_verified_outcome_event",
+    "_verified_traversal_progress",
 ]
 
 
@@ -338,13 +347,17 @@ class AgentRuntime:
         init=False,
     )
     _bound_cognition_requests: dict[
-        concurrent.futures.Future[CognitionDecision], tuple[ModelRequestLifecycle, object],
+        concurrent.futures.Future[CognitionDecision],
+        tuple[ModelRequestLifecycle, object],
     ] = field(default_factory=dict, init=False, repr=False)
     _planner_budget_bindings: dict[
-        concurrent.futures.Future[CognitionDecision], _PlannerBudgetRefusalBinding,
+        concurrent.futures.Future[CognitionDecision],
+        _PlannerBudgetRefusalBinding,
     ] = field(default_factory=dict, init=False, repr=False)
     _pending_planner_budget_refusal: _PlannerBudgetRefusalBinding | None = field(
-        default=None, init=False, repr=False,
+        default=None,
+        init=False,
+        repr=False,
     )
     _planner_budget_retry_ns: int = field(default=0, init=False)
     _pool: SingleWorkerDaemonExecutor = field(init=False)
@@ -407,7 +420,8 @@ class AgentRuntime:
     _headroom_recovery: _HeadroomRecovery | None = field(default=None, init=False)
     _headroom_inspection_memory: MemoryRecord | None = field(default=None, init=False)
     _keepalive_prediction_evidence: _KeepalivePredictionEvidence | None = field(
-        default=None, init=False,
+        default=None,
+        init=False,
     )
     _keepalive_rotation_hint: _KeepalivePredictionEvidence | None = field(default=None, init=False)
     _gather_acquisition_continuation: _GatherAcquisitionContinuation | None = field(
@@ -424,24 +438,31 @@ class AgentRuntime:
             if not isinstance(self.operator_request_only, RequestOnlyConfig):
                 raise ValueError("request-only mode requires its validated configuration")
             self._literal_request_fence = LiteralRequestFence(
-                self.operator_request_only, time.time_ns(),
+                self.operator_request_only,
+                time.time_ns(),
                 time.monotonic_ns() + self.operator_request_only.wait_timeout_ms * 1_000_000,
             )
         if self.motor_hz <= 0 or self.cognition_hz <= 0 or self.semantic_hz < 0:
             raise ValueError(
                 "motor/cognition frequencies must be positive and semantic nonnegative"
             )
-        if (type(self.cognition_request_timeout_ms) is not int
-                or not 1 <= self.cognition_request_timeout_ms <= 300_000):
+        if (
+            type(self.cognition_request_timeout_ms) is not int
+            or not 1 <= self.cognition_request_timeout_ms <= 300_000
+        ):
             raise ValueError("bound cognition timeout must be between 1 and 300000 ms")
         if self.stale_frame_consecutive_limit < 1:
             raise ValueError("stale_frame_consecutive_limit must be positive")
         from minecraft_ai.control.mining_knowledge import MiningKnowledge
+
         configure_mining = getattr(self.executor, "configure_mining_knowledge", None)
         if callable(configure_mining) and getattr(self.executor, "mining_knowledge", None) is None:
-            configure_mining(MiningKnowledge(
-                self.memories, self.mining_ruleset_id or ("session:" + uuid.uuid4().hex),
-            ))
+            configure_mining(
+                MiningKnowledge(
+                    self.memories,
+                    self.mining_ruleset_id or ("session:" + uuid.uuid4().hex),
+                )
+            )
         self._pool = SingleWorkerDaemonExecutor(
             thread_name="minecraft-ai-cognition",
         )
@@ -591,7 +612,9 @@ class AgentRuntime:
                 # or an adapter's private exception text to public telemetry.
                 self._shutdown_results[name] = {"error_code": type(exc).__name__}
                 logging.getLogger(__name__).warning(
-                    "Runtime cleanup %s failed: %s", name, type(exc).__name__,
+                    "Runtime cleanup %s failed: %s",
+                    name,
+                    type(exc).__name__,
                 )
                 return None
             self._shutdown_results[name] = result
@@ -607,12 +630,20 @@ class AgentRuntime:
         inputs_released = isinstance(revoked, dict) and revoked.get("motor_lease_active") is False
         # Keep only the release conclusion, not the supervisor's full status.
         self._shutdown_results["actuator_release"] = inputs_released
+
         def retire_cognition_requests() -> None:
-            for future in tuple(set(getattr(self, "_bound_cognition_requests", {}))
-                                | set(getattr(self, "_planner_budget_bindings", {}))):
-                cleanup("cognition_request", partial(self._reject_bound_cognition,
-                    future, "runtime_shutdown",
-                ))
+            for future in tuple(
+                set(getattr(self, "_bound_cognition_requests", {}))
+                | set(getattr(self, "_planner_budget_bindings", {}))
+            ):
+                cleanup(
+                    "cognition_request",
+                    partial(
+                        self._reject_bound_cognition,
+                        future,
+                        "runtime_shutdown",
+                    ),
+                )
 
         cleanup("cognition_registry", retire_cognition_requests)
         self._pending_planner_budget_refusal = None
@@ -629,22 +660,31 @@ class AgentRuntime:
         cleanup("terminal_run", cancel_terminal)
         lease_thread = self._lease_thread
         if lease_thread is not None:
-            cleanup("lease_thread", lambda: lease_thread.join(
-                timeout=min(2.0, remaining_s()),
-            ))
+            cleanup(
+                "lease_thread",
+                lambda: lease_thread.join(
+                    timeout=min(2.0, remaining_s()),
+                ),
+            )
         # Perception retirement fences publications before model checkpointing.
-        cleanup("perception", lambda: self.perception.close(
-            deadline_ns=min(deadline_ns, time.monotonic_ns() + 2_000_000_000),
-        ))
+        cleanup(
+            "perception",
+            lambda: self.perception.close(
+                deadline_ns=min(deadline_ns, time.monotonic_ns() + 2_000_000_000),
+            ),
+        )
         policy = getattr(self.executor, "policy", None)
         retire = getattr(policy, "retire", None)
         if callable(retire):
-            cleanup("policy", lambda: retire(
-                # Reserve room for recorder and parent learning evidence. Every
-                # child shares this cutoff; no per-worker additive timeout.
-                deadline_ns=deadline_ns - 5_000_000_000,
-                inputs_released=inputs_released and not emergency_stop_latched(),
-            ))
+            cleanup(
+                "policy",
+                lambda: retire(
+                    # Reserve room for recorder and parent learning evidence. Every
+                    # child shares this cutoff; no per-worker additive timeout.
+                    deadline_ns=deadline_ns - 5_000_000_000,
+                    inputs_released=inputs_released and not emergency_stop_latched(),
+                ),
+            )
         else:
             # Explicit legacy transition: no capability means no checkpoint ACK
             # claim. Custom close callbacks remain cooperative under outer stop.
@@ -654,9 +694,13 @@ class AgentRuntime:
             cleanup("trajectory", lambda: trajectory.close(timeout_s=remaining_s()))
         cleanup("skill_statistics", lambda: self._flush_pending_skill_stats(force=True))
         cleanup("learning_records", lambda: self._flush_pending_learning_records(force=True))
-        cleanup("telemetry", lambda: self.telemetry.publish(
-            self._telemetry_payload(state="stopped"), force=True,
-        ))
+        cleanup(
+            "telemetry",
+            lambda: self.telemetry.publish(
+                self._telemetry_payload(state="stopped"),
+                force=True,
+            ),
+        )
 
     def _warmup_policy(self) -> None:
         if self.operator_request_only is not None:
@@ -685,12 +729,16 @@ class AgentRuntime:
         try:
             released = self._release_and_reconcile_inputs()
             run = self.executor.run
-            if (run is not None and run.run_id == fence.run_id
-                    and run.outcome == SkillOutcome.RUNNING):
-                self.executor.expire_operator_attempt(
-                    now_ns=time.monotonic_ns(), reason=f"operator.attempt_request_only:{reason}",
+            if (
+                run is not None
+                and run.run_id == fence.run_id
+                and run.outcome == SkillOutcome.RUNNING
+            ):
+                expired = self.executor.expire_operator_attempt(
+                    now_ns=time.monotonic_ns(),
+                    reason=f"operator.attempt_request_only:{reason}",
                 )
-                self._record_terminal_run(self.executor.run, advance_plan=False)
+                self._record_terminal_run(expired.run, advance_plan=False)
                 self._execution_revision += 1
         finally:
             # Persisting an expiry can fail independently of physical release.
@@ -738,9 +786,15 @@ class AgentRuntime:
                     if self._stop.is_set() or operator_pause_latched() or emergency_stop_latched():
                         return
                     snapshot = self.state_db.load_operator_context(limit=1000)
-                    pending = tuple(message for message in snapshot.messages if message.status in {
-                        OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
-                    })
+                    pending = tuple(
+                        message
+                        for message in snapshot.messages
+                        if message.status
+                        in {
+                            OperatorMessageStatus.QUEUED,
+                            OperatorMessageStatus.DELIVERED,
+                        }
+                    )
                     # Do not guess between concurrent/paid/question requests or
                     # replay an old delivered instruction after a restart.
                     if len(pending) != 1:
@@ -750,7 +804,9 @@ class AgentRuntime:
                     if fence.admission_reason(message, spec) is not None:
                         return
                     attempt = OperatorAttempt.admit(
-                        message, wall_ns=time.time_ns(), monotonic_ns=time.monotonic_ns(),
+                        message,
+                        wall_ns=time.time_ns(),
+                        monotonic_ns=time.monotonic_ns(),
                     )
                     if attempt.terminal_reason is not None:
                         fence.finish(attempt.terminal_reason)
@@ -761,16 +817,28 @@ class AgentRuntime:
                         if not current:
                             return
                         if not self._persist_operator_message_status(
-                            message.message_id, OperatorMessageStatus.ACKNOWLEDGED,
-                            timestamp_ns=time.time_ns(), response_text="Starting the bounded survey.",
+                            message.message_id,
+                            OperatorMessageStatus.ACKNOWLEDGED,
+                            timestamp_ns=time.time_ns(),
+                            response_text="Starting the bounded survey.",
                         ):
                             return
-                        fence.bind(message, spec, attempt,
-                                   revision=self.state_db.operator_revision(), run_id=uuid.uuid4().hex)
-                        self._operator_attempts[fence.context_key] = attempt
+                        fence.bind(
+                            message,
+                            spec,
+                            attempt,
+                            revision=self.state_db.operator_revision(),
+                            run_id=uuid.uuid4().hex,
+                        )
+                        context_key = fence.context_key
+                        if context_key is None:
+                            raise RuntimeError("request-only context was not bound")
+                        self._operator_attempts[context_key] = attempt
                 # No database/operator lock spans policy construction/warmup.
                 self._start_skill(
-                    spec, source=SkillStartSource.COGNITION, run_id=fence.run_id,
+                    spec,
+                    source=SkillStartSource.COGNITION,
+                    run_id=fence.run_id,
                     context_key=fence.context_key,
                     parameters=spec.action_permissions.model_dump(),
                     instruction=spec.policy_instruction,
@@ -781,8 +849,9 @@ class AgentRuntime:
         run = self.executor.run
         try:
             snapshot = self.state_db.load_operator_context(limit=1000)
-            reason = fence.check(snapshot, run, self.skills.get(fence.config.skill_id),
-                                 now_ns=time.monotonic_ns())
+            reason = fence.check(
+                snapshot, run, self.skills.get(fence.config.skill_id), now_ns=time.monotonic_ns()
+            )
         except (sqlite3.Error, ValueError, KeyError):
             reason = "authority_unavailable"
         if reason is not None:
@@ -794,7 +863,9 @@ class AgentRuntime:
         self._merge_policy_perception()
         motor_started = time.perf_counter()
         result = self.executor.tick(
-            self.blackboard, sequence=self._sequence, now_ns=time.monotonic_ns(),
+            self.blackboard,
+            sequence=self._sequence,
+            now_ns=time.monotonic_ns(),
             capture=getattr(self.perception, "last_capture", None),
         )
         result = self._expire_operator_result(result)
@@ -806,39 +877,68 @@ class AgentRuntime:
             self._finish_request_only("motor_admission_refused")
             return
         if result.run.outcome != SkillOutcome.RUNNING:
-            self._record_terminal_run(result.run, outcome_verification=result.outcome_verification,
-                                      advance_plan=False)
+            self._record_terminal_run(
+                result.run, outcome_verification=result.outcome_verification, advance_plan=False
+            )
             self._finish_request_only(f"skill_{result.run.outcome.value}")
         self.telemetry.publish(self._telemetry_payload(state="request-only-survey"))
 
     @contextmanager
-    def _request_only_motor_authority(self, action: MotorAction, execution: ExecutionTick | None):
+    def _request_only_motor_authority(
+        self,
+        action: MotorAction,
+        execution: ExecutionTick | None,
+    ) -> Iterator[bool]:
         """Keep the final request/revision/deadline check across actual dispatch."""
         if self.operator_request_only is None:
             yield True
             return
         fence = self._literal_request_fence
         # Mandatory releases do not acquire positive-action authority.
-        release_only = not (action.keys_down or action.buttons_down or action.mouse_dx
-                            or action.mouse_dy or action.cursor_x is not None)
+        release_only = not (
+            action.keys_down
+            or action.buttons_down
+            or action.mouse_dx
+            or action.mouse_dy
+            or action.cursor_x is not None
+        )
         if release_only:
             yield True
             return
-        if (fence is None or self.state_db is None or action.keys_down or action.buttons_down
-                or action.camera_semantics != "world" or action.cursor_x is not None):
+        if (
+            fence is None
+            or self.state_db is None
+            or action.keys_down
+            or action.buttons_down
+            or action.camera_semantics != "world"
+            or action.cursor_x is not None
+        ):
             if fence is not None:
                 fence.finish("camera_press_refused")
+            yield False
+            return
+        operator_revision = fence.operator_revision
+        if operator_revision is None:
+            fence.finish("authority_unavailable")
             yield False
             return
         stack = ExitStack()
         try:
             stack.enter_context(operator_intent_lock(timeout_s=0.05))
-            current = stack.enter_context(self.state_db.admit_operator_revision(fence.operator_revision))
+            current = stack.enter_context(
+                self.state_db.admit_operator_revision(operator_revision)
+            )
             snapshot = self.state_db.load_operator_context(limit=1000)
             run = self.executor.run if execution is None else execution.run
-            reason = fence.check(snapshot, run, self.skills.get(fence.config.skill_id),
-                                 now_ns=time.monotonic_ns())
-            if not current or self._stop.is_set() or operator_pause_latched() or emergency_stop_latched():
+            reason = fence.check(
+                snapshot, run, self.skills.get(fence.config.skill_id), now_ns=time.monotonic_ns()
+            )
+            if (
+                not current
+                or self._stop.is_set()
+                or operator_pause_latched()
+                or emergency_stop_latched()
+            ):
                 reason = "request_authority_changed"
         except (sqlite3.Error, RuntimeError, ValueError, KeyError):
             stack.close()
@@ -871,7 +971,8 @@ class AgentRuntime:
             )
         except Exception as exc:
             logging.getLogger(__name__).warning(
-                "Fresh-capture continuation guard failed: %s", type(exc).__name__,
+                "Fresh-capture continuation guard failed: %s",
+                type(exc).__name__,
             )
             allowed = False
         if allowed is True and not self._stop.is_set():
@@ -883,7 +984,8 @@ class AgentRuntime:
             # A rejected/failed release cannot grant continuation. The existing
             # run-finally disarm and lease retirement remain independent owners.
             logging.getLogger(__name__).warning(
-                "Capture-guard input release failed: %s", type(exc).__name__,
+                "Capture-guard input release failed: %s",
+                type(exc).__name__,
             )
         return False
 
@@ -893,6 +995,7 @@ class AgentRuntime:
         # returns; a rejected send raises, while budget suppression ends this
         # tick without authorizing a recovery from its unsent action.
         capture_started = time.perf_counter()
+        recipe_observer = getattr(self, "recipe_observer", None)
         try:
             frame = self.perception.capture_once()
         except ImageCaptureTimeout as error:
@@ -903,8 +1006,8 @@ class AgentRuntime:
             self.metrics.stale_frame_skips += 1
             self.metrics.consecutive_stale_frames += 1
             self._release_and_reconcile_inputs()
-            if self.recipe_observer is not None:
-                self.recipe_observer.revoke(self.blackboard)
+            if recipe_observer is not None:
+                recipe_observer.revoke(self.blackboard)
             self.telemetry.publish(self._telemetry_payload(state="capture-stalled"))
             if self.metrics.consecutive_stale_frames >= self.stale_frame_consecutive_limit:
                 raise RuntimeError(
@@ -914,10 +1017,10 @@ class AgentRuntime:
             return
         self.metrics.frames += 1
         self.metrics.last_capture_ms = (time.perf_counter() - capture_started) * 1000.0
-        if self.recipe_observer is not None:
-            self.recipe_observer.poll(self.blackboard)
+        if recipe_observer is not None:
+            recipe_observer.poll(self.blackboard)
         self._merge_operator_target()
-        if self.operator_request_only is None:
+        if getattr(self, "operator_request_only", None) is None:
             self._merge_policy_perception()
         if self.perception.stale():
             self.metrics.stale_frame_skips += 1
@@ -930,8 +1033,8 @@ class AgentRuntime:
             # stale capture, so a command failure here is tolerated — the lease
             # revocation path and release_all remain the authoritative release.
             self._release_and_reconcile_inputs()
-            if self.recipe_observer is not None:
-                self.recipe_observer.revoke(self.blackboard)
+            if recipe_observer is not None:
+                recipe_observer.revoke(self.blackboard)
             self.telemetry.publish(self._telemetry_payload(state="capture-stalled"))
             if self.metrics.consecutive_stale_frames >= self.stale_frame_consecutive_limit:
                 raise RuntimeError(
@@ -947,12 +1050,22 @@ class AgentRuntime:
             # The next tick must observe the released body before selecting
             # another action; never replay the pre-release image or command.
             return
-        if self._await_post_chat_capture(frame):
+        if getattr(self, "_game_chat_completed_ns", None) is not None and (
+            AgentRuntime._await_post_chat_capture(self, frame)
+        ):
             return
         if not self._continue_after_capture():
             return
-        if self.operator_request_only is not None:
+        if getattr(self, "operator_request_only", None) is not None:
             self._tick_request_only()
+            return
+        from .operator.standby import apply_reasoning_standby
+        from .directions.runtime import tick_inventory_direction
+
+        reasoning_standby = apply_reasoning_standby(self)
+        if tick_inventory_direction(self):
+            return
+        if reasoning_standby:
             return
         if self._expire_current_operator_attempt():
             # Expiration releases the old goal. Verified death/modal recovery
@@ -964,13 +1077,6 @@ class AgentRuntime:
         self._flush_pending_operator_status_updates()
         self.telemetry.publish(self._telemetry_payload(state="running"))
         self._publish_player_chat_facts()
-        from .operator.standby import apply_reasoning_standby
-        from .directions.runtime import tick_inventory_direction
-        reasoning_standby = apply_reasoning_standby(self)
-        if tick_inventory_direction(self):
-            return
-        if reasoning_standby:
-            return
         self._planks_retry_requires_wood()
         if self._yield_keepalive_to_operator():
             return
@@ -1081,10 +1187,7 @@ class AgentRuntime:
             and frozen_gather_count is not None
             and (
                 continuation is None
-                or (
-                    continuation_owned
-                    and frozen_gather_count == continuation.last_exact_count
-                )
+                or (continuation_owned and frozen_gather_count == continuation.last_exact_count)
             )
         )
         verified_collection_count = getattr(
@@ -1108,16 +1211,10 @@ class AgentRuntime:
             and continuation.resource_acquired_events == _GATHER_ACQUISITIONS_REQUIRED - 1
         )
         gather_transaction_terminal = bool(
-            terminal
-            and (
-                result.run.skill_id == "gather_nearby_wood"
-                or continuation is not None
-            )
+            terminal and (result.run.skill_id == "gather_nearby_wood" or continuation is not None)
         )
         inherited_plan_neutral = bool(
-            terminal
-            and result.run.run_id
-            in getattr(self, "_plan_neutral_recovery_runs", set())
+            terminal and result.run.run_id in getattr(self, "_plan_neutral_recovery_runs", set())
         )
         collect_drop_kind = (
             _verified_collectable_break(result.outcome_verification)
@@ -1130,9 +1227,7 @@ class AgentRuntime:
             and collect_drop_kind is not None
             and "collect_recent_drop" in self.skills.specs
         )
-        headroom_child = bool(
-            headroom_deadline_expired or self._is_headroom_child_result(result)
-        )
+        headroom_child = bool(headroom_deadline_expired or self._is_headroom_child_result(result))
         headroom = getattr(self, "_headroom_recovery", None)
         headroom_retry_advances_plan = bool(
             headroom_child
@@ -1145,8 +1240,7 @@ class AgentRuntime:
             )
         )
         advance_plan = bool(
-            not collect_recent_drop
-            and (not headroom_child or headroom_retry_advances_plan)
+            not collect_recent_drop and (not headroom_child or headroom_retry_advances_plan)
         )
         if gather_transaction_terminal:
             # A gather break and the first two exact pickups are intermediate.
@@ -1163,8 +1257,12 @@ class AgentRuntime:
             # Never persist a duplicate, unowned, or count-inexact acquisition
             # as one of this transaction's three facts.
             recorded_verification = None
-        if continuation is not None and terminal and not (
-            gather_handoff or (verified_gather_collection and not gather_collection_complete)
+        if (
+            continuation is not None
+            and terminal
+            and not (
+                gather_handoff or (verified_gather_collection and not gather_collection_complete)
+            )
         ):
             self._gather_acquisition_continuation = None
         sent: bool | None = None
@@ -1190,10 +1288,7 @@ class AgentRuntime:
         self.metrics.last_motor_ms = (time.perf_counter() - motor_started) * 1000.0
         if terminal:
             stop_event = getattr(self, "_stop", None)
-            if (
-                (stop_event is not None and stop_event.is_set())
-                or operator_pause_latched()
-            ):
+            if (stop_event is not None and stop_event.is_set()) or operator_pause_latched():
                 # A pause/stop observed while releasing this terminal action
                 # owns the executor. Never resurrect a successor transaction.
                 self._gather_acquisition_continuation = None
@@ -1240,8 +1335,7 @@ class AgentRuntime:
                     parameters=continuation.parameters,
                     instruction=continuation.instruction,
                     gather_acquisitions_remaining=(
-                        _GATHER_ACQUISITIONS_REQUIRED
-                        - continuation.resource_acquired_events
+                        _GATHER_ACQUISITIONS_REQUIRED - continuation.resource_acquired_events
                     ),
                 )
                 continuation.active_run_id = gather_run_id
@@ -1269,14 +1363,23 @@ class AgentRuntime:
                     pass
                 return
             recovery_ids = result.recovery_skills
-            if (result.run.skill_id == "gather_nearby_wood"
-                    and not visible_oak_trunk(self.blackboard)):
+            if result.run.skill_id == "gather_nearby_wood" and not visible_oak_trunk(
+                self.blackboard
+            ):
                 # A missing trunk calls for a search, not another attack or a
                 # reacquisition loop against the same ungrounded stone wall.
-                recovery_ids = tuple(skill for skill in recovery_ids if skill in {
-                    "escape_submersion", "retreat_from_danger", "explore_forward",
-                    "backtrack_from_obstacle", "survey_surroundings",
-                })
+                recovery_ids = tuple(
+                    skill
+                    for skill in recovery_ids
+                    if skill
+                    in {
+                        "escape_submersion",
+                        "retreat_from_danger",
+                        "explore_forward",
+                        "backtrack_from_obstacle",
+                        "survey_surroundings",
+                    }
+                )
             recovery = select_learned_recovery(
                 self.skills,
                 recovery_ids,
@@ -1293,10 +1396,7 @@ class AgentRuntime:
                     result.run,
                     plan_neutral=(
                         inherited_plan_neutral
-                        or (
-                            gather_transaction_terminal
-                            and not gather_collection_complete
-                        )
+                        or (gather_transaction_terminal and not gather_collection_complete)
                     ),
                 )
 
@@ -1309,14 +1409,16 @@ class AgentRuntime:
     ) -> SkillRun:
         self.blackboard.merge_semantics(
             instance_id=self.perception.instance_id,
-            facts=(PerceptionFact(
-                key="collection.recent_break",
-                value=drop_kind,
-                confidence=0.995,
-                observed_ns=time.monotonic_ns(),
-                source=f"verified:{broken_run.run_id}:block-broken:{drop_kind}",
-                expires_after_ms=6_000,
-            ),),
+            facts=(
+                PerceptionFact(
+                    key="collection.recent_break",
+                    value=drop_kind,
+                    confidence=0.995,
+                    observed_ns=time.monotonic_ns(),
+                    source=f"verified:{broken_run.run_id}:block-broken:{drop_kind}",
+                    expires_after_ms=6_000,
+                ),
+            ),
         )
         collection = self._start_skill(
             self.skills.get("collect_recent_drop"),
@@ -1445,12 +1547,24 @@ class AgentRuntime:
 
         if not _verified_obstacle_stall(result):
             return False
-        non_destructive = tuple(skill for skill in result.recovery_skills if skill in {
-            "backtrack_from_obstacle", "survey_surroundings",
-        })
-        if select_learned_recovery(
-            self.skills, non_destructive, self.blackboard, context_key=result.run.context_key,
-        ) is not None:
+        non_destructive = tuple(
+            skill
+            for skill in result.recovery_skills
+            if skill
+            in {
+                "backtrack_from_obstacle",
+                "survey_surroundings",
+            }
+        )
+        if (
+            select_learned_recovery(
+                self.skills,
+                non_destructive,
+                self.blackboard,
+                context_key=result.run.context_key,
+            )
+            is not None
+        ):
             # Try declared mobility/sensing alternatives before freezing the
             # player for an expensive block classifier and a possible dig.
             return False
@@ -1490,8 +1604,11 @@ class AgentRuntime:
         origin = self.skills.specs.get(origin_skill_id)
         if origin is not None and (
             origin.outcome_kind == "traversal"
-            or origin.skill_id in {
-                "traverse_level_ground", "traverse_visible_obstacle", "explore_forward",
+            or origin.skill_id
+            in {
+                "traverse_level_ground",
+                "traverse_visible_obstacle",
+                "explore_forward",
             }
         ):
             return origin
@@ -1510,8 +1627,11 @@ class AgentRuntime:
             result = send_command("release-inputs", lease_id=self.lease_id)
         except Exception:
             return False
-        if (not isinstance(result, dict) or result.get("released") is not True
-                or result.get("lease_active") is not True):
+        if (
+            not isinstance(result, dict)
+            or result.get("released") is not True
+            or result.get("lease_active") is not True
+        ):
             return False
         # The protocol has no exact physical release timestamp. The first
         # request is a conservative action-duration cutoff, not sensor time.
@@ -1549,9 +1669,7 @@ class AgentRuntime:
         if now_ns >= recovery.deadline_ns:
             running = self.executor.run
             child_run_id = (
-                recovery.mining_run_id
-                if recovery.phase == "mining"
-                else recovery.retry_run_id
+                recovery.mining_run_id if recovery.phase == "mining" else recovery.retry_run_id
             )
             if (
                 running is not None
@@ -1597,11 +1715,7 @@ class AgentRuntime:
         if recovery.phase == "reorient":
             latest = self.blackboard.raw_latest()
             captured = self.perception.last_capture
-            if (
-                latest is None
-                or captured is None
-                or captured.captured_ns != latest.captured_ns
-            ):
+            if latest is None or captured is None or captured.captured_ns != latest.captured_ns:
                 self._clear_headroom_recovery(recovery)
                 return
             if recovery.pre_reorient_dhash is None:
@@ -1639,16 +1753,11 @@ class AgentRuntime:
             )
             recovery.phase = "settle"
             recovery.reoriented_frame_id = latest.frame_id
-            recovery.settle_deadline_ns = (
-                time.monotonic_ns() + _HEADROOM_SETTLE_TIMEOUT_NS
-            )
+            recovery.settle_deadline_ns = time.monotonic_ns() + _HEADROOM_SETTLE_TIMEOUT_NS
             return
 
         if recovery.phase == "settle":
-            if (
-                recovery.settle_deadline_ns is None
-                or now_ns >= recovery.settle_deadline_ns
-            ):
+            if recovery.settle_deadline_ns is None or now_ns >= recovery.settle_deadline_ns:
                 self._clear_headroom_recovery(recovery)
                 self._traversal_escalation_pending = True
                 self._cognition_requested = True
@@ -1699,10 +1808,13 @@ class AgentRuntime:
             if latest.frame_id <= recovery.settle_frame_id:
                 return
             try:
-                crosshair_stable = perceptual_hash_distance(
-                    recovery.settle_crosshair_dhash,
-                    current_crosshair_dhash,
-                ) <= 2
+                crosshair_stable = (
+                    perceptual_hash_distance(
+                        recovery.settle_crosshair_dhash,
+                        current_crosshair_dhash,
+                    )
+                    <= 2
+                )
             except ValueError:
                 crosshair_stable = False
             rgb_stable = (
@@ -1727,18 +1839,11 @@ class AgentRuntime:
             if self.perception.active_vlm is None:
                 self._clear_headroom_recovery(recovery)
                 return
-            if (
-                not self.perception.semantic_available()
-                or not local_model_inference_available()
-            ):
+            if not self.perception.semantic_available() or not local_model_inference_available():
                 return
             captured = self.perception.last_capture
             latest = self.blackboard.raw_latest()
-            if (
-                captured is None
-                or latest is None
-                or captured.captured_ns != latest.captured_ns
-            ):
+            if captured is None or latest is None or captured.captured_ns != latest.captured_ns:
                 self._clear_headroom_recovery(recovery)
                 return
             query_id = uuid.uuid4().hex
@@ -1800,12 +1905,13 @@ class AgentRuntime:
                 parameters={
                     "target": target.kind,
                     "target_track_id": track_id,
-                    **({"harvest_required": False}
-                       if not is_hand_safe_soft_block(target.kind) else {}),
+                    **(
+                        {"harvest_required": False}
+                        if not is_hand_safe_soft_block(target.kind)
+                        else {}
+                    ),
                 },
-                instruction=(
-                    "Clear only the grounded blocking block under the crosshair."
-                ),
+                instruction=("Clear only the grounded blocking block under the crosshair."),
             )
             return
 
@@ -1844,19 +1950,29 @@ class AgentRuntime:
         # allow an explicit model abstention to be attributed to this inspection.
         worker = self.perception.active_vlm
         receipt = getattr(getattr(worker, "metrics", None), "last_crosshair_block_receipt", None)
-        hashes = tuple(self.blackboard.fact(key, min_confidence=1.0) for key in (
-            "recovery.crosshair.frame_dhash", "recovery.crosshair.observation_dhash",
-        ))
+        hashes = tuple(
+            self.blackboard.fact(key, min_confidence=1.0)
+            for key in (
+                "recovery.crosshair.frame_dhash",
+                "recovery.crosshair.observation_dhash",
+            )
+        )
         published = bool(
-            hashes[0] is not None and hashes[1] is not None
-            and all(fact is not None and fact.source == recovery.query_source
-                    and fact.observed_ns >= recovery.query_started_ns for fact in hashes)
+            hashes[0] is not None
+            and hashes[1] is not None
+            and all(
+                fact is not None
+                and fact.source == recovery.query_source
+                and fact.observed_ns >= recovery.query_started_ns
+                for fact in hashes
+            )
             and hashes[0].observed_ns == hashes[1].observed_ns
             and hashes[0].value == recovery.query_frame_dhash
             and hashes[1].value == recovery.query_crosshair_dhash
         )
         abstained = bool(
-            published and isinstance(receipt, dict)
+            published
+            and isinstance(receipt, dict)
             and receipt.get("query_id") == recovery.query_id
             and receipt.get("source_crop_pixel_sha256") == recovery.query_pixel_sha256
             and receipt.get("block") == "unknown"
@@ -1868,8 +1984,8 @@ class AgentRuntime:
             text=(
                 "Crosshair inspection: model abstained; no clearable target established. "
                 "No mining action was started."
-                if abstained else
-                "Crosshair inspection completed without an accepted clearable target. "
+                if abstained
+                else "Crosshair inspection completed without an accepted clearable target. "
                 "No mining action was started."
             ),
             created_ns=now_ns,
@@ -1896,8 +2012,7 @@ class AgentRuntime:
             return False
         unsafe_truths = ("danger.immediate", "scene.death", "scene.ui_overlay")
         if any(
-            (fact := self.blackboard.fact(key, min_confidence=0.65, now_ns=now_ns))
-            is not None
+            (fact := self.blackboard.fact(key, min_confidence=0.65, now_ns=now_ns)) is not None
             and fact.value is True
             for key in unsafe_truths
         ):
@@ -2044,7 +2159,8 @@ class AgentRuntime:
                 camera_semantics="world",
             )
         )
-        if sent is False or self._stop.is_set():
+        stop_event = getattr(self, "_stop", None)
+        if sent is False or (stop_event is not None and stop_event.is_set()):
             return False
         executor = getattr(self, "executor", None)
         policy = None if executor is None else getattr(executor, "policy", None)
@@ -2068,12 +2184,14 @@ class AgentRuntime:
         operator work still preempt.
         """
         self._null_replan_streak += 1
-        if (self._null_replan_streak >= self._NULL_REPLAN_RELEASE_AFTER
-                and self._traversal_escalation_pending):
+        if (
+            self._null_replan_streak >= self._NULL_REPLAN_RELEASE_AFTER
+            and self._traversal_escalation_pending
+        ):
             self._traversal_escalation_pending = False
             self._traversal_escalation_release = (
-                "bounded_keepalive_resume_after_"
-                f"{self._null_replan_streak}_null_replans")
+                f"bounded_keepalive_resume_after_{self._null_replan_streak}_null_replans"
+            )
             self._null_replan_streak = 0
 
     def _explore_keep_alive(self) -> SkillSpec | None:
@@ -2109,19 +2227,34 @@ class AgentRuntime:
         if hint is not None:
             if (
                 self._keepalive_rotation_scope() != hint.scope
-                or (self.executor.run is not None
-                    and self.executor.run.outcome == SkillOutcome.RUNNING)
-                or any(getattr(self, owner, None) is not None for owner in (
-                    "_cognition_perception_probe", "_craft_semantic_probe",
-                    "_gather_acquisition_continuation", "_input_release_pending_ns",
-                ))
-                or self._stop.is_set() or operator_pause_latched() or emergency_stop_latched()
+                or (
+                    self.executor.run is not None
+                    and self.executor.run.outcome == SkillOutcome.RUNNING
+                )
+                or any(
+                    getattr(self, owner, None) is not None
+                    for owner in (
+                        "_cognition_perception_probe",
+                        "_craft_semantic_probe",
+                        "_gather_acquisition_continuation",
+                        "_input_release_pending_ns",
+                    )
+                )
+                or self._stop.is_set()
+                or operator_pause_latched()
+                or emergency_stop_latched()
                 or not self._headroom_scene_is_safe()
             ):
                 return None
-            alternate = next((spec for _, spec, _ in candidates
-                              if spec.skill_id != hint.skill_id
-                              and initiation_satisfied(spec, self.blackboard)), None)
+            alternate = next(
+                (
+                    spec
+                    for _, spec, _ in candidates
+                    if spec.skill_id != hint.skill_id
+                    and initiation_satisfied(spec, self.blackboard)
+                ),
+                None,
+            )
             if alternate is not None:
                 return alternate
         healthy = [
@@ -2151,49 +2284,76 @@ class AgentRuntime:
         revision = 0
         if self.state_db is not None:
             try:
-                context = self.state_db.load_operator_context(statuses={
-                    OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
-                    OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED,
-                }, limit=20)
+                context = self.state_db.load_operator_context(
+                    statuses={
+                        OperatorMessageStatus.QUEUED,
+                        OperatorMessageStatus.DELIVERED,
+                        OperatorMessageStatus.ACKNOWLEDGED,
+                        OperatorMessageStatus.REFUSED,
+                    },
+                    limit=20,
+                )
             except (sqlite3.Error, ValueError, RuntimeError):
                 return None
             if (
-                context.target is not None or len(context.messages) == 20
+                context.target is not None
+                or len(context.messages) == 20
                 or _active_operator_messages(context.messages)
-                or any(message.status in {
-                    OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
-                } for message in context.messages)
+                or any(
+                    message.status
+                    in {
+                        OperatorMessageStatus.QUEUED,
+                        OperatorMessageStatus.DELIVERED,
+                    }
+                    for message in context.messages
+                )
             ):
                 return None
             revision = context.revision
         latest = self.blackboard.raw_latest()
         if latest is None:
             return None
-        return (latest.instance_id, self._plan_goal_id or "", self._plan_started_ns,
-                self._execution_revision, revision)
+        return (
+            latest.instance_id,
+            self._plan_goal_id or "",
+            self._plan_started_ns,
+            self._execution_revision,
+            revision,
+        )
 
     def _note_keepalive_prediction(
-        self, execution: ExecutionTick | None, action: MotorAction, provenance: ActionProvenance,
+        self,
+        execution: ExecutionTick | None,
+        action: MotorAction,
+        provenance: ActionProvenance,
     ) -> None:
         """Count at most three actual accepted predictions, not 20 Hz holds or cold waits."""
 
         evidence = self._keepalive_prediction_evidence
-        if (evidence is None or evidence.disqualified or execution is None
-                or execution.run.run_id != evidence.run_id
-                or execution.run.skill_id != evidence.skill_id
-                or execution.run.context_key != _EXPLORE_KEEPALIVE_CONTEXT
-                or self.executor.run is None or self.executor.run.run_id != evidence.run_id
-                or execution.run.outcome != SkillOutcome.RUNNING):
+        if (
+            evidence is None
+            or evidence.disqualified
+            or execution is None
+            or execution.run.run_id != evidence.run_id
+            or execution.run.skill_id != evidence.skill_id
+            or execution.run.context_key != _EXPLORE_KEEPALIVE_CONTEXT
+            or self.executor.run is None
+            or self.executor.run.run_id != evidence.run_id
+            or execution.run.outcome != SkillOutcome.RUNNING
+        ):
             return
         if action.keys_down or action.buttons_down:
             evidence.disqualified = True
             return
-        if (provenance.origin != ActionOrigin.POLICY
-                or provenance.policy_action_kind != "prediction"):
+        if (
+            provenance.origin != ActionOrigin.POLICY
+            or provenance.policy_action_kind != "prediction"
+        ):
             return
         condition = provenance.condition or {}
         if (
-            not provenance.prediction_id or provenance.prediction_id != provenance.policy_request_id
+            not provenance.prediction_id
+            or provenance.prediction_id != provenance.policy_request_id
             or condition.get("episode_id") != evidence.run_id
             or condition.get("skill_id") != evidence.skill_id
             or provenance.source_captured_ns is None
@@ -2206,21 +2366,27 @@ class AgentRuntime:
         if not isinstance(component, dict):
             return
         causal = component.get("last_action_provenance")
-        if not isinstance(causal, dict) or any(causal.get(key) != expected for key, expected in (
-            ("prediction_id", provenance.prediction_id),
-            ("request_id", provenance.policy_request_id),
-            ("source_frame_id", provenance.source_frame_id),
-            ("source_captured_ns", provenance.source_captured_ns),
-            ("condition", provenance.condition),
-        )):
+        if not isinstance(causal, dict) or any(
+            causal.get(key) != expected
+            for key, expected in (
+                ("prediction_id", provenance.prediction_id),
+                ("request_id", provenance.policy_request_id),
+                ("source_frame_id", provenance.source_frame_id),
+                ("source_captured_ns", provenance.source_captured_ns),
+                ("condition", provenance.condition),
+            )
+        ):
             return
         # TemporalPolicyClient snapshots this prediction and its causal sibling
         # together; never borrow the router root's or another expert's output.
         prediction = component.get("last_prediction")
         if not isinstance(prediction, dict):
             return
-        if (prediction.get("keys") not in ([], ()) or prediction.get("buttons") not in ([], ())
-                or prediction.get("suppressed_actions") not in ([], ())):
+        if (
+            prediction.get("keys") not in ([], ())
+            or prediction.get("buttons") not in ([], ())
+            or prediction.get("suppressed_actions") not in ([], ())
+        ):
             # A safety guard or a real attempted interaction is not model abstention.
             evidence.disqualified = True
             return
@@ -2233,18 +2399,23 @@ class AgentRuntime:
             evidence.prediction_ids.add(provenance.prediction_id)
 
     def _finish_keepalive_prediction_evidence(
-        self, run: SkillRun, verification: OutcomeVerification | None,
+        self,
+        run: SkillRun,
+        verification: OutcomeVerification | None,
     ) -> None:
         evidence = self._keepalive_prediction_evidence
         if evidence is None or evidence.run_id != run.run_id:
             return
         self._keepalive_prediction_evidence = None
         if (
-            not evidence.disqualified and len(evidence.prediction_ids) == 3
-            and run.skill_id == evidence.skill_id and run.context_key == _EXPLORE_KEEPALIVE_CONTEXT
+            not evidence.disqualified
+            and len(evidence.prediction_ids) == 3
+            and run.skill_id == evidence.skill_id
+            and run.context_key == _EXPLORE_KEEPALIVE_CONTEXT
             and run.outcome == SkillOutcome.FAILED
             and run.failure_code == SkillFailureCode.CONTROLLER_STARVATION
-            and verification is not None and verification.run_id == run.run_id
+            and verification is not None
+            and verification.run_id == run.run_id
             and verification.signal == OutcomeSignal.CONTROLLER_STARVATION
             and self._keepalive_rotation_scope() == evidence.scope
         ):
@@ -2295,8 +2466,7 @@ class AgentRuntime:
                 and running.outcome == SkillOutcome.RUNNING
                 and (
                     running.skill_id == "gather_nearby_wood"
-                    or running.run_id
-                    in getattr(self, "_plan_neutral_recovery_runs", set())
+                    or running.run_id in getattr(self, "_plan_neutral_recovery_runs", set())
                 )
             )
             or (headroom is not None and headroom.origin_skill_id == "gather_nearby_wood")
@@ -2398,10 +2568,11 @@ class AgentRuntime:
         if self._stop.is_set() or operator_pause_latched():
             self._gather_acquisition_continuation = None
             self._stop.set()
-            return
+            return None
         if self._input_release_pending_ns is not None:
             raise RuntimeError("input release acknowledgement is pending")
-        if not self._operator_motor_admitted(execution):
+        operator_admission = getattr(self, "_operator_motor_admitted", None)
+        if callable(operator_admission) and not operator_admission(execution):
             return False
         # The supervisor lease has one global replay counter, while learned
         # policy bodies and synthetic controllers maintain independent local
@@ -2419,27 +2590,39 @@ class AgentRuntime:
             fallback_policy_id=self.executor.policy.policy_id,
         )
         running = self.executor.run if execution is None else execution.run
-        direction_boundary = nullcontext(None)
+        direction_boundary: AbstractContextManager[
+            Callable[[dict[str, object]], None] | None
+        ] = nullcontext(None)
         if running is not None and running.parameters.get("direction_request_id"):
             from .directions.gateway import ControlUnavailableError, DirectionsGateway
+
             if self.state_db is None:
                 raise ControlUnavailableError("Direction dispatch requires durable authority.")
             gateway = getattr(self, "_direction_gateway", None)
             if gateway is None:
                 gateway = DirectionsGateway(self.state_db.path)
             direction_boundary = gateway.motor_authority(
-                running, action, self.perception.last_capture,
+                running,
+                action,
+                self.perception.last_capture,
             )
         try:
-            with self._request_only_motor_authority(action, execution) as request_admitted:
+            request_authority = getattr(self, "_request_only_motor_authority", None)
+            request_boundary: AbstractContextManager[bool] = (
+                request_authority(action, execution)
+                if callable(request_authority)
+                else nullcontext(True)
+            )
+            with request_boundary as request_admitted:
                 if request_admitted:
                     with direction_boundary as record_direction_action:
                         # Other admission work may wait. Recheck the same owner
                         # clock immediately before the actuator boundary.
-                        if not self._operator_motor_admitted(execution):
+                        if callable(operator_admission) and not operator_admission(execution):
                             return False
                         accepted = send_command(
-                            "motor-action", lease_id=self.lease_id,
+                            "motor-action",
+                            lease_id=self.lease_id,
                             action=action.model_dump(mode="json"),
                         )
                         if record_direction_action is not None:
@@ -2451,15 +2634,14 @@ class AgentRuntime:
             # close the TOCTOU window without hiding unrelated transport failures.
             if self._stop.is_set() or operator_pause_latched():
                 self._stop.set()
-                return
+                return None
             raise
         if not request_admitted:
             self._finish_request_only("motor_admission_refused")
             return False
         self._note_keepalive_prediction(execution, action, provenance)
-        if (
-            action.camera_semantics == "world"
-            and callable(getattr(self.executor.policy, "restore_world_camera_state", None))
+        if action.camera_semantics == "world" and callable(
+            getattr(self.executor.policy, "restore_world_camera_state", None)
         ):
             # Wrappers may emit their own camera deltas, while learned clients
             # may pre-integrate a proposal later changed by execution guards.
@@ -2480,7 +2662,17 @@ class AgentRuntime:
                         bool,
                     )
                 )
-                else self._authoritative_world_camera_pitch_units()
+                else (
+                    camera_reader()
+                    if callable(
+                        camera_reader := getattr(
+                            self,
+                            "_authoritative_world_camera_pitch_units",
+                            None,
+                        )
+                    )
+                    else None
+                )
             )
             if physical_pitch is not None:
                 _restore_policy_world_camera(
@@ -2665,9 +2857,8 @@ class AgentRuntime:
                 stop_event.set()
             return
         running = self.executor.run
-        if (
-            self._execution_revision != probe.execution_revision
-            or (running is not None and running.outcome == SkillOutcome.RUNNING)
+        if self._execution_revision != probe.execution_revision or (
+            running is not None and running.outcome == SkillOutcome.RUNNING
         ):
             # Safety/operator work may take ownership while this optional wait
             # is settling. Its visual publication remains independently
@@ -2689,9 +2880,14 @@ class AgentRuntime:
                     ("environment.underwater", "escape_submersion"),
                     ("danger.immediate", "retreat_from_danger"),
                 )
-                if (hazard := self.blackboard.fact(
-                    key, min_confidence=0.7, now_ns=now_ns,
-                )) is not None
+                if (
+                    hazard := self.blackboard.fact(
+                        key,
+                        min_confidence=0.7,
+                        now_ns=now_ns,
+                    )
+                )
+                is not None
                 and hazard.value is True
             ),
             self.blackboard,
@@ -2748,8 +2944,7 @@ class AgentRuntime:
             )
             current_hash = (
                 current_hash_fact.value
-                if current_hash_fact is not None
-                and isinstance(current_hash_fact.value, str)
+                if current_hash_fact is not None and isinstance(current_hash_fact.value, str)
                 else None
             )
             if (
@@ -2778,10 +2973,7 @@ class AgentRuntime:
                     settle_dhash=current_hash,
                 )
                 return
-            if (
-                not self.perception.semantic_available()
-                or not local_model_inference_available()
-            ):
+            if not self.perception.semantic_available() or not local_model_inference_available():
                 return
             terminal_count = self._active_vlm_terminal_count()
             if terminal_count is None:
@@ -2817,14 +3009,11 @@ class AgentRuntime:
                 frame_id=latest.frame_id,
                 settle_dhash=current_hash,
                 terminal_count_before=terminal_count,
-                grounding_deadline_ns=(
-                    now_ns + _COGNITION_PERCEPTION_GROUNDING_TIMEOUT_NS
-                ),
+                grounding_deadline_ns=(now_ns + _COGNITION_PERCEPTION_GROUNDING_TIMEOUT_NS),
             )
             return
         if (
-            probe.grounding_deadline_ns is not None
-            and now_ns >= probe.grounding_deadline_ns
+            probe.grounding_deadline_ns is not None and now_ns >= probe.grounding_deadline_ns
         ) or self._active_vlm_status().get("thread_alive") is False:
             # Bound ownership of the scene even if a worker stalls or stops.
             # The in-flight job is left alone; its eventual publication still
@@ -2855,7 +3044,8 @@ class AgentRuntime:
         )
         target_anchor = next((fact for fact in retained if fact.key == "target.visible"), None)
         if (
-            probe.target_description and probe.target_description.strip()
+            probe.target_description
+            and probe.target_description.strip()
             and target_anchor is not None
         ):
             # Keep only requested companions of this named target's accepted
@@ -2865,12 +3055,22 @@ class AgentRuntime:
             retained += tuple(
                 fact
                 for key in probe.requested_keys
-                if key in {
-                    "target.near", "target.mineable", "target.kind", "target.dx", "target.dy",
+                if key
+                in {
+                    "target.near",
+                    "target.mineable",
+                    "target.kind",
+                    "target.dx",
+                    "target.dy",
                 }
-                and (fact := self.blackboard.fact(
-                    key, min_confidence=0.7, now_ns=now_ns,
-                )) is not None
+                and (
+                    fact := self.blackboard.fact(
+                        key,
+                        min_confidence=0.7,
+                        now_ns=now_ns,
+                    )
+                )
+                is not None
                 and fact.source == target_anchor.source
                 and fact.observed_ns == target_anchor.observed_ns
             )
@@ -2891,9 +3091,11 @@ class AgentRuntime:
             return
         deadline_ns = now_ns + _COGNITION_PERCEPTION_HANDOFF_TIMEOUT_NS
         retained = tuple(
-            fact.model_copy(update={
-                "expires_after_ms": max(1, (deadline_ns - fact.observed_ns) // 1_000_000),
-            })
+            fact.model_copy(
+                update={
+                    "expires_after_ms": max(1, (deadline_ns - fact.observed_ns) // 1_000_000),
+                }
+            )
             for fact in retained
         )
         latest = self.blackboard.raw_latest()
@@ -2929,12 +3131,15 @@ class AgentRuntime:
         now_ns = time.monotonic_ns()
         stop_event = getattr(self, "_stop", None)
         if (
-            probe is None or not probe.target_description
+            probe is None
+            or not probe.target_description
             or not any(key.startswith("target.") for key in probe.requested_keys)
-            or probe.query_id is None or probe.query_source is None
+            or probe.query_id is None
+            or probe.query_source is None
             or not probe.query_source.startswith("vlm:")
             or not probe.query_source.endswith(f":{probe.query_id}")
-            or probe.handoff_deadline_ns is None or now_ns >= probe.handoff_deadline_ns
+            or probe.handoff_deadline_ns is None
+            or now_ns >= probe.handoff_deadline_ns
             or probe.cognition_future is not None
             or probe.execution_revision != self._execution_revision
             or not probe.retained_facts
@@ -2980,12 +3185,14 @@ class AgentRuntime:
                 # remaining lifetime to cross the next motor boundary once.
                 expires_ns = time.monotonic_ns() + _COGNITION_PERCEPTION_ACTION_GRACE_NS
                 facts = tuple(
-                    fact.model_copy(update={
-                        "expires_after_ms": min(
-                            fact.expires_after_ms,
-                            max(1, (expires_ns - fact.observed_ns) // 1_000_000),
-                        ),
-                    })
+                    fact.model_copy(
+                        update={
+                            "expires_after_ms": min(
+                                fact.expires_after_ms,
+                                max(1, (expires_ns - fact.observed_ns) // 1_000_000),
+                            ),
+                        }
+                    )
                     for fact in probe.retained_facts
                     if (current := self.blackboard.fact(fact.key)) is not None
                     and current.source == probe.query_source
@@ -3019,9 +3226,7 @@ class AgentRuntime:
         self._craft_semantic_probe = None
 
     def _craft_semantic_budget_available(self, *, now_ns: int) -> bool:
-        remaining_ms = self.executor.plank_crafting_semantic_time_remaining_ms(
-            now_ns=now_ns
-        )
+        remaining_ms = self.executor.plank_crafting_semantic_time_remaining_ms(now_ns=now_ns)
         if remaining_ms is None:
             return False
         latency = self._active_vlm_status().get("last_latency_ms")
@@ -3107,11 +3312,7 @@ class AgentRuntime:
             return True
         active = self.executor.run
         plan_active = bool(self._plan_steps) and 0 <= self._plan_index < len(self._plan_steps)
-        return not (
-            active is not None
-            and active.outcome == SkillOutcome.RUNNING
-            and plan_active
-        )
+        return not (active is not None and active.outcome == SkillOutcome.RUNNING and plan_active)
 
     def _start_cognition_if_due(self) -> bool | None:
         if self.operator_request_only is not None:
@@ -3197,10 +3398,7 @@ class AgentRuntime:
             return None
         now = time.monotonic_ns()
         new_operator_message = self._new_queued_operator_message_waiting()
-        if (
-            now < getattr(self, "_cognition_retry_not_before_ns", 0)
-            and not new_operator_message
-        ):
+        if now < getattr(self, "_cognition_retry_not_before_ns", 0) and not new_operator_message:
             return None
         if new_operator_message:
             # New operator authority is a new decision problem, not another
@@ -3235,7 +3433,8 @@ class AgentRuntime:
             if getattr(self, "_cognition_perception_probe", None) is perception_probe:
                 if perception_probe is not None:
                     self._cognition_perception_probe = replace(
-                        perception_probe, cognition_future=self._pending_decision,
+                        perception_probe,
+                        cognition_future=self._pending_decision,
                     )
             self._consume_cognition()
             return None
@@ -3273,7 +3472,9 @@ class AgentRuntime:
         elif bound_inputs is not None:
             _, snapshot, operator_revision = bound_inputs
             self._pending_decision = self._submit_bound_cognition(
-                context, snapshot, operator_revision=operator_revision,
+                context,
+                snapshot,
+                operator_revision=operator_revision,
             )
         else:
             self._pending_decision = self._pool.submit(
@@ -3282,7 +3483,10 @@ class AgentRuntime:
                 context,
             )
         if refusal_binding is not None:
-            self._planner_budget_bindings[self._pending_decision] = refusal_binding
+            planner_bindings = getattr(self, "_planner_budget_bindings", None)
+            if planner_bindings is None:
+                planner_bindings = self._planner_budget_bindings = {}
+            planner_bindings[self._pending_decision] = refusal_binding
         self._last_cognition_ns = now
         self._cognition_requested = False
         self._pending_execution_revision = self._execution_revision
@@ -3290,22 +3494,37 @@ class AgentRuntime:
         if getattr(self, "_cognition_perception_probe", None) is perception_probe:
             if perception_probe is not None:
                 self._cognition_perception_probe = replace(
-                    perception_probe, cognition_future=self._pending_decision,
+                    perception_probe,
+                    cognition_future=self._pending_decision,
                 )
         return None
 
     @staticmethod
     def _planner_budget_message_authority(message: OperatorMessage) -> dict[str, Any]:
-        return message.model_dump(mode="json", exclude={
-            "status", "delivered_ns", "acknowledged_ns", "response_text",
-        })
+        return message.model_dump(
+            mode="json",
+            exclude={
+                "status",
+                "delivered_ns",
+                "acknowledged_ns",
+                "response_text",
+            },
+        )
 
     def _planner_budget_plan_state(self) -> tuple[str | None, tuple[str, ...], int, int, object]:
-        return (self._plan_goal_id, self._plan_steps, self._plan_index,
-                self._plan_started_ns, copy.deepcopy(self._plan_graph))
+        return (
+            self._plan_goal_id,
+            self._plan_steps,
+            self._plan_index,
+            self._plan_started_ns,
+            copy.deepcopy(self._plan_graph),
+        )
 
     def _capture_planner_budget_binding(
-        self, context: CognitionContext, *, now_ns: int,
+        self,
+        context: CognitionContext,
+        *,
+        now_ns: int,
     ) -> _PlannerBudgetRefusalBinding | None:
         # Capture only original, currently selected ordinary pending authority.
         # This binds terminal errors; it does not change successful publication.
@@ -3316,28 +3535,45 @@ class AgentRuntime:
         if database is None or model is None or not selected or latest is None:
             return None
         message = selected[0]
-        if (message.direction_request_id is not None
-                or message.kind not in {OperatorMessageKind.INSTRUCTION,
-                                       OperatorMessageKind.CORRECTION, OperatorMessageKind.QUESTION}
-                or message.status not in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}):
+        if (
+            message.direction_request_id is not None
+            or message.kind
+            not in {
+                OperatorMessageKind.INSTRUCTION,
+                OperatorMessageKind.CORRECTION,
+                OperatorMessageKind.QUESTION,
+            }
+            or message.status not in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+        ):
             return None
         try:
             current = database.load_operator_context(
-                statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}, limit=20,
+                statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED},
+                limit=20,
             )
             active = _active_operator_messages(current.messages)
-            if (not active or self._planner_budget_message_authority(active[0])
-                    != self._planner_budget_message_authority(message)):
+            if not active or self._planner_budget_message_authority(
+                active[0]
+            ) != self._planner_budget_message_authority(message):
                 return None
             deadline = now_ns + self.cognition_request_timeout_ms * 1_000_000
             if message.execution_budget is not None:
-                remaining = message.created_ns + message.execution_budget.timeout_ms * 1_000_000 - time.time_ns()
+                remaining = (
+                    message.created_ns
+                    + message.execution_budget.timeout_ms * 1_000_000
+                    - time.time_ns()
+                )
                 if remaining <= 0 or message.created_ns > time.time_ns():
                     return None
                 deadline = min(deadline, now_ns + remaining)
             return _PlannerBudgetRefusalBinding(
-                message, current.revision, model, latest.instance_id,
-                self._execution_revision, self._planner_budget_plan_state(), deadline,
+                message,
+                current.revision,
+                model,
+                latest.instance_id,
+                self._execution_revision,
+                self._planner_budget_plan_state(),
+                deadline,
             )
         except (ValueError, RuntimeError, sqlite3.Error):
             return None
@@ -3345,12 +3581,15 @@ class AgentRuntime:
     def _planner_budget_owner_current(self, binding: _PlannerBudgetRefusalBinding) -> bool:
         latest = self.blackboard.raw_latest()
         return not (
-            self._stop.is_set() or operator_pause_latched() or emergency_stop_latched()
+            self._stop.is_set()
+            or operator_pause_latched()
+            or emergency_stop_latched()
             or self._input_release_pending_ns is not None
             or self._execution_revision != binding.execution_revision
             or self._planner_budget_plan_state() != binding.plan_state
             or getattr(self.high_level, "model", None) is not binding.model
-            or latest is None or latest.instance_id != binding.instance_id
+            or latest is None
+            or latest.instance_id != binding.instance_id
             or time.monotonic_ns() >= binding.deadline_ns
         )
 
@@ -3370,22 +3609,28 @@ class AgentRuntime:
                 if not current or not self._planner_budget_owner_current(binding):
                     return False
                 context = database.load_operator_context(
-                    statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}, limit=20,
+                    statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED},
+                    limit=20,
                 )
                 active = _active_operator_messages(context.messages)
-                if (not active or self._planner_budget_message_authority(active[0])
-                        != self._planner_budget_message_authority(binding.message)):
+                if not active or self._planner_budget_message_authority(
+                    active[0]
+                ) != self._planner_budget_message_authority(binding.message):
                     return False
                 updated = database.update_operator_message_status(
-                    binding.message.message_id, OperatorMessageStatus.REFUSED,
-                    timestamp_ns=time.time_ns(), response_text=_PLANNER_BUDGET_RESPONSE,
+                    binding.message.message_id,
+                    OperatorMessageStatus.REFUSED,
+                    timestamp_ns=time.time_ns(),
+                    response_text=_PLANNER_BUDGET_RESPONSE,
                     admission=lambda: self._planner_budget_owner_current(binding),
                 )
                 # Refusal itself advances intent once. A nested writer or lost
                 # owner after the update must roll back, not publish stale text.
-                if (database.operator_revision() != binding.operator_revision + 1
-                        or updated.status != OperatorMessageStatus.REFUSED
-                        or not self._planner_budget_owner_current(binding)):
+                if (
+                    database.operator_revision() != binding.operator_revision + 1
+                    or updated.status != OperatorMessageStatus.REFUSED
+                    or not self._planner_budget_owner_current(binding)
+                ):
                     raise OperatorResponseAdmissionError("planner refusal authority changed")
         # A delayed delivery receipt must not turn this terminal request back
         # into pending after the durable refusal has committed.
@@ -3436,7 +3681,9 @@ class AgentRuntime:
         return model is not None and all(
             callable(getattr(model, name, None))
             for name in (
-                "complete_bound_constrained", "admit_bound_decision", "discard_bound_request",
+                "complete_bound_constrained",
+                "admit_bound_decision",
+                "discard_bound_request",
             )
         )
 
@@ -3447,9 +3694,14 @@ class AgentRuntime:
         if self.state_db is None or self.high_level is None:
             raise RuntimeError("bound cognition requires durable operator authority")
         model = self.high_level.model
-        if not all(callable(getattr(model, name, None)) for name in (
-            "complete_bound_constrained", "admit_bound_decision", "discard_bound_request",
-        )):
+        if not all(
+            callable(getattr(model, name, None))
+            for name in (
+                "complete_bound_constrained",
+                "admit_bound_decision",
+                "discard_bound_request",
+            )
+        ):
             raise RuntimeError("bound cognition adapter lacks its complete lifecycle")
         with operator_intent_lock(timeout_s=0.05):
             if self._stop.is_set() or operator_pause_latched() or emergency_stop_latched():
@@ -3463,7 +3715,8 @@ class AgentRuntime:
                     raise RuntimeError("operator changed during cognition snapshot")
                 if not operator.messages:
                     operator = self.state_db.load_operator_context(
-                        statuses={OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED}, limit=20,
+                        statuses={OperatorMessageStatus.ACKNOWLEDGED},
+                        limit=20,
                     )
                 # Keep the target and semantic snapshot on the captured revision.
                 self._merge_operator_target()
@@ -3472,9 +3725,12 @@ class AgentRuntime:
         # successful snapshot construction and outside the rollback boundary,
         # using exactly the observation the queued planner will receive.
         requires_wood = self._planks_retry_requires_wood(snapshot=snapshot)
-        context = copy.deepcopy(self._cognition_context(
-            operator, requires_wood=requires_wood,
-        ))
+        context = copy.deepcopy(
+            self._cognition_context(
+                operator,
+                requires_wood=requires_wood,
+            )
+        )
         return context, snapshot, operator.revision
 
     @staticmethod
@@ -3489,22 +3745,31 @@ class AgentRuntime:
             # A broken adapter notification cannot reopen a rejected request.
             # Detailed model work remains adapter-owned; delivery is not claimed.
             logging.getLogger(__name__).error(
-                "Bound cognition discard notification failed: %s", type(error).__name__,
+                "Bound cognition discard notification failed: %s",
+                type(error).__name__,
             )
 
     def _submit_bound_cognition(
-        self, context: CognitionContext, snapshot: CognitionBlackboardSnapshot,
-        *, operator_revision: int,
+        self,
+        context: CognitionContext,
+        snapshot: CognitionBlackboardSnapshot,
+        *,
+        operator_revision: int,
     ) -> concurrent.futures.Future[CognitionDecision]:
         controller = self.high_level
         assert controller is not None
         model = controller.model
         now = time.monotonic_ns()
-        request = ModelRequestLifecycle(RequestBinding.from_snapshot(
-            snapshot, request_id=uuid.uuid4().hex, operator_revision=operator_revision,
-            execution_revision=self._execution_revision, submitted_ns=now,
-            deadline_ns=now + self.cognition_request_timeout_ms * 1_000_000,
-        ))
+        request = ModelRequestLifecycle(
+            RequestBinding.from_snapshot(
+                snapshot,
+                request_id=uuid.uuid4().hex,
+                operator_revision=operator_revision,
+                execution_revision=self._execution_revision,
+                submitted_ns=now,
+                deadline_ns=now + self.cognition_request_timeout_ms * 1_000_000,
+            )
+        )
 
         def compute() -> CognitionDecision:
             try:
@@ -3538,7 +3803,9 @@ class AgentRuntime:
         return future
 
     def _reject_bound_cognition(
-        self, future: concurrent.futures.Future[CognitionDecision], reason: str,
+        self,
+        future: concurrent.futures.Future[CognitionDecision],
+        reason: str,
     ) -> None:
         getattr(self, "_planner_budget_bindings", {}).pop(future, None)
         record = getattr(self, "_bound_cognition_requests", {}).pop(future, None)
@@ -3548,7 +3815,8 @@ class AgentRuntime:
             self._notify_bound_discard(request, model)
 
     def _preflight_bound_cognition(
-        self, record: tuple[ModelRequestLifecycle, object],
+        self,
+        record: tuple[ModelRequestLifecycle, object],
     ) -> bool:
         """Discard already stale requests early; this check never authorizes inputs.
 
@@ -3559,32 +3827,42 @@ class AgentRuntime:
         request, model = record
         binding = request.binding
         snapshot = request.snapshot()
-        if (self.state_db is None or snapshot.disposition != "pending"
-                or snapshot.computation_completed_ns is None):
+        if (
+            self.state_db is None
+            or snapshot.disposition != "pending"
+            or snapshot.computation_completed_ns is None
+        ):
             return False
         try:
             with operator_intent_lock(timeout_s=0.05):
                 with self.state_db.admit_operator_revision(binding.operator_revision) as current:
                     latest = self.blackboard.raw_latest()
                     return not (
-                        not current or self._stop.is_set() or operator_pause_latched()
+                        not current
+                        or self._stop.is_set()
+                        or operator_pause_latched()
                         or emergency_stop_latched()
                         or self._input_release_pending_ns is not None
                         or self._execution_revision != binding.execution_revision
                         or self.high_level is None
                         or getattr(self.high_level, "model", None) is not model
-                        or latest is None or latest.instance_id != binding.instance_id
+                        or latest is None
+                        or latest.instance_id != binding.instance_id
                         or time.monotonic_ns() >= binding.deadline_ns
                     )
         except Exception as error:
             logging.getLogger(__name__).error(
-                "Bound cognition preflight rejected: %s", type(error).__name__,
+                "Bound cognition preflight rejected: %s",
+                type(error).__name__,
             )
             return False
 
     def _admit_bound_cognition(
-        self, record: tuple[ModelRequestLifecycle, object], decision: CognitionDecision,
-        *, adopt_plan: bool,
+        self,
+        record: tuple[ModelRequestLifecycle, object],
+        decision: CognitionDecision,
+        *,
+        adopt_plan: bool,
     ) -> bool:
         """Compare authority and publish once; never perform inference or inputs here.
 
@@ -3596,15 +3874,21 @@ class AgentRuntime:
         binding = request.binding
         origin = decision.model_origin
         previous = (
-            self._last_decision, self._plan_steps, self._plan_goal_id,
-            self._plan_index, self._plan_started_ns,
+            self._last_decision,
+            self._plan_steps,
+            self._plan_goal_id,
+            self._plan_index,
+            self._plan_started_ns,
             getattr(self, "_plan_graph", None),
         )
 
         def restore_metadata() -> None:
             (
-                self._last_decision, self._plan_steps, self._plan_goal_id,
-                self._plan_index, self._plan_started_ns,
+                self._last_decision,
+                self._plan_steps,
+                self._plan_goal_id,
+                self._plan_index,
+                self._plan_started_ns,
                 self._plan_graph,
             ) = previous
 
@@ -3617,29 +3901,40 @@ class AgentRuntime:
                         binding.operator_revision,
                     ) as current:
                         latest = self.blackboard.raw_latest()
-                        if (not current or self._stop.is_set() or operator_pause_latched()
-                                or emergency_stop_latched()
-                                or self._input_release_pending_ns is not None
-                                or self._execution_revision != binding.execution_revision
-                                or self.high_level is None or self.high_level.model is not model
-                                or latest is None or latest.instance_id != binding.instance_id
-                                or not recipe_identity_matches(
-                                    decision.pack_recipe_identity, self.blackboard,
-                                )
-                                or time.monotonic_ns() >= binding.deadline_ns):
+                        if (
+                            not current
+                            or self._stop.is_set()
+                            or operator_pause_latched()
+                            or emergency_stop_latched()
+                            or self._input_release_pending_ns is not None
+                            or self._execution_revision != binding.execution_revision
+                            or self.high_level is None
+                            or self.high_level.model is not model
+                            or latest is None
+                            or latest.instance_id != binding.instance_id
+                            or not recipe_identity_matches(
+                                decision.pack_recipe_identity,
+                                self.blackboard,
+                            )
+                            or time.monotonic_ns() >= binding.deadline_ns
+                        ):
                             raise RuntimeError("publication_authority_changed")
                         if decision.skill_id is not None:
-                            if (decision.skill_id not in self.skills.specs
-                                    or not initiation_satisfied(
-                                        self.skills.get(decision.skill_id), self.blackboard,
-                                    )):
+                            if (
+                                decision.skill_id not in self.skills.specs
+                                or not initiation_satisfied(
+                                    self.skills.get(decision.skill_id),
+                                    self.blackboard,
+                                )
+                            ):
                                 raise RuntimeError("selected_skill_no_longer_feasible")
                         if origin is not None:
-                            admit: Callable[..., object] = (
-                                cast(BoundCognitionModel, model).admit_bound_decision
-                            )
+                            admit: Callable[..., object] = cast(
+                                BoundCognitionModel, model
+                            ).admit_bound_decision
                             result = admit(
-                                request=binding, attempt_id=origin.attempt_id,
+                                request=binding,
+                                attempt_id=origin.attempt_id,
                                 source_decision_sha256=origin.source_decision_sha256,
                                 final_decision=decision.model_dump(mode="json"),
                                 final_decision_sha256=final_sha,
@@ -3683,7 +3978,8 @@ class AgentRuntime:
             if not isinstance(error, Exception):
                 raise
             logging.getLogger(__name__).error(
-                "Bound cognition publication rejected: %s", type(error).__name__,
+                "Bound cognition publication rejected: %s",
+                type(error).__name__,
             )
             return False
         finally:
@@ -3766,9 +4062,7 @@ class AgentRuntime:
         if stale_future is not None:
             self._reject_bound_cognition(stale_future, "operator_preempted")
             stale_future.cancel()
-        replacement: concurrent.futures.Future[CognitionDecision] = (
-            concurrent.futures.Future()
-        )
+        replacement: concurrent.futures.Future[CognitionDecision] = concurrent.futures.Future()
         replacement.set_result(decision)
         self._pending_decision = replacement
         self._pending_operator_message_ids = pending_ids
@@ -3822,8 +4116,10 @@ class AgentRuntime:
         if any(
             getattr(self, owner, None) is not None
             for owner in (
-                "_headroom_recovery", "_gather_acquisition_continuation",
-                "_craft_semantic_probe", "_cognition_perception_probe",
+                "_headroom_recovery",
+                "_gather_acquisition_continuation",
+                "_craft_semantic_probe",
+                "_cognition_perception_probe",
             )
         ):
             return None
@@ -3855,12 +4151,16 @@ class AgentRuntime:
             if messages:
                 return None
             acknowledged = self.state_db.load_operator_messages(
-                statuses={OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED}, limit=20,
+                statuses={OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED},
+                limit=20,
             )
             if _active_operator_messages(acknowledged) or (
-                len(acknowledged) == 20 and not any(
-                    message.kind in {
-                        OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION,
+                len(acknowledged) == 20
+                and not any(
+                    message.kind
+                    in {
+                        OperatorMessageKind.INSTRUCTION,
+                        OperatorMessageKind.CORRECTION,
                     }
                     for message in acknowledged
                 )
@@ -3873,16 +4173,16 @@ class AgentRuntime:
             not goal
             or goal.startswith("operator:")
             or decision.chosen_goal_id != goal
-            or not self._plan_steps[self._plan_index:]
+            or not self._plan_steps[self._plan_index :]
             or self._plan_started_ns <= 0
         ):
             return None
         # Inspect attempts BEFORE filtering outcomes. A newer success, timeout,
         # cancellation or unrelated task must not expose older failures.
         attempts = tuple(
-            run for run in self._recent_skill_runs
-            if run.skill_id in _BOUNDED_KEEPALIVE_SKILL_IDS
-            or run.skill_id == "gather_nearby_wood"
+            run
+            for run in self._recent_skill_runs
+            if run.skill_id in _BOUNDED_KEEPALIVE_SKILL_IDS or run.skill_id == "gather_nearby_wood"
         )[:2]
         if len(attempts) != 2:
             return None
@@ -3906,12 +4206,16 @@ class AgentRuntime:
         current = self.blackboard.fact("frame.dhash", min_confidence=1.0)
         latest = self.blackboard.raw_latest()
         if (
-            obstacle is not None and isinstance(obstacle.value, bool)
-            and observation is not None and current is not None and latest is not None
+            obstacle is not None
+            and isinstance(obstacle.value, bool)
+            and observation is not None
+            and current is not None
+            and latest is not None
             and obstacle.source == observation.source
             and obstacle.observed_ns == observation.observed_ns
             and current.observed_ns >= latest.captured_ns
-            and isinstance(observation.value, str) and isinstance(current.value, str)
+            and isinstance(observation.value, str)
+            and isinstance(current.value, str)
         ):
             try:
                 if perceptual_hash_distance(observation.value, current.value) <= 2:
@@ -3959,8 +4263,10 @@ class AgentRuntime:
             self._last_cognition_ns = time.monotonic_ns()
             self._pending_operator_message_ids = ()
             self._pending_operator_message_kinds = {}
-            if (binding is not None
-                    and error.operator_goal_id == f"operator:{binding.message.message_id}"):
+            if (
+                binding is not None
+                and error.operator_goal_id == f"operator:{binding.message.message_id}"
+            ):
                 self._pending_planner_budget_refusal = binding
                 self._planner_budget_retry_ns = 0
                 self._flush_planner_budget_refusal()
@@ -3980,7 +4286,8 @@ class AgentRuntime:
         now = time.monotonic_ns()
         self._last_cognition_ns = now
         if decision.pack_recipe_identity is not None and not recipe_identity_matches(
-            decision.pack_recipe_identity, self.blackboard,
+            decision.pack_recipe_identity,
+            self.blackboard,
         ):
             self._reject_bound_cognition(future, "pack_identity_changed")
             self._pending_operator_message_ids = ()
@@ -4013,10 +4320,12 @@ class AgentRuntime:
         idle_stall_run_id = self._idle_stall_probe_run_id(decision)
         idle_stall_decision = decision if idle_stall_run_id is not None else None
         if idle_stall_run_id is not None:
-            decision = decision.model_copy(update={
-                "ask_perception": ("obstacle.ahead",),
-                "request_replan": True,
-            })
+            decision = decision.model_copy(
+                update={
+                    "ask_perception": ("obstacle.ahead",),
+                    "request_replan": True,
+                }
+            )
         perception_output_keys = tuple(
             dict.fromkeys(
                 key
@@ -4038,7 +4347,8 @@ class AgentRuntime:
             decision.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS
             and self._planks_retry_requires_wood()
             and planks_retry_requires_wood(
-                self._cognition_context(), skill_id=decision.skill_id,
+                self._cognition_context(),
+                skill_id=decision.skill_id,
             )
         ):
             self._reject_bound_cognition(future, "wood_prerequisite_changed")
@@ -4065,9 +4375,7 @@ class AgentRuntime:
         )
         if (
             selected_message_id is not None
-            and getattr(self, "_pending_operator_message_kinds", {}).get(
-                selected_message_id
-            )
+            and getattr(self, "_pending_operator_message_kinds", {}).get(selected_message_id)
             == OperatorMessageKind.CORRECTION
         ):
             # Corrections are bounded overrides, not durable multi-step goals.
@@ -4088,7 +4396,8 @@ class AgentRuntime:
         record = getattr(self, "_bound_cognition_requests", {}).pop(future, None)
         if record is not None:
             if not self._admit_bound_cognition(
-                record, decision,
+                record,
+                decision,
                 adopt_plan=idle_stall_run_id is None and not missing_target_referent,
             ):
                 self._pending_operator_message_ids = ()
@@ -4096,7 +4405,8 @@ class AgentRuntime:
                 return
         else:
             if decision.pack_recipe_identity is not None and not recipe_identity_matches(
-                decision.pack_recipe_identity, self.blackboard,
+                decision.pack_recipe_identity,
+                self.blackboard,
             ):
                 self._pending_operator_message_ids = ()
                 self._cognition_requested = True
@@ -4181,7 +4491,8 @@ class AgentRuntime:
             # No new skill can be selected from the pre-chat captured scene.
             return
         if decision.pack_recipe_identity is not None and not recipe_identity_matches(
-            decision.pack_recipe_identity, self.blackboard,
+            decision.pack_recipe_identity,
+            self.blackboard,
         ):
             self._cognition_requested = True
             return
@@ -4434,14 +4745,14 @@ class AgentRuntime:
                 self._plan_graph = None
             return
         goal_changed = (
-            decision.chosen_goal_id is not None
-            and decision.chosen_goal_id != self._plan_goal_id
+            decision.chosen_goal_id is not None and decision.chosen_goal_id != self._plan_goal_id
         )
-        remaining = self._plan_steps[self._plan_index:]
+        remaining = self._plan_steps[self._plan_index :]
         skills = getattr(self, "skills", None)
         active = getattr(getattr(self, "executor", None), "run", None)
         refines_unexecutable = bool(
-            remaining and skills is not None
+            remaining
+            and skills is not None
             and (active is None or active.outcome != SkillOutcome.RUNNING)
             and bind_plan_step_skill(remaining[0], skills) is None
             and any(bind_plan_step_skill(step, skills) is not None for step in steps)
@@ -4533,12 +4844,22 @@ class AgentRuntime:
         if skill_id is None or skill_id not in skills.specs:
             return False
         context_key = self._plan_goal_id or "default"
-        recent = next((run for run in getattr(self, "_recent_skill_runs", ())
-                       if run.context_key == context_key and run.skill_id == skill_id), None)
-        if (recent is not None
-                and recent.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}
-                and (recent.failure_code == SkillFailureCode.CONTROLLER_STARVATION
-                     or getattr(self, "_pending_decision", None) is not None)):
+        recent = next(
+            (
+                run
+                for run in getattr(self, "_recent_skill_runs", ())
+                if run.context_key == context_key and run.skill_id == skill_id
+            ),
+            None,
+        )
+        if (
+            recent is not None
+            and recent.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}
+            and (
+                recent.failure_code == SkillFailureCode.CONTROLLER_STARVATION
+                or getattr(self, "_pending_decision", None) is not None
+            )
+        ):
             # Infrastructure starvation is not a physical competence penalty.
             # It still requires fresh admission instead of continually restarting
             # the failed method and invalidating the planner's snapshot.
@@ -4579,20 +4900,31 @@ class AgentRuntime:
             self._plan_step_completed_ns = time.monotonic_ns()
             self._cognition_requested = True
             return False
-        constraints: dict[str, bool] = {key: value for key, value in (
-            getattr(getattr(self, "_last_decision", None), "skill_parameters", {})
-        ).items() if key.startswith("allow_") and value is False}
+        constraints: dict[str, bool] = {
+            key: value
+            for key, value in (
+                getattr(getattr(self, "_last_decision", None), "skill_parameters", {})
+            ).items()
+            if key.startswith("allow_") and value is False
+        }
         database = getattr(self, "state_db", None)
         if database is not None and context_key.startswith("operator:"):
             try:
                 messages = database.load_operator_messages(
-                    statuses={OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED}, limit=20,
+                    statuses={OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED},
+                    limit=20,
                 )
             except sqlite3.Error:
                 self._cognition_requested = True
                 return False
-            owner = next((message for message in _active_operator_messages(messages)
-                          if context_key == f"operator:{message.message_id}"), None)
+            owner = next(
+                (
+                    message
+                    for message in _active_operator_messages(messages)
+                    if context_key == f"operator:{message.message_id}"
+                ),
+                None,
+            )
             if owner is not None:
                 # A model's one-option choice not to jump is not an operator
                 # prohibition on jumping in the next climbing option.
@@ -4611,12 +4943,17 @@ class AgentRuntime:
             return False
         """Deliver a bound reply through the existing lease, never another agent."""
         text = _authorized_game_chat(
-            decision, self.blackboard, already_replied_ns=self._last_player_chat_replied_ns,
+            decision,
+            self.blackboard,
+            already_replied_ns=self._last_player_chat_replied_ns,
         )
         if (
-            text is None or not game_chat_authority_matches(decision, self.blackboard)
+            text is None
+            or not game_chat_authority_matches(decision, self.blackboard)
             or not game_chat_delivery_admitted(
-                text, self.blackboard, getattr(self.perception, "last_capture", None),
+                text,
+                self.blackboard,
+                getattr(self.perception, "last_capture", None),
             )
         ):
             return False
@@ -4626,17 +4963,19 @@ class AgentRuntime:
             # movement/mining hold when it returns from the chat screen.
             if not self._release_and_reconcile_inputs():
                 return False
-            if (
-                not game_chat_authority_matches(decision, self.blackboard)
-                or not game_chat_delivery_admitted(
-                    text, self.blackboard, getattr(self.perception, "last_capture", None),
-                )
+            if not game_chat_authority_matches(
+                decision, self.blackboard
+            ) or not game_chat_delivery_admitted(
+                text,
+                self.blackboard,
+                getattr(self.perception, "last_capture", None),
             ):
                 return False
             chat_attempted = True
             result = send_command("chat", lease_id=self.lease_id, text=text)
             if (
-                not isinstance(result, dict) or result.get("sent") is not True
+                not isinstance(result, dict)
+                or result.get("sent") is not True
                 or type(result.get("characters")) is not int
                 or result["characters"] != len(text)
             ):
@@ -4646,14 +4985,15 @@ class AgentRuntime:
             return True
         except Exception as error:
             logging.getLogger(__name__).warning(
-                "Game chat delivery was not confirmed: %s", type(error).__name__,
+                "Game chat delivery was not confirmed: %s",
+                type(error).__name__,
             )
             return False
         finally:
             if chat_attempted:
                 self._game_chat_completed_ns = time.monotonic_ns()
 
-    def _await_post_chat_capture(self, frame: CapturedFrame) -> bool:
+    def _await_post_chat_capture(self, frame: CapturedFrame | FrameState) -> bool:
         completed = self._game_chat_completed_ns
         if completed is None:
             return False
@@ -4748,8 +5088,12 @@ class AgentRuntime:
         )
 
     def on_skill_run_started(
-        self, *, run: SkillRun, source: SkillStartSource,
-        origin: SkillDecisionOrigin | None, parent_run_id: str | None,
+        self,
+        *,
+        run: SkillRun,
+        source: SkillStartSource,
+        origin: SkillDecisionOrigin | None,
+        parent_run_id: str | None,
     ) -> None:
         """Observe an actual new run; default implementation does nothing.
 
@@ -4762,7 +5106,10 @@ class AgentRuntime:
         """
 
     def on_skill_run_terminal(
-        self, *, run: SkillRun, outcome_verification: OutcomeVerification | None,
+        self,
+        *,
+        run: SkillRun,
+        outcome_verification: OutcomeVerification | None,
     ) -> None:
         """Observe a terminal run and its matching, runtime-filtered evidence.
 
@@ -4775,8 +5122,12 @@ class AgentRuntime:
         """
 
     def _start_skill(
-        self, spec: SkillSpec, *, source: SkillStartSource,
-        origin: SkillDecisionOrigin | None = None, parent_run_id: str | None = None,
+        self,
+        spec: SkillSpec,
+        *,
+        source: SkillStartSource,
+        origin: SkillDecisionOrigin | None = None,
+        parent_run_id: str | None = None,
         **kwargs: Any,
     ) -> SkillRun:
         refused = self._admit_operator_skill_start(spec, kwargs)
@@ -4797,21 +5148,29 @@ class AgentRuntime:
         )
         self._keepalive_prediction_evidence = None
         self._keepalive_rotation_hint = None
-        if (source == SkillStartSource.KEEPALIVE and spec.skill_id in _KEEPALIVE_ROTATION_SKILLS
-                and run.context_key == _EXPLORE_KEEPALIVE_CONTEXT):
+        if (
+            source == SkillStartSource.KEEPALIVE
+            and spec.skill_id in _KEEPALIVE_ROTATION_SKILLS
+            and run.context_key == _EXPLORE_KEEPALIVE_CONTEXT
+        ):
             scope = self._keepalive_rotation_scope()
             if scope is not None:
                 self._keepalive_prediction_evidence = _KeepalivePredictionEvidence(
-                    run.run_id, run.skill_id, scope,
+                    run.run_id,
+                    run.skill_id,
+                    scope,
                 )
         try:
             self.on_skill_run_started(
-                run=run.model_copy(deep=True), source=source, origin=origin,
+                run=run.model_copy(deep=True),
+                source=source,
+                origin=origin,
                 parent_run_id=parent_run_id,
             )
         except Exception as error:
             logging.getLogger(__name__).error(
-                "Skill-start observer failed: %s", type(error).__name__,
+                "Skill-start observer failed: %s",
+                type(error).__name__,
             )
         return run
 
@@ -4823,29 +5182,43 @@ class AgentRuntime:
         return self.executor.push_child(spec, **kwargs)
 
     def _admit_operator_skill_start(
-        self, spec: SkillSpec, kwargs: dict[str, Any],
+        self,
+        spec: SkillSpec,
+        kwargs: dict[str, Any],
     ) -> SkillRun | None:
         context_key = str(kwargs.get("context_key", "default"))
         fence = self._literal_request_fence
         if self.operator_request_only is not None and (
-            fence is None or fence.state != "running" or context_key != fence.context_key
-            or kwargs.get("run_id") != fence.run_id or spec.skill_id != fence.config.skill_id
-            or not camera_only_spec(spec) or skill_digest(spec) != fence.spec_sha256
-            or self._stop.is_set() or operator_pause_latched() or emergency_stop_latched()
+            fence is None
+            or fence.state != "running"
+            or context_key != fence.context_key
+            or kwargs.get("run_id") != fence.run_id
+            or spec.skill_id != fence.config.skill_id
+            or not camera_only_spec(spec)
+            or skill_digest(spec) != fence.spec_sha256
+            or self._stop.is_set()
+            or operator_pause_latched()
+            or emergency_stop_latched()
         ):
             now = time.monotonic_ns()
             return SkillRun(
-                run_id=kwargs.get("run_id", uuid.uuid4().hex), skill_id=spec.skill_id,
-                started_ns=now, ended_ns=now, context_key=context_key,
-                outcome=SkillOutcome.CANCELLED, failure_reason="operator.request_only:unrequested_skill",
+                run_id=kwargs.get("run_id", uuid.uuid4().hex),
+                skill_id=spec.skill_id,
+                started_ns=now,
+                ended_ns=now,
+                context_key=context_key,
+                outcome=SkillOutcome.CANCELLED,
+                failure_reason="operator.request_only:unrequested_skill",
             )
         attempt = getattr(self, "_operator_attempts", {}).get(context_key)
         if attempt is not None:
             reason = attempt.start(now_ns=time.monotonic_ns())
             if reason is not None:
                 running = self.executor.run
-                if running is not None and running.context_key == context_key and (
-                    running.outcome == SkillOutcome.RUNNING
+                if (
+                    running is not None
+                    and running.context_key == context_key
+                    and (running.outcome == SkillOutcome.RUNNING)
                 ):
                     expired = self._expire_operator_result(ExecutionTick(run=running, action=None))
                     self._record_terminal_run(expired.run, advance_plan=False)
@@ -4856,16 +5229,21 @@ class AgentRuntime:
                 now = time.monotonic_ns()
                 refused = SkillRun(
                     run_id=kwargs.get("run_id", uuid.uuid4().hex),
-                    skill_id=spec.skill_id, started_ns=now, ended_ns=now,
-                    context_key=context_key, parameters=kwargs.get("parameters", {}),
-                    outcome=SkillOutcome.TIMED_OUT, failure_reason=reason,
+                    skill_id=spec.skill_id,
+                    started_ns=now,
+                    ended_ns=now,
+                    context_key=context_key,
+                    parameters=kwargs.get("parameters", {}),
+                    outcome=SkillOutcome.TIMED_OUT,
+                    failure_reason=reason,
                 )
                 self._record_terminal_run(refused, advance_plan=False)
                 return refused
         return None
 
     def _remember_operator_attempts(
-        self, messages: tuple[OperatorMessage, ...],
+        self,
+        messages: tuple[OperatorMessage, ...],
     ) -> tuple[OperatorMessage, ...]:
         attempts = getattr(self, "_operator_attempts", None)
         if attempts is None:
@@ -4882,7 +5260,9 @@ class AgentRuntime:
             owner = attempts.get(context_key)
             if owner is None and message.execution_budget is not None:
                 owner = attempts[context_key] = OperatorAttempt.admit(
-                    message, wall_ns=wall, monotonic_ns=now,
+                    message,
+                    wall_ns=wall,
+                    monotonic_ns=now,
                 )
             if owner is not None:
                 owner.bind(message)
@@ -4890,11 +5270,14 @@ class AgentRuntime:
                 if reason is not None:
                     self._close_operator_attempt(context_key)
                     if message.status in {
-                        OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+                        OperatorMessageStatus.QUEUED,
+                        OperatorMessageStatus.DELIVERED,
                     }:
                         self._persist_operator_message_status(
-                            message.message_id, OperatorMessageStatus.ACKNOWLEDGED,
-                            timestamp_ns=wall, response_text=f"Request refused: {reason}.",
+                            message.message_id,
+                            OperatorMessageStatus.ACKNOWLEDGED,
+                            timestamp_ns=wall,
+                            response_text=f"Request refused: {reason}.",
                         )
                     # Selection happens before this filter: an old instruction
                     # must not regain authority underneath the exhausted one.
@@ -4929,12 +5312,23 @@ class AgentRuntime:
         self._release_and_reconcile_inputs()
         if self.executor.run is not None and self.executor.run.run_id == result.run.run_id:
             self.executor.expire_operator_attempt(now_ns=now, reason=reason)
-        expired = result.run.model_copy(update={
-            "outcome": SkillOutcome.TIMED_OUT, "ended_ns": now,
-            "failure_reason": reason, "failure_code": None,
-        })
-        return replace(result, run=expired, action=None, recovery_skills=(),
-                       motor_intent=None, policy_proposal=None, outcome_verification=None)
+        expired = result.run.model_copy(
+            update={
+                "outcome": SkillOutcome.TIMED_OUT,
+                "ended_ns": now,
+                "failure_reason": reason,
+                "failure_code": None,
+            }
+        )
+        return replace(
+            result,
+            run=expired,
+            action=None,
+            recovery_skills=(),
+            motor_intent=None,
+            policy_proposal=None,
+            outcome_verification=None,
+        )
 
     def _expire_current_operator_attempt(self) -> bool:
         run = self.executor.run
@@ -4942,8 +5336,11 @@ class AgentRuntime:
         if recovery is not None:
             owner = getattr(self, "_operator_attempts", {}).get(recovery.context_key)
             if owner is not None and owner.check(now_ns=time.monotonic_ns()) is not None:
-                if (run is not None and run.outcome == SkillOutcome.RUNNING
-                        and run.context_key == recovery.context_key):
+                if (
+                    run is not None
+                    and run.outcome == SkillOutcome.RUNNING
+                    and run.context_key == recovery.context_key
+                ):
                     # The active child owns the same release/terminal operation.
                     # Do not send a second physical release for its parent.
                     expired = self._expire_operator_result(ExecutionTick(run=run, action=None))
@@ -4968,8 +5365,11 @@ class AgentRuntime:
         recovery = getattr(self, "_headroom_recovery", None)
         run = self.executor.run if execution is None else execution.run
         context_key = (
-            recovery.context_key if execution is None and recovery is not None
-            else None if run is None else run.context_key
+            recovery.context_key
+            if execution is None and recovery is not None
+            else None
+            if run is None
+            else run.context_key
         )
         owner = getattr(self, "_operator_attempts", {}).get(context_key)
         if owner is None or owner.check(now_ns=time.monotonic_ns()) is None:
@@ -4979,6 +5379,8 @@ class AgentRuntime:
             self._record_terminal_run(expired.run, advance_plan=False)
             self._execution_revision += 1
         else:
+            if not isinstance(context_key, str):
+                raise RuntimeError("operator attempt is missing its context key")
             self._close_operator_attempt(context_key)
             self._release_and_reconcile_inputs()
         return False
@@ -5030,28 +5432,37 @@ class AgentRuntime:
         if matching_verification is not None and matching_verification.run_id != run.run_id:
             matching_verification = None
             logging.getLogger(__name__).error("Skill-terminal evidence rejected: ValueError")
-        if _verified_traversal_progress(ExecutionTick(
-            run=run, action=None, outcome_verification=matching_verification,
-        )):
+        if _verified_traversal_progress(
+            ExecutionTick(
+                run=run,
+                action=None,
+                outcome_verification=matching_verification,
+            )
+        ):
             # Plan-owned traversal can recover mobility without passing through
             # a new scalar cognition skill. Its verified progress must release
             # the old stall latch or an exhausted plan strands the motor again.
             self._traversal_escalation_pending = False
         parents = getattr(self, "_mining_collection_parents", {})
         parent_id = parents.pop(run.run_id, None)
-        parent_trial = (knowledge.trial(parent_id)
-                        if knowledge is not None and parent_id is not None else None)
+        parent_trial = (
+            knowledge.trial(parent_id) if knowledge is not None and parent_id is not None else None
+        )
         if knowledge is not None and parent_trial is not None and parent_trial.broke is True:
             from minecraft_ai.control.mining_knowledge import MiningTrial
+
             collected = bool(
-                run.outcome == SkillOutcome.SUCCEEDED and matching_verification is not None
+                run.outcome == SkillOutcome.SUCCEEDED
+                and matching_verification is not None
                 and matching_verification.kind == OutcomeKind.RESOURCE_ACQUISITION
                 and matching_verification.status == OutcomeStatus.SUCCEEDED
                 and matching_verification.signal == OutcomeSignal.RESOURCE_ACQUIRED
                 and matching_verification.confidence >= 0.9
             )
             collection_trial = MiningTrial(
-                attempt_id=run.run_id, parent_attempt_id=parent_id, key=parent_trial.key,
+                attempt_id=run.run_id,
+                parent_attempt_id=parent_id,
+                key=parent_trial.key,
                 harvested=True if collected else None,
                 picked_up=True if collected else None,
                 elapsed_ms=max(0.001, ((run.ended_ns or run.started_ns) - run.started_ns) / 1e6),
@@ -5063,11 +5474,13 @@ class AgentRuntime:
         self._finish_keepalive_prediction_evidence(run, matching_verification)
         try:
             self.on_skill_run_terminal(
-                run=run.model_copy(deep=True), outcome_verification=matching_verification,
+                run=run.model_copy(deep=True),
+                outcome_verification=matching_verification,
             )
         except Exception as error:
             logging.getLogger(__name__).error(
-                "Skill-terminal observer failed: %s", type(error).__name__,
+                "Skill-terminal observer failed: %s",
+                type(error).__name__,
             )
         if not _expected_keepalive_expiry(run):
             self._recent_skill_runs.appendleft(run)
@@ -5105,9 +5518,7 @@ class AgentRuntime:
                 outcome_verification,
                 observed_ns=observed_ns,
                 trajectory_id=(
-                    None
-                    if self.trajectory is None
-                    else self.trajectory.manifest.trajectory_id
+                    None if self.trajectory is None else self.trajectory.manifest.trajectory_id
                 ),
             )
         )
@@ -5156,9 +5567,7 @@ class AgentRuntime:
                 self._clear_storage_error_if_drained()
 
     def _flush_pending_learning_records(self, *, force: bool = False) -> None:
-        if self.state_db is None or not (
-            self._pending_runtime_events or self._pending_memories
-        ):
+        if self.state_db is None or not (self._pending_runtime_events or self._pending_memories):
             return
         now = time.monotonic_ns()
         if not force and now - self._last_storage_retry_ns < 1_000_000_000:
@@ -5207,7 +5616,8 @@ class AgentRuntime:
         if self.state_db is None:
             return False
         if recipe_identity is not None and not recipe_identity_matches(
-            recipe_identity, self.blackboard,
+            recipe_identity,
+            self.blackboard,
         ):
             self._pending_operator_status_updates.pop(message_id, None)
             self._cognition_requested = True
@@ -5217,12 +5627,16 @@ class AgentRuntime:
         try:
             if recipe_identity is None:
                 self.state_db.update_operator_message_status(
-                    message_id, status, timestamp_ns=timestamp_ns,
+                    message_id,
+                    status,
+                    timestamp_ns=timestamp_ns,
                     response_text=response_text,
                 )
             else:
                 self.state_db.update_operator_message_status(
-                    message_id, status, timestamp_ns=timestamp_ns,
+                    message_id,
+                    status,
+                    timestamp_ns=timestamp_ns,
                     response_text=response_text,
                     admission=lambda: recipe_identity_matches(recipe_identity, self.blackboard),
                 )
@@ -5286,9 +5700,14 @@ class AgentRuntime:
             limit=20,
         )
         selected = _active_operator_messages(messages)
-        return bool(selected and selected[0].kind in {
-            OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION,
-        })
+        return bool(
+            selected
+            and selected[0].kind
+            in {
+                OperatorMessageKind.INSTRUCTION,
+                OperatorMessageKind.CORRECTION,
+            }
+        )
 
     def _yield_keepalive_to_operator(self) -> bool:
         """Release disposable walking before an unresolved directive is considered.
@@ -5302,7 +5721,8 @@ class AgentRuntime:
         executor = getattr(self, "executor", None)
         running = None if executor is None else executor.run
         if (
-            running is None or running.outcome != SkillOutcome.RUNNING
+            running is None
+            or running.outcome != SkillOutcome.RUNNING
             or running.run_id != self._disposable_keepalive_run_id
             or running.context_key != _EXPLORE_KEEPALIVE_CONTEXT
             or running.skill_id not in _KEEPALIVE_ROTATION_SKILLS
@@ -5441,30 +5861,40 @@ class AgentRuntime:
         )
 
     def _cognition_context(
-        self, operator_context: OperatorContextSnapshot | None = None,
-        *, requires_wood: bool | None = None,
+        self,
+        operator_context: OperatorContextSnapshot | None = None,
+        *,
+        requires_wood: bool | None = None,
     ) -> CognitionContext:
         goals = tuple((*role_standing_goals(self.role), *self.custom_goals))
         progression = self._progression_goal()
         if progression is not None:
             goals = (progression, *goals)
         knowledge = getattr(getattr(self, "executor", None), "mining_knowledge", None)
-        memories = tuple(record for record in self.memories.retrieve(limit=40)
-                         if record.source != "runtime:mining-trial-v1"
-                         or (knowledge is not None
-                             and record.metadata.get("ruleset") == knowledge.scope))[:20]
+        memories = tuple(
+            record
+            for record in self.memories.retrieve(limit=40)
+            if record.source != "runtime:mining-trial-v1"
+            or (knowledge is not None and record.metadata.get("ruleset") == knowledge.scope)
+        )[:20]
         operator_messages: tuple[OperatorMessage, ...] = ()
         if operator_context is not None:
             messages = tuple(
-                message for message in operator_context.messages
-                if message.status in {
-                    OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+                message
+                for message in operator_context.messages
+                if message.status
+                in {
+                    OperatorMessageStatus.QUEUED,
+                    OperatorMessageStatus.DELIVERED,
                 }
             )[:20]
             if not messages:
-                messages = tuple(message for message in operator_context.messages
-                                 if message.status in {OperatorMessageStatus.ACKNOWLEDGED,
-                                                       OperatorMessageStatus.REFUSED})[:20]
+                messages = tuple(
+                    message
+                    for message in operator_context.messages
+                    if message.status
+                    in {OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED}
+                )[:20]
             operator_messages = _active_operator_messages(messages)
         elif self.state_db is not None:
             messages = self.state_db.load_operator_messages(
@@ -5495,7 +5925,7 @@ class AgentRuntime:
         ):
             # First, so the existing bounded model-memory payload retains it.
             memories = (inspection, *memories[:19])
-        wiki = ()
+        wiki: tuple[WikiEvidence, ...] = ()
         pack_recipe_reply = None
         pack_recipe_identity = None
         pack_recipe_status = None
@@ -5525,10 +5955,7 @@ class AgentRuntime:
                 wiki = (answer.evidence,)
                 pack_recipe_reply = answer.chat_reply
                 pack_recipe_identity = answer.identity
-            elif (
-                pack_recipe_status != "verified"
-                and pack_recipe_catalog.is_recipe_query(query)
-            ):
+            elif pack_recipe_status != "verified" and pack_recipe_catalog.is_recipe_query(query):
                 pack_recipe_reply = RECIPE_SCOPE_UNAVAILABLE
         return CognitionContext(
             role=self.role,
@@ -5564,20 +5991,29 @@ class AgentRuntime:
         rows: list[dict[str, Any]] = []
         for slot in sorted(range(9), key=lambda slot: slot != equipped):
             item = self.blackboard.fact(f"hotbar.slot.{slot}.item", min_confidence=0.7)
-            if (item is None or not isinstance(item.value, str)
-                    or item.source.startswith("bootstrap:")):
+            if (
+                item is None
+                or not isinstance(item.value, str)
+                or item.source.startswith("bootstrap:")
+            ):
                 continue
             belief = knowledge.belief(kind.value, item.value)
             rule = knowledge.rule(kind.value, item.value)
-            rows.append({
-                "block": kind.value, "tool": item.value, "slot": slot,
-                "equipped": slot == equipped,
-                "observed_breaks": belief.breaks, "observed_harvests": belief.harvests,
-                "observed_nonharvests": belief.nonharvests, "observed_pickups": belief.pickups,
-                "censored_attempts": belief.censored,
-                "game_rule": None if rule is None else rule.model_dump(),
-                "scope": knowledge.scope,
-            })
+            rows.append(
+                {
+                    "block": kind.value,
+                    "tool": item.value,
+                    "slot": slot,
+                    "equipped": slot == equipped,
+                    "observed_breaks": belief.breaks,
+                    "observed_harvests": belief.harvests,
+                    "observed_nonharvests": belief.nonharvests,
+                    "observed_pickups": belief.pickups,
+                    "censored_attempts": belief.censored,
+                    "game_rule": None if rule is None else rule.model_dump(),
+                    "scope": knowledge.scope,
+                }
+            )
             if len(rows) == 4:
                 break
         return tuple(rows)
@@ -5591,10 +6027,13 @@ class AgentRuntime:
     ) -> SkillRun:
         parameters = _compatible_recovery_parameters(parent, recovery)
         # Actuator prohibitions survive recovery even when they are not task parameters.
-        parameters.update({
-            name: False for name in recovery.action_permissions.model_dump()
-            if parent.parameters.get(name) is False
-        })
+        parameters.update(
+            {
+                name: False
+                for name in recovery.action_permissions.model_dump()
+                if parent.parameters.get(name) is False
+            }
+        )
         run = self._start_skill(
             recovery,
             source=SkillStartSource.RECOVERY,
@@ -5609,12 +6048,15 @@ class AgentRuntime:
             and recovery.skill_id == "close_open_inventory"
         ):
             self._plan_neutral_recovery_runs = {
-                *getattr(self, "_plan_neutral_recovery_runs", ()), run.run_id
+                *getattr(self, "_plan_neutral_recovery_runs", ()),
+                run.run_id,
             }
         return run
 
     def _planks_retry_requires_wood(
-        self, *, snapshot: CognitionBlackboardSnapshot | None = None,
+        self,
+        *,
+        snapshot: CognitionBlackboardSnapshot | None = None,
     ) -> bool:
         """Persist one prerequisite repair, not a stale claim of inventory absence."""
         memories = getattr(self, "memories", None)
@@ -5623,7 +6065,8 @@ class AgentRuntime:
         if not getattr(self, "_planks_failure_memory_initialized", False):
             self._planks_failure_memory = max(
                 (
-                    memory for memory in memories.records.values()
+                    memory
+                    for memory in memories.records.values()
                     if memory.source == "runtime:verified-skill-outcome"
                     and memory.metadata.get("skill_id") == "craft_wood_planks"
                     and memory.metadata.get("reported_reason") == _PLANKS_NO_LOGS_REASON
@@ -5662,14 +6105,19 @@ class AgentRuntime:
                     continue
             else:
                 latest = board.latest()
-                if not fact.source.startswith("vlm:") or latest is None or not any(
-                    evidence.region_kind == EvidenceRegion.GUI
-                    and evidence.evidence_id in fact.evidence_refs
-                    # VLM observed_ns is completion time, not capture time.
-                    # A delayed pre-failure image must not repair the prerequisite.
-                    and getattr(self, "_planks_no_logs_failure_ns", 0)
-                    < evidence.captured_ns <= fact.observed_ns
-                    for evidence in latest.evidence
+                if (
+                    not fact.source.startswith("vlm:")
+                    or latest is None
+                    or not any(
+                        evidence.region_kind == EvidenceRegion.GUI
+                        and evidence.evidence_id in fact.evidence_refs
+                        # VLM observed_ns is completion time, not capture time.
+                        # A delayed pre-failure image must not repair the prerequisite.
+                        and getattr(self, "_planks_no_logs_failure_ns", 0)
+                        < evidence.captured_ns
+                        <= fact.observed_ns
+                        for evidence in latest.evidence
+                    )
                 ):
                     continue
             observed_ns = time.time_ns()
@@ -5723,6 +6171,7 @@ class AgentRuntime:
 
     def _telemetry_payload(self, *, state: str) -> dict[str, object]:
         from .operator.standby import standby_status
+
         running = self.executor.run
         if running is not None and running.outcome != SkillOutcome.RUNNING:
             running = None
@@ -5753,7 +6202,9 @@ class AgentRuntime:
                 "phase": (
                     "handoff"
                     if cognition_probe.handoff_deadline_ns is not None
-                    else "settling" if cognition_probe.query_id is None else "grounding"
+                    else "settling"
+                    if cognition_probe.query_id is None
+                    else "grounding"
                 ),
                 "query_id": cognition_probe.query_id,
                 "requested_keys": list(cognition_probe.requested_keys),
@@ -5762,11 +6213,13 @@ class AgentRuntime:
                 "execution_revision": cognition_probe.execution_revision,
                 "origin": (
                     "runtime:failure-triggered-observation"
-                    if cognition_probe.trigger_run_id is not None else "model:requested"
+                    if cognition_probe.trigger_run_id is not None
+                    else "model:requested"
                 ),
                 "trigger_run_id": cognition_probe.trigger_run_id,
                 "trigger_decision": (
-                    None if cognition_probe.trigger_decision is None
+                    None
+                    if cognition_probe.trigger_decision is None
                     else cognition_probe.trigger_decision.model_dump(mode="json")
                 ),
             }
@@ -5788,7 +6241,8 @@ class AgentRuntime:
         }
         perception_status["recipe_observation"] = (
             {"state": "disabled", "reason": "not_configured"}
-            if self.recipe_observer is None else self.recipe_observer.status()
+            if self.recipe_observer is None
+            else self.recipe_observer.status()
         )
         latest = self.blackboard.latest()
         perception_status["tracks"] = (
@@ -5811,8 +6265,7 @@ class AgentRuntime:
             if self.trajectory is not None
             else {
                 "enabled": False,
-                "disabled_reason": self.trajectory_disabled_reason
-                or "disabled-by-configuration",
+                "disabled_reason": self.trajectory_disabled_reason or "disabled-by-configuration",
                 "written_steps": 0,
                 "dropped_steps": 0,
                 "queued_samples": 0,
@@ -5822,7 +6275,8 @@ class AgentRuntime:
         return {
             "schema_version": 1,
             "reasoning_standby": standby_status(self),
-            "operator_request_only": None if self._literal_request_fence is None
+            "operator_request_only": None
+            if self._literal_request_fence is None
             else self._literal_request_fence.status(),
             "state": state,
             "role": self.role.role_id,

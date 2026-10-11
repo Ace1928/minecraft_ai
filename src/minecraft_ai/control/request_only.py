@@ -15,8 +15,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from minecraft_ai.control.operator_budget import OperatorAttempt, authority_digest
-from minecraft_ai.skills import SkillSpec
+from minecraft_ai.skills import SkillRun, SkillSpec
 from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
+from minecraft_ai.storage import OperatorContextSnapshot
 
 
 class RequestOnlyConfig(BaseModel):
@@ -27,9 +28,13 @@ class RequestOnlyConfig(BaseModel):
 
 
 def skill_digest(spec: SkillSpec) -> str:
-    return hashlib.sha256(json.dumps(
-        spec.model_dump(mode="json"), sort_keys=True, separators=(",", ":"),
-    ).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(
+            spec.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 def camera_only_spec(spec: SkillSpec) -> bool:
@@ -55,23 +60,38 @@ class LiteralRequestFence:
     def admission_reason(self, message: OperatorMessage, spec: SkillSpec) -> str | None:
         if self.state != "waiting":
             return "owner_already_consumed"
-        if (message.status != OperatorMessageStatus.QUEUED
-                or message.created_ns < self.started_wall_ns):
+        if (
+            message.status != OperatorMessageStatus.QUEUED
+            or message.created_ns < self.started_wall_ns
+        ):
             return "request_not_fresh"
-        if (message.kind not in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
-                or message.direction_request_id is not None
-                or message.direction_attempt_id is not None
-                or message.text != self.config.skill_id or spec.skill_id != self.config.skill_id):
+        if (
+            message.kind not in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+            or message.direction_request_id is not None
+            or message.direction_attempt_id is not None
+            or message.text != self.config.skill_id
+            or spec.skill_id != self.config.skill_id
+        ):
             return "literal_request_required"
-        if (message.execution_budget is None or message.execution_budget.max_skills != 1
-                or message.execution_budget.timeout_ms > 12_000):
+        if (
+            message.execution_budget is None
+            or message.execution_budget.max_skills != 1
+            or message.execution_budget.timeout_ms > 12_000
+        ):
             return "one_bounded_survey_required"
         if not camera_only_spec(spec):
             return "camera_permissions_changed"
         return None
 
-    def bind(self, message: OperatorMessage, spec: SkillSpec, attempt: OperatorAttempt,
-             *, revision: int, run_id: str) -> None:
+    def bind(
+        self,
+        message: OperatorMessage,
+        spec: SkillSpec,
+        attempt: OperatorAttempt,
+        *,
+        revision: int,
+        run_id: str,
+    ) -> None:
         if self.admission_reason(message, spec) is not None or attempt.terminal_reason is not None:
             raise ValueError("request-only admission refused")
         self.message_id = message.message_id
@@ -83,16 +103,32 @@ class LiteralRequestFence:
         self.attempt = attempt
         self.state = "running"
 
-    def check(self, snapshot, run, spec: SkillSpec, *, now_ns: int) -> str | None:
+    def check(
+        self,
+        snapshot: OperatorContextSnapshot,
+        run: SkillRun | None,
+        spec: SkillSpec,
+        *,
+        now_ns: int,
+    ) -> str | None:
         if self.state != "running" or self.attempt is None:
             return "request_not_running"
-        if (snapshot.revision != self.operator_revision
-                or run is None or run.run_id != self.run_id or run.context_key != self.context_key
-                or run.skill_id != self.config.skill_id):
+        if (
+            snapshot.revision != self.operator_revision
+            or run is None
+            or run.run_id != self.run_id
+            or run.context_key != self.context_key
+            or run.skill_id != self.config.skill_id
+        ):
             return "request_authority_changed"
-        matching = tuple(message for message in snapshot.messages if message.message_id == self.message_id)
-        if (len(matching) != 1 or matching[0].status != OperatorMessageStatus.ACKNOWLEDGED
-                or authority_digest(matching[0]) != self.authority_sha256):
+        matching = tuple(
+            message for message in snapshot.messages if message.message_id == self.message_id
+        )
+        if (
+            len(matching) != 1
+            or matching[0].status != OperatorMessageStatus.ACKNOWLEDGED
+            or authority_digest(matching[0]) != self.authority_sha256
+        ):
             return "request_authority_changed"
         if not camera_only_spec(spec) or skill_digest(spec) != self.spec_sha256:
             return "camera_permissions_changed"

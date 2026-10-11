@@ -6,6 +6,7 @@ import json
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from platformdirs import user_runtime_dir
 
@@ -16,7 +17,7 @@ STANDBY_FILE = Path(user_runtime_dir("minecraft-ai")) / "reasoning-standby.json"
 MAX_STANDBY_NS = 120_000_000_000
 
 
-def standby_remaining_ns(*, path=None):
+def standby_remaining_ns(*, path: Path | None = None) -> int:
     path = STANDBY_FILE if path is None else path
     try:
         data = json.loads(path.read_text())
@@ -26,7 +27,11 @@ def standby_remaining_ns(*, path=None):
         return 0
 
 
-def set_reasoning_standby(enabled, *, path=None):
+def set_reasoning_standby(
+    enabled: bool,
+    *,
+    path: Path | None = None,
+) -> dict[str, bool | int]:
     if type(enabled) is not bool:
         raise ValueError("enabled must be a boolean")
     path = STANDBY_FILE if path is None else path
@@ -43,7 +48,7 @@ def set_reasoning_standby(enabled, *, path=None):
     return {"requested": enabled, "maximum_seconds": 120}
 
 
-def standby_status(runtime):
+def standby_status(runtime: Any) -> dict[str, Any]:
     remaining = standby_remaining_ns()
     if not remaining:
         return {"state": "off", "remaining_seconds": 0}
@@ -70,7 +75,7 @@ def standby_status(runtime):
     }
 
 
-def apply_reasoning_standby(runtime):
+def apply_reasoning_standby(runtime: Any) -> bool:
     if not standby_remaining_ns():
         if getattr(runtime, "_reasoning_standby_engaged", False):
             runtime._reasoning_standby_engaged = False

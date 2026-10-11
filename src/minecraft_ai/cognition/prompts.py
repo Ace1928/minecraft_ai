@@ -21,7 +21,6 @@ from .constants import (
     _MAX_HIGH_LEVEL_FACTS,
     _MAX_HIGH_LEVEL_GOALS,
     _MAX_HIGH_LEVEL_PAYLOAD_CHARS,
-    _MAX_OPERATOR_PROMPT_TEXT_CHARS,
     _MOTOR_ONLY_FACT_KEYS,
     _MOTOR_ONLY_FACT_PREFIXES,
     _URGENT_FACT_KEYS,
@@ -66,17 +65,19 @@ def _cognition_decision_schema(bounds: _DecisionRepairBounds) -> dict[str, Any]:
         _operator_question_perception_keys() if bounds.reply_only else _cognition_perception_keys()
     )
     if bounds.reply_only:
-        properties.update({
-            "g": {"const": bounds.authority_goal_id},
-            "s": {"type": "null"},
-            "p": {"type": "object", "maxProperties": 0, "additionalProperties": False},
-            "o": {"type": "string", "minLength": 1, "maxLength": 160},
-            "c": {"type": "null"},
-            "x": {"const": False},
-            "w": {"type": "null"},
-            "d": {"type": "null"},
-            "n": {"type": "array", "maxItems": 0},
-        })
+        properties.update(
+            {
+                "g": {"const": bounds.authority_goal_id},
+                "s": {"type": "null"},
+                "p": {"type": "object", "maxProperties": 0, "additionalProperties": False},
+                "o": {"type": "string", "minLength": 1, "maxLength": 160},
+                "c": {"type": "null"},
+                "x": {"const": False},
+                "w": {"type": "null"},
+                "d": {"type": "null"},
+                "n": {"type": "array", "maxItems": 0},
+            }
+        )
         schema["required"] = list(properties)
     return schema
 
@@ -137,9 +138,14 @@ def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
     # possible even when the only requested option has repeatedly failed.
     skill_alternatives = (*tuple(literal(skill_id) for skill_id in skill_ids), '"null"')
     skill_rule = " | ".join(skill_alternatives)
-    question_rule = " | ".join(literal(key) for key in (
-        _operator_question_perception_keys() if bounds.reply_only else _cognition_perception_keys()
-    ))
+    question_rule = " | ".join(
+        literal(key)
+        for key in (
+            _operator_question_perception_keys()
+            if bounds.reply_only
+            else _cognition_perception_keys()
+        )
+    )
     parameter_names = tuple(
         dict.fromkeys(
             (
@@ -185,8 +191,8 @@ def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
                 '",\\"s\\":" skill ",\\"p\\":" params '
                 '",\\"o\\":" reply-string ",\\"c\\":null,\\"x\\":false,\\"q\\":" questions '
                 '",\\"w\\":null,\\"d\\":null,\\"n\\":[]}"'
-                if bounds.reply_only else
-                'root ::= "{\\"r\\":" summary ",\\"g\\":" goal '
+                if bounds.reply_only
+                else 'root ::= "{\\"r\\":" summary ",\\"g\\":" goal '
                 '",\\"s\\":" skill ",\\"p\\":" params '
                 '",\\"o\\":" nullable-medium ",\\"c\\":" nullable-medium '
                 '",\\"x\\":" boolean ",\\"q\\":" questions '
@@ -215,6 +221,7 @@ def _cognition_decision_grammar(bounds: _DecisionRepairBounds) -> str:
             'char ::= [^"\\\\\\x7F\\x00-\\x1F] | "\\\\" (["\\\\/bfnrt] | "u" [0-9a-fA-F]{4})',
         )
     )
+
 
 def _high_level_fact_payload(
     blackboard: CognitionReadView,
@@ -268,8 +275,7 @@ def _high_level_fact_payload(
         (
             (key, fact)
             for key, fact in blackboard.fresh_facts(min_confidence=0.35).items()
-            if not key.startswith(_MOTOR_ONLY_FACT_PREFIXES)
-            and key not in _MOTOR_ONLY_FACT_KEYS
+            if not key.startswith(_MOTOR_ONLY_FACT_PREFIXES) and key not in _MOTOR_ONLY_FACT_KEYS
         ),
         key=lambda item: rank(item[0]),
     )[:_MAX_HIGH_LEVEL_FACTS]
@@ -280,6 +286,7 @@ def _high_level_fact_payload(
             value = value[:_MAX_HIGH_LEVEL_FACT_TEXT]
         payload[key] = [value, round(fact.confidence, 3)]
     return payload
+
 
 def _selected_goals(
     goals: tuple[Goal, ...],
@@ -309,6 +316,7 @@ def _selected_goals(
     )
     return tuple(goal for _index, goal in ranked[:_MAX_HIGH_LEVEL_GOALS])
 
+
 def _wiki_prompt_payload(item: WikiEvidence) -> dict[str, object]:
     return {
         "title": item.title[:120],
@@ -319,12 +327,14 @@ def _wiki_prompt_payload(item: WikiEvidence) -> dict[str, object]:
         "confidence": round(item.confidence, 3),
     }
 
+
 def _compact_prompt_scalar(
     value: str | int | float | bool,
     *,
     text_limit: int = 100,
 ) -> str | int | float | bool:
     return value[:text_limit] if isinstance(value, str) else value
+
 
 def _serialize_high_level_payload(payload: dict[str, Any]) -> str:
     """Fit optional context under a conservative local-model character budget."""
@@ -378,6 +388,7 @@ def _serialize_high_level_payload(payload: dict[str, Any]) -> str:
 
         raise ValueError("high-level prompt cannot fit the bounded local-model context")
 
+
 def _operator_prompt_payload(message: OperatorMessage) -> dict[str, object]:
     """Expose operator-authored content without feeding model replies back as commands."""
     return {
@@ -390,6 +401,7 @@ def _operator_prompt_payload(message: OperatorMessage) -> dict[str, object]:
         "status": message.status.value,
     }
 
+
 def _operator_prompt_metadata(message: OperatorMessage) -> dict[str, object]:
     return {
         "message_id": message.message_id[:128],
@@ -397,6 +409,7 @@ def _operator_prompt_metadata(message: OperatorMessage) -> dict[str, object]:
         "priority": message.priority,
         "status": message.status.value,
     }
+
 
 def _explicit_action_constraints(text: str) -> dict[str, bool]:
     """Translate literal operator prohibitions into the motor option contract.
@@ -414,7 +427,8 @@ def _explicit_action_constraints(text: str) -> dict[str, bool]:
         scope = match.group("scope")
         if re.search(
             r"\b(?:move|moving|movement|walk|walking|run|running|sprint|sprinting|"
-            r"strafe|strafing|locomotion)\b", scope,
+            r"strafe|strafing|locomotion)\b",
+            scope,
         ):
             constraints["allow_movement"] = False
         if re.search(r"\b(?:attack|attacking|hit|hitting|fight|fighting)\b", scope):
@@ -424,6 +438,7 @@ def _explicit_action_constraints(text: str) -> dict[str, bool]:
         if re.search(r"\b(?:jump|jumping)\b", scope):
             constraints["allow_jump"] = False
     return constraints
+
 
 def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
     """Map an affirmative, concrete directive to compatible learned options.
@@ -486,12 +501,8 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
         normalized,
     ):
         add("open_inventory")
-    if (
-        re.search(r"\b(?:close|exit|leave) (?:the )?(?:inventory|menu)\b", normalized)
-        or (
-            "inventory" in normalized
-            and re.search(r"\b(?:close|exit|leave)\s+it\b", normalized)
-        )
+    if re.search(r"\b(?:close|exit|leave) (?:the )?(?:inventory|menu)\b", normalized) or (
+        "inventory" in normalized and re.search(r"\b(?:close|exit|leave)\s+it\b", normalized)
     ):
         add("close_open_inventory")
     if re.search(r"\b(?:click|activate|press)\b.*\b(?:button|control|menu)\b", normalized):
@@ -547,6 +558,7 @@ def _operator_requested_skill_ids(text: str) -> tuple[str, ...]:
         add("use_target")
     return tuple(requested)
 
+
 def _urgent_safety_required(blackboard: CognitionReadView) -> bool:
     for key in (
         "danger.immediate",
@@ -601,21 +613,28 @@ def _affirmative_inventory_inspection(text: str) -> bool:
             label, clause = clause.split(":", 1)
             # A bounded task label may precede an imperative; arbitrary
             # reported text ("the sign reads: ...") is not a new directive.
-            if re.fullmatch(
-                r"(?:(?:one time|command following|inventory|operator|bounded)\s+)*"
-                r"(?:check|task|instruction|request)", label.strip(),
-            ) is None:
+            if (
+                re.fullmatch(
+                    r"(?:(?:one time|command following|inventory|operator|bounded)\s+)*"
+                    r"(?:check|task|instruction|request)",
+                    label.strip(),
+                )
+                is None
+            ):
                 continue
         if re.match(
             r"\s*(?:please\s+)?(?:open|inspect|check|audit|view)"
-            r"\s+(?:the\s+)?inventory\b", clause,
+            r"\s+(?:the\s+)?inventory\b",
+            clause,
         ):
             return True
     return False
 
 
 def planks_retry_requires_wood(
-    context: CognitionContext, *, skill_id: str | None = None,
+    context: CognitionContext,
+    *,
+    skill_id: str | None = None,
 ) -> bool:
     """Keep crafting blocked; a current inventory directive may admit GUI inspection."""
     if not context.planks_retry_requires_wood:
@@ -623,8 +642,10 @@ def planks_retry_requires_wood(
     if (
         context.operator_messages
         and context.operator_messages[0].kind == OperatorMessageKind.QUESTION
-        and context.operator_messages[0].status in {
-            OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+        and context.operator_messages[0].status
+        in {
+            OperatorMessageStatus.QUEUED,
+            OperatorMessageStatus.DELIVERED,
         }
     ):
         # The same reply-only priority as the controller fast path. An older
@@ -639,19 +660,22 @@ def planks_retry_requires_wood(
         ),
         None,
     )
-    if (
-        active is not None
-        and active.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
-    ):
+    if active is not None and active.status in {
+        OperatorMessageStatus.QUEUED,
+        OperatorMessageStatus.DELIVERED,
+    }:
         if _WOOD_INVENTORY_AUDIT_SKILLS.intersection(_operator_requested_skill_ids(active.text)):
             return False
     if (
-        skill_id == "open_inventory" and active is not None
+        skill_id == "open_inventory"
+        and active is not None
         and active is context.operator_messages[0]
         and (
             active.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
-            or (active.kind == OperatorMessageKind.INSTRUCTION
-                and active.status == OperatorMessageStatus.ACKNOWLEDGED)
+            or (
+                active.kind == OperatorMessageKind.INSTRUCTION
+                and active.status == OperatorMessageStatus.ACKNOWLEDGED
+            )
         )
         and _affirmative_inventory_inspection(active.text)
     ):

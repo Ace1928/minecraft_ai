@@ -90,6 +90,11 @@ class PackRecipeCatalog:
         self.sha256 = sha256
         self.version_id = payload["bds_version"]
 
+    def configured_only(self) -> bool:
+        """Whether this catalog is an installed-file reference, not live-world proof."""
+        configured = self._payload.get("configured_recipe_identity")
+        return type(configured) is dict and configured.get("state") == "configured_only"
+
     def active_scope_status(self, view: CognitionReadView) -> str:
         return self._scope_status(active_recipe_identity(view))
 

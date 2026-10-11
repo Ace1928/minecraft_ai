@@ -351,22 +351,29 @@ def _reasoning_status_text(status: dict[str, object]) -> str:
     return "Waiting for the agent to report its reasoning state."
 
 
-def _inventory_qualification_view(discovery, receipt):
-    reason = discovery.get("readiness_reason")
+def _inventory_qualification_view(
+    discovery: dict[str, Any],
+    receipt: dict[str, Any] | None,
+) -> dict[str, object]:
+    reason_value = discovery.get("readiness_reason")
+    reason = reason_value if isinstance(reason_value, str) else None
     pending = bool(receipt and receipt.get("state") in {"queued", "running"})
     ready = reason == "execution_contract_unqualified"
     if ready:
         availability = "Ready for a private inventory check. Paid commands remain held."
     else:
-        explanation = {
+        explanations = {
             "motor_lease_inactive": "the agent has no active control lease",
             "emergency_stop_latched": "emergency stop is active",
             "operator_paused": "the operator has paused control",
             "live_incapable": "live game control is unavailable",
-        }.get(reason, (reason or "readiness is unconfirmed").replace("_", " "))
+        }
+        explanation = None if reason is None else explanations.get(reason)
+        if explanation is None:
+            explanation = (reason or "readiness is unconfirmed").replace("_", " ")
         availability = f"Inventory check unavailable: {explanation}. Paid commands remain held."
     summary = ""
-    receipt_current = bool(receipt) and all(
+    receipt_current = receipt is not None and all(
         receipt.get(receipt_key) is not None
         and receipt.get(receipt_key) == discovery.get(discovery_key)
         for receipt_key, discovery_key in (
@@ -917,7 +924,10 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
                 from minecraft_ai.operator.standby import set_reasoning_standby
                 if set(payload) != {"enabled"}:
                     raise ValueError("Only enabled may be supplied.")
-                self._send_json(HTTPStatus.OK, set_reasoning_standby(payload["enabled"]))
+                enabled = payload["enabled"]
+                if type(enabled) is not bool:
+                    raise ValueError("enabled must be a boolean.")
+                self._send_json(HTTPStatus.OK, set_reasoning_standby(enabled))
             elif path == "/api/target":
                 self._post_target(payload)
             elif path in {"/api/target/reference", "/api/target/reference/release"}:
@@ -1085,7 +1095,12 @@ class OperatorRequestHandler(BaseHTTPRequestHandler):
             database.save_operator_message(message)
         self._send_json(HTTPStatus.CREATED, message.model_dump(mode="json"))
 
-    def _post_inventory_qualification(self, payload: dict[str, Any], *, cancel=False) -> None:
+    def _post_inventory_qualification(
+        self,
+        payload: dict[str, Any],
+        *,
+        cancel: bool = False,
+    ) -> None:
         from minecraft_ai.directions import DirectionsGateway, DirectionsRequest
         allowed = {"request_id"} if cancel else {
             "request_id", "server_id", "expected_session_id", "expected_epoch",

@@ -14,7 +14,11 @@ from minecraft_ai.control.execution import visible_oak_trunk
 from minecraft_ai.grounded_perception import resolve_grounded_output_keys
 from minecraft_ai.model_requests import ModelRequestLifecycle
 from minecraft_ai.models import (
-    LanguageModel, ModelMessage, ModelRequestAttempt, ModelResponse, PlannerRequestBudgetError,
+    LanguageModel,
+    ModelMessage,
+    ModelRequestAttempt,
+    ModelResponse,
+    PlannerRequestBudgetError,
 )
 from minecraft_ai.perception import CognitionReadView
 from minecraft_ai.skills import SkillFailureCode, SkillLibrary, SkillOutcome, SkillRun
@@ -77,7 +81,8 @@ class HighLevelController:
     metrics: HighLevelMetrics = field(default_factory=HighLevelMetrics, init=False)
     _request_context: ContextVar[ModelRequestLifecycle | None] = field(
         default_factory=lambda: ContextVar("cognition_request", default=None),
-        init=False, repr=False,
+        init=False,
+        repr=False,
     )
 
     def __post_init__(self) -> None:
@@ -94,8 +99,9 @@ class HighLevelController:
         # deliberately irrelevant, and even a legacy nested call clears it.
         token = self._request_context.set(request)
         try:
-            context = replace(context, pack_configured_information=None,
-                              pack_configured_question=None)
+            context = replace(
+                context, pack_configured_information=None, pack_configured_question=None
+            )
             identity = (
                 self.pack_recipe_catalog.active_identity(blackboard)
                 if self.pack_recipe_catalog is not None
@@ -113,7 +119,8 @@ class HighLevelController:
                 self._active_operator_question(context) is None
                 and context.pack_recipe_reply not in {None, RECIPE_SCOPE_UNAVAILABLE}
                 and (
-                    player_question is None or not player_question.fresh()
+                    player_question is None
+                    or not player_question.fresh()
                     or not any(item.query.strip() == player_query for item in context.wiki)
                 )
             )
@@ -123,8 +130,11 @@ class HighLevelController:
                 or stale_player_reference
             ):
                 context = replace(
-                    context, wiki=(), pack_recipe_reply=RECIPE_SCOPE_UNAVAILABLE,
-                    pack_recipe_identity=None, pack_recipe_status="unknown",
+                    context,
+                    wiki=(),
+                    pack_recipe_reply=RECIPE_SCOPE_UNAVAILABLE,
+                    pack_recipe_identity=None,
+                    pack_recipe_status="unknown",
                 )
             decision = bind_game_chat_authority(self._decide(blackboard, context), blackboard)
             # Private host binding survives authority rewrites and repairs. It
@@ -136,14 +146,17 @@ class HighLevelController:
             self._request_context.reset(token)
 
     def _configured_reference(
-        self, query: str, blackboard: CognitionReadView,
+        self,
+        query: str,
+        blackboard: CognitionReadView,
     ) -> dict[str, Any] | None:
         """Read installed-file information without attesting the current game."""
         catalog = self.pack_recipe_catalog
         latest = blackboard.latest()
         request = self._request_context.get()
         if (
-            catalog is None or latest is None
+            catalog is None
+            or latest is None
             or not self._configured_catalog_only()
             or catalog.active_scope_status(blackboard) == "verified"
             or (request is not None and request.snapshot().disposition != "pending")
@@ -157,46 +170,55 @@ class HighLevelController:
             return None
         return answer
 
-
     def _configured_catalog_only(self) -> bool:
         catalog = self.pack_recipe_catalog
         if catalog is None:
             return False
-        configured = catalog._payload.get("configured_recipe_identity")
-        return type(configured) is dict and configured.get("state") == "configured_only"
-
+        configured_only = getattr(catalog, "configured_only", None)
+        return callable(configured_only) and configured_only() is True
 
     @staticmethod
     def _informational_recipe_question(query: str) -> bool:
         # A recipe instruction is not silently reclassified as an information request.
         return bool(re.match(r"^\s*(?:how\b|what\b|recipe\s+for\b)", query, re.I))
 
-
     @staticmethod
     def _configured_reference_label(reference: dict[str, Any]) -> str:
         return configured_recipe_label(reference)
 
-
     def _configured_reference_response(
-        self, decision: CognitionDecision, blackboard: CognitionReadView,
+        self,
+        decision: CognitionDecision,
+        blackboard: CognitionReadView,
         context: CognitionContext,
     ) -> CognitionDecision:
         question = self._active_operator_question(context)
         reference = context.pack_configured_information
+        assert reference is not None
         text = self._configured_reference_label(reference) + reference["recipe_text"]
         if len(text) > 160:
             # Never truncate quantities/output; the complete reference remains
             # factual context, but cannot be copied into this bounded reply.
-            text = "Configured recipe found. Its full scoped answer exceeds this reply limit. Live load is unverified."
+            text = (
+                "Configured recipe found. Its full scoped answer exceeds this reply limit. "
+                "Live load is unverified."
+            )
         player = blackboard.fact("social.player_message", min_confidence=0.7)
         matching_player = False
         if player is not None and player.fresh() and type(player.value) is str:
             _speaker, separator, query = player.value.partition(":")
-            matching_player = (query if separator else player.value).strip() == context.pack_configured_question
+            matching_player = (
+                query if separator else player.value
+            ).strip() == context.pack_configured_question
         chat = None
         if question is None and matching_player:
-            chat = text if len(text) <= 150 else (
-                "The configured recipe is too long for this chat reply. Live load is unverified."
+            chat = (
+                text
+                if len(text) <= 150
+                else (
+                    "The configured recipe is too long for this chat reply. "
+                    "Live load is unverified."
+                )
             )
         request = self._request_context.get()
         pending_instruction = any(
@@ -206,41 +228,57 @@ class HighLevelController:
         )
         valid = (
             not pending_instruction
-            and (request is None or (
-                request.snapshot().disposition == "pending"
-                and time.monotonic_ns() < request.binding.deadline_ns
-            ))
-            and (matching_player if question is None
-                 else question.text == context.pack_configured_question)
+            and (
+                request is None
+                or (
+                    request.snapshot().disposition == "pending"
+                    and time.monotonic_ns() < request.binding.deadline_ns
+                )
+            )
+            and (
+                matching_player
+                if question is None
+                else question.text == context.pack_configured_question
+            )
         )
         if pending_instruction:
             # Preserve the highest-authority decision and its plan; reference
             # projection must not substitute a fresh chat question for it.
             return decision
-        result = decision.model_copy(update={
-            "chosen_goal_id": None if question is None else f"operator:{question.message_id}",
-            "skill_id": None, "skill_parameters": {}, "request_replan": False,
-            "ask_perception": (), "research_query": None, "instruction": None,
-            "plan_steps": (), "say": text if valid else None,
-            "game_chat": chat if valid else None,
-        })
+        result = decision.model_copy(
+            update={
+                "chosen_goal_id": None if question is None else f"operator:{question.message_id}",
+                "skill_id": None,
+                "skill_parameters": {},
+                "request_replan": False,
+                "ask_perception": (),
+                "research_query": None,
+                "instruction": None,
+                "plan_steps": (),
+                "say": text if valid else None,
+                "game_chat": chat if valid else None,
+            }
+        )
         # Informational projection cannot inherit an observed-live binding.
         result._pack_recipe_identity = None
         result._configured_recipe_reference = True
         return result
 
-
     def _with_player_reference(
-        self, blackboard: CognitionReadView, context: CognitionContext,
+        self,
+        blackboard: CognitionReadView,
+        context: CognitionContext,
     ) -> CognitionContext:
         """Retrieve in this worker, never in the capture/motor thread.
 
         Pack recipes already supplied by the runtime are authoritative here.
         General vanilla snippets are explanatory references, not game facts.
         """
-        if any(message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
-               and message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
-               for message in context.operator_messages):
+        if any(
+            message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+            and message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+            for message in context.operator_messages
+        ):
             return context
         question = blackboard.fact("social.player_message", min_confidence=0.7)
         if question is not None and question.fresh() and type(question.value) is str:
@@ -249,15 +287,23 @@ class HighLevelController:
             if self._informational_recipe_question(query):
                 reference = self._configured_reference(query, blackboard)
                 if reference is not None and question.fresh():
-                    return replace(context, wiki=(), pack_recipe_reply=None,
-                        pack_recipe_identity=None, pack_recipe_status=None,
-                        pack_configured_information=reference, pack_configured_question=query)
+                    return replace(
+                        context,
+                        wiki=(),
+                        pack_recipe_reply=None,
+                        pack_recipe_identity=None,
+                        pack_recipe_status=None,
+                        pack_configured_information=reference,
+                        pack_configured_question=query,
+                    )
         if self.world_search is None or context.wiki or context.pack_recipe_reply is not None:
             return context
         question = blackboard.fact("social.player_message", min_confidence=0.7)
         latest = blackboard.latest()
         if (
-            question is None or not question.fresh() or type(question.value) is not str
+            question is None
+            or not question.fresh()
+            or type(question.value) is not str
             or latest is None
         ):
             return context
@@ -278,14 +324,17 @@ class HighLevelController:
             cutoff = min(cutoff, request.binding.deadline_ns)
         evidence = self.world_search.search(query, game_version=parts[1], deadline_ns=cutoff)
         if (
-            not question.fresh() or not evidence
+            not question.fresh()
+            or not evidence
             or (request is not None and request.snapshot().disposition != "pending")
         ):
             return context
         return replace(context, wiki=evidence)
 
     def _with_operator_reference(
-        self, blackboard: CognitionReadView, context: CognitionContext,
+        self,
+        blackboard: CognitionReadView,
+        context: CognitionContext,
     ) -> CognitionContext:
         """Give a pending reply-only question the same bounded references.
 
@@ -300,7 +349,10 @@ class HighLevelController:
         # current question merely because it came from the same pack session.
         if context.wiki or context.pack_recipe_reply is not None:
             context = replace(
-                context, wiki=(), pack_recipe_reply=None, pack_recipe_identity=None,
+                context,
+                wiki=(),
+                pack_recipe_reply=None,
+                pack_recipe_identity=None,
                 pack_recipe_status=None,
             )
         parts = latest.instance_id.split(":")
@@ -311,9 +363,15 @@ class HighLevelController:
             return context
         reference = self._configured_reference(question.text, blackboard)
         if reference is not None:
-            return replace(context, wiki=(), pack_recipe_reply=None,
-                pack_recipe_identity=None, pack_recipe_status=None,
-                pack_configured_information=reference, pack_configured_question=question.text)
+            return replace(
+                context,
+                wiki=(),
+                pack_recipe_reply=None,
+                pack_recipe_identity=None,
+                pack_recipe_status=None,
+                pack_configured_information=reference,
+                pack_configured_question=question.text,
+            )
         if self.pack_recipe_catalog is not None:
             status = self.pack_recipe_catalog.active_scope_status(blackboard)
             answer = self.pack_recipe_catalog.lookup_live(question.text, blackboard)
@@ -321,13 +379,16 @@ class HighLevelController:
                 if request is not None and request.snapshot().disposition != "pending":
                     return context
                 return replace(
-                    context, wiki=(answer.evidence,), pack_recipe_reply=answer.chat_reply,
+                    context,
+                    wiki=(answer.evidence,),
+                    pack_recipe_reply=answer.chat_reply,
                     pack_recipe_identity=answer.identity,
                     pack_recipe_status=status,
                 )
             if status != "verified" and self.pack_recipe_catalog.is_recipe_query(question.text):
                 return replace(
-                    context, pack_recipe_reply=RECIPE_SCOPE_UNAVAILABLE,
+                    context,
+                    pack_recipe_reply=RECIPE_SCOPE_UNAVAILABLE,
                     pack_recipe_status=status,
                 )
             if self.pack_recipe_catalog.mentions_pack_content(question.text):
@@ -338,11 +399,11 @@ class HighLevelController:
         if request is not None:
             cutoff = min(cutoff, request.binding.deadline_ns)
         evidence = self.world_search.search(
-            question.text, game_version=parts[1], deadline_ns=cutoff,
+            question.text,
+            game_version=parts[1],
+            deadline_ns=cutoff,
         )
-        if not evidence or (
-            request is not None and request.snapshot().disposition != "pending"
-        ):
+        if not evidence or (request is not None and request.snapshot().disposition != "pending"):
             return context
         return replace(context, wiki=evidence)
 
@@ -404,7 +465,8 @@ class HighLevelController:
                 blocked_skill_ids = self._recently_blocked_skill_ids(context)
                 if blocked_skill_ids:
                     feasible_skill_payloads = [
-                        payload for payload in feasible_skill_payloads
+                        payload
+                        for payload in feasible_skill_payloads
                         if str(payload["skill_id"]) not in blocked_skill_ids
                     ]
             # The canonical visible log count is strategic state even though
@@ -512,9 +574,7 @@ class HighLevelController:
                 ],
                 "planks_retry_requires_wood": planks_retry_requires_wood(context),
                 "current_plan": {
-                    "goal": (
-                        None if context.plan_goal_id is None else context.plan_goal_id[:128]
-                    ),
+                    "goal": (None if context.plan_goal_id is None else context.plan_goal_id[:128]),
                     "steps": [step[:120] for step in context.current_plan[:5]],
                     "next": context.plan_index,
                     "started_ago_ms": (
@@ -567,8 +627,9 @@ class HighLevelController:
                 ModelMessage(
                     role="system",
                     content=(
-                        _OPERATOR_QUESTION_SYSTEM if repair_bounds.reply_only else
-                        "Control only the Minecraft game through verified closed-loop skills. "
+                        _OPERATOR_QUESTION_SYSTEM
+                        if repair_bounds.reply_only
+                        else "Control only the Minecraft game through verified closed-loop skills. "
                         "Return one compact JSON object, keys once in grammar order: "
                         "r=summary under 12 words, g=goal id, s=skill id or null, p=parameters, "
                         "o=operator reply, c=authorized in-game chat, x=replan, q=at most two "
@@ -620,7 +681,10 @@ class HighLevelController:
                                 "ACTIVE OPERATOR DIRECTIVE (highest authority; follow this "
                                 "literal current request and do not substitute an older task): "
                                 + json.dumps(
-                                    _operator_prompt_payload(active_operator),
+                                    {
+                                        **_operator_prompt_payload(active_operator),
+                                        "text": active_operator.text[:640],
+                                    },
                                     separators=(",", ":"),
                                 )
                             ),
@@ -646,9 +710,7 @@ class HighLevelController:
                 # The model chooses the world plan; exact recipe text comes
                 # from the hash-pinned pack export and still passes the normal
                 # runtime player-chat authorization gate.
-                decision = decision.model_copy(
-                    update={"game_chat": context.pack_recipe_reply}
-                )
+                decision = decision.model_copy(update={"game_chat": context.pack_recipe_reply})
             decision = _bound_skill_parameters(
                 self._apply_decision_authority(decision, blackboard, context),
                 self.skills,
@@ -666,7 +728,8 @@ class HighLevelController:
             if decision.skill_id is not None:
                 selected = self.skills.get(decision.skill_id)
                 if selected.skill_id in _WOOD_INVENTORY_AUDIT_SKILLS and planks_retry_requires_wood(
-                    context, skill_id=selected.skill_id,
+                    context,
+                    skill_id=selected.skill_id,
                 ):
                     return self._repair_infeasible(
                         decision,
@@ -725,10 +788,12 @@ class HighLevelController:
                     and run.failure_code != SkillFailureCode.CONTROLLER_STARVATION
                 )
                 if candidates:
-                    decision = decision.model_copy(update={
-                        "ask_perception": self._prerequisite_perception_keys(candidates[0]),
-                        "request_replan": True,
-                    })
+                    decision = decision.model_copy(
+                        update={
+                            "ask_perception": self._prerequisite_perception_keys(candidates[0]),
+                            "request_replan": True,
+                        }
+                    )
             self.metrics.last_error = None
             return decision
         except PlannerRequestBudgetError as exc:
@@ -762,8 +827,7 @@ class HighLevelController:
             (
                 message
                 for message in context.operator_messages
-                if message.kind
-                in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+                if message.kind in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
             ),
             None,
         )
@@ -794,7 +858,8 @@ class HighLevelController:
             return " ".join(words).rstrip(".! ")
 
         literal_option = normalized_label(active.text) in {
-            normalized_label(selected_spec.skill_id), normalized_label(selected_spec.name),
+            normalized_label(selected_spec.skill_id),
+            normalized_label(selected_spec.name),
         }
         decision = CognitionDecision(
             reasoning_summary="Following an explicit operator instruction.",
@@ -802,9 +867,7 @@ class HighLevelController:
             skill_id=feasible_skill_ids[0],
             skill_parameters=parameters,
             say="Starting that now.",
-            instruction=(
-                selected_spec.policy_instruction if literal_option else active.text
-            ),
+            instruction=(selected_spec.policy_instruction if literal_option else active.text),
         )
         return self._scope_operator_decision(decision, blackboard, context)
 
@@ -819,15 +882,16 @@ class HighLevelController:
             decision.skill_id is not None
             and decision.ask_perception
             and not any(
-                resolve_grounded_output_keys((), question)
-                for question in decision.ask_perception
+                resolve_grounded_output_keys((), question) for question in decision.ask_perception
             )
         ):
             # Runtime defers skill+question decisions too. An invented question
             # must not strand that selected skill outside the null fallback.
-            decision = decision.model_copy(update={
-                "ask_perception": self._prerequisite_perception_keys(decision.skill_id),
-            })
+            decision = decision.model_copy(
+                update={
+                    "ask_perception": self._prerequisite_perception_keys(decision.skill_id),
+                }
+            )
         operator_goal_ids = {
             f"operator:{message.message_id}" for message in context.operator_messages
         }
@@ -906,7 +970,9 @@ class HighLevelController:
         }
 
     def _operator_method_choices(
-        self, active: OperatorMessage, context: CognitionContext,
+        self,
+        active: OperatorMessage,
+        context: CognitionContext,
     ) -> tuple[str, ...]:
         """Keep accepted intent while admitting its already-declared recovery methods.
 
@@ -915,8 +981,10 @@ class HighLevelController:
         only null and an endless expensive replan loop.
         """
         requested = _operator_requested_skill_ids(active.text)
-        if (active.kind != OperatorMessageKind.INSTRUCTION
-                or active.status != OperatorMessageStatus.ACKNOWLEDGED):
+        if (
+            active.kind != OperatorMessageKind.INSTRUCTION
+            or active.status != OperatorMessageStatus.ACKNOWLEDGED
+        ):
             return requested
         goal = f"operator:{active.message_id}"
         methods = list(requested)
@@ -926,44 +994,59 @@ class HighLevelController:
                 methods.extend(spec.recovery_skills)
         if "gather_nearby_wood" in requested:
             return tuple(dict.fromkeys(methods))
-        if not any(run.context_key == goal and run.skill_id in methods
-                   and run.outcome == SkillOutcome.FAILED
-                   and run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
-                   for run in context.recent_skill_runs):
+        if not any(
+            run.context_key == goal
+            and run.skill_id in methods
+            and run.outcome == SkillOutcome.FAILED
+            and run.failure_code == SkillFailureCode.LOCOMOTION_STALLED
+            for run in context.recent_skill_runs
+        ):
             return requested
         return tuple(dict.fromkeys(methods))
 
     def _observed_locomotion_recovery(
-        self, blackboard: CognitionReadView, context: CognitionContext,
+        self,
+        blackboard: CognitionReadView,
+        context: CognitionContext,
     ) -> CognitionDecision | None:
         """Use measured recovery competence without waiting for another language call."""
         if _urgent_safety_required(blackboard) or not context.operator_messages:
             return None
         active = context.operator_messages[0]
-        if (active.kind != OperatorMessageKind.INSTRUCTION
-                or active.status != OperatorMessageStatus.ACKNOWLEDGED):
+        if (
+            active.kind != OperatorMessageKind.INSTRUCTION
+            or active.status != OperatorMessageStatus.ACKNOWLEDGED
+        ):
             return None
         goal = f"operator:{active.message_id}"
         if context.plan_goal_id not in {None, goal}:
             return None
         latest_run = max(
             (run for run in context.recent_skill_runs if run.context_key == goal),
-            key=lambda run: run.ended_ns or run.started_ns, default=None,
+            key=lambda run: run.ended_ns or run.started_ns,
+            default=None,
         )
         search_needed = bool(
-            latest_run is not None and latest_run.skill_id == "gather_nearby_wood"
+            latest_run is not None
+            and latest_run.skill_id == "gather_nearby_wood"
             and not visible_oak_trunk(blackboard)
             and latest_run.failure_code == SkillFailureCode.CONTROLLER_STARVATION
         )
-        if (latest_run is None or latest_run.outcome != SkillOutcome.FAILED
-                or (latest_run.failure_code != SkillFailureCode.LOCOMOTION_STALLED
-                    and not search_needed)):
+        if (
+            latest_run is None
+            or latest_run.outcome != SkillOutcome.FAILED
+            or (
+                latest_run.failure_code != SkillFailureCode.LOCOMOTION_STALLED and not search_needed
+            )
+        ):
             return None
         methods = self._operator_method_choices(active, context)
         if methods and latest_run.skill_id not in methods:
             return None
         for key, expected in (
-            ("scene.playable", True), ("scene.ui_overlay", False), ("scene.mode", "world"),
+            ("scene.playable", True),
+            ("scene.ui_overlay", False),
+            ("scene.mode", "world"),
         ):
             fact = blackboard.fact(key, min_confidence=0.8)
             if fact is None or type(fact.value) is not type(expected) or fact.value != expected:
@@ -973,21 +1056,33 @@ class HighLevelController:
             return None
         selected = select_learned_recovery(
             self.skills,
-            tuple(skill for skill in failed.recovery_skills
-                  if (not methods or skill in methods)
-                  and (not search_needed or skill in {
-                      "explore_forward", "backtrack_from_obstacle", "survey_surroundings",
-                  })),
-            blackboard, context_key=goal,
+            tuple(
+                skill
+                for skill in failed.recovery_skills
+                if (not methods or skill in methods)
+                and (
+                    not search_needed
+                    or skill
+                    in {
+                        "explore_forward",
+                        "backtrack_from_obstacle",
+                        "survey_surroundings",
+                    }
+                )
+            ),
+            blackboard,
+            context_key=goal,
         )
         if selected is None:
             return None
         return CognitionDecision(
             reasoning_summary=(
                 "Search for an accessible trunk before retrying wood gathering."
-                if search_needed else "Using learned recovery after observed blocked movement."
+                if search_needed
+                else "Using learned recovery after observed blocked movement."
             ),
-            chosen_goal_id=goal, skill_id=selected.skill_id,
+            chosen_goal_id=goal,
+            skill_id=selected.skill_id,
             skill_parameters=dict(_explicit_action_constraints(active.text)),
             instruction=selected.policy_instruction,
         )
@@ -1054,9 +1149,7 @@ class HighLevelController:
             overlap = 4 * len(query_tokens & identity_tokens) + len(
                 query_tokens & description_tokens
             )
-            competence = self.skills.hierarchical_success_probability(
-                skill.skill_id, context_key
-            )
+            competence = self.skills.hierarchical_success_probability(skill.skill_id, context_key)
             failure_penalty = min(
                 0.45,
                 0.08 * self.skills.contextual_failure_streak(skill.skill_id, context_key),
@@ -1120,7 +1213,8 @@ class HighLevelController:
             question = self._active_operator_question(context)
             if question is not None:
                 return _DecisionRepairBounds(
-                    allowed_skills=(), authority_goal_id=f"operator:{question.message_id}",
+                    allowed_skills=(),
+                    authority_goal_id=f"operator:{question.message_id}",
                     reply_only=True,
                     literal_operator=question,
                 )
@@ -1159,9 +1253,15 @@ class HighLevelController:
             requested_skill_ids=requested_skill_ids,
             literal_operator=active,
             allowed_goal_ids=(
-                tuple(goal.goal_id for goal in _selected_goals(
-                    context.goals, active_goal_id=context.plan_goal_id,
-                )) if active is None else ()
+                tuple(
+                    goal.goal_id
+                    for goal in _selected_goals(
+                        context.goals,
+                        active_goal_id=context.plan_goal_id,
+                    )
+                )
+                if active is None
+                else ()
             ),
         )
 
@@ -1172,8 +1272,10 @@ class HighLevelController:
         if (
             context.operator_messages
             and context.operator_messages[0].kind == OperatorMessageKind.QUESTION
-            and context.operator_messages[0].status in {
-                OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
+            and context.operator_messages[0].status
+            in {
+                OperatorMessageStatus.QUEUED,
+                OperatorMessageStatus.DELIVERED,
             }
         ):
             return context.operator_messages[0]
@@ -1275,8 +1377,7 @@ class HighLevelController:
         repaired = self._apply_decision_authority(repaired, blackboard, context)
         if repaired.skill_id is None and repaired.request_replan:
             if not any(
-                resolve_grounded_output_keys((), question)
-                for question in repaired.ask_perception
+                resolve_grounded_output_keys((), question) for question in repaired.ask_perception
             ):
                 questions = self._prerequisite_perception_keys(failed_skill)
                 if (
@@ -1297,28 +1398,28 @@ class HighLevelController:
                     # leave a confirmed stall without a diagnostic observation.
                     # Reporting the failure in chat does not replace sensing it.
                     questions = ("obstacle.ahead",)
-                repaired = repaired.model_copy(
-                    update={"ask_perception": questions}
-                )
+                repaired = repaired.model_copy(update={"ask_perception": questions})
             self.metrics.last_error = None
             return _enforce_repair_bounds(repaired, repair_bounds)
         if repaired.skill_id in feasible:
             self.metrics.last_error = None
             return _enforce_repair_bounds(repaired, repair_bounds)
         self.metrics.last_error = f"repeated-option-blocked:{failed_skill}"
-        return _without_model_origin(decision.model_copy(
-            update={
-                "reasoning_summary": (
-                    f"Blocked repeated {failed_skill} after empirical timeout/failure evidence."
-                ),
-                "skill_id": None,
-                "skill_parameters": dict(repair_bounds.required_action_constraints),
-                "request_replan": True,
-                "ask_perception": tuple(
-                    dict.fromkeys((*decision.ask_perception, "obstacle.ahead"))
-                ),
-            }
-        ))
+        return _without_model_origin(
+            decision.model_copy(
+                update={
+                    "reasoning_summary": (
+                        f"Blocked repeated {failed_skill} after empirical timeout/failure evidence."
+                    ),
+                    "skill_id": None,
+                    "skill_parameters": dict(repair_bounds.required_action_constraints),
+                    "request_replan": True,
+                    "ask_perception": tuple(
+                        dict.fromkeys((*decision.ask_perception, "obstacle.ahead"))
+                    ),
+                }
+            )
+        )
 
     def _prerequisite_perception_keys(self, skill_id: str | None) -> tuple[str, ...]:
         """Ask for canonical visual prerequisites, never internal run witnesses."""
@@ -1388,20 +1489,30 @@ class HighLevelController:
         )
         grammar = (
             _cognition_decision_grammar(repair_bounds)
-            if not callable(native) and (use_bound or callable(constrained)) else ""
+            if not callable(native) and (use_bound or callable(constrained))
+            else ""
         )
         attempt_id = None if request is None else request.start_attempt(name)
         try:
             if callable(native):
-                response = cast(ModelResponse, native(
-                    messages, name=name, authority=repair_bounds.native_format(),
-                ))
+                response = cast(
+                    ModelResponse,
+                    native(
+                        messages,
+                        name=name,
+                        authority=repair_bounds.native_format(),
+                    ),
+                )
             elif request is not None and callable(bound):
                 response = cast(
                     ModelResponse,
                     bound(
-                        messages, name=name, schema=schema, grammar=grammar,
-                        request=request.binding, attempt_id=attempt_id,
+                        messages,
+                        name=name,
+                        schema=schema,
+                        grammar=grammar,
+                        request=request.binding,
+                        attempt_id=attempt_id,
                     ),
                 )
             elif callable(constrained):
@@ -1423,7 +1534,8 @@ class HighLevelController:
             response = response.model_copy()
             response._request_attempt = (
                 ModelRequestAttempt(request.binding.request_id, attempt_id)
-                if request is not None and attempt_id is not None else None
+                if request is not None and attempt_id is not None
+                else None
             )
         except BaseException as error:
             if request is not None and attempt_id is not None:
@@ -1477,12 +1589,14 @@ class HighLevelController:
             self.metrics.last_error = None
             return _enforce_repair_bounds(repaired, repair_bounds)
         self.metrics.last_error = f"infeasible-decision: {reason}"
-        return _without_model_origin(decision.model_copy(
-            update={
-                "reasoning_summary": f"Blocked infeasible decision; {reason}",
-                "skill_id": None,
-                "skill_parameters": dict(repair_bounds.required_action_constraints),
-                "request_replan": True,
-                "ask_perception": tuple(dict.fromkeys((*decision.ask_perception, *missing))),
-            }
-        ))
+        return _without_model_origin(
+            decision.model_copy(
+                update={
+                    "reasoning_summary": f"Blocked infeasible decision; {reason}",
+                    "skill_id": None,
+                    "skill_parameters": dict(repair_bounds.required_action_constraints),
+                    "request_replan": True,
+                    "ask_perception": tuple(dict.fromkeys((*decision.ask_perception, *missing))),
+                }
+            )
+        )

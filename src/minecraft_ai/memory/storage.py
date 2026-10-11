@@ -46,9 +46,15 @@ class OperatorContextSnapshot:
 
 def _message_authority(message: OperatorMessage) -> dict[str, object]:
     """Delivery receipts do not change intent; consumed corrections do."""
-    content = message.model_dump(mode="json", exclude={
-        "status", "delivered_ns", "acknowledged_ns", "response_text",
-    })
+    content = message.model_dump(
+        mode="json",
+        exclude={
+            "status",
+            "delivered_ns",
+            "acknowledged_ns",
+            "response_text",
+        },
+    )
     content["archived"] = message.status == OperatorMessageStatus.ARCHIVED
     content["refused"] = message.status == OperatorMessageStatus.REFUSED
     content["correction_consumed"] = (
@@ -91,7 +97,11 @@ class StateDatabase:
             self.connection.commit()
 
     def _execute_write(
-        self, statement: str, parameters: tuple[object, ...], *, commit: bool = True,
+        self,
+        statement: str,
+        parameters: tuple[object, ...],
+        *,
+        commit: bool = True,
     ) -> None:
         """Own new writes while preserving existing caller-owned batch semantics.
 
@@ -144,13 +154,18 @@ class StateDatabase:
     def operator_revision(self) -> int:
         """Durable monotonic intent revision; legacy stores start at zero."""
         row = self.connection.execute(
-            "SELECT value FROM meta WHERE key=?", (_OPERATOR_REVISION_KEY,),
+            "SELECT value FROM meta WHERE key=?",
+            (_OPERATOR_REVISION_KEY,),
         ).fetchone()
         if row is None:
             return 0
         raw = row[0]
-        if (not isinstance(raw, str) or not 1 <= len(raw) <= 19
-                or not raw.isascii() or not raw.isdecimal()):
+        if (
+            not isinstance(raw, str)
+            or not 1 <= len(raw) <= 19
+            or not raw.isascii()
+            or not raw.isdecimal()
+        ):
             raise ValueError("invalid persisted operator authority revision")
         revision = int(raw)
         if not 0 <= revision <= MAX_OPERATOR_REVISION:
@@ -170,7 +185,10 @@ class StateDatabase:
         )
 
     def load_operator_context(
-        self, *, statuses: set[OperatorMessageStatus] | None = None, limit: int = 100,
+        self,
+        *,
+        statuses: set[OperatorMessageStatus] | None = None,
+        limit: int = 100,
     ) -> OperatorContextSnapshot:
         """Read revision, messages and target from one short SQLite snapshot.
 
@@ -804,7 +822,8 @@ class StateDatabase:
 
     def _store_operator_message(self, message: OperatorMessage) -> None:
         row = self.connection.execute(
-            "SELECT payload FROM operator_messages WHERE message_id=?", (message.message_id,),
+            "SELECT payload FROM operator_messages WHERE message_id=?",
+            (message.message_id,),
         ).fetchone()
         current = None if row is None else OperatorMessage.model_validate_json(row[0])
         if current == message:
@@ -916,8 +935,10 @@ class StateDatabase:
             if row is None:
                 raise KeyError(message_id)
             current = OperatorMessage.model_validate_json(row[0])
-            if (current.status == OperatorMessageStatus.REFUSED
-                    and status not in {OperatorMessageStatus.REFUSED, OperatorMessageStatus.ARCHIVED}):
+            if current.status == OperatorMessageStatus.REFUSED and status not in {
+                OperatorMessageStatus.REFUSED,
+                OperatorMessageStatus.ARCHIVED,
+            }:
                 raise OperatorResponseAdmissionError("refused operator request is terminal")
             changes: dict[str, object] = {"status": status}
             if status == OperatorMessageStatus.DELIVERED:
@@ -1093,7 +1114,7 @@ class StateDatabase:
     def save_benchmark_report(self, report: BenchmarkReport) -> None:
         """Persist an immutable benchmark report and its task-level evidence."""
         payload = report.model_dump_json()
-        with (self._transaction(write=True) if self._transaction_depth else self.connection):
+        with self._transaction(write=True) if self._transaction_depth else self.connection:
             self.connection.execute(
                 """
                 INSERT INTO benchmark_runs(

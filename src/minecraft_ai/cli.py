@@ -12,6 +12,7 @@ import time
 import statistics
 from contextlib import ExitStack
 from pathlib import Path
+from typing import Literal
 
 import typer
 from platformdirs import user_data_dir, user_runtime_dir
@@ -1559,7 +1560,12 @@ def _measure_bedrock_camera() -> None:
     )
     if attached.get("live_capable") is not True:
         raise typer.BadParameter("The isolated Bedrock camera input route is not live-capable.")
-    input_window_id = int(attached.get("input_window_id") or window_id)
+    attached_input_window_id = attached.get("input_window_id")
+    input_window_id = (
+        attached_input_window_id
+        if type(attached_input_window_id) is int
+        else window_id
+    )
 
     def capture_world_frame() -> CapturedFrame:
         if (
@@ -1605,7 +1611,9 @@ def _measure_bedrock_camera() -> None:
             raise typer.BadParameter("The one-use camera-only probe was not accepted.")
         time.sleep(0.12)
 
-    def measure_axis(axis: str) -> tuple[float, list[dict[str, object]]]:
+    def measure_axis(
+        axis: Literal["yaw", "pitch"],
+    ) -> tuple[float, list[dict[str, object]]]:
         counts_per_degree: list[float] = []
         observations: list[dict[str, object]] = []
         for magnitude in (24, 48, 96):
@@ -1666,14 +1674,18 @@ def _measure_bedrock_camera() -> None:
     yaw_scale, yaw_observations = measure_axis("yaw")
     pitch_scale, pitch_observations = measure_axis("pitch")
     observations = [*yaw_observations, *pitch_observations]
-    inlier_counts = [
-        int(item[key])
-        for item in observations
-        for key in ("forward_homography_inliers", "reverse_homography_inliers")
-    ]
-    restoration_errors = [
-        float(item["restore_mean_absolute_pixel_error"]) for item in observations
-    ]
+    inlier_counts: list[int] = []
+    restoration_errors: list[float] = []
+    for item in observations:
+        for key in ("forward_homography_inliers", "reverse_homography_inliers"):
+            value = item[key]
+            if type(value) is not int:
+                raise RuntimeError(f"camera calibration emitted non-integer {key}")
+            inlier_counts.append(value)
+        restore_value = item["restore_mean_absolute_pixel_error"]
+        if not isinstance(restore_value, (int, float)) or isinstance(restore_value, bool):
+            raise RuntimeError("camera calibration emitted a non-numeric restoration error")
+        restoration_errors.append(float(restore_value))
     restore_error = statistics.mean(restoration_errors)
     if restore_error > 0.08:
         raise typer.BadParameter(

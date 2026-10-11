@@ -19,7 +19,12 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from .models import ModelMessage, ModelResponse, PlannerRequestBudgetError, local_model_inference_lane
+from .models import (
+    ModelMessage,
+    ModelResponse,
+    PlannerRequestBudgetError,
+    local_model_inference_lane,
+)
 
 MODEL_ID = "erais-native-qwen3"
 MAX_PROMPT_BYTES = 2048
@@ -77,8 +82,10 @@ def _compact_mining_history(rows: object) -> dict[str, Any] | None:
     if type(rows) is not list or not 0 < len(rows) <= 4:
         return None
     count_fields = {
-        "observed_breaks": "breaks", "observed_harvests": "harvests",
-        "observed_nonharvests": "nonharvests", "observed_pickups": "pickups",
+        "observed_breaks": "breaks",
+        "observed_harvests": "harvests",
+        "observed_nonharvests": "nonharvests",
+        "observed_pickups": "pickups",
         "censored_attempts": "censored",
     }
     scope = None
@@ -87,14 +94,18 @@ def _compact_mining_history(rows: object) -> dict[str, Any] | None:
         if type(row) is not dict:
             continue
         row_scope, block, tool = (row.get(key) for key in ("scope", "block", "tool"))
-        if (type(row_scope) is not str or not 0 < len(row_scope) <= 512
-                or type(block) is not str or not 0 < len(block) <= 256
-                or type(tool) is not str or not 0 < len(tool) <= 256
-                or re.fullmatch(r"(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+", block, re.ASCII) is None
-                or re.fullmatch(r"(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+", tool, re.ASCII) is None):
+        if (
+            type(row_scope) is not str
+            or not 0 < len(row_scope) <= 512
+            or type(block) is not str
+            or not 0 < len(block) <= 256
+            or type(tool) is not str
+            or not 0 < len(tool) <= 256
+            or re.fullmatch(r"(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+", block, re.ASCII) is None
+            or re.fullmatch(r"(?:[a-z0-9_.-]+:)?[a-z0-9_./-]+", tool, re.ASCII) is None
+        ):
             continue
-        if any(type(row.get(key)) is not int or not 0 <= row[key] < 2**63
-               for key in count_fields):
+        if any(type(row.get(key)) is not int or not 0 <= row[key] < 2**63 for key in count_fields):
             continue
         if scope is not None and row_scope != scope:
             return None
@@ -109,14 +120,22 @@ def _compact_mining_history(rows: object) -> dict[str, Any] | None:
         pairs[key] = entry
     if scope is None or not pairs:
         return None
-    outcomes = sorted(pairs.values(), key=lambda row: (
-        -row["pickups"], -row["harvests"], -row["breaks"], row["censored"],
-        row["block"], row["tool"],
-    ))[:2]
+    outcomes = sorted(
+        pairs.values(),
+        key=lambda row: (
+            -row["pickups"],
+            -row["harvests"],
+            -row["breaks"],
+            row["censored"],
+            row["block"],
+            row["tool"],
+        ),
+    )[:2]
     return {
         "declared_scope_sha256": hashlib.sha256(scope.encode("utf-8")).hexdigest(),
         "scope_kind": "session" if scope.startswith("session:") else "unattested_ruleset",
-        "current_pack_verified": False, "current_state_verified": False,
+        "current_pack_verified": False,
+        "current_state_verified": False,
         "gameplay_authority": False,
         "semantics": "Past outcomes only; missing pickup is inconclusive.",
         "outcomes": outcomes,
@@ -124,7 +143,9 @@ def _compact_mining_history(rows: object) -> dict[str, Any] | None:
 
 
 def _compact_context(
-    messages: tuple[ModelMessage, ...], *, authority_bounds: dict[str, Any] | None = None,
+    messages: tuple[ModelMessage, ...],
+    *,
+    authority_bounds: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     payload: dict[str, Any] = {}
     directive: dict[str, Any] | None = None
@@ -163,32 +184,47 @@ def _compact_context(
     result: dict[str, Any] = {}
     reference = payload.get("configured_recipe_reference")
     if type(reference) is dict:
-        required = ("live_engine_recipe_bytes_verified", "selected_desktop_connection_verified", "gameplay_authority")
+        required_reference_flags = (
+            "live_engine_recipe_bytes_verified",
+            "selected_desktop_connection_verified",
+            "gameplay_authority",
+        )
         recipe = reference.get("recipe_text")
         catalog = reference.get("catalog_sha256")
         packs = reference.get("configured_packs")
         if (
             reference.get("state") != "configured_snapshot"
-            or any(reference.get(key) is not False for key in required)
-            or type(recipe) is not str or not 0 < len(recipe) <= 150
-            or type(catalog) is not str or re.fullmatch(r"[0-9a-f]{64}", catalog) is None
-            or type(packs) is not list or not 0 < len(packs) <= 16
-            or any(type(pack) is not dict or type(pack.get("version")) is not list
-                   or len(pack["version"]) != 3
-                   or any(type(part) is not int or not 0 <= part <= 65535
-                          for part in pack["version"]) for pack in packs)
+            or any(reference.get(key) is not False for key in required_reference_flags)
+            or type(recipe) is not str
+            or not 0 < len(recipe) <= 150
+            or type(catalog) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", catalog) is None
+            or type(packs) is not list
+            or not 0 < len(packs) <= 16
+            or any(
+                type(pack) is not dict
+                or type(pack.get("version")) is not list
+                or len(pack["version"]) != 3
+                or any(type(part) is not int or not 0 <= part <= 65535 for part in pack["version"])
+                for pack in packs
+            )
         ):
             raise ValueError("configured recipe reference does not grant verified state or actions")
         result["configured_recipe_reference"] = {
-            "scope": "configured_snapshot", "engine_loaded": False,
-            "selected_client_session": False, "gameplay_authority": False,
-            "catalog_sha256": catalog, "recipe_text": recipe,
+            "scope": "configured_snapshot",
+            "engine_loaded": False,
+            "selected_client_session": False,
+            "gameplay_authority": False,
+            "catalog_sha256": catalog,
+            "recipe_text": recipe,
             "pack_versions": sorted({".".join(map(str, pack["version"])) for pack in packs}),
         }
     for key in ("active_operator_message",):
         if type(payload.get(key)) is dict:
             result[key] = {
-                field: payload[key].get(field) if field == "message_id" else _short(payload[key].get(field), 110)
+                field: payload[key].get(field)
+                if field == "message_id"
+                else _short(payload[key].get(field), 110)
                 for field in ("message_id", "kind", "priority", "status")
                 if field in payload[key]
             }
@@ -221,9 +257,7 @@ def _compact_context(
                 compact_bounds["allowed_skills"] = [
                     {
                         "s": item.get("s"),
-                        "p": list(item.get("p", []))
-                        if type(item.get("p", [])) is list
-                        else [],
+                        "p": list(item.get("p", [])) if type(item.get("p", [])) is list else [],
                     }
                     for item in allowed
                     if type(item) is dict
@@ -231,9 +265,9 @@ def _compact_context(
             requested = bounds.get("requested_skill_ids")
             if type(requested) is list:
                 compact_bounds["requested_skill_ids"] = list(requested)
-            required = bounds.get("required_action_constraints")
-            if type(required) is dict:
-                compact_bounds["required_action_constraints"] = dict(required)
+            required_constraints = bounds.get("required_action_constraints")
+            if type(required_constraints) is dict:
+                compact_bounds["required_action_constraints"] = dict(required_constraints)
             for key in ("authority_goal_id", "reply_only", "skill_required"):
                 if key in bounds:
                     compact_bounds[key] = bounds[key]
@@ -300,15 +334,15 @@ def _compact_context(
             "environment.underwater",
             "inventory.hotbar.logs",
         )
-        selected = [key for key in priority if key in facts]
-        selected.extend(
+        selected_fact_keys = [key for key in priority if key in facts]
+        selected_fact_keys.extend(
             key
             for key in sorted(facts)
-            if key not in selected
+            if key not in selected_fact_keys
             and key.startswith(("target.", "obstacle.", "terrain.", "scene."))
         )
         compact_facts = {}
-        for key in selected[:10]:
+        for key in selected_fact_keys[:10]:
             compact_facts[key] = _short(facts[key], 85)
         if compact_facts:
             result["fresh_facts"] = compact_facts
@@ -320,16 +354,23 @@ def _compact_context(
         if declared_goals is not None:
             rows = [item for item in rows if item.get("id") in declared_goals]
         active = directive if directive is not None else active_message
-        active_goal = f"operator:{active['message_id']}" if type(active) is dict and type(active.get("message_id")) is str else None
+        active_goal = (
+            f"operator:{active['message_id']}"
+            if type(active) is dict and type(active.get("message_id")) is str
+            else None
+        )
         mandatory = [item for item in rows if item.get("id") in {goal_id, active_goal} - {None}]
-        selected = mandatory + [item for item in rows if item not in mandatory][:max(0, 2-len(mandatory))]
+        selected_goals = (
+            mandatory
+            + [item for item in rows if item not in mandatory][: max(0, 2 - len(mandatory))]
+        )
         result["goals"] = [
             {
                 key: item.get(key) if key == "id" else _short(item.get(key), 85)
                 for key in ("id", "description", "source")
                 if key in item
             }
-            for item in selected
+            for item in selected_goals
         ]
     current_plan = payload.get("current_plan")
     if type(current_plan) is dict:
@@ -343,7 +384,10 @@ def _compact_context(
         required_ids = set(result.get("authority_bounds", {}).get("requested_skill_ids", []))
         rows = [item for item in skills if type(item) is dict]
         mandatory = [item for item in rows if item.get("skill_id") in required_ids]
-        selected = mandatory + [item for item in rows if item not in mandatory][:max(0, 6-len(mandatory))]
+        selected_skills = (
+            mandatory
+            + [item for item in rows if item not in mandatory][: max(0, 6 - len(mandatory))]
+        )
         result["skills"] = [
             {
                 "skill_id": item.get("skill_id"),
@@ -351,7 +395,7 @@ def _compact_context(
                 "parameters": list(item.get("parameters", [])),
                 "competence": item.get("competence"),
             }
-            for item in selected
+            for item in selected_skills
         ]
     for source, target, limit, count in (
         ("chat_lines", "chat_lines", 100, 2),
@@ -359,11 +403,11 @@ def _compact_context(
         ("wiki_evidence", "wiki_evidence", 220, 2),
         ("recent_skill_runs", "recent_skill_runs", 80, 2),
     ):
-        rows = payload.get(source)
-        if type(rows) is not list:
+        source_rows = payload.get(source)
+        if type(source_rows) is not list:
             continue
         compact_rows = []
-        for row in rows[:count]:
+        for row in source_rows[:count]:
             if type(row) is not dict:
                 continue
             if source == "wiki_evidence":
@@ -425,7 +469,9 @@ def _compact_context(
 
 
 def compact_planner_prompt(
-    messages: tuple[ModelMessage, ...], *, max_prompt_bytes: int = MAX_PROMPT_BYTES,
+    messages: tuple[ModelMessage, ...],
+    *,
+    max_prompt_bytes: int = MAX_PROMPT_BYTES,
     fits_prompt: Callable[[str], bool] | None = None,
     response_format: dict[str, Any] | None = None,
 ) -> str:
@@ -435,7 +481,8 @@ def compact_planner_prompt(
     if fits_prompt is not None and not callable(fits_prompt):
         raise ValueError("native World token budget check must be callable")
     context, reply_only = _compact_context(
-        messages, authority_bounds=None if response_format is None else response_format["authority"],
+        messages,
+        authority_bounds=None if response_format is None else response_format["authority"],
     )
     # Bind failure only to a literal directive and the independently declared
     # original goal. Compacted prose, rejected model text and player chat do not
@@ -445,10 +492,13 @@ def compact_planner_prompt(
     if type(directive) is dict and response_format is not None:
         message_id = directive.get("message_id")
         authority_goal = response_format["authority"].get("authority_goal_id")
-        if (type(message_id) is str and authority_goal == f"operator:{message_id}"
-                and directive.get("status") in {"queued", "delivered"}
-                and directive.get("kind") in {"instruction", "correction", "question"}
-                and type(directive.get("text")) is str):
+        if (
+            type(message_id) is str
+            and authority_goal == f"operator:{message_id}"
+            and directive.get("status") in {"queued", "delivered"}
+            and directive.get("kind") in {"instruction", "correction", "question"}
+            and type(directive.get("text")) is str
+        ):
             refusal_goal = authority_goal
     if response_format is not None:
         # This is already parsed from original controller authority, before
@@ -471,7 +521,10 @@ def compact_planner_prompt(
             compact["configured_recipe_reference"] = context["configured_recipe_reference"]
         context = compact
         rules = _STRUCTURED_REPLY_ONLY_RULES if response_format is not None else _REPLY_ONLY_RULES
-        prefix = rules
+        prefix = (
+            rules.removesuffix("\nContext:")
+            + f' Exact g value: {json.dumps(goal_id, ensure_ascii=False)}.\nContext:'
+        )
     else:
         prefix = _PLANNER_RULES
     facts = context.get("fresh_facts", {})
@@ -485,7 +538,9 @@ def compact_planner_prompt(
     active = context.get("active_operator_directive", context.get("active_operator_message"))
     if type(active) is dict and type(active.get("message_id")) is str:
         active_goal = f"operator:{active['message_id']}"
-        if any(type(row) is dict and row.get("id") == active_goal for row in context.get("goals", [])):
+        if any(
+            type(row) is dict and row.get("id") == active_goal for row in context.get("goals", [])
+        ):
             mandatory_goal_ids.add(active_goal)
     while True:
         encoded = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
@@ -507,9 +562,18 @@ def compact_planner_prompt(
             rows = context.get(key)
             minimum_rows = 1 if key == "skills" or (key == "wiki_evidence" and needs_answer) else 0
             if isinstance(rows, list) and len(rows) > minimum_rows:
-                removable = [index for index, row in enumerate(rows) if
-                    not (key == "skills" and type(row) is dict and row.get("skill_id") in required_ids)
-                    and not (key == "goals" and type(row) is dict and row.get("id") in mandatory_goal_ids)]
+                removable = [
+                    index
+                    for index, row in enumerate(rows)
+                    if not (
+                        key == "skills"
+                        and type(row) is dict
+                        and row.get("skill_id") in required_ids
+                    )
+                    and not (
+                        key == "goals" and type(row) is dict and row.get("id") in mandatory_goal_ids
+                    )
+                ]
                 if removable:
                     rows.pop(removable[-1])
                     break
@@ -522,15 +586,23 @@ def compact_planner_prompt(
             if isinstance(bounds, dict):
                 allowed = bounds.get("allowed_skills")
                 if isinstance(allowed, list) and len(allowed) > 1:
-                    removable = [index for index, row in enumerate(allowed) if
-                        type(row) is dict and row.get("s") not in required_ids]
+                    removable = [
+                        index
+                        for index, row in enumerate(allowed)
+                        if type(row) is dict and row.get("s") not in required_ids
+                    ]
                     if removable:
                         allowed.pop(removable[-1])
                         continue
             # Descriptions and competence are context, not authority. Keep all
             # remaining skill IDs/parameter names and required fallback values.
-            optional = [(row, name) for row in context.get("skills", []) if type(row) is dict
-                        for name in ("description", "competence") if name in row]
+            optional = [
+                (row, name)
+                for row in context.get("skills", [])
+                if type(row) is dict
+                for name in ("description", "competence")
+                if name in row
+            ]
             if optional:
                 row, name = optional[-1]
                 row.pop(name)
@@ -688,15 +760,22 @@ class NativeWorldCognitionModel:
             return self._identity(client, headers)
 
     def _complete(
-        self, messages: tuple[ModelMessage, ...], *, response_format: dict[str, Any] | None = None,
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        response_format: dict[str, Any] | None = None,
     ) -> ModelResponse:
         capsule = None
         if response_format is not None:
             try:
                 from erais.demo.minecraft_cognition_contract import (  # type: ignore[import-not-found]
-                    CONTRACT, PERCEPTION_KEYS, parse_format, validate_output,
+                    CONTRACT,
+                    PERCEPTION_KEYS,
+                    parse_format,
+                    validate_output,
                 )
                 from .cognition.prompts import _cognition_perception_keys
+
                 if set(PERCEPTION_KEYS) != set(_cognition_perception_keys()):
                     raise ValueError("Minecraft perception contract vocabulary changed")
                 capsule = parse_format(response_format)
@@ -734,19 +813,24 @@ class NativeWorldCognitionModel:
                 def check_receipt(receipt: object, *, complete: bool) -> None:
                     assert capsule is not None and structured_identity is not None
                     expected = {
-                        "contract": CONTRACT, "mode": capsule.mode,
+                        "contract": CONTRACT,
+                        "mode": capsule.mode,
                         "authority_sha256": capsule.authority_sha256,
                         "grammar_sha256": capsule.grammar_sha256,
                         "tokenizer_identity": structured_identity["tokenizer_identity"],
-                        "runtime_id": runtime_id, "complete": complete,
+                        "runtime_id": runtime_id,
+                        "complete": complete,
                     }
                     if (
-                        type(receipt) is not dict or set(receipt) != set(expected)
-                        or receipt != expected or receipt.get("complete") is not complete
+                        type(receipt) is not dict
+                        or set(receipt) != set(expected)
+                        or receipt != expected
+                        or receipt.get("complete") is not complete
                     ):
                         raise RuntimeError(
                             "native Minecraft structured receipt does not match authority/owner"
                         )
+
                 budget_checks = 0
 
                 def fits_prompt(prompt: str) -> bool:
@@ -787,7 +871,9 @@ class NativeWorldCognitionModel:
                     return budget["fits"] is True
 
                 prompt = compact_planner_prompt(
-                    messages, fits_prompt=fits_prompt, response_format=response_format,
+                    messages,
+                    fits_prompt=fits_prompt,
+                    response_format=response_format,
                 )
                 payload = {
                     "model": MODEL_ID,
@@ -825,7 +911,10 @@ class NativeWorldCognitionModel:
             check_receipt(erais.get("structured") if type(erais) is dict else None, complete=True)
             try:
                 validate_output(
-                    text, capsule, finish_reason=choice["finish_reason"], interrupted=False,
+                    text,
+                    capsule,
+                    finish_reason=choice["finish_reason"],
+                    interrupted=False,
                 )
             except ValueError as error:
                 raise RuntimeError("native Minecraft decision was not completed") from error
@@ -839,22 +928,34 @@ class NativeWorldCognitionModel:
         return self._complete(messages)
 
     def complete_structured(
-        self, messages: tuple[ModelMessage, ...], *, name: str, schema: dict[str, Any],
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, Any],
     ) -> ModelResponse:
         raise RuntimeError(
             "native Minecraft requires original named authority, not an arbitrary schema"
         )
 
     def complete_constrained(
-        self, messages: tuple[ModelMessage, ...], *, name: str,
-        schema: dict[str, Any], grammar: str,
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        schema: dict[str, Any],
+        grammar: str,
     ) -> ModelResponse:
         raise RuntimeError(
             "native Minecraft requires original named authority, not an arbitrary grammar"
         )
 
     def complete_minecraft_decision(
-        self, messages: tuple[ModelMessage, ...], *, name: str, authority: dict[str, Any],
+        self,
+        messages: tuple[ModelMessage, ...],
+        *,
+        name: str,
+        authority: dict[str, Any],
     ) -> ModelResponse:
         if name not in {"cognition_decision", "cognition_decision_json_repair"}:
             raise RuntimeError("unsupported native Minecraft request name")

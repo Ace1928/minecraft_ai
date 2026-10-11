@@ -7,6 +7,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.cognition import HighLevelController
@@ -17,13 +18,14 @@ from minecraft_ai.pack_recipes import PackRecipeCatalog
 from minecraft_ai.pack_observer import RecipeObservationReader
 from minecraft_ai.resident_broker_model import configured_model
 from minecraft_ai.motor import BootstrapMotorPolicy, MotorPolicy
+from minecraft_ai.models import VisionLanguageModel
 from minecraft_ai.perception import PerceptionBlackboard
 from minecraft_ai.perception_service import ActiveVLMWorker, RealtimePerceptionService
 from minecraft_ai.platforms import create_bedrock_capture
 from minecraft_ai.platforms.bedrock_session import BedrockSession
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame, IsolationError
 from minecraft_ai.platforms.capture_source import BedrockCaptureSource
-from minecraft_ai.platforms.frame_cache import PublishedFrameCapture
+from minecraft_ai.platforms.frame_cache import CaptureSource, PublishedFrameCapture
 from minecraft_ai.agent_lifecycle import AgentProcess
 from minecraft_ai.policy_service import GroundedPolicyRouter, TemporalPolicyClient
 from minecraft_ai.roles import get_role
@@ -137,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
                 ) from exc
             if host_binding is None:
                 raise IsolationError("host capture requires a persisted exact host-monitor binding")
-        capture = create_bedrock_capture(
+        capture: CaptureSource = create_bedrock_capture(
             args.display,
             args.window_id,
             allow_host=bool(args.allow_host_capture),
@@ -189,7 +191,14 @@ def main(argv: list[str] | None = None) -> int:
         if config.vision_language.enabled:
             if not config.vision_language.model_id:
                 raise RuntimeError("vision-language model is enabled but model_id is empty")
-            vlm_model = configured_model(config.vision_language, purpose="vision")
+            if config.vision_language.provider != "openai-compatible":
+                raise RuntimeError(
+                    "vision-language inference requires an image-capable local model provider"
+                )
+            vlm_model = cast(
+                VisionLanguageModel,
+                configured_model(config.vision_language, purpose="vision"),
+            )
             active_vlm = ActiveVLMWorker(vlm_model, blackboard, args.instance_id)
 
         perception = RealtimePerceptionService(
