@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from importlib import import_module
 from typing import Literal
 
 import numpy as np
@@ -33,7 +34,7 @@ def camera_rotation_delta_degrees(
         raise ValueError("camera measurement received an invalid second frame")
 
     try:
-        import cv2
+        cv2 = import_module("cv2")
     except ImportError as exc:  # pragma: no cover - covered by optional-extra packaging
         raise RuntimeError(
             "install the camera-calibration extra to measure Bedrock camera motion"
@@ -48,7 +49,7 @@ def camera_rotation_delta_degrees(
     before_gray = before_gray[top:bottom, left:right]
     after_gray = after_gray[top:bottom, left:right]
 
-    detector = cv2.ORB_create(nfeatures=1800, fastThreshold=8)  # type: ignore[attr-defined]
+    detector = cv2.ORB_create(nfeatures=1800, fastThreshold=8)
     keypoints_before, descriptors_before = detector.detectAndCompute(before_gray, None)
     keypoints_after, descriptors_after = detector.detectAndCompute(after_gray, None)
     if descriptors_before is None or descriptors_after is None:

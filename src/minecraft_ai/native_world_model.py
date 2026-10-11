@@ -9,6 +9,7 @@ parser and authority checks remain downstream.
 from __future__ import annotations
 
 import hashlib
+from importlib import import_module
 import json
 import os
 import re
@@ -703,7 +704,7 @@ class NativeWorldCognitionModel:
 
     def _client(self) -> Any:
         try:
-            import httpx
+            httpx = import_module("httpx")
         except ImportError as error:  # pragma: no cover - dependency is part of the runtime extra
             raise RuntimeError("httpx is required for the ERAIS Native World adapter") from error
         return httpx.Client(timeout=self.timeout_s)
