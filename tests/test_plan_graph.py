@@ -37,6 +37,21 @@ def test_sanitize_plan_steps_drops_sentinels_and_duplicate_copies() -> None:
     ) == ("gather_nearby_wood", "open_inventory")
 
 
+def test_sanitize_plan_steps_drops_perception_keys_not_actions() -> None:
+    assert sanitize_plan_steps(
+        (
+            "survey_surroundings",
+            "target.{visible,dx,dy,kind,mineable,near}",
+            "target.oak_log",
+            "scene.playable",
+            "find a visible oak log",
+        )
+    ) == ("survey_surroundings", "find a visible oak log")
+    assert CognitionDecision(
+        plan_steps=("target.visible", "gather_nearby_wood"),
+    ).plan_steps == ("gather_nearby_wood",)
+
+
 def test_plan_graph_blocks_failed_method_and_exposes_sibling() -> None:
     skills = SkillLibrary()
     skills.register(

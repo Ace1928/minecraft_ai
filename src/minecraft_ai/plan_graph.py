@@ -7,6 +7,7 @@ failed method does not merely increment a flattened string index.
 from __future__ import annotations
 
 from enum import StrEnum
+import re
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -33,6 +34,8 @@ _SENTINEL_PLAN_STEPS = frozenset(
         "next step if successful",
     }
 )
+
+_FACT_KEY_PLAN_STEP = re.compile(r"^[a-z][a-z0-9_]*\.[a-z0-9_{}*.,-]+$")
 
 
 class PlanNodeState(StrEnum):
@@ -201,6 +204,12 @@ def sanitize_plan_steps(steps: tuple[str, ...]) -> tuple[str, ...]:
             continue
         normalized = _normalized_plan_text(text)
         if not normalized or normalized in _SENTINEL_PLAN_STEPS:
+            continue
+        # Perception keys are observations to request or verify, not executable
+        # actions. Structured decoders occasionally copy ``ask_perception``
+        # values into the adjacent plan field; admitting those strings creates
+        # permanently unbound nodes which no skill can execute.
+        if _FACT_KEY_PLAN_STEP.fullmatch(text.casefold()):
             continue
         if cleaned and _normalized_plan_text(cleaned[-1]) == normalized:
             continue
