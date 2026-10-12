@@ -263,6 +263,48 @@ def _plan_step_requests_inventory_transition(skill_id: str, step: str) -> bool:
     return True
 
 
+def _verified_plan_step_completion(
+    step: str,
+    verification: OutcomeVerification | None,
+) -> bool:
+    """Match an unbound world objective only to typed, successful evidence.
+
+    Free-form plan prose cannot be completed by an unrelated successful option.
+    The narrow exception is an evaluator receipt whose outcome and target are
+    both explicit in the objective, such as a verified log pickup completing
+    ``gather three logs``.
+    """
+
+    if (
+        verification is None
+        or verification.status != OutcomeStatus.SUCCEEDED
+        or verification.confidence < 0.9
+        or not isinstance(verification.target_kind, str)
+    ):
+        return False
+    words = set(_normalized_plan_text(step).split())
+    if not words.intersection({"acquire", "collect", "gather", "get", "harvest", "mine"}):
+        return False
+
+    target = normalize_block_kind(verification.target_kind)
+    target_words = {target, target.removesuffix("s")}
+    if target.endswith("_log") or target == "log":
+        target_words.update({"log", "logs", "trunk", "tree", "wood"})
+    elif target == "dirt":
+        target_words.update({"dirt", "soil"})
+    if not words.intersection(target_words):
+        return False
+
+    return (
+        verification.kind == OutcomeKind.RESOURCE_ACQUISITION
+        and verification.signal == OutcomeSignal.RESOURCE_ACQUIRED
+    ) or (
+        verification.kind == OutcomeKind.MINING
+        and verification.signal == OutcomeSignal.BLOCK_BROKEN
+        and bool(words.intersection({"break", "harvest", "mine"}))
+    )
+
+
 def _verified_log_break(verification: OutcomeVerification | None) -> bool:
     """Return whether exact bound mining evidence identifies a vanilla log."""
 
@@ -1249,10 +1291,7 @@ def _active_operator_messages(
         # A newer terminal directive is a durable intent-watermark. Retain the
         # older inbox rows for audit, but never let a delayed backlog item
         # silently regain motor authority underneath the completed handoff.
-        and (
-            newest_terminal is None
-            or message.created_ns > newest_terminal.created_ns
-        )
+        and (newest_terminal is None or message.created_ns > newest_terminal.created_ns)
     )
     if pending:
         return tuple(

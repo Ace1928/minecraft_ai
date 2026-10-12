@@ -668,9 +668,7 @@ def test_death_recovery_preserves_incomplete_gather_plan_neutrality(
         assert respawn is not None and respawn.skill_id == "respawn_after_death"
         assert respawn.run_id in runtime._plan_neutral_recovery_runs
         runtime._record_terminal_run(
-            respawn.model_copy(
-                update={"ended_ns": now + 1, "outcome": SkillOutcome.SUCCEEDED}
-            )
+            respawn.model_copy(update={"ended_ns": now + 1, "outcome": SkillOutcome.SUCCEEDED})
         )
         assert runtime._plan_index == 0
 
@@ -812,9 +810,7 @@ def test_associative_recall_ignores_legacy_keepalive_expiry_memory() -> None:
         )
     )
 
-    assert [memory.memory_id for memory in store.retrieve(now_ns=now)] == [
-        "real-failure"
-    ]
+    assert [memory.memory_id for memory in store.retrieve(now_ns=now)] == ["real-failure"]
 
 
 def test_empty_dependency_graph_is_valid() -> None:
@@ -1014,8 +1010,9 @@ def test_motor_boundary_allows_release_on_unknown_frame(
     monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
     monkeypatch.setattr(
         "minecraft_ai.runtime.send_command",
-        lambda _command, **payload: sent.append(payload)
-        or {"accepted_sequence": payload["action"]["sequence"]},
+        lambda _command, **payload: (
+            sent.append(payload) or {"accepted_sequence": payload["action"]["sequence"]}
+        ),
     )
 
     assert runtime._send_motor(MotorAction(sequence=7, keys_up=("w",))) is True
@@ -1289,10 +1286,13 @@ def test_cursor_action_does_not_rebind_world_camera(monkeypatch: pytest.MonkeyPa
         restore_world_camera_state=lambda **value: restored.append(value),
     )
     monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
-    monkeypatch.setattr("minecraft_ai.runtime.send_command", lambda *_args, **_kw: {
-        "accepted_sequence": 7,
-        "world_camera": {"estimated_pitch_units": 73, "origin_calibrated": True},
-    })
+    monkeypatch.setattr(
+        "minecraft_ai.runtime.send_command",
+        lambda *_args, **_kw: {
+            "accepted_sequence": 7,
+            "world_camera": {"estimated_pitch_units": 73, "origin_calibrated": True},
+        },
+    )
     runtime._send_motor(MotorAction(sequence=7, mouse_dy=10, camera_semantics="cursor"))
     assert not restored
 
@@ -1638,9 +1638,10 @@ def test_only_verified_log_breaks_trigger_drop_collection() -> None:
         False
     )
     assert _verified_oak_log_break(verified) is True
-    assert _verified_oak_log_break(
-        verified.model_copy(update={"target_kind": "minecraft:spruce_log"})
-    ) is False
+    assert (
+        _verified_oak_log_break(verified.model_copy(update={"target_kind": "minecraft:spruce_log"}))
+        is False
+    )
 
 
 def test_newest_acknowledged_operator_directive_remains_active() -> None:
@@ -2259,9 +2260,7 @@ def test_terminal_runs_persist_stats_events_and_factual_memories(tmp_path: Path)
         assert not runtime._pending_memories
 
     with StateDatabase(path) as database:
-        stats = database.load_skills().stats[
-            ("traverse_level_ground", "test-terminal")
-        ]
+        stats = database.load_skills().stats[("traverse_level_ground", "test-terminal")]
         events = database.load_runtime_events(limit=10)
         memories = tuple(database.load_memories().records.values())
 
@@ -2315,7 +2314,8 @@ def test_intermediate_mine_success_does_not_advance_plan_before_collection(
 
 @pytest.mark.parametrize("outcome", [SkillOutcome.FAILED, SkillOutcome.CANCELLED])
 def test_unfinished_crafting_recovery_close_does_not_consume_plan_step(
-    tmp_path: Path, outcome: SkillOutcome,
+    tmp_path: Path,
+    outcome: SkillOutcome,
 ) -> None:
     with StateDatabase(tmp_path / "state.sqlite3") as database:
         runtime = _runtime_for_learning(database)
@@ -2325,19 +2325,22 @@ def test_unfinished_crafting_recovery_close_does_not_consume_plan_step(
         runtime.skills = build_bootstrap_skill_library()
         runtime.executor = SkillExecutor(BootstrapMotorPolicy())
         failed = SkillRun(
-            run_id="failed-planks", skill_id="craft_wood_planks", context_key="wood",
-            started_ns=1, ended_ns=2, outcome=outcome,
+            run_id="failed-planks",
+            skill_id="craft_wood_planks",
+            context_key="wood",
+            started_ns=1,
+            ended_ns=2,
+            outcome=outcome,
             failure_reason=(
                 "crafting-no-logs-observed-in-inventory"
-                if outcome == SkillOutcome.FAILED else "replan-requested"
+                if outcome == SkillOutcome.FAILED
+                else "replan-requested"
             ),
         )
         runtime._record_terminal_run(failed)
         recovery = runtime._start_recovery_skill(
             runtime.skills.get("close_open_inventory"), failed
-        ).model_copy(
-            update={"ended_ns": time.monotonic_ns(), "outcome": SkillOutcome.SUCCEEDED}
-        )
+        ).model_copy(update={"ended_ns": time.monotonic_ns(), "outcome": SkillOutcome.SUCCEEDED})
         runtime._record_terminal_run(recovery)
         runtime._record_terminal_run(recovery)
         assert runtime._plan_index == 0
@@ -2376,9 +2379,7 @@ def test_incomplete_gather_recovery_does_not_consume_plan_step(
             runtime.skills.get("reacquire_target"),
             failed,
             plan_neutral=True,
-        ).model_copy(
-            update={"ended_ns": 3, "outcome": SkillOutcome.SUCCEEDED}
-        )
+        ).model_copy(update={"ended_ns": 3, "outcome": SkillOutcome.SUCCEEDED})
 
         runtime._record_terminal_run(recovery)
 
@@ -2386,7 +2387,8 @@ def test_incomplete_gather_recovery_does_not_consume_plan_step(
 
 
 def test_cancelled_collection_revokes_recent_break_authorization(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # This checks revocation, not storage performance within a 250ms fact TTL.
     # Slow CI disk writes must not expire the evidence before its assertion.
@@ -2481,8 +2483,11 @@ def test_planks_retry_guard_survives_restart_and_positive_evidence_expiry(tmp_pa
         assert runtime._planks_retry_requires_wood() is False
         runtime._record_terminal_run(
             SkillRun(
-                run_id="no-logs-before-restart", skill_id="craft_wood_planks",
-                started_ns=1, ended_ns=2, outcome=SkillOutcome.FAILED,
+                run_id="no-logs-before-restart",
+                skill_id="craft_wood_planks",
+                started_ns=1,
+                ended_ns=2,
+                outcome=SkillOutcome.FAILED,
                 failure_reason="crafting-no-logs-observed-in-inventory",
             )
         )
@@ -2497,11 +2502,20 @@ def test_planks_retry_guard_survives_restart_and_positive_evidence_expiry(tmp_pa
         resumed.blackboard = PerceptionBlackboard()
         resumed.blackboard.publish(
             FrameState(
-                frame_id=1, captured_ns=now, instance_id="bedrock:test", width=1, height=1,
-                facts=(PerceptionFact(
-                    key="inventory.hotbar.logs", value=0, confidence=0.995,
-                    observed_ns=now, source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
-                ),),
+                frame_id=1,
+                captured_ns=now,
+                instance_id="bedrock:test",
+                width=1,
+                height=1,
+                facts=(
+                    PerceptionFact(
+                        key="inventory.hotbar.logs",
+                        value=0,
+                        confidence=0.995,
+                        observed_ns=now,
+                        source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+                    ),
+                ),
             )
         )
         assert resumed._planks_retry_requires_wood() is True
@@ -2509,10 +2523,15 @@ def test_planks_retry_guard_survives_restart_and_positive_evidence_expiry(tmp_pa
         positive_ns = time.monotonic_ns()
         resumed.blackboard.merge_semantics(
             instance_id="bedrock:test",
-            facts=(PerceptionFact(
-                key="inventory.hotbar.logs", value=1, confidence=0.995,
-                observed_ns=positive_ns, source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
-            ),),
+            facts=(
+                PerceptionFact(
+                    key="inventory.hotbar.logs",
+                    value=1,
+                    confidence=0.995,
+                    observed_ns=positive_ns,
+                    source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+                ),
+            ),
         )
         assert resumed._planks_retry_requires_wood() is False
 
@@ -2523,8 +2542,11 @@ def test_planks_retry_guard_survives_restart_and_positive_evidence_expiry(tmp_pa
         assert resumed_again._planks_retry_requires_wood() is False
         resumed_again._record_terminal_run(
             SkillRun(
-                run_id="fresh-no-logs", skill_id="craft_wood_planks",
-                started_ns=3, ended_ns=4, outcome=SkillOutcome.FAILED,
+                run_id="fresh-no-logs",
+                skill_id="craft_wood_planks",
+                started_ns=3,
+                ended_ns=4,
+                outcome=SkillOutcome.FAILED,
                 failure_reason="crafting-no-logs-observed-in-inventory",
             )
         )
@@ -2533,25 +2555,32 @@ def test_planks_retry_guard_survives_restart_and_positive_evidence_expiry(tmp_pa
 
 @pytest.mark.parametrize("evidence_kind", ["vlm-hotbar", "bare-global", "stale", "future"])
 def test_planks_retry_rejects_untrusted_or_stale_positive_evidence(
-    tmp_path: Path, evidence_kind: str,
+    tmp_path: Path,
+    evidence_kind: str,
 ) -> None:
     with StateDatabase(tmp_path / "state.sqlite3") as database:
         runtime = _runtime_for_learning(database)
         now = time.monotonic_ns()
         runtime._record_terminal_run(
             SkillRun(
-                run_id="no-logs", skill_id="craft_wood_planks",
-                started_ns=now - 2_000_000_000, ended_ns=now - 1_000_000_000,
+                run_id="no-logs",
+                skill_id="craft_wood_planks",
+                started_ns=now - 2_000_000_000,
+                ended_ns=now - 1_000_000_000,
                 outcome=SkillOutcome.FAILED,
                 failure_reason="crafting-no-logs-observed-in-inventory",
             )
         )
         fact = PerceptionFact(
             key="inventory.logs" if evidence_kind == "bare-global" else "inventory.hotbar.logs",
-            value=1, confidence=0.995,
+            value=1,
+            confidence=0.995,
             observed_ns=(
-                now - 500_000_000 if evidence_kind == "stale"
-                else now + 10_000_000_000 if evidence_kind == "future" else now
+                now - 500_000_000
+                if evidence_kind == "stale"
+                else now + 10_000_000_000
+                if evidence_kind == "future"
+                else now
             ),
             source=(
                 "vlm:guess" if evidence_kind == "vlm-hotbar" else BEDROCK_HOTBAR_LOG_COUNT_SOURCE
@@ -2561,7 +2590,11 @@ def test_planks_retry_rejects_untrusted_or_stale_positive_evidence(
         runtime.blackboard = PerceptionBlackboard()
         runtime.blackboard.publish(
             FrameState(
-                frame_id=1, captured_ns=now, instance_id="bedrock:test", width=1, height=1,
+                frame_id=1,
+                captured_ns=now,
+                instance_id="bedrock:test",
+                width=1,
+                height=1,
                 facts=(fact,),
             )
         )
@@ -2571,12 +2604,19 @@ def test_planks_retry_rejects_untrusted_or_stale_positive_evidence(
 @pytest.mark.parametrize(
     "evidence_kind,clears",
     [
-        ("current", True), ("no-reference", False), ("before-failure", False),
-        ("at-failure", False), ("after-completion", False), ("arbitrary-source", False),
+        ("current", True),
+        ("no-reference", False),
+        ("before-failure", False),
+        ("at-failure", False),
+        ("after-completion", False),
+        ("arbitrary-source", False),
     ],
 )
 def test_planks_retry_positive_global_count_requires_its_gui_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, evidence_kind: str, clears: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    evidence_kind: str,
+    clears: bool,
 ) -> None:
     with StateDatabase(tmp_path / "state.sqlite3") as database:
         runtime = _runtime_for_learning(database)
@@ -2585,8 +2625,10 @@ def test_planks_retry_positive_global_count_requires_its_gui_evidence(
         monkeypatch.setattr(time, "monotonic_ns", lambda: now)
         runtime._record_terminal_run(
             SkillRun(
-                run_id="no-logs", skill_id="craft_wood_planks",
-                started_ns=now - 2_000_000_000, ended_ns=now - 1_000_000_000,
+                run_id="no-logs",
+                skill_id="craft_wood_planks",
+                started_ns=now - 2_000_000_000,
+                ended_ns=now - 1_000_000_000,
                 outcome=SkillOutcome.FAILED,
                 failure_reason="crafting-no-logs-observed-in-inventory",
             )
@@ -2597,15 +2639,23 @@ def test_planks_retry_positive_global_count_requires_its_gui_evidence(
             "after-completion": now + 1,
         }.get(evidence_kind, now)
         evidence = PerceptionEvidence(
-            evidence_id="frame-1:gui", frame_id=1, captured_ns=captured_ns,
+            evidence_id="frame-1:gui",
+            frame_id=1,
+            captured_ns=captured_ns,
             region_kind=EvidenceRegion.GUI,
             region=ScreenRegion(x=0, y=0, width=1, height=1),
-            pixel_sha256="a" * 64, crop_width=16, crop_height=16,
+            pixel_sha256="a" * 64,
+            crop_width=16,
+            crop_height=16,
         )
         fact = PerceptionFact(
-            key="inventory.logs", value=1, confidence=0.995, observed_ns=now,
+            key="inventory.logs",
+            value=1,
+            confidence=0.995,
+            observed_ns=now,
             source=(
-                "arbitrary:test" if evidence_kind == "arbitrary-source"
+                "arbitrary:test"
+                if evidence_kind == "arbitrary-source"
                 else "vlm:test:grounded-inventory"
             ),
             expires_after_ms=250,
@@ -2614,13 +2664,19 @@ def test_planks_retry_positive_global_count_requires_its_gui_evidence(
         runtime.blackboard = PerceptionBlackboard()
         runtime.blackboard.publish(
             FrameState(
-                frame_id=1, captured_ns=now, instance_id="bedrock:test", width=16, height=16,
-                facts=(fact,), evidence=(evidence,),
+                frame_id=1,
+                captured_ns=now,
+                instance_id="bedrock:test",
+                width=16,
+                height=16,
+                facts=(fact,),
+                evidence=(evidence,),
             )
         )
         assert runtime._planks_retry_requires_wood() is not clears
         markers = [
-            memory for memory in runtime.memories.records.values()
+            memory
+            for memory in runtime.memories.records.values()
             if memory.source == "runtime:craft-prerequisite-repair"
         ]
         assert len(markers) == int(clears)
@@ -2641,33 +2697,56 @@ def test_planks_retry_positive_global_count_requires_its_gui_evidence(
     ],
 )
 def test_only_fresh_explicit_craft_request_overrides_no_logs_guard(
-    status: OperatorMessageStatus, text: str, blocked: bool,
+    status: OperatorMessageStatus,
+    text: str,
+    blocked: bool,
 ) -> None:
     context = CognitionContext(
-        role=get_role("generalist"), goals=(), memories=(), promises=(), wiki=(),
+        role=get_role("generalist"),
+        goals=(),
+        memories=(),
+        promises=(),
+        wiki=(),
         planks_retry_requires_wood=True,
-        operator_messages=(OperatorMessage(
-            message_id="fresh-request", created_ns=1, text=text, status=status,
-        ),),
+        operator_messages=(
+            OperatorMessage(
+                message_id="fresh-request",
+                created_ns=1,
+                text=text,
+                status=status,
+            ),
+        ),
     )
     assert planks_retry_requires_wood(context) is blocked
 
 
-@pytest.mark.parametrize("status", (
-    OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
-))
+@pytest.mark.parametrize(
+    "status",
+    (
+        OperatorMessageStatus.QUEUED,
+        OperatorMessageStatus.DELIVERED,
+    ),
+)
 def test_pending_question_keeps_old_craft_retry_blocked(status) -> None:
     context = CognitionContext(
-        role=get_role("generalist"), goals=(), memories=(), promises=(), wiki=(),
+        role=get_role("generalist"),
+        goals=(),
+        memories=(),
+        promises=(),
+        wiki=(),
         planks_retry_requires_wood=True,
         operator_messages=(
             OperatorMessage(
-                message_id="newer-question", created_ns=2, text="What are you doing?",
-                kind=OperatorMessageKind.QUESTION, status=status,
+                message_id="newer-question",
+                created_ns=2,
+                text="What are you doing?",
+                kind=OperatorMessageKind.QUESTION,
+                status=status,
             ),
             OperatorMessage(message_id="craft-once", created_ns=1, text="Craft planks once."),
         ),
     )
+
     class QuestionModel:
         model_id = "synthetic-pending-question"
         calls = 0
@@ -2675,12 +2754,25 @@ def test_pending_question_keeps_old_craft_retry_blocked(status) -> None:
         def complete_constrained(self, messages, **kwargs):
             del messages, kwargs
             self.calls += 1
-            return ModelResponse(text=json.dumps({
-                "r": "Current inventory has not been observed.",
-                "g": "operator:newer-question", "s": None, "p": {},
-                "o": "I am waiting for fresh inventory evidence before crafting.",
-                "c": None, "x": False, "q": [], "w": None, "d": None, "n": [],
-            }), model=self.model_id, latency_ms=1)
+            return ModelResponse(
+                text=json.dumps(
+                    {
+                        "r": "Current inventory has not been observed.",
+                        "g": "operator:newer-question",
+                        "s": None,
+                        "p": {},
+                        "o": "I am waiting for fresh inventory evidence before crafting.",
+                        "c": None,
+                        "x": False,
+                        "q": [],
+                        "w": None,
+                        "d": None,
+                        "n": [],
+                    }
+                ),
+                model=self.model_id,
+                latency_ms=1,
+            )
 
     model = QuestionModel()
     controller = HighLevelController(model, build_bootstrap_skill_library())
@@ -2696,7 +2788,8 @@ def test_pending_question_keeps_old_craft_retry_blocked(status) -> None:
     # may receive its normal one bounded inventory audit afterwards.
     context.operator_messages = (
         context.operator_messages[0].model_copy(
-            update={"status": OperatorMessageStatus.ACKNOWLEDGED}),
+            update={"status": OperatorMessageStatus.ACKNOWLEDGED}
+        ),
         context.operator_messages[1],
     )
     assert planks_retry_requires_wood(context) is False
@@ -2708,19 +2801,29 @@ def test_pending_question_keeps_old_craft_retry_blocked(status) -> None:
 def test_cognition_excludes_missing_wood_audit_but_reenables_after_repair() -> None:
     skills = build_bootstrap_skill_library()
     failed = SkillRun(
-        run_id="previous-craft", skill_id="craft_wood_planks", started_ns=1, ended_ns=2,
-        outcome=SkillOutcome.FAILED, failure_reason="crafting-no-logs-observed-in-inventory",
+        run_id="previous-craft",
+        skill_id="craft_wood_planks",
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.FAILED,
+        failure_reason="crafting-no-logs-observed-in-inventory",
     )
     skills.record(failed)
     skills.record(failed.model_copy(update={"run_id": "previous-craft-2"}))
     context = CognitionContext(
-        role=get_role("generalist"), goals=(), memories=(), promises=(), wiki=(),
-        recent_skill_runs=(), planks_retry_requires_wood=True,
+        role=get_role("generalist"),
+        goals=(),
+        memories=(),
+        promises=(),
+        wiki=(),
+        recent_skill_runs=(),
+        planks_retry_requires_wood=True,
     )
     controller = HighLevelController(_OperatorFastPathOnlyModel(), skills)
     board = PerceptionBlackboard()
     blocked_payloads = {
-        entry["skill_id"] for entry in controller._feasible_skill_payloads(
+        entry["skill_id"]
+        for entry in controller._feasible_skill_payloads(
             board, query_text="open inventory and craft planks", context=context
         )
     }
@@ -2731,12 +2834,14 @@ def test_cognition_excludes_missing_wood_audit_but_reenables_after_repair() -> N
     assert {"craft_wood_planks", "open_inventory"}.isdisjoint(blocked_bounds)
     context.planks_retry_requires_wood = False
     context.recent_skill_runs = (failed,)
-    assert controller._blocking_skill_run(
-        CognitionDecision(skill_id="craft_wood_planks"), context
-    ) is None
+    assert (
+        controller._blocking_skill_run(CognitionDecision(skill_id="craft_wood_planks"), context)
+        is None
+    )
     assert "craft_wood_planks" not in controller._recently_blocked_skill_ids(context)
     repaired_payloads = {
-        entry["skill_id"] for entry in controller._feasible_skill_payloads(
+        entry["skill_id"]
+        for entry in controller._feasible_skill_payloads(
             board, query_text="open inventory and craft planks", context=context
         )
     }
@@ -2782,8 +2887,13 @@ def test_cognition_strips_cross_skill_action_constraints_from_gather_wood() -> N
 
 def test_bootstrap_cognition_does_not_retry_blocked_crafting_plan() -> None:
     context = CognitionContext(
-        role=get_role("generalist"), goals=(), memories=(), promises=(), wiki=(),
-        current_plan=("craft_wood_planks",), planks_retry_requires_wood=True,
+        role=get_role("generalist"),
+        goals=(),
+        memories=(),
+        promises=(),
+        wiki=(),
+        current_plan=("craft_wood_planks",),
+        planks_retry_requires_wood=True,
     )
     fallback = BootstrapCognitionPolicy(build_bootstrap_skill_library())
     for _ in range(2):
@@ -2843,7 +2953,8 @@ def test_collection_success_persists_resource_event_and_advances_plan_once(tmp_p
         events = database.load_runtime_events(limit=10)
         assert len(events) == 2
         assert {event.kind for event in events} == {
-            RuntimeEventKind.SKILL_SUCCEEDED, RuntimeEventKind.RESOURCE_ACQUIRED
+            RuntimeEventKind.SKILL_SUCCEEDED,
+            RuntimeEventKind.RESOURCE_ACQUIRED,
         }
         assert runtime.metrics.skill_successes == 1
         assert _trajectory_outcome_annotations(
@@ -2880,8 +2991,11 @@ def test_runtime_transfers_prebreak_baseline_only_when_send_keeps_runtime_live(
     runtime.executor = SkillExecutor(BootstrapMotorPolicy())
     runtime.executor.start(runtime.skills.get("mine_visible_block"), run_id="break-bound")
     baseline = PerceptionFact(
-        key=baseline_key, value=0, confidence=0.995,
-        observed_ns=now - 5_000_000_000, source=baseline_source,
+        key=baseline_key,
+        value=0,
+        confidence=0.995,
+        observed_ns=now - 5_000_000_000,
+        source=baseline_source,
         expires_after_ms=250,
     )
     if drop_kind == "log":
@@ -2891,7 +3005,11 @@ def test_runtime_transfers_prebreak_baseline_only_when_send_keeps_runtime_live(
     runtime.blackboard = PerceptionBlackboard()
     runtime.blackboard.publish(
         FrameState(
-            frame_id=1, captured_ns=now, instance_id="bedrock:test", width=1280, height=720,
+            frame_id=1,
+            captured_ns=now,
+            instance_id="bedrock:test",
+            width=1280,
+            height=720,
             facts=(baseline.model_copy(update={"value": 1, "observed_ns": now}),),
         )
     )
@@ -2903,17 +3021,25 @@ def test_runtime_transfers_prebreak_baseline_only_when_send_keeps_runtime_live(
     def execute(*_args: object, **_kwargs: object) -> ExecutionTick:
         order.append("policy")
         run = SkillRun(
-            run_id="break-bound", skill_id="mine_visible_block", started_ns=now - 6_000_000_000,
-            ended_ns=now, outcome=SkillOutcome.SUCCEEDED,
+            run_id="break-bound",
+            skill_id="mine_visible_block",
+            started_ns=now - 6_000_000_000,
+            ended_ns=now,
+            outcome=SkillOutcome.SUCCEEDED,
         )
         runtime.executor._run = run
         return ExecutionTick(
             run=run,
             action=MotorAction(sequence=1, buttons_up=("left",)),
             outcome_verification=OutcomeVerification(
-                run_id=run.run_id, kind=OutcomeKind.MINING, status=OutcomeStatus.SUCCEEDED,
-                signal=OutcomeSignal.BLOCK_BROKEN, observed_ns=now, confidence=0.99,
-                reason=f"verified {target_kind} break", target_kind=target_kind,
+                run_id=run.run_id,
+                kind=OutcomeKind.MINING,
+                status=OutcomeStatus.SUCCEEDED,
+                signal=OutcomeSignal.BLOCK_BROKEN,
+                observed_ns=now,
+                confidence=0.99,
+                reason=f"verified {target_kind} break",
+                target_kind=target_kind,
             ),
         )
 
@@ -2927,15 +3053,23 @@ def test_runtime_transfers_prebreak_baseline_only_when_send_keeps_runtime_live(
     runtime._plan_index = 0
     runtime._plan_goal_id = None
     for method in (
-        "_merge_operator_target", "_merge_policy_perception", "_flush_pending_skill_stats",
-        "_flush_pending_learning_records", "_flush_pending_operator_status_updates",
-        "_publish_player_chat_facts", "_consume_cognition", "_start_cognition_if_due",
-        "_request_semantics_if_due", "_route_observed_scene_recovery", "_advance_headroom_recovery",
+        "_merge_operator_target",
+        "_merge_policy_perception",
+        "_flush_pending_skill_stats",
+        "_flush_pending_learning_records",
+        "_flush_pending_operator_status_updates",
+        "_publish_player_chat_facts",
+        "_consume_cognition",
+        "_start_cognition_if_due",
+        "_request_semantics_if_due",
+        "_route_observed_scene_recovery",
+        "_advance_headroom_recovery",
     ):
         monkeypatch.setattr(runtime, method, lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runtime, "_telemetry_payload", lambda **_kwargs: {})
     monkeypatch.setattr(runtime, "_expire_late_headroom_child", lambda result: (result, False))
     monkeypatch.setattr(runtime, "_is_headroom_child_result", lambda _result: False)
+
     def send(*_args: object, **_kwargs: object) -> None:
         order.append("send")
         if stop_during_send:
@@ -2967,13 +3101,19 @@ def test_gather_continuation_requires_three_exact_pickups_before_plan_advance(
     runtime.executor = SkillExecutor(BootstrapMotorPolicy())
     runtime.blackboard = PerceptionBlackboard()
     captured_ns = time.monotonic_ns()
-    runtime.blackboard.publish(FrameState(
-        frame_id=1, captured_ns=captured_ns, instance_id="bedrock:test",
-        width=1280, height=720,
-    ))
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=captured_ns,
+            instance_id="bedrock:test",
+            width=1280,
+            height=720,
+        )
+    )
     runtime.perception = SimpleNamespace(  # type: ignore[assignment]
         capture_once=lambda: CapturedFrame(1, captured_ns, 1280, 720, b""),
-        stale=lambda: False, instance_id="bedrock:test",
+        stale=lambda: False,
+        instance_id="bedrock:test",
     )
     runtime.telemetry = SimpleNamespace(publish=lambda _payload: None)  # type: ignore[assignment]
     runtime.metrics = RuntimeMetrics()
@@ -2990,8 +3130,11 @@ def test_gather_continuation_requires_three_exact_pickups_before_plan_advance(
     bindings: dict[str, str | int | float | bool] = {}
     instruction = "Collect exactly three nearby oak logs."
     runtime.executor.start(
-        runtime.skills.get("gather_nearby_wood"), run_id="gather-origin",
-        context_key="progression:wood", parameters=bindings, instruction=instruction,
+        runtime.skills.get("gather_nearby_wood"),
+        run_id="gather-origin",
+        context_key="progression:wood",
+        parameters=bindings,
+        instruction=instruction,
     )
     exact_count = 4
     recorded: list[tuple[SkillRun, OutcomeVerification | None, bool]] = []
@@ -3007,8 +3150,11 @@ def test_gather_continuation_requires_three_exact_pickups_before_plan_advance(
         runtime.executor._run = terminal
         if active.skill_id == "gather_nearby_wood":
             runtime.executor._mining_hotbar_log_baseline = PerceptionFact(
-                key="inventory.hotbar.logs", value=exact_count, confidence=0.995,
-                observed_ns=ended_ns - 1, source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
+                key="inventory.hotbar.logs",
+                value=exact_count,
+                confidence=0.995,
+                observed_ns=ended_ns - 1,
+                source=BEDROCK_HOTBAR_LOG_COUNT_SOURCE,
                 expires_after_ms=250,
             )
             kind, signal, target = OutcomeKind.MINING, OutcomeSignal.BLOCK_BROKEN, "oak_log"
@@ -3016,18 +3162,27 @@ def test_gather_continuation_requires_three_exact_pickups_before_plan_advance(
             exact_count += 1
             runtime.executor._verified_collection_hotbar_log_count = exact_count
             kind, signal, target = (
-                OutcomeKind.RESOURCE_ACQUISITION, OutcomeSignal.RESOURCE_ACQUIRED, "log"
+                OutcomeKind.RESOURCE_ACQUISITION,
+                OutcomeSignal.RESOURCE_ACQUIRED,
+                "log",
             )
-        return ExecutionTick(run=terminal, action=None, outcome_verification=OutcomeVerification(
-            run_id=active.run_id, kind=kind, status=OutcomeStatus.SUCCEEDED,
-            signal=signal, observed_ns=ended_ns, confidence=0.995,
-            reason="verified", target_kind=target,
-            evidence_keys=(
-                ("inventory.hotbar.logs",)
-                if signal == OutcomeSignal.RESOURCE_ACQUIRED
-                else ()
+        return ExecutionTick(
+            run=terminal,
+            action=None,
+            outcome_verification=OutcomeVerification(
+                run_id=active.run_id,
+                kind=kind,
+                status=OutcomeStatus.SUCCEEDED,
+                signal=signal,
+                observed_ns=ended_ns,
+                confidence=0.995,
+                reason="verified",
+                target_kind=target,
+                evidence_keys=(
+                    ("inventory.hotbar.logs",) if signal == OutcomeSignal.RESOURCE_ACQUIRED else ()
+                ),
             ),
-        ))
+        )
 
     def record(
         run: SkillRun,
@@ -3037,15 +3192,21 @@ def test_gather_continuation_requires_three_exact_pickups_before_plan_advance(
     ) -> None:
         recorded.append((run, outcome_verification, advance_plan))
         if run.outcome == SkillOutcome.SUCCEEDED and advance_plan:
-            runtime._advance_plan_on_step_complete(run)
+            runtime._advance_plan_on_step_complete(run, outcome_verification)
 
     monkeypatch.setattr(runtime.executor, "tick", execute)
     monkeypatch.setattr(runtime, "_record_terminal_run", record)
     for method in (
-        "_merge_operator_target", "_merge_policy_perception", "_flush_pending_skill_stats",
-        "_flush_pending_learning_records", "_flush_pending_operator_status_updates",
-        "_publish_player_chat_facts", "_consume_cognition", "_start_cognition_if_due",
-        "_request_semantics_if_due", "_route_observed_scene_recovery",
+        "_merge_operator_target",
+        "_merge_policy_perception",
+        "_flush_pending_skill_stats",
+        "_flush_pending_learning_records",
+        "_flush_pending_operator_status_updates",
+        "_publish_player_chat_facts",
+        "_consume_cognition",
+        "_start_cognition_if_due",
+        "_request_semantics_if_due",
+        "_route_observed_scene_recovery",
         "_advance_headroom_recovery",
     ):
         monkeypatch.setattr(runtime, method, lambda *_args, **_kwargs: None)
@@ -3062,7 +3223,8 @@ def test_gather_continuation_requires_three_exact_pickups_before_plan_advance(
             continuation = runtime._gather_acquisition_continuation
             assert continuation is not None
             assert (continuation.resource_acquired_events, continuation.last_exact_count) == (
-                acquired, 4 + acquired,
+                acquired,
+                4 + acquired,
             )
             assert runtime.executor.run is not None
             assert runtime.executor.run.skill_id == "gather_nearby_wood"
@@ -3073,7 +3235,8 @@ def test_gather_continuation_requires_three_exact_pickups_before_plan_advance(
             assert runtime._plan_index == 0
 
     acquisitions = [
-        item for item in recorded
+        item
+        for item in recorded
         if item[1] is not None and item[1].signal == OutcomeSignal.RESOURCE_ACQUIRED
     ]
     assert len(acquisitions) == 3
@@ -3243,9 +3406,7 @@ def test_keepalive_timeout_is_an_event_not_a_permanent_failure_memory(
         runtime._record_terminal_run(run)
 
     with StateDatabase(path) as database:
-        stats = database.load_skills().stats[
-            ("traverse_level_ground", "explore-keepalive")
-        ]
+        stats = database.load_skills().stats[("traverse_level_ground", "explore-keepalive")]
         events = database.load_runtime_events(limit=10)
         memories = tuple(database.load_memories().records.values())
 
@@ -3703,9 +3864,13 @@ class _IdleStallPerception:
         self.queries: list[object] = []
         self.last_capture: CapturedFrame | None = None
         self.instance_id = "bedrock:idle-stall"
-        self.active_vlm = SimpleNamespace(status=lambda: {
-            "completed": self.completed, "failures": 0, "thread_alive": True,
-        })
+        self.active_vlm = SimpleNamespace(
+            status=lambda: {
+                "completed": self.completed,
+                "failures": 0,
+                "thread_alive": True,
+            }
+        )
 
     def semantic_available(self) -> bool:
         return self.available
@@ -3719,32 +3884,56 @@ class _IdleStallPerception:
 
 def _publish_idle_stall_frame(runtime: AgentRuntime, now_ns: int, frame_id: int) -> None:
     runtime.perception.last_capture = CapturedFrame(1, now_ns, 1280, 720, b"")
-    runtime.blackboard.publish(FrameState(
-        frame_id=frame_id, captured_ns=now_ns, instance_id="bedrock:idle-stall",
-        width=1280, height=720,
-        facts=tuple(PerceptionFact(
-            key=key, value=value, confidence=0.995, observed_ns=now_ns,
-            source=BEDROCK_HUD_SAFETY_SOURCE, expires_after_ms=500,
-        ) for key, value in (
-            ("scene.playable", True), ("scene.mode", "world"),
-            ("scene.ui_overlay", False), ("environment.underwater", False),
-        )) + (PerceptionFact(
-            key="frame.dhash", value="0123456789abcdef", confidence=1.0,
-            observed_ns=now_ns, source="bootstrap:test", expires_after_ms=500,
-        ),),
-    ))
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=frame_id,
+            captured_ns=now_ns,
+            instance_id="bedrock:idle-stall",
+            width=1280,
+            height=720,
+            facts=tuple(
+                PerceptionFact(
+                    key=key,
+                    value=value,
+                    confidence=0.995,
+                    observed_ns=now_ns,
+                    source=BEDROCK_HUD_SAFETY_SOURCE,
+                    expires_after_ms=500,
+                )
+                for key, value in (
+                    ("scene.playable", True),
+                    ("scene.mode", "world"),
+                    ("scene.ui_overlay", False),
+                    ("environment.underwater", False),
+                )
+            )
+            + (
+                PerceptionFact(
+                    key="frame.dhash",
+                    value="0123456789abcdef",
+                    confidence=1.0,
+                    observed_ns=now_ns,
+                    source="bootstrap:test",
+                    expires_after_ms=500,
+                ),
+            ),
+        )
+    )
 
 
 def _runtime_with_idle_stalls(
-    monkeypatch: pytest.MonkeyPatch, clock_ns: list[int],
-    *, database: StateDatabase | None = None,
+    monkeypatch: pytest.MonkeyPatch,
+    clock_ns: list[int],
+    *,
+    database: StateDatabase | None = None,
 ) -> tuple[AgentRuntime, _IdleStallPerception, CognitionDecision]:
     monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock_ns[0])
     monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
     monkeypatch.setattr("minecraft_ai.runtime.emergency_stop_latched", lambda: False)
     monkeypatch.setattr("minecraft_ai.runtime.local_model_inference_available", lambda: True)
     decision = CognitionDecision(
-        chosen_goal_id="autonomous:explore", skill_parameters={"allow_attack": False},
+        chosen_goal_id="autonomous:explore",
+        skill_parameters={"allow_attack": False},
     )
     runtime = _runtime_with_completed_decision(decision, database=database)
     runtime.skills = build_bootstrap_skill_library()
@@ -3760,14 +3949,21 @@ def _runtime_with_idle_stalls(
     runtime._plan_started_ns = clock_ns[0] - 5_000_000_000
     runtime._traversal_escalation_pending = True
     runtime._idle_stall_probe_used_for_run_id = None
-    runtime._recent_skill_runs = deque(SkillRun(
-        run_id=f"stall-{index}", skill_id=skill_id, context_key="autonomous:explore",
-        started_ns=clock_ns[0] - index * 1_000_000_000,
-        ended_ns=clock_ns[0] - index * 1_000_000_000 + 500_000_000,
-        outcome=SkillOutcome.FAILED, failure_code=SkillFailureCode.LOCOMOTION_STALLED,
-    ) for index, skill_id in (
-        (1, "traverse_visible_obstacle"), (2, "traverse_level_ground"),
-    ))
+    runtime._recent_skill_runs = deque(
+        SkillRun(
+            run_id=f"stall-{index}",
+            skill_id=skill_id,
+            context_key="autonomous:explore",
+            started_ns=clock_ns[0] - index * 1_000_000_000,
+            ended_ns=clock_ns[0] - index * 1_000_000_000 + 500_000_000,
+            outcome=SkillOutcome.FAILED,
+            failure_code=SkillFailureCode.LOCOMOTION_STALLED,
+        )
+        for index, skill_id in (
+            (1, "traverse_visible_obstacle"),
+            (2, "traverse_level_ground"),
+        )
+    )
     perception = _IdleStallPerception()
     runtime.perception = perception  # type: ignore[assignment]
     _publish_idle_stall_frame(runtime, clock_ns[0], 1)
@@ -3849,7 +4045,8 @@ def test_idle_stall_probe_marker_survives_settle_timeout(
 
 @pytest.mark.parametrize("blocked_lane", ("perception", "inference"))
 def test_idle_stall_probe_unavailable_admission_does_not_consume_marker(
-    monkeypatch: pytest.MonkeyPatch, blocked_lane: str,
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_lane: str,
 ) -> None:
     runtime, perception, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
     perception.available = blocked_lane != "perception"
@@ -3873,15 +4070,22 @@ def test_idle_stall_probe_new_qualifying_failure_is_a_new_opportunity(
     runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
     runtime._idle_stall_probe_used_for_run_id = "stall-1"
     assert runtime._idle_stall_probe_run_id(decision) is None
-    runtime._recent_skill_runs.appendleft(runtime._recent_skill_runs[0].model_copy(update={
-        "run_id": "stall-new", "started_ns": 9_600_000_000, "ended_ns": 9_900_000_000,
-    }))
+    runtime._recent_skill_runs.appendleft(
+        runtime._recent_skill_runs[0].model_copy(
+            update={
+                "run_id": "stall-new",
+                "started_ns": 9_600_000_000,
+                "ended_ns": 9_900_000_000,
+            }
+        )
+    )
     assert runtime._idle_stall_probe_run_id(decision) == "stall-new"
 
 
 @pytest.mark.parametrize("operator_owned", (False, True))
 def test_idle_stall_probe_ineligible_idle_is_unchanged(
-    monkeypatch: pytest.MonkeyPatch, operator_owned: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    operator_owned: bool,
 ) -> None:
     runtime, perception, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
     if operator_owned:
@@ -3897,14 +4101,29 @@ def test_idle_stall_probe_ineligible_idle_is_unchanged(
     assert runtime._plan_index == 0
 
 
-@pytest.mark.parametrize("case", (
-    "no-history", "one-failure", "duplicate-id", "different-context", "older-task",
-    "intervening-success", "wrong-failure", "timeout", "non-locomotion",
-    "starved-newest", "starved-older",
-    "operator-decision", "operator-plan", "operator-history", "exhausted-plan",
-))
+@pytest.mark.parametrize(
+    "case",
+    (
+        "no-history",
+        "one-failure",
+        "duplicate-id",
+        "different-context",
+        "older-task",
+        "intervening-success",
+        "wrong-failure",
+        "timeout",
+        "non-locomotion",
+        "starved-newest",
+        "starved-older",
+        "operator-decision",
+        "operator-plan",
+        "operator-history",
+        "exhausted-plan",
+    ),
+)
 def test_idle_stall_probe_rejects_unrelated_or_ineligible_history(
-    monkeypatch: pytest.MonkeyPatch, case: str,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
 ) -> None:
     runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
     newest, older = runtime._recent_skill_runs
@@ -3919,23 +4138,37 @@ def test_idle_stall_probe_rejects_unrelated_or_ineligible_history(
     elif case == "older-task":
         runtime._plan_started_ns = newest.ended_ns + 1  # type: ignore[operator]
     elif case == "intervening-success":
-        runtime._recent_skill_runs.insert(1, older.model_copy(update={
-            "run_id": "progress", "outcome": SkillOutcome.SUCCEEDED, "failure_code": None,
-        }))
+        runtime._recent_skill_runs.insert(
+            1,
+            older.model_copy(
+                update={
+                    "run_id": "progress",
+                    "outcome": SkillOutcome.SUCCEEDED,
+                    "failure_code": None,
+                }
+            ),
+        )
     elif case == "wrong-failure":
-        runtime._recent_skill_runs[0] = newest.model_copy(update={
-            "failure_code": None, "failure_reason": "locomotion.stalled",
-        })
+        runtime._recent_skill_runs[0] = newest.model_copy(
+            update={
+                "failure_code": None,
+                "failure_reason": "locomotion.stalled",
+            }
+        )
     elif case == "timeout":
-        runtime._recent_skill_runs[0] = newest.model_copy(update={
-            "outcome": SkillOutcome.TIMED_OUT,
-        })
+        runtime._recent_skill_runs[0] = newest.model_copy(
+            update={
+                "outcome": SkillOutcome.TIMED_OUT,
+            }
+        )
     elif case in {"starved-newest", "starved-older"}:
         index = 0 if case == "starved-newest" else 1
-        runtime._recent_skill_runs[index] = runtime._recent_skill_runs[index].model_copy(update={
-            "failure_code": SkillFailureCode.CONTROLLER_STARVATION,
-            "failure_reason": "controller emitted no sustained locomotion",
-        })
+        runtime._recent_skill_runs[index] = runtime._recent_skill_runs[index].model_copy(
+            update={
+                "failure_code": SkillFailureCode.CONTROLLER_STARVATION,
+                "failure_reason": "controller emitted no sustained locomotion",
+            }
+        )
     elif case == "non-locomotion":
         runtime._recent_skill_runs[0] = newest.model_copy(update={"skill_id": "open_inventory"})
     elif case == "operator-decision":
@@ -3943,32 +4176,50 @@ def test_idle_stall_probe_rejects_unrelated_or_ineligible_history(
     elif case == "operator-plan":
         runtime._plan_goal_id = "operator:wait"
     elif case == "operator-history":
-        runtime._recent_skill_runs = deque(run.model_copy(update={
-            "context_key": "operator:wait",
-        }) for run in runtime._recent_skill_runs)
+        runtime._recent_skill_runs = deque(
+            run.model_copy(
+                update={
+                    "context_key": "operator:wait",
+                }
+            )
+            for run in runtime._recent_skill_runs
+        )
     else:
         runtime._plan_index = len(runtime._plan_steps)
     assert runtime._idle_stall_probe_run_id(decision) is None
 
 
-@pytest.mark.parametrize("update", (
-    {"skill_id": "explore_forward"}, {"ask_perception": ("obstacle.ahead",)},
-    {"request_replan": True}, {"research_query": "Minecraft stone mining time"},
-    {"say": "Waiting here."}, {"game_chat": "Hello!"},
-))
+@pytest.mark.parametrize(
+    "update",
+    (
+        {"skill_id": "explore_forward"},
+        {"ask_perception": ("obstacle.ahead",)},
+        {"request_replan": True},
+        {"research_query": "Minecraft stone mining time"},
+        {"say": "Waiting here."},
+        {"game_chat": "Hello!"},
+    ),
+)
 def test_idle_stall_probe_requires_pure_idle_decision(
-    monkeypatch: pytest.MonkeyPatch, update: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    update: dict[str, object],
 ) -> None:
     runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
     assert runtime._idle_stall_probe_run_id(decision.model_copy(update=update)) is None
 
 
-@pytest.mark.parametrize("owner", (
-    "_headroom_recovery", "_gather_acquisition_continuation",
-    "_craft_semantic_probe", "_cognition_perception_probe",
-))
+@pytest.mark.parametrize(
+    "owner",
+    (
+        "_headroom_recovery",
+        "_gather_acquisition_continuation",
+        "_craft_semantic_probe",
+        "_cognition_perception_probe",
+    ),
+)
 def test_idle_stall_probe_never_competes_with_existing_owner(
-    monkeypatch: pytest.MonkeyPatch, owner: str,
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
 ) -> None:
     runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
     setattr(runtime, owner, object())
@@ -3977,7 +4228,8 @@ def test_idle_stall_probe_never_competes_with_existing_owner(
 
 @pytest.mark.parametrize("guard", ("stop", "pause", "emergency", "underwater", "latch"))
 def test_idle_stall_probe_preserves_runtime_safety_guards(
-    monkeypatch: pytest.MonkeyPatch, guard: str,
+    monkeypatch: pytest.MonkeyPatch,
+    guard: str,
 ) -> None:
     runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
     if guard == "stop":
@@ -3989,78 +4241,123 @@ def test_idle_stall_probe_preserves_runtime_safety_guards(
     elif guard == "latch":
         runtime._traversal_escalation_pending = False
     else:
-        runtime.blackboard.merge_semantics(instance_id="bedrock:idle-stall", facts=(
-            PerceptionFact(
-                key="environment.underwater", value=True, confidence=0.995,
-                observed_ns=10_000_000_000, source=BEDROCK_HUD_SAFETY_SOURCE,
+        runtime.blackboard.merge_semantics(
+            instance_id="bedrock:idle-stall",
+            facts=(
+                PerceptionFact(
+                    key="environment.underwater",
+                    value=True,
+                    confidence=0.995,
+                    observed_ns=10_000_000_000,
+                    source=BEDROCK_HUD_SAFETY_SOURCE,
+                ),
             ),
-        ))
+        )
     assert runtime._idle_stall_probe_run_id(decision) is None
 
 
 @pytest.mark.parametrize("value", (True, False))
 def test_idle_stall_probe_respects_scene_matched_obstacle_answer(
-    monkeypatch: pytest.MonkeyPatch, value: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    value: bool,
 ) -> None:
     clock_ns = [10_000_000_000]
     runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, clock_ns)
-    runtime.blackboard.merge_semantics(instance_id="bedrock:idle-stall", facts=tuple(
-        PerceptionFact(
-            key=key, value=answer, confidence=1.0, observed_ns=clock_ns[0],
-            source="vlm:test:already-observed", expires_after_ms=10_000,
-        ) for key, answer in (
-            ("obstacle.ahead", value), ("scene.observation_dhash", "0123456789abcdef"),
-        )
-    ))
+    runtime.blackboard.merge_semantics(
+        instance_id="bedrock:idle-stall",
+        facts=tuple(
+            PerceptionFact(
+                key=key,
+                value=answer,
+                confidence=1.0,
+                observed_ns=clock_ns[0],
+                source="vlm:test:already-observed",
+                expires_after_ms=10_000,
+            )
+            for key, answer in (
+                ("obstacle.ahead", value),
+                ("scene.observation_dhash", "0123456789abcdef"),
+            )
+        ),
+    )
     assert runtime._idle_stall_probe_run_id(decision) is None
 
 
-@pytest.mark.parametrize("status", (
-    OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED,
-    OperatorMessageStatus.ACKNOWLEDGED,
-))
+@pytest.mark.parametrize(
+    "status",
+    (
+        OperatorMessageStatus.QUEUED,
+        OperatorMessageStatus.DELIVERED,
+        OperatorMessageStatus.ACKNOWLEDGED,
+    ),
+)
 def test_idle_stall_probe_never_overrides_operator_instruction(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: OperatorMessageStatus,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status: OperatorMessageStatus,
 ) -> None:
     with StateDatabase(tmp_path / "idle-stall.sqlite3") as database:
         runtime, _, decision = _runtime_with_idle_stalls(
-            monkeypatch, [10_000_000_000], database=database,
+            monkeypatch,
+            [10_000_000_000],
+            database=database,
         )
-        database.save_operator_message(OperatorMessage(
-            message_id="explicit-wait", created_ns=1, text="Wait here, do not move.",
-            kind=OperatorMessageKind.INSTRUCTION, status=status,
-        ))
+        database.save_operator_message(
+            OperatorMessage(
+                message_id="explicit-wait",
+                created_ns=1,
+                text="Wait here, do not move.",
+                kind=OperatorMessageKind.INSTRUCTION,
+                status=status,
+            )
+        )
         assert runtime._idle_stall_probe_run_id(decision) is None
 
 
 @pytest.mark.parametrize("correction_tombstone", (False, True))
 def test_idle_stall_probe_full_ack_page_cannot_hide_operator_authority(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, correction_tombstone: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    correction_tombstone: bool,
 ) -> None:
     with StateDatabase(tmp_path / "idle-stall-history.sqlite3") as database:
         runtime, _, decision = _runtime_with_idle_stalls(
-            monkeypatch, [10_000_000_000], database=database,
+            monkeypatch,
+            [10_000_000_000],
+            database=database,
         )
-        database.save_operator_message(OperatorMessage(
-            message_id="older-wait", created_ns=1, text="Stay here until I return.",
-            kind=OperatorMessageKind.INSTRUCTION,
-            status=OperatorMessageStatus.ACKNOWLEDGED,
-        ))
+        database.save_operator_message(
+            OperatorMessage(
+                message_id="older-wait",
+                created_ns=1,
+                text="Stay here until I return.",
+                kind=OperatorMessageKind.INSTRUCTION,
+                status=OperatorMessageStatus.ACKNOWLEDGED,
+            )
+        )
         for index in range(20):
-            database.save_operator_message(OperatorMessage(
-                message_id=f"newer-question-{index}", created_ns=index + 2,
-                text="What are you doing?", kind=OperatorMessageKind.QUESTION,
-                status=OperatorMessageStatus.ACKNOWLEDGED,
-            ))
+            database.save_operator_message(
+                OperatorMessage(
+                    message_id=f"newer-question-{index}",
+                    created_ns=index + 2,
+                    text="What are you doing?",
+                    kind=OperatorMessageKind.QUESTION,
+                    status=OperatorMessageStatus.ACKNOWLEDGED,
+                )
+            )
         if correction_tombstone:
-            database.save_operator_message(OperatorMessage(
-                message_id="newest-completed-correction", created_ns=22,
-                text="Stop following that old instruction.",
-                kind=OperatorMessageKind.CORRECTION,
-                status=OperatorMessageStatus.ACKNOWLEDGED,
-            ))
+            database.save_operator_message(
+                OperatorMessage(
+                    message_id="newest-completed-correction",
+                    created_ns=22,
+                    text="Stop following that old instruction.",
+                    kind=OperatorMessageKind.CORRECTION,
+                    status=OperatorMessageStatus.ACKNOWLEDGED,
+                )
+            )
         page = database.load_operator_messages(
-            statuses={OperatorMessageStatus.ACKNOWLEDGED}, limit=20,
+            statuses={OperatorMessageStatus.ACKNOWLEDGED},
+            limit=20,
         )
         assert len(page) == 20
         assert all(message.message_id != "older-wait" for message in page)
@@ -4074,6 +4371,7 @@ def test_perception_only_replan_combines_questions_and_waits_for_one_fresh_resul
 ) -> None:
     clock_ns = [1_000_000_000]
     monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock_ns[0])
+
     class _Worker:
         completed = 3
         failures = 0
@@ -4205,19 +4503,23 @@ def test_perception_only_replan_combines_questions_and_waits_for_one_fresh_resul
 
 
 @pytest.mark.parametrize(
-    "description", ("  oak-log trunk  ", 'oak "log" trunk', '"' * 280),
+    "description",
+    ("  oak-log trunk  ", 'oak "log" trunk', '"' * 280),
 )
 def test_target_question_preserves_only_explicit_frozen_descriptor(
-    monkeypatch: pytest.MonkeyPatch, description: str,
+    monkeypatch: pytest.MonkeyPatch,
+    description: str,
 ) -> None:
     clock_ns = [10_000_000_000]
     runtime, perception, decision = _runtime_with_idle_stalls(monkeypatch, clock_ns)
-    decision = decision.model_copy(update={
-        "ask_perception": ("target.visible", "target.near"),
-        "instruction": description,
-        "reasoning_summary": "Find a diamond block from earlier history.",
-        "skill_parameters": {"target": "dirt", "allow_attack": False},
-    })
+    decision = decision.model_copy(
+        update={
+            "ask_perception": ("target.visible", "target.near"),
+            "instruction": description,
+            "reasoning_summary": "Find a diamond block from earlier history.",
+            "skill_parameters": {"target": "dirt", "allow_attack": False},
+        }
+    )
     _consume_repeated_idle(runtime, decision)
 
     probe = runtime._cognition_perception_probe
@@ -4253,23 +4555,33 @@ def test_target_question_preserves_only_explicit_frozen_descriptor(
 @pytest.mark.parametrize("replan", (False, True))
 @pytest.mark.parametrize("skill_id", (None, "explore_forward"))
 def test_target_question_without_referent_cannot_observe_act_or_adopt_plan(
-    monkeypatch: pytest.MonkeyPatch, description: str | None,
-    questions: tuple[str, ...], replan: bool, skill_id: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    description: str | None,
+    questions: tuple[str, ...],
+    replan: bool,
+    skill_id: str | None,
 ) -> None:
     runtime, perception, base = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
     adopted: list[CognitionDecision] = []
     runtime._adopt_plan_if_revised = adopted.append  # type: ignore[method-assign]
-    decision = base.model_copy(update={
-        "skill_id": skill_id, "ask_perception": questions,
-        "instruction": description, "request_replan": replan,
-        "plan_steps": ("invent a new target and move",),
-        "reasoning_summary": "The target is the dirt block.",
-    })
+    decision = base.model_copy(
+        update={
+            "skill_id": skill_id,
+            "ask_perception": questions,
+            "instruction": description,
+            "request_replan": replan,
+            "plan_steps": ("invent a new target and move",),
+            "reasoning_summary": "The target is the dirt block.",
+        }
+    )
     _consume_repeated_idle(runtime, decision)
 
-    assert runtime._last_decision == decision.model_copy(update={
-        "skill_id": None, "ask_perception": (),
-    })
+    assert runtime._last_decision == decision.model_copy(
+        update={
+            "skill_id": None,
+            "ask_perception": (),
+        }
+    )
     assert runtime._cognition_perception_probe is None and perception.queries == []
     assert runtime.executor.run is None and not adopted
     assert runtime._traversal_escalation_pending
@@ -4280,22 +4592,34 @@ def test_target_question_without_referent_cannot_observe_act_or_adopt_plan(
 
 
 def test_missing_target_referent_does_not_acknowledge_operator(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     with StateDatabase(tmp_path / "missing-referent.sqlite3") as database:
         runtime, perception, base = _runtime_with_idle_stalls(
-            monkeypatch, [10_000_000_000], database=database,
+            monkeypatch,
+            [10_000_000_000],
+            database=database,
         )
         message = OperatorMessage(
-            message_id="find-target", created_ns=1, text="Find the oak tree.",
+            message_id="find-target",
+            created_ns=1,
+            text="Find the oak tree.",
             status=OperatorMessageStatus.DELIVERED,
         )
         database.save_operator_message(message)
         runtime._pending_operator_message_ids = (message.message_id,)
-        _consume_repeated_idle(runtime, base.model_copy(update={
-            "chosen_goal_id": "operator:find-target", "ask_perception": ("target.visible",),
-            "say": "Found it.", "request_replan": False,
-        }))
+        _consume_repeated_idle(
+            runtime,
+            base.model_copy(
+                update={
+                    "chosen_goal_id": "operator:find-target",
+                    "ask_perception": ("target.visible",),
+                    "say": "Found it.",
+                    "request_replan": False,
+                }
+            ),
+        )
 
         assert database.load_operator_messages()[0].status == OperatorMessageStatus.DELIVERED
         assert runtime.metrics.operator_responses == 0
@@ -4306,7 +4630,8 @@ def test_missing_target_referent_does_not_acknowledge_operator(
 
 @pytest.mark.parametrize("question", ("obstacle.ahead", "scene.playable"))
 def test_non_target_question_needs_no_target_descriptor(
-    monkeypatch: pytest.MonkeyPatch, question: str,
+    monkeypatch: pytest.MonkeyPatch,
+    question: str,
 ) -> None:
     runtime, perception, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
     _consume_repeated_idle(runtime, decision.model_copy(update={"ask_perception": (question,)}))
@@ -4329,9 +4654,15 @@ def test_missing_target_referent_does_not_cancel_active_crafting(
 
     runtime.executor = SimpleNamespace(run=active, cancel=forbidden)  # type: ignore[assignment]
     runtime._send_motor = forbidden  # type: ignore[method-assign]
-    _consume_repeated_idle(runtime, decision.model_copy(update={
-        "skill_id": "explore_forward", "ask_perception": ("target.visible",),
-    }))
+    _consume_repeated_idle(
+        runtime,
+        decision.model_copy(
+            update={
+                "skill_id": "explore_forward",
+                "ask_perception": ("target.visible",),
+            }
+        ),
+    )
     assert runtime.executor.run is active
     assert runtime._cognition_perception_probe is None and perception.queries == []
     assert runtime._cognition_retry_count == 0
@@ -4339,13 +4670,20 @@ def test_missing_target_referent_does_not_cancel_active_crafting(
 
 @pytest.mark.parametrize("preemption", ("operator", "execution"))
 def test_target_descriptor_does_not_survive_probe_preemption(
-    monkeypatch: pytest.MonkeyPatch, preemption: str,
+    monkeypatch: pytest.MonkeyPatch,
+    preemption: str,
 ) -> None:
     clock_ns = [10_000_000_000]
     runtime, perception, decision = _runtime_with_idle_stalls(monkeypatch, clock_ns)
-    _consume_repeated_idle(runtime, decision.model_copy(update={
-        "ask_perception": ("target.visible",), "instruction": "oak-log trunk",
-    }))
+    _consume_repeated_idle(
+        runtime,
+        decision.model_copy(
+            update={
+                "ask_perception": ("target.visible",),
+                "instruction": "oak-log trunk",
+            }
+        ),
+    )
     assert runtime._cognition_perception_probe is not None
     if preemption == "operator":
         runtime._new_queued_operator_message_waiting = lambda: True  # type: ignore[method-assign]
@@ -4422,9 +4760,7 @@ def _runtime_with_waiting_cognition_perception(
         settle_dhash=None,
         settle_deadline_ns=now_ns + 2_000_000_000,
         grounding_deadline_ns=(
-            now_ns + 180_000_000_000
-            if grounding_deadline_ns is None
-            else grounding_deadline_ns
+            now_ns + 180_000_000_000 if grounding_deadline_ns is None else grounding_deadline_ns
         ),
     )
     return runtime
@@ -4452,7 +4788,9 @@ def test_perception_probe_yields_to_fresh_hazard_without_waiting_for_worker(
         )
     )
     runtime = _runtime_with_waiting_cognition_perception(
-        now_ns=now_ns, query_id=query_id, facts=facts,
+        now_ns=now_ns,
+        query_id=query_id,
+        facts=facts,
     )
     monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
 
@@ -4478,14 +4816,16 @@ def test_perception_probe_does_not_promote_weak_or_expired_hazard(
     now_ns = time.monotonic_ns()
     runtime = _runtime_with_waiting_cognition_perception(
         now_ns=now_ns,
-        facts=(PerceptionFact(
-            key="danger.immediate",
-            value=True,
-            confidence=0.995 if expired else 0.1,
-            observed_ns=now_ns - 2_000_000_000 if expired else now_ns,
-            source="safety:bedrock-hud-v1:test",
-            expires_after_ms=250,
-        ),),
+        facts=(
+            PerceptionFact(
+                key="danger.immediate",
+                value=True,
+                confidence=0.995 if expired else 0.1,
+                observed_ns=now_ns - 2_000_000_000 if expired else now_ns,
+                source="safety:bedrock-hud-v1:test",
+                expires_after_ms=250,
+            ),
+        ),
     )
 
     runtime._reconcile_cognition_perception_probe()
@@ -4502,13 +4842,15 @@ def test_perception_hazard_cannot_start_recovery_after_pause_or_stop(
     now_ns = time.monotonic_ns()
     runtime = _runtime_with_waiting_cognition_perception(
         now_ns=now_ns,
-        facts=(PerceptionFact(
-            key="danger.immediate",
-            value=True,
-            confidence=0.995,
-            observed_ns=now_ns,
-            source="safety:bedrock-hud-v1:test",
-        ),),
+        facts=(
+            PerceptionFact(
+                key="danger.immediate",
+                value=True,
+                confidence=0.995,
+                observed_ns=now_ns,
+                source="safety:bedrock-hud-v1:test",
+            ),
+        ),
     )
     if not paused:
         runtime._stop.set()
@@ -4575,28 +4917,31 @@ def _publish_probe_world_frame(
 ) -> None:
     latest = runtime.blackboard.raw_latest()
     assert latest is not None
-    runtime.blackboard.publish(FrameState(
-        frame_id=latest.frame_id + 1,
-        captured_ns=now_ns,
-        instance_id=latest.instance_id,
-        width=1280,
-        height=720,
-        facts=tuple(
-            PerceptionFact(
-                key=key,
-                value=value,
-                confidence=1.0,
-                observed_ns=now_ns,
-                source=BEDROCK_HUD_SAFETY_SOURCE,
-                expires_after_ms=250,
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=latest.frame_id + 1,
+            captured_ns=now_ns,
+            instance_id=latest.instance_id,
+            width=1280,
+            height=720,
+            facts=tuple(
+                PerceptionFact(
+                    key=key,
+                    value=value,
+                    confidence=1.0,
+                    observed_ns=now_ns,
+                    source=BEDROCK_HUD_SAFETY_SOURCE,
+                    expires_after_ms=250,
+                )
+                for key, value in (
+                    ("frame.dhash", frame_hash),
+                    ("scene.playable", True),
+                    ("scene.mode", "world"),
+                )
             )
-            for key, value in (
-                ("frame.dhash", frame_hash),
-                ("scene.playable", True),
-                ("scene.mode", "world"),
-            )
-        ) + facts,
-    ))
+            + facts,
+        )
+    )
 
 
 def _runtime_with_published_cognition_probe(
@@ -4604,7 +4949,8 @@ def _runtime_with_published_cognition_probe(
     clock_ns: list[int],
     *,
     values: tuple[tuple[str, str | int | bool], ...] = (
-        ("target.visible", True), ("obstacle.ahead", True),
+        ("target.visible", True),
+        ("obstacle.ahead", True),
     ),
 ) -> tuple[AgentRuntime, tuple[PerceptionFact, ...]]:
     monkeypatch.setattr("minecraft_ai.runtime.time.monotonic_ns", lambda: clock_ns[0])
@@ -4623,14 +4969,21 @@ def _runtime_with_published_cognition_probe(
         )
         for key, value in values
     )
-    _publish_probe_world_frame(runtime, clock_ns[0], facts=observed + (PerceptionFact(
-        key="scene.observation_dhash",
-        value="0123456789abcdef",
-        confidence=1.0,
-        observed_ns=clock_ns[0],
-        source=source,
-        expires_after_ms=120_000,
-    ),))
+    _publish_probe_world_frame(
+        runtime,
+        clock_ns[0],
+        facts=observed
+        + (
+            PerceptionFact(
+                key="scene.observation_dhash",
+                value="0123456789abcdef",
+                confidence=1.0,
+                observed_ns=clock_ns[0],
+                source=source,
+                expires_after_ms=120_000,
+            ),
+        ),
+    )
     assert runtime._cognition_perception_probe is not None
     runtime._cognition_perception_probe = replace(
         runtime._cognition_perception_probe,
@@ -4638,9 +4991,13 @@ def _runtime_with_published_cognition_probe(
         settle_dhash="0123456789abcdef",
     )
     runtime.perception = SimpleNamespace(  # type: ignore[assignment]
-        active_vlm=SimpleNamespace(status=lambda: {
-            "completed": 1, "failures": 0, "thread_alive": True,
-        }),
+        active_vlm=SimpleNamespace(
+            status=lambda: {
+                "completed": 1,
+                "failures": 0,
+                "thread_alive": True,
+            }
+        ),
         semantic_available=lambda: True,
     )
     runtime._reconcile_cognition_perception_probe()
@@ -4658,13 +5015,20 @@ def _attach_probe_cognition(runtime: AgentRuntime) -> Future[CognitionDecision]:
 
 
 def _runtime_with_described_target_handoff(
-    monkeypatch: pytest.MonkeyPatch, clock_ns: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+    clock_ns: list[int],
 ) -> tuple[AgentRuntime, _IdleStallPerception]:
     runtime, perception, decision = _runtime_with_idle_stalls(monkeypatch, clock_ns)
     assert runtime._cognition_context(requires_wood=False).active_perception_target is None
-    _consume_repeated_idle(runtime, decision.model_copy(update={
-        "ask_perception": ("target.visible", "target.near"), "instruction": "oak-log trunk",
-    }))
+    _consume_repeated_idle(
+        runtime,
+        decision.model_copy(
+            update={
+                "ask_perception": ("target.visible", "target.near"),
+                "instruction": "oak-log trunk",
+            }
+        ),
+    )
     for frame_id in (2, 3):
         clock_ns[0] += 50_000_000
         _publish_idle_stall_frame(runtime, clock_ns[0], frame_id)
@@ -4675,30 +5039,60 @@ def _runtime_with_described_target_handoff(
     source = f"vlm:test:{probe.query_id}"
     clock_ns[0] += 50_000_000
     evidence_id = f"frame-{probe.frame_id}:world"
-    observed = tuple(PerceptionFact(
-        key=key, value=value, confidence=0.9, observed_ns=clock_ns[0],
-        source=source, expires_after_ms=15_000, evidence_refs=(evidence_id,),
-    ) for key, value in (
-        ("target.visible", True), ("target.near", True), ("target.dx", 0.0), ("target.dy", 0.0),
-    ))
+    observed = tuple(
+        PerceptionFact(
+            key=key,
+            value=value,
+            confidence=0.9,
+            observed_ns=clock_ns[0],
+            source=source,
+            expires_after_ms=15_000,
+            evidence_refs=(evidence_id,),
+        )
+        for key, value in (
+            ("target.visible", True),
+            ("target.near", True),
+            ("target.dx", 0.0),
+            ("target.dy", 0.0),
+        )
+    )
     _publish_probe_world_frame(runtime, clock_ns[0])
     runtime.blackboard.merge_semantics(
         instance_id=perception.instance_id,
-        facts=observed + (PerceptionFact(
-            key="scene.observation_dhash", value="0123456789abcdef", confidence=1.0,
-            observed_ns=clock_ns[0], source=source, expires_after_ms=120_000,
-        ),),
-        tracks=(Track(
-            track_id="generic-tree", label="tree", confidence=0.9,
-            region=ScreenRegion(x=0.4, y=0.3, width=0.2, height=0.3),
-            first_seen_ns=clock_ns[0], last_seen_ns=clock_ns[0],
-            evidence_refs=(evidence_id,),
-        ),),
-        evidence=(PerceptionEvidence(
-            evidence_id=evidence_id, frame_id=probe.frame_id, captured_ns=clock_ns[0],
-            region_kind=EvidenceRegion.WORLD, region=ScreenRegion(x=0, y=0, width=1, height=0.84),
-            pixel_sha256="0" * 64, crop_width=512, crop_height=288,
-        ),),
+        facts=observed
+        + (
+            PerceptionFact(
+                key="scene.observation_dhash",
+                value="0123456789abcdef",
+                confidence=1.0,
+                observed_ns=clock_ns[0],
+                source=source,
+                expires_after_ms=120_000,
+            ),
+        ),
+        tracks=(
+            Track(
+                track_id="generic-tree",
+                label="tree",
+                confidence=0.9,
+                region=ScreenRegion(x=0.4, y=0.3, width=0.2, height=0.3),
+                first_seen_ns=clock_ns[0],
+                last_seen_ns=clock_ns[0],
+                evidence_refs=(evidence_id,),
+            ),
+        ),
+        evidence=(
+            PerceptionEvidence(
+                evidence_id=evidence_id,
+                frame_id=probe.frame_id,
+                captured_ns=clock_ns[0],
+                region_kind=EvidenceRegion.WORLD,
+                region=ScreenRegion(x=0, y=0, width=1, height=0.84),
+                pixel_sha256="0" * 64,
+                crop_width=512,
+                crop_height=288,
+            ),
+        ),
     )
     perception.completed += 1
     perception.available = True
@@ -4717,8 +5111,9 @@ def test_followup_model_receives_requested_target_separately_from_generic_track(
 
         def complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse:
             self.messages = messages
-            return ModelResponse(text='{"s":null,"x":false,"q":[]}', model=self.model_id,
-                                 latency_ms=1)
+            return ModelResponse(
+                text='{"s":null,"x":false,"q":[]}', model=self.model_id, latency_ms=1
+            )
 
     runtime, perception = _runtime_with_described_target_handoff(monkeypatch, [10_000_000_000])
     model = _CapturingModel()
@@ -4743,7 +5138,8 @@ def test_followup_model_receives_requested_target_separately_from_generic_track(
 
 @pytest.mark.parametrize("reason", ("cleared", "execution", "operator", "expired", "replaced"))
 def test_followup_target_description_is_removed_with_probe_ownership(
-    monkeypatch: pytest.MonkeyPatch, reason: str,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
 ) -> None:
     clock_ns = [10_000_000_000]
     runtime, _ = _runtime_with_described_target_handoff(monkeypatch, clock_ns)
@@ -4760,7 +5156,8 @@ def test_followup_target_description_is_removed_with_probe_ownership(
         clock_ns[0] = probe.handoff_deadline_ns
     elif reason == "replaced":
         runtime.blackboard.remove_semantic_facts(
-            ("target.visible",), expected_source=probe.query_source,
+            ("target.visible",),
+            expected_source=probe.query_source,
         )
     else:
         runtime._new_queued_operator_message_waiting = lambda: True  # type: ignore[method-assign]
@@ -4856,8 +5253,11 @@ def test_perception_handoff_revocation_preserves_newer_fact_producer(
     future = _attach_probe_cognition(runtime)
     clock_ns[0] += 1_000_000_000
     newer = PerceptionFact(
-        key="target.visible", value=False, confidence=1.0,
-        observed_ns=clock_ns[0], source="operator:new-observation",
+        key="target.visible",
+        value=False,
+        confidence=1.0,
+        observed_ns=clock_ns[0],
+        source="operator:new-observation",
     )
     _publish_probe_world_frame(runtime, clock_ns[0], facts=(newer,))
 
@@ -4879,10 +5279,19 @@ def test_perception_handoff_revokes_cues_and_future_on_preemption(
     runtime, _observed = _runtime_with_published_cognition_probe(monkeypatch, clock_ns)
     _attach_probe_cognition(runtime)
     clock_ns[0] += 91_000_000_000 if reason == "timeout" else 1_000_000_000
-    facts = () if reason != "hazard" else (PerceptionFact(
-        key="danger.immediate", value=True, confidence=0.995,
-        observed_ns=clock_ns[0], source=BEDROCK_HUD_SAFETY_SOURCE,
-    ),)
+    facts = (
+        ()
+        if reason != "hazard"
+        else (
+            PerceptionFact(
+                key="danger.immediate",
+                value=True,
+                confidence=0.995,
+                observed_ns=clock_ns[0],
+                source=BEDROCK_HUD_SAFETY_SOURCE,
+            ),
+        )
+    )
     _publish_probe_world_frame(runtime, clock_ns[0], facts=facts)
     if reason == "pause":
         monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: True)
@@ -4890,7 +5299,11 @@ def test_perception_handoff_revokes_cues_and_future_on_preemption(
         runtime.cognition_hz = 1
         runtime._new_queued_operator_message_waiting = lambda: True  # type: ignore[method-assign]
         runtime._cognition_context = lambda: CognitionContext(  # type: ignore[method-assign]
-            get_role("generalist"), (), (), (), (),
+            get_role("generalist"),
+            (),
+            (),
+            (),
+            (),
         )
         runtime._stage_operator_fast_path = lambda _context: True  # type: ignore[method-assign]
         runtime._start_cognition_if_due()
@@ -4911,11 +5324,15 @@ def test_perception_handoff_never_extends_possession_safety_or_success_facts(
 ) -> None:
     clock_ns = [10_000_000_000]
     runtime, observed = _runtime_with_published_cognition_probe(
-        monkeypatch, clock_ns,
+        monkeypatch,
+        clock_ns,
         values=(
-            ("target.visible", True), ("obstacle.ahead", False),
-            ("inventory.logs", 3), ("danger.immediate", False),
-            ("target.broken", True), ("target.mineable", True),
+            ("target.visible", True),
+            ("obstacle.ahead", False),
+            ("inventory.logs", 3),
+            ("danger.immediate", False),
+            ("target.broken", True),
+            ("target.mineable", True),
         ),
     )
     probe = runtime._cognition_perception_probe
@@ -4931,7 +5348,9 @@ def test_empty_or_nonretained_perception_result_retries_without_scene_hold(
     values: tuple[tuple[str, str | int | bool], ...],
 ) -> None:
     runtime, _observed = _runtime_with_published_cognition_probe(
-        monkeypatch, [10_000_000_000], values=values,
+        monkeypatch,
+        [10_000_000_000],
+        values=values,
     )
 
     assert runtime._cognition_perception_probe is None
@@ -5062,7 +5481,9 @@ def test_expired_settle_does_not_end_perception_scene_ownership(
         clock_ns[0] = probe.grounding_deadline_ns
     elif phase == "unknown":
         runtime.perception.active_vlm.status = lambda: {  # type: ignore[union-attr,method-assign]
-            "completed": 1, "failures": 0, "thread_alive": True,
+            "completed": 1,
+            "failures": 0,
+            "thread_alive": True,
         }
         runtime.perception.semantic_available = lambda: True  # type: ignore[method-assign]
     _publish_probe_world_frame(runtime, clock_ns[0])
@@ -5089,7 +5510,8 @@ def test_expired_settle_does_not_end_perception_scene_ownership(
     monkeypatch.setattr(runtime, "_telemetry_payload", lambda **_kwargs: {})
     monkeypatch.setattr(runtime, "_authoritative_world_camera_pitch_units", lambda: 348)
     monkeypatch.setattr(
-        runtime, "_send_motor",
+        runtime,
+        "_send_motor",
         lambda *_args, **_kwargs: pytest.fail("probe-owned pixels must not move"),
     )
     monkeypatch.setattr(
@@ -5115,9 +5537,17 @@ def test_expired_settle_does_not_end_perception_scene_ownership(
     assert runtime.metrics.motor_actions == 0
 
 
-@pytest.mark.parametrize("scene", (
-    "world", "inventory", "death", "storage", "unknown", "stalled-world",
-))
+@pytest.mark.parametrize(
+    "scene",
+    (
+        "world",
+        "inventory",
+        "death",
+        "storage",
+        "unknown",
+        "stalled-world",
+    ),
+)
 def test_idle_tick_reorients_extreme_pitch_only_in_verified_world(
     monkeypatch: pytest.MonkeyPatch,
     scene: str,
@@ -5141,8 +5571,11 @@ def test_idle_tick_reorients_extreme_pitch_only_in_verified_world(
         height=720,
         facts=tuple(
             PerceptionFact(
-                key=key, value=value, confidence=1.0,
-                observed_ns=captured_ns, source=BEDROCK_HUD_SAFETY_SOURCE,
+                key=key,
+                value=value,
+                confidence=1.0,
+                observed_ns=captured_ns,
+                source=BEDROCK_HUD_SAFETY_SOURCE,
             )
             for key, value in (
                 ("scene.playable", scene in {"world", "stalled-world"}),
@@ -5150,7 +5583,9 @@ def test_idle_tick_reorients_extreme_pitch_only_in_verified_world(
                 ("scene.ui_overlay", scene in {"inventory", "storage"}),
                 ("scene.death", scene == "death"),
             )
-        ) if scene != "unknown" else (),
+        )
+        if scene != "unknown"
+        else (),
     )
     runtime.blackboard = PerceptionBlackboard()
     runtime.blackboard.publish(frame)
@@ -5570,9 +6005,7 @@ def _runtime_with_inflight_operator_cognition(
     runtime._pending_decision = stale_future
     runtime._pending_execution_revision = 0
     runtime._execution_revision = 0
-    runtime._pending_operator_message_ids = (
-        (message.message_id,) if sampled_message else ()
-    )
+    runtime._pending_operator_message_ids = (message.message_id,) if sampled_message else ()
     runtime._pending_operator_status_updates = {}
     runtime._pending_skill_stats = {}
     runtime._pending_runtime_events = {}
@@ -5667,9 +6100,7 @@ def test_gui_operator_fast_path_waits_for_running_local_inference(
         assert runtime.executor.run.skill_id == "explore_forward"
         assert terminal == []
         assert sent_actions == []
-        assert database.load_operator_messages(limit=1)[0].status == (
-            OperatorMessageStatus.QUEUED
-        )
+        assert database.load_operator_messages(limit=1)[0].status == (OperatorMessageStatus.QUEUED)
 
         # Once the uninterruptible request releases the sole inference lane,
         # the same deterministic operator decision can safely own the GUI.
@@ -5698,11 +6129,9 @@ def test_operator_fast_path_does_not_queue_behind_detached_busy_worker(
         release_worker.wait(timeout=5.0)
 
     with StateDatabase(tmp_path / "state.sqlite3") as database:
-        runtime, _, model, terminal, sent_actions = (
-            _runtime_with_inflight_operator_cognition(
-                database,
-                message_text="Mine the marked dirt block.",
-            )
+        runtime, _, model, terminal, sent_actions = _runtime_with_inflight_operator_cognition(
+            database,
+            message_text="Mine the marked dirt block.",
         )
         runtime._pending_decision = None
         pool = ThreadPoolExecutor(max_workers=1)
@@ -5783,9 +6212,7 @@ def test_urgent_safety_blocks_operator_fast_path_preemption(
         assert runtime.executor.run.run_id == "disposable-keepalive"
         assert terminal == []
         assert sent_actions == []
-        assert database.load_operator_messages(limit=1)[0].status == (
-            OperatorMessageStatus.QUEUED
-        )
+        assert database.load_operator_messages(limit=1)[0].status == (OperatorMessageStatus.QUEUED)
 
 
 def test_delivered_operator_message_remains_waiting_until_acknowledged(tmp_path: Path) -> None:
@@ -6017,9 +6444,7 @@ def test_accepted_correction_cannot_install_a_persistent_plan(tmp_path: Path) ->
             database=database,
             pending_message_ids=("one-shot-craft",),
         )
-        runtime._pending_operator_message_kinds = {
-            "one-shot-craft": OperatorMessageKind.CORRECTION
-        }
+        runtime._pending_operator_message_kinds = {"one-shot-craft": OperatorMessageKind.CORRECTION}
         runtime.skills = build_bootstrap_skill_library()
         runtime.executor = SkillExecutor(BootstrapMotorPolicy())
 
@@ -6086,7 +6511,8 @@ def test_start_current_plan_skill_advances_past_repeated_contextual_failures() -
     runtime._cognition_requested = False
 
     runtime.skills.stats[("craft_wood_planks", "test-plan")] = SkillStats(
-        failures=2, consecutive_failures=2,
+        failures=2,
+        consecutive_failures=2,
     )
 
     started = runtime._start_current_plan_skill()

@@ -159,6 +159,7 @@ from minecraft_ai.runtime_support.helpers import (
     _operator_target_facts,
     _plan_step_matches_skill,
     _plan_step_requests_inventory_transition,
+    _verified_plan_step_completion,
     _reported_action_level,
     _restore_policy_world_camera,
     _scene_claim_is_fresh,
@@ -925,9 +926,7 @@ class AgentRuntime:
         stack = ExitStack()
         try:
             stack.enter_context(operator_intent_lock(timeout_s=0.05))
-            current = stack.enter_context(
-                self.state_db.admit_operator_revision(operator_revision)
-            )
+            current = stack.enter_context(self.state_db.admit_operator_revision(operator_revision))
             snapshot = self.state_db.load_operator_context(limit=1000)
             run = self.executor.run if execution is None else execution.run
             reason = fence.check(
@@ -2085,13 +2084,12 @@ class AgentRuntime:
             }
         if current_safety_value("scene.ui_overlay", True):
             return (
-                skill_id == "activate_visible_gui_control"
-                and action.camera_semantics == "cursor"
+                skill_id == "activate_visible_gui_control" and action.camera_semantics == "cursor"
             )
 
-        return current_safety_value(
-            "scene.playable", True
-        ) and current_safety_value("scene.mode", "world")
+        return current_safety_value("scene.playable", True) and current_safety_value(
+            "scene.mode", "world"
+        )
 
     def _materialize_headroom_target(
         self,
@@ -2653,9 +2651,9 @@ class AgentRuntime:
             fallback_policy_id=self.executor.policy.policy_id,
         )
         running = self.executor.run if execution is None else execution.run
-        direction_boundary: AbstractContextManager[
-            Callable[[dict[str, object]], None] | None
-        ] = nullcontext(None)
+        direction_boundary: AbstractContextManager[Callable[[dict[str, object]], None] | None] = (
+            nullcontext(None)
+        )
         if running is not None and running.parameters.get("direction_request_id"):
             from .directions.gateway import ControlUnavailableError, DirectionsGateway
 
@@ -4714,7 +4712,11 @@ class AgentRuntime:
         self._cognition_retry_not_before_ns = now_ns + _OPERATOR_FOLLOWUP_DELAY_NS
         self._cognition_requested = True
 
-    def _advance_plan_on_step_complete(self, run: SkillRun) -> None:
+    def _advance_plan_on_step_complete(
+        self,
+        run: SkillRun,
+        outcome_verification: OutcomeVerification | None = None,
+    ) -> None:
         """Mark one persistent plan step done after a skill succeeds.
 
         Bound graph nodes require their matching skill. Unbound free-form plans
@@ -4727,8 +4729,10 @@ class AgentRuntime:
             return
         if self._plan_index >= len(self._plan_steps):
             return
-        if not _plan_step_requests_inventory_transition(
-            run.skill_id, self._plan_steps[self._plan_index]
+        current_step = self._plan_steps[self._plan_index]
+        if not (
+            _plan_step_matches_skill(run.skill_id, current_step)
+            or _verified_plan_step_completion(current_step, outcome_verification)
         ):
             return
         if self._last_decision is not None:
@@ -5565,7 +5569,7 @@ class AgentRuntime:
         if run.outcome == SkillOutcome.SUCCEEDED:
             self.metrics.skill_successes += 1
             if advance_plan:
-                self._advance_plan_on_step_complete(run)
+                self._advance_plan_on_step_complete(run, matching_verification)
         elif run.outcome == SkillOutcome.FAILED:
             self.metrics.skill_failures += 1
             self.metrics.skill_failed_outcomes += 1
@@ -5842,8 +5846,7 @@ class AgentRuntime:
         )
         return bool(
             active
-            and active[0].status
-            in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+            and active[0].status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
         )
 
     def _operator_message_arrived_after_snapshot(self) -> bool:
@@ -5851,15 +5854,17 @@ class AgentRuntime:
         if self.state_db is None:
             return False
         sampled = set(self._pending_operator_message_ids)
-        pending = _active_operator_messages(self.state_db.load_operator_messages(
-            statuses={
-                OperatorMessageStatus.QUEUED,
-                OperatorMessageStatus.DELIVERED,
-                OperatorMessageStatus.ACKNOWLEDGED,
-                OperatorMessageStatus.REFUSED,
-            },
-            limit=1000,
-        ))
+        pending = _active_operator_messages(
+            self.state_db.load_operator_messages(
+                statuses={
+                    OperatorMessageStatus.QUEUED,
+                    OperatorMessageStatus.DELIVERED,
+                    OperatorMessageStatus.ACKNOWLEDGED,
+                    OperatorMessageStatus.REFUSED,
+                },
+                limit=1000,
+            )
+        )
         return any(
             message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
             and message.message_id not in sampled
@@ -5879,15 +5884,17 @@ class AgentRuntime:
                 OperatorMessageStatus.ACKNOWLEDGED,
             }
         }
-        active = _active_operator_messages(self.state_db.load_operator_messages(
-            statuses={
-                OperatorMessageStatus.QUEUED,
-                OperatorMessageStatus.DELIVERED,
-                OperatorMessageStatus.ACKNOWLEDGED,
-                OperatorMessageStatus.REFUSED,
-            },
-            limit=1000,
-        ))
+        active = _active_operator_messages(
+            self.state_db.load_operator_messages(
+                statuses={
+                    OperatorMessageStatus.QUEUED,
+                    OperatorMessageStatus.DELIVERED,
+                    OperatorMessageStatus.ACKNOWLEDGED,
+                    OperatorMessageStatus.REFUSED,
+                },
+                limit=1000,
+            )
+        )
         return any(
             message.status == OperatorMessageStatus.QUEUED
             and message.message_id not in pending_delivery

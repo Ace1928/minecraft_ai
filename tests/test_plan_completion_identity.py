@@ -23,16 +23,25 @@ def _runtime(database: StateDatabase, steps: tuple[str, ...]):
 
 def _run(skill_id: str, run_id: str = "completed") -> SkillRun:
     return SkillRun(
-        run_id=run_id, skill_id=skill_id, context_key="test:progress",
-        started_ns=1, ended_ns=2, outcome=SkillOutcome.SUCCEEDED,
+        run_id=run_id,
+        skill_id=skill_id,
+        context_key="test:progress",
+        started_ns=1,
+        ended_ns=2,
+        outcome=SkillOutcome.SUCCEEDED,
     )
 
 
 def test_unrelated_world_successes_cannot_diverge_or_rewind_bound_plan(tmp_path: Path) -> None:
     with StateDatabase(tmp_path / "state.sqlite3") as database:
-        runtime = _runtime(database, (
-            "gather_nearby_wood", "traverse_level_ground", "gather_nearby_wood",
-        ))
+        runtime = _runtime(
+            database,
+            (
+                "gather_nearby_wood",
+                "traverse_level_ground",
+                "gather_nearby_wood",
+            ),
+        )
         graph = runtime._plan_graph
         assert graph is not None
         graph.mark_running("gather_nearby_wood")
@@ -56,14 +65,18 @@ def test_unrelated_world_successes_cannot_diverge_or_rewind_bound_plan(tmp_path:
         assert runtime.metrics.skill_successes == 3
 
 
-@pytest.mark.parametrize(("step", "skill_id"), (
-    ("Find a nearby oak trunk", "explore_forward"),
-    ("check the inventory", "open_inventory"),
-    ("close the inventory after inspection", "close_open_inventory"),
-    ("click the Play button", "activate_visible_gui_control"),
-))
-def test_unbound_legacy_prose_advances_graph_and_projection_together(
-    tmp_path: Path, step: str, skill_id: str,
+@pytest.mark.parametrize(
+    ("step", "skill_id"),
+    (
+        ("check the inventory", "open_inventory"),
+        ("close the inventory after inspection", "close_open_inventory"),
+        ("click the Play button", "activate_visible_gui_control"),
+    ),
+)
+def test_verified_gui_prose_advances_graph_and_projection_together(
+    tmp_path: Path,
+    step: str,
+    skill_id: str,
 ) -> None:
     with StateDatabase(tmp_path / "state.sqlite3") as database:
         runtime = _runtime(database, (step, "gather_nearby_wood"))
@@ -77,12 +90,47 @@ def test_unbound_legacy_prose_advances_graph_and_projection_together(
         assert graph.nodes[graph.order[0]].state is PlanNodeState.SUCCEEDED
 
 
-@pytest.mark.parametrize("blocker", (
-    "different-goal", "failed", "timed-out", "cancelled", "plan-neutral", "no-advance",
-))
+@pytest.mark.parametrize(
+    ("step", "skill_id"),
+    (
+        ("Find a nearby oak trunk", "explore_forward"),
+        ("mine_block", "traverse_level_ground"),
+        ("build a dirt hut", "explore_forward"),
+    ),
+)
+def test_unbound_world_objective_requires_matching_execution_evidence(
+    tmp_path: Path,
+    step: str,
+    skill_id: str,
+) -> None:
+    with StateDatabase(tmp_path / "state.sqlite3") as database:
+        runtime = _runtime(database, (step,))
+        graph = runtime._plan_graph
+        assert graph is not None and graph.current() is not None
+        assert graph.current().skill_id is None
+
+        runtime._record_terminal_run(_run(skill_id))
+
+        assert runtime._plan_index == graph.cursor == 0
+        assert graph.nodes[graph.order[0]].state is PlanNodeState.READY
+
+
+@pytest.mark.parametrize(
+    "blocker",
+    (
+        "different-goal",
+        "failed",
+        "timed-out",
+        "cancelled",
+        "plan-neutral",
+        "no-advance",
+    ),
+)
 @pytest.mark.parametrize("step", ("gather_nearby_wood", "Find a nearby oak trunk"))
 def test_plan_completion_preserves_existing_terminal_gates(
-    tmp_path: Path, blocker: str, step: str,
+    tmp_path: Path,
+    blocker: str,
+    step: str,
 ) -> None:
     with StateDatabase(tmp_path / "state.sqlite3") as database:
         runtime = _runtime(database, (step, "traverse_level_ground"))
@@ -95,11 +143,15 @@ def test_plan_completion_preserves_existing_terminal_gates(
         elif blocker == "plan-neutral":
             runtime._plan_neutral_recovery_runs = {run.run_id}
         else:
-            run = run.model_copy(update={"outcome": {
-                "failed": SkillOutcome.FAILED,
-                "timed-out": SkillOutcome.TIMED_OUT,
-                "cancelled": SkillOutcome.CANCELLED,
-            }.get(blocker, SkillOutcome.SUCCEEDED)})
+            run = run.model_copy(
+                update={
+                    "outcome": {
+                        "failed": SkillOutcome.FAILED,
+                        "timed-out": SkillOutcome.TIMED_OUT,
+                        "cancelled": SkillOutcome.CANCELLED,
+                    }.get(blocker, SkillOutcome.SUCCEEDED)
+                }
+            )
 
         runtime._record_terminal_run(run, advance_plan=blocker != "no-advance")
 
@@ -118,17 +170,20 @@ def test_gui_success_cannot_consume_unbound_world_objective(tmp_path: Path) -> N
         assert graph.nodes[graph.order[0]].state is PlanNodeState.READY
 
 
-def test_graph_free_legacy_world_success_remains_permissive(tmp_path: Path) -> None:
+def test_graph_free_legacy_world_progress_still_requires_skill_identity(tmp_path: Path) -> None:
     with StateDatabase(tmp_path / "state.sqlite3") as database:
         runtime = _runtime(database, ("gather_nearby_wood",))
         runtime._plan_graph = None
         runtime._record_terminal_run(_run("explore_forward"))
+        assert runtime._plan_index == 0
+        runtime._record_terminal_run(_run("gather_nearby_wood", "matched"))
         assert runtime._plan_index == 1
 
 
 def test_unbound_graph_completion_requires_explicit_caller_allowance() -> None:
     graph = plan_graph_from_steps(
-        ("Find a nearby oak trunk",), goal_id="test:progress",
+        ("Find a nearby oak trunk",),
+        goal_id="test:progress",
         skills=build_bootstrap_skill_library(),
     )
     original = graph.model_dump()
@@ -138,7 +193,8 @@ def test_unbound_graph_completion_requires_explicit_caller_allowance() -> None:
 
 def test_unbound_allowance_does_not_override_exact_skill_identity() -> None:
     graph = plan_graph_from_steps(
-        ("gather_nearby_wood",), goal_id="test:progress",
+        ("gather_nearby_wood",),
+        goal_id="test:progress",
         skills=build_bootstrap_skill_library(),
     )
     original = graph.model_dump()
