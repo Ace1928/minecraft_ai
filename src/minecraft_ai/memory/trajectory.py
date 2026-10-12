@@ -33,6 +33,10 @@ _LOG = logging.getLogger(__name__)
 _GIB = 1024**3
 
 
+class ActionBindingMismatch(ValueError):
+    """A policy proposal belongs to a different skill option than the executor."""
+
+
 class TrajectoryDiskSpaceError(RuntimeError):
     """Recording cannot continue without consuming the configured disk reserve."""
 
@@ -84,9 +88,13 @@ class ActionProvenance(BaseModel):
         condition_skill_id = _condition_text(self.condition, "skill_id")
         condition_run_id = _condition_text(self.condition, "episode_id")
         if skill_id is not None and condition_skill_id not in {None, skill_id}:
-            raise ValueError("skill_id does not match the accepted action condition")
+            raise ActionBindingMismatch(
+                "skill_id does not match the accepted action condition"
+            )
         if skill_run_id is not None and condition_run_id not in {None, skill_run_id}:
-            raise ValueError("skill_run_id does not match the accepted action condition")
+            raise ActionBindingMismatch(
+                "skill_run_id does not match the accepted action condition"
+            )
 
     @model_validator(mode="after")
     def validate_condition_identity(self) -> ActionProvenance:

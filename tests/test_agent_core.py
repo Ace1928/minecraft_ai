@@ -90,7 +90,7 @@ from minecraft_ai.skills import (
     SkillStats,
 )
 from minecraft_ai.storage import StateDatabase
-from minecraft_ai.trajectory import ActionOrigin, motor_condition_id
+from minecraft_ai.trajectory import ActionBindingMismatch, ActionOrigin, motor_condition_id
 
 
 def test_accepted_action_provenance_resolves_bound_model_route_and_condition() -> None:
@@ -1020,6 +1020,36 @@ def test_motor_boundary_allows_release_on_unknown_frame(
     assert runtime.metrics.scene_interlocks == 0
     assert runtime.metrics.motor_actions == 4
     assert trajectory.accepted_calls == 1
+
+
+def test_motor_boundary_releases_stale_previous_skill_prediction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, trajectory = _motor_shutdown_runtime()
+    runtime.executor.notify_inputs_released = Mock()
+    sent: list[str] = []
+
+    def dispatch(command: str, **_kwargs: object) -> dict[str, object]:
+        sent.append(command)
+        if command == "release-inputs":
+            return {"released": True, "lease_active": True}
+        raise AssertionError("stale policy action must not reach the motor")
+
+    def stale(*_args: object, **_kwargs: object) -> object:
+        raise ActionBindingMismatch(
+            "skill_id does not match the accepted action condition"
+        )
+
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+    monkeypatch.setattr("minecraft_ai.runtime.send_command", dispatch)
+    monkeypatch.setattr("minecraft_ai.runtime._accepted_action_provenance", stale)
+
+    assert runtime._send_motor(MotorAction(sequence=7, keys_down=("w",))) is False
+    assert sent == ["release-inputs"]
+    assert runtime.metrics.stale_policy_action_rejections == 1
+    assert runtime.metrics.motor_actions == 3
+    assert trajectory.accepted_calls == 0
+    runtime.executor.notify_inputs_released.assert_called_once()
 
 
 @pytest.mark.parametrize(

@@ -131,5 +131,6 @@ class RuntimeMetrics:
     stale_frame_skips: int = 0
     consecutive_stale_frames: int = 0
     scene_interlocks: int = 0
+    stale_policy_action_rejections: int = 0
     storage_contentions: int = 0
     last_storage_error: str | None = None

@@ -107,6 +107,7 @@ from .social import (
     SocialState,
 )
 from .telemetry import TelemetryPublisher
+from .memory.trajectory import ActionBindingMismatch
 from .trajectory import ActionOrigin, ActionProvenance, TrajectoryRecorder
 from .storage import OperatorContextSnapshot, OperatorResponseAdmissionError, StateDatabase
 from .supervisor import operator_intent_lock, operator_pause_latched, send_command
@@ -2645,11 +2646,24 @@ class AgentRuntime:
         # the supervisor would safely accept the monotonic jump.
         if action.sequence < self._sequence:
             action = action.model_copy(update={"sequence": self._sequence})
-        provenance = _accepted_action_provenance(
-            execution,
-            self.blackboard,
-            fallback_policy_id=self.executor.policy.policy_id,
-        )
+        try:
+            provenance = _accepted_action_provenance(
+                execution,
+                self.blackboard,
+                fallback_policy_id=self.executor.policy.policy_id,
+            )
+        except ActionBindingMismatch as mismatch:
+            # A slow or temporarily inactive expert may finish an action for
+            # the previous option after the executor has already changed skill.
+            # The proposal has not crossed the supervisor boundary yet. Drop it,
+            # physically release any older hold, and let the current option ask
+            # for a prediction carrying its own episode identity next tick.
+            self.metrics.stale_policy_action_rejections += 1
+            if not self._release_and_reconcile_inputs():
+                raise RuntimeError(
+                    "stale policy action release was not acknowledged"
+                ) from mismatch
+            return False
         running = self.executor.run if execution is None else execution.run
         direction_boundary: AbstractContextManager[Callable[[dict[str, object]], None] | None] = (
             nullcontext(None)
@@ -6406,6 +6420,7 @@ class AgentRuntime:
             "stale_frame_skips": self.metrics.stale_frame_skips,
             "consecutive_stale_frames": self.metrics.consecutive_stale_frames,
             "scene_interlocks": self.metrics.scene_interlocks,
+            "stale_policy_action_rejections": self.metrics.stale_policy_action_rejections,
             "input_release_pending": self._input_release_pending_ns is not None,
             "traversal_escalation": {
                 "pending": bool(self._traversal_escalation_pending),
