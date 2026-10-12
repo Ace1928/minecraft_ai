@@ -80,5 +80,6 @@ def test_persistent_ffmpeg_capture_returns_newest_complete_exact_window_frame(
     assert command[command.index("-i") + 1] == ":2"
     assert "shell" not in kwargs
     assert kwargs["stdout"] is ffmpeg_x11_capture.subprocess.PIPE
+    assert window.get_geometry.call_count == 1
     capture.close()
     display.close.assert_called_once()

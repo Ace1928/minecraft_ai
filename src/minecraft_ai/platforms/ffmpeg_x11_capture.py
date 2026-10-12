@@ -79,6 +79,8 @@ class FfmpegX11Capture:
         bounds = self._bounds()
         self._source_bounds = bounds
         self._content = self._content_rect(bounds["width"], bounds["height"])
+        self._last_geometry_check_ns = time.monotonic_ns()
+        self._geometry_check_interval_ns = 1_000_000_000
         self._frame_size = bounds["width"] * bounds["height"] * 4
         command = [
             binary,
@@ -203,10 +205,15 @@ class FfmpegX11Capture:
         if bgra is None or len(bgra) != self._frame_size:
             raise IsolationError("FFmpeg X11 returned an incomplete BGRA frame")
 
-        bounds = self._bounds()
-        content = self._content_rect(bounds["width"], bounds["height"])
-        if bounds != self._source_bounds or content != self._content:
-            raise IsolationError("Minecraft window geometry changed during FFmpeg capture")
+        bounds = self._source_bounds
+        content = self._content
+        now_ns = time.monotonic_ns()
+        if now_ns - self._last_geometry_check_ns >= self._geometry_check_interval_ns:
+            bounds = self._bounds()
+            content = self._content_rect(bounds["width"], bounds["height"])
+            if bounds != self._source_bounds or content != self._content:
+                raise IsolationError("Minecraft window geometry changed during FFmpeg capture")
+            self._last_geometry_check_ns = now_ns
         width = bounds["width"]
         height = bounds["height"]
         if content is not None:
