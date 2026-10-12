@@ -113,7 +113,9 @@ def test_failed_attempt_clears_old_bundle_before_any_capture_or_inference(failur
         assert service.last_observation is None
         if failure == "capture":
             raise RuntimeError("capture failed")
-        return first if failure == "nonmonotonic" else next_frame
+        if failure == "nonmonotonic":
+            return _capture(43, first.captured_ns - 1)
+        return next_frame
 
     def infer(_captured: CapturedFrame) -> tuple[PerceptionFact, ...]:
         assert service.last_observation is None
