@@ -133,9 +133,11 @@ def test_runtime_event_roundtrip_is_append_only_and_filterable(tmp_path: Path) -
     with StateDatabase(path) as db:
         events = db.load_runtime_events(limit=10)
         failures = db.load_runtime_events(kinds={RuntimeEventKind.SKILL_FAILED}, limit=10)
+        trajectory_events = db.load_runtime_events_for_trajectory("trajectory-one")
 
     assert events == (succeeded, failed)
     assert failures == (failed,)
+    assert trajectory_events == ()
 
 
 def test_current_schema_open_does_not_reexecute_migration_ddl(

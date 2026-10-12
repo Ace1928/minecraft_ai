@@ -680,6 +680,32 @@ class StateDatabase:
         ).fetchall()
         return tuple(RuntimeEvent.model_validate_json(payload) for (payload,) in rows)
 
+    def load_runtime_events_for_trajectory(
+        self,
+        trajectory_id: str,
+        *,
+        kinds: set[RuntimeEventKind] | None = None,
+    ) -> tuple[RuntimeEvent, ...]:
+        """Load the complete ordered evidence stream for one recorded trajectory."""
+
+        selected_id = trajectory_id.strip()
+        if not selected_id:
+            raise ValueError("trajectory_id cannot be empty")
+        parameters: list[object] = [selected_id]
+        clauses = ["trajectory_id=?"]
+        if kinds:
+            selected_kinds = sorted(kinds, key=lambda kind: kind.value)
+            placeholders = ",".join("?" for _ in selected_kinds)
+            clauses.append(f"kind IN ({placeholders})")
+            parameters.extend(kind.value for kind in selected_kinds)
+        rows = self.connection.execute(
+            "SELECT payload FROM events WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY observed_ns ASC, event_id ASC",
+            tuple(parameters),
+        ).fetchall()
+        return tuple(RuntimeEvent.model_validate_json(payload) for (payload,) in rows)
+
     def save_place(self, record: PlaceRecord) -> None:
         self._execute_write(
             """
