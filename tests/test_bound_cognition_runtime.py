@@ -782,10 +782,15 @@ def test_capture_filters_history_before_caps_and_reconciles_outside_authority_lo
     )
     assert all(message.status == expected_status for message in context.operator_messages)
     expected_loads = [(
-        frozenset({OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}), 20, False,
+        frozenset({
+            OperatorMessageStatus.QUEUED,
+            OperatorMessageStatus.DELIVERED,
+            OperatorMessageStatus.ACKNOWLEDGED,
+            OperatorMessageStatus.REFUSED,
+        }),
+        1000,
+        False,
     )]
-    if not pending:
-        expected_loads.append((frozenset({OperatorMessageStatus.ACKNOWLEDGED}), 20, True))
     assert harness.database.loads == expected_loads
     assert not harness.controller.requests and not harness.pool.jobs
 

@@ -55,6 +55,21 @@ def test_lower_priority_directive_cannot_override_selected_question(tmp_path):
         assert not runtime._unresolved_operator_directive_waiting()
 
 
+def test_newer_acknowledged_instruction_releases_older_pending_backlog(tmp_path):
+    with StateDatabase(tmp_path / "state.sqlite") as database:
+        database.save_operator_message(OperatorMessage(
+            message_id="old-pending", created_ns=1, text="Wait for manual review",
+            status=OperatorMessageStatus.DELIVERED,
+        ))
+        database.save_operator_message(OperatorMessage(
+            message_id="new-handoff", created_ns=2, text="Review complete; resume gameplay",
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ))
+        runtime = object.__new__(AgentRuntime)
+        runtime.state_db = database
+        assert not runtime._unresolved_operator_directive_waiting()
+
+
 def test_missing_database_has_no_new_authority():
     runtime = object.__new__(AgentRuntime)
     runtime.state_db = None

@@ -3548,8 +3548,13 @@ class AgentRuntime:
             return None
         try:
             current = database.load_operator_context(
-                statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED},
-                limit=20,
+                statuses={
+                    OperatorMessageStatus.QUEUED,
+                    OperatorMessageStatus.DELIVERED,
+                    OperatorMessageStatus.ACKNOWLEDGED,
+                    OperatorMessageStatus.REFUSED,
+                },
+                limit=1000,
             )
             active = _active_operator_messages(current.messages)
             if not active or self._planner_budget_message_authority(
@@ -3609,8 +3614,13 @@ class AgentRuntime:
                 if not current or not self._planner_budget_owner_current(binding):
                     return False
                 context = database.load_operator_context(
-                    statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED},
-                    limit=20,
+                    statuses={
+                        OperatorMessageStatus.QUEUED,
+                        OperatorMessageStatus.DELIVERED,
+                        OperatorMessageStatus.ACKNOWLEDGED,
+                        OperatorMessageStatus.REFUSED,
+                    },
+                    limit=1000,
                 )
                 active = _active_operator_messages(context.messages)
                 if not active or self._planner_budget_message_authority(
@@ -3707,17 +3717,17 @@ class AgentRuntime:
             if self._stop.is_set() or operator_pause_latched() or emergency_stop_latched():
                 raise RuntimeError("operator suspension prevents model submission")
             operator = self.state_db.load_operator_context(
-                statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED},
-                limit=20,
+                statuses={
+                    OperatorMessageStatus.QUEUED,
+                    OperatorMessageStatus.DELIVERED,
+                    OperatorMessageStatus.ACKNOWLEDGED,
+                    OperatorMessageStatus.REFUSED,
+                },
+                limit=1000,
             )
             with self.state_db.admit_operator_revision(operator.revision) as current:
                 if not current:
                     raise RuntimeError("operator changed during cognition snapshot")
-                if not operator.messages:
-                    operator = self.state_db.load_operator_context(
-                        statuses={OperatorMessageStatus.ACKNOWLEDGED},
-                        limit=20,
-                    )
                 # Keep the target and semantic snapshot on the captured revision.
                 self._merge_operator_target()
                 snapshot = self.blackboard.cognition_snapshot()
@@ -5696,12 +5706,19 @@ class AgentRuntime:
         if self.state_db is None:
             return False
         messages = self.state_db.load_operator_messages(
-            statuses={OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED},
-            limit=20,
+            statuses={
+                OperatorMessageStatus.QUEUED,
+                OperatorMessageStatus.DELIVERED,
+                OperatorMessageStatus.ACKNOWLEDGED,
+                OperatorMessageStatus.REFUSED,
+            },
+            limit=1000,
         )
         selected = _active_operator_messages(messages)
         return bool(
             selected
+            and selected[0].status
+            in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
             and selected[0].kind
             in {
                 OperatorMessageKind.INSTRUCTION,
@@ -5745,14 +5762,21 @@ class AgentRuntime:
         """Return whether any operator message still awaits acknowledgement."""
         if self.state_db is None:
             return False
-        return bool(
+        active = _active_operator_messages(
             self.state_db.load_operator_messages(
                 statuses={
                     OperatorMessageStatus.QUEUED,
                     OperatorMessageStatus.DELIVERED,
+                    OperatorMessageStatus.ACKNOWLEDGED,
+                    OperatorMessageStatus.REFUSED,
                 },
-                limit=1,
+                limit=1000,
             )
+        )
+        return bool(
+            active
+            and active[0].status
+            in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
         )
 
     def _operator_message_arrived_after_snapshot(self) -> bool:
@@ -5760,14 +5784,20 @@ class AgentRuntime:
         if self.state_db is None:
             return False
         sampled = set(self._pending_operator_message_ids)
-        pending = self.state_db.load_operator_messages(
+        pending = _active_operator_messages(self.state_db.load_operator_messages(
             statuses={
                 OperatorMessageStatus.QUEUED,
                 OperatorMessageStatus.DELIVERED,
+                OperatorMessageStatus.ACKNOWLEDGED,
+                OperatorMessageStatus.REFUSED,
             },
-            limit=20,
+            limit=1000,
+        ))
+        return any(
+            message.status in {OperatorMessageStatus.QUEUED, OperatorMessageStatus.DELIVERED}
+            and message.message_id not in sampled
+            for message in pending
         )
-        return any(message.message_id not in sampled for message in pending)
 
     def _new_queued_operator_message_waiting(self) -> bool:
         """Return whether fresh operator authority may bypass an old retry delay."""
@@ -5782,11 +5812,20 @@ class AgentRuntime:
                 OperatorMessageStatus.ACKNOWLEDGED,
             }
         }
-        queued = self.state_db.load_operator_messages(
-            statuses={OperatorMessageStatus.QUEUED},
-            limit=20,
+        active = _active_operator_messages(self.state_db.load_operator_messages(
+            statuses={
+                OperatorMessageStatus.QUEUED,
+                OperatorMessageStatus.DELIVERED,
+                OperatorMessageStatus.ACKNOWLEDGED,
+                OperatorMessageStatus.REFUSED,
+            },
+            limit=1000,
+        ))
+        return any(
+            message.status == OperatorMessageStatus.QUEUED
+            and message.message_id not in pending_delivery
+            for message in active
         )
-        return any(message.message_id not in pending_delivery for message in queued)
 
     def _observed_hotbar_inventory(self) -> dict[str, int]:
         blackboard = getattr(self, "blackboard", None)
@@ -5886,30 +5925,22 @@ class AgentRuntime:
                 in {
                     OperatorMessageStatus.QUEUED,
                     OperatorMessageStatus.DELIVERED,
+                    OperatorMessageStatus.ACKNOWLEDGED,
+                    OperatorMessageStatus.REFUSED,
                 }
-            )[:20]
-            if not messages:
-                messages = tuple(
-                    message
-                    for message in operator_context.messages
-                    if message.status
-                    in {OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED}
-                )[:20]
-            operator_messages = _active_operator_messages(messages)
+            )[:1000]
+            operator_messages = _active_operator_messages(messages)[:20]
         elif self.state_db is not None:
             messages = self.state_db.load_operator_messages(
                 statuses={
                     OperatorMessageStatus.QUEUED,
                     OperatorMessageStatus.DELIVERED,
+                    OperatorMessageStatus.ACKNOWLEDGED,
+                    OperatorMessageStatus.REFUSED,
                 },
-                limit=20,
+                limit=1000,
             )
-            if not messages:
-                messages = self.state_db.load_operator_messages(
-                    statuses={OperatorMessageStatus.ACKNOWLEDGED, OperatorMessageStatus.REFUSED},
-                    limit=20,
-                )
-            operator_messages = _active_operator_messages(messages)
+            operator_messages = _active_operator_messages(messages)[:20]
         operator_messages = self._remember_operator_attempts(operator_messages)
         inspection = self._headroom_inspection_memory
         if (

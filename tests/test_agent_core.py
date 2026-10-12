@@ -1557,6 +1557,29 @@ def test_fresh_correction_supersedes_older_acknowledged_instruction() -> None:
     assert tuple(message.message_id for message in active) == ("correction",)
 
 
+def test_newer_acknowledged_instruction_tombstones_older_pending_backlog() -> None:
+    messages = (
+        OperatorMessage(
+            message_id="old-pending",
+            created_ns=1,
+            text="Do not start gameplay before handoff",
+            priority=1.0,
+            status=OperatorMessageStatus.DELIVERED,
+        ),
+        OperatorMessage(
+            message_id="new-handoff",
+            created_ns=2,
+            text="Manual review is complete; begin survival progression",
+            priority=0.8,
+            status=OperatorMessageStatus.ACKNOWLEDGED,
+        ),
+    )
+
+    active = _active_operator_messages(messages)
+
+    assert tuple(message.message_id for message in active) == ("new-handoff",)
+
+
 def test_fresh_directive_precedes_an_older_acknowledged_correction() -> None:
     messages = (
         OperatorMessage(
@@ -5660,7 +5683,7 @@ def test_delivered_operator_message_remains_waiting_until_acknowledged(tmp_path:
         database.close()
 
 
-def test_pending_operator_message_is_not_hidden_by_newer_acknowledged_history(
+def test_pending_operator_message_older_than_acknowledged_handoff_is_tombstoned(
     tmp_path: Path,
 ) -> None:
     database = StateDatabase(tmp_path / "state.sqlite3")
@@ -5701,7 +5724,7 @@ def test_pending_operator_message_is_not_hidden_by_newer_acknowledged_history(
         context = runtime._cognition_context()
 
         assert tuple(message.message_id for message in context.operator_messages) == (
-            "old-pending",
+            "acknowledged-21",
         )
     finally:
         database.close()
@@ -5875,7 +5898,7 @@ def test_accepted_correction_cannot_install_a_persistent_plan(tmp_path: Path) ->
         database.close()
 
 
-def test_valid_acknowledgement_drains_next_message_without_failure_backoff(
+def test_valid_acknowledgement_tombstones_older_pending_message(
     tmp_path: Path,
 ) -> None:
     database = StateDatabase(tmp_path / "state.sqlite3")
@@ -5907,10 +5930,9 @@ def test_valid_acknowledgement_drains_next_message_without_failure_backoff(
         }
         assert messages["first"].status == OperatorMessageStatus.ACKNOWLEDGED
         assert messages["second"].status == OperatorMessageStatus.DELIVERED
-        assert runtime._cognition_requested is True
+        assert runtime._cognition_requested is False
         assert runtime._cognition_retry_count == 0
-        delay = runtime._cognition_retry_not_before_ns - runtime._last_cognition_ns
-        assert 0 < delay <= 250_000_000
+        assert runtime._cognition_retry_not_before_ns == 0
     finally:
         database.close()
 

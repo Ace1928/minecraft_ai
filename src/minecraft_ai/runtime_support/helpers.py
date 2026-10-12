@@ -1223,6 +1223,21 @@ def _active_operator_messages(
     # Typed directions use the existing executor under their durable receipt,
     # never free-form cognition or an acknowledged instruction replay.
     messages = tuple(message for message in messages if message.direction_request_id is None)
+    terminal = tuple(
+        message
+        for message in messages
+        if (
+            message.status == OperatorMessageStatus.REFUSED
+            or (
+                message.status == OperatorMessageStatus.ACKNOWLEDGED
+                and message.kind
+                in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
+            )
+        )
+    )
+    newest_terminal = (
+        None if not terminal else max(terminal, key=lambda message: message.created_ns)
+    )
     pending = tuple(
         message
         for message in messages
@@ -1231,6 +1246,13 @@ def _active_operator_messages(
             OperatorMessageStatus.QUEUED,
             OperatorMessageStatus.DELIVERED,
         }
+        # A newer terminal directive is a durable intent-watermark. Retain the
+        # older inbox rows for audit, but never let a delayed backlog item
+        # silently regain motor authority underneath the completed handoff.
+        and (
+            newest_terminal is None
+            or message.created_ns > newest_terminal.created_ns
+        )
     )
     if pending:
         return tuple(
@@ -1244,26 +1266,13 @@ def _active_operator_messages(
                 reverse=True,
             )
         )
-    acknowledged = tuple(
-        message
-        for message in messages
-        if (
-            message.status == OperatorMessageStatus.REFUSED
-            or (
-                message.status == OperatorMessageStatus.ACKNOWLEDGED
-                and message.kind
-                in {OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION}
-            )
-        )
-    )
-    if not acknowledged:
+    if newest_terminal is None:
         return ()
-    newest = max(acknowledged, key=lambda message: message.created_ns)
     return (
-        (newest,)
+        (newest_terminal,)
         if (
-            newest.status == OperatorMessageStatus.ACKNOWLEDGED
-            and newest.kind == OperatorMessageKind.INSTRUCTION
+            newest_terminal.status == OperatorMessageStatus.ACKNOWLEDGED
+            and newest_terminal.kind == OperatorMessageKind.INSTRUCTION
         )
         else ()
     )
