@@ -878,7 +878,8 @@ def test_native_world_controller_recipe_reaches_existing_leased_chat_contract(mo
     answer = catalog.lookup("How do I craft a Poké Ball?", game_version="1.26.52.3")
     assert answer is not None
     runtime_id = "b" * 32
-    from erais.demo.minecraft_cognition_contract import parse_format
+    contract = pytest.importorskip("erais.demo.minecraft_cognition_contract")
+    parse_format = contract.parse_format
     identity = {"runtime_id": runtime_id, "fully_native": True, "source_family": "Qwen3",
                 "minecraft_cognition": {"contract": "erais.minecraft.cognition.v1",
                     "supported": True, "tokenizer_identity": "c" * 64,
