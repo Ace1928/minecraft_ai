@@ -343,6 +343,10 @@ def test_existing_executor_completes_two_attributed_pulses_and_retires_once(gate
     import minecraft_ai.runtime as runtime_module
 
     sent = []
+    # Model the coarse Windows monotonic clock which can assign the accepted
+    # pulse and its causally later frame the same timestamp.  Frame ids retain
+    # the strict ordering evidence in this case.
+    monkeypatch.setattr(time, "monotonic_ns", lambda: 10_000_000_000)
     monkeypatch.setattr(runtime_module, "operator_pause_latched", lambda: False)
     monkeypatch.setattr(
         runtime_module,

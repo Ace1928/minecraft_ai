@@ -761,8 +761,12 @@ class DirectionsGateway:
                 or fact.value is not True
                 or fact.source != BEDROCK_HUD_SAFETY_SOURCE
                 or capture is None
-                or fact.observed_ns <= step["action_monotonic_ns"]
-                or capture.captured_ns <= step["action_monotonic_ns"]
+                # Windows may report the accepted action and the next capture
+                # on the same coarse monotonic tick.  The strictly increasing
+                # frame id below establishes causal order in that case; only a
+                # genuinely older observation is inadmissible.
+                or fact.observed_ns < step["action_monotonic_ns"]
+                or capture.captured_ns < step["action_monotonic_ns"]
                 or capture.frame_id <= step["action_frame_id"]
             ):
                 self._revoke_conn(
@@ -788,14 +792,17 @@ class DirectionsGateway:
             if run.skill_id == "close_open_inventory":
                 steps = sdb.connection.execute(
                     "SELECT * FROM paid_direction_steps WHERE request_id=? "
-                    "AND attempt_id=? ORDER BY action_monotonic_ns",
+                    "AND attempt_id=? ORDER BY "
+                    "CASE skill_id WHEN 'open_inventory' THEN 0 ELSE 1 END",
                     (request_id, attempt_id),
                 ).fetchall()
                 if (
                     len(steps) != 2
                     or steps[0]["skill_id"] != "open_inventory"
                     or steps[0]["verified_monotonic_ns"] is None
-                    or steps[0]["verified_monotonic_ns"] >= steps[1]["action_monotonic_ns"]
+                    # Open verification starts the close phase synchronously.
+                    # Equal coarse clock ticks are valid; reversed time is not.
+                    or steps[0]["verified_monotonic_ns"] > steps[1]["action_monotonic_ns"]
                 ):
                     self._revoke_conn(
                         sdb, row, DirectionsState.FAILED, "inventory_order_unverified"
