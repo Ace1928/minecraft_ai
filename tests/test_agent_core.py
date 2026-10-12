@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -920,6 +921,22 @@ def _motor_shutdown_runtime() -> tuple[AgentRuntime, _AcceptedTrajectorySpy]:
             instance_id="bedrock:shutdown-test",
             width=1,
             height=1,
+            facts=(
+                PerceptionFact(
+                    key="scene.playable",
+                    value=True,
+                    confidence=1.0,
+                    observed_ns=now,
+                    source=BEDROCK_HUD_SAFETY_SOURCE,
+                ),
+                PerceptionFact(
+                    key="scene.mode",
+                    value="world",
+                    confidence=1.0,
+                    observed_ns=now,
+                    source=BEDROCK_HUD_SAFETY_SOURCE,
+                ),
+            ),
         )
     )
     trajectory = _AcceptedTrajectorySpy()
@@ -938,8 +955,129 @@ def _motor_shutdown_runtime() -> tuple[AgentRuntime, _AcceptedTrajectorySpy]:
     runtime.lease_id = "lease-test"
     runtime._last_decision = None
     runtime._sequence = 7
+    runtime._input_release_pending_ns = None
     runtime.metrics = RuntimeMetrics(motor_actions=3)
     return runtime, trajectory
+
+
+def test_motor_boundary_rejects_stale_world_authority_on_new_unknown_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, trajectory = _motor_shutdown_runtime()
+    old = runtime.blackboard.raw_latest()
+    assert old is not None
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=old.frame_id + 1,
+            captured_ns=old.captured_ns + 1,
+            instance_id=old.instance_id,
+            width=old.width,
+            height=old.height,
+        )
+    )
+    runtime.executor.notify_inputs_released = Mock()
+    sent: list[str] = []
+
+    def dispatch(command: str, **_kwargs: object) -> dict[str, object]:
+        sent.append(command)
+        if command == "release-inputs":
+            return {"released": True, "lease_active": True}
+        raise AssertionError("stale scene must not reach the motor")
+
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+    monkeypatch.setattr("minecraft_ai.runtime.send_command", dispatch)
+
+    assert runtime._send_motor(MotorAction(sequence=7, keys_down=("w",))) is False
+    assert sent == ["release-inputs"]
+    assert runtime.metrics.scene_interlocks == 1
+    assert runtime.metrics.motor_actions == 3
+    assert trajectory.accepted_calls == 0
+    runtime.executor.notify_inputs_released.assert_called_once()
+
+
+def test_motor_boundary_allows_release_on_unknown_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, trajectory = _motor_shutdown_runtime()
+    old = runtime.blackboard.raw_latest()
+    assert old is not None
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=old.frame_id + 1,
+            captured_ns=old.captured_ns + 1,
+            instance_id=old.instance_id,
+            width=old.width,
+            height=old.height,
+        )
+    )
+    sent: list[dict[str, object]] = []
+    monkeypatch.setattr("minecraft_ai.runtime.operator_pause_latched", lambda: False)
+    monkeypatch.setattr(
+        "minecraft_ai.runtime.send_command",
+        lambda _command, **payload: sent.append(payload)
+        or {"accepted_sequence": payload["action"]["sequence"]},
+    )
+
+    assert runtime._send_motor(MotorAction(sequence=7, keys_up=("w",))) is True
+    assert len(sent) == 1
+    assert runtime.metrics.scene_interlocks == 0
+    assert runtime.metrics.motor_actions == 4
+    assert trajectory.accepted_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("scene_key", "skill_id", "admitted"),
+    (
+        ("scene.death", "respawn_after_death", True),
+        ("scene.death", "explore_forward", False),
+        ("scene.away", "dismiss_away_overlay", True),
+        ("scene.away", "respawn_after_death", False),
+        ("scene.inventory_overlay", "close_open_inventory", True),
+        ("scene.inventory_overlay", "craft_wood_planks", True),
+    ),
+)
+def test_motor_boundary_scopes_current_overlay_authority(
+    scene_key: str,
+    skill_id: str,
+    admitted: bool,
+) -> None:
+    runtime, _trajectory = _motor_shutdown_runtime()
+    old = runtime.blackboard.raw_latest()
+    assert old is not None
+    captured_ns = old.captured_ns + 1
+    runtime.blackboard.publish(
+        FrameState(
+            frame_id=old.frame_id + 1,
+            captured_ns=captured_ns,
+            instance_id=old.instance_id,
+            width=old.width,
+            height=old.height,
+            facts=(
+                PerceptionFact(
+                    key=scene_key,
+                    value=True,
+                    confidence=1.0,
+                    observed_ns=captured_ns,
+                    source=BEDROCK_HUD_SAFETY_SOURCE,
+                ),
+            ),
+        )
+    )
+    action = MotorAction(
+        sequence=7,
+        buttons_down=("left",),
+        buttons_up=("left",),
+        cursor_x=0.5,
+        cursor_y=0.5,
+        camera_semantics="cursor",
+    )
+    execution = ExecutionTick(
+        run=SkillRun(run_id="scene-gate", skill_id=skill_id, started_ns=1),
+        action=action,
+        action_origin=ActionOrigin.SYNTHETIC,
+    )
+
+    assert runtime._current_scene_admits_motor(action, execution) is admitted
 
 
 def test_motor_send_noops_when_runtime_is_already_stopping(

@@ -2030,6 +2030,69 @@ class AgentRuntime:
             and latest.captured_ns <= mode.observed_ns <= now_ns
         )
 
+    def _current_scene_admits_motor(
+        self,
+        action: MotorAction,
+        execution: ExecutionTick | None,
+    ) -> bool:
+        """Admit positive input only against safety facts from the latest frame.
+
+        Learned and synthetic controllers may finish after the pixels which
+        produced their proposal have already been replaced by a loading, death,
+        or GUI frame.  Fact TTL alone is therefore insufficient at the final
+        actuator boundary.  Release-only actions remain unconditional so an
+        uncertain scene can always become physically quiet.
+        """
+
+        positive_input = bool(
+            action.keys_down
+            or action.buttons_down
+            or action.mouse_dx
+            or action.mouse_dy
+            or action.cursor_x is not None
+        )
+        if not positive_input:
+            return True
+
+        latest = self.blackboard.raw_latest()
+        if latest is None:
+            return False
+        now_ns = time.monotonic_ns()
+
+        def current_safety_value(key: str, expected: object) -> bool:
+            fact = self.blackboard.fact(key, min_confidence=0.65, now_ns=now_ns)
+            return bool(
+                fact is not None
+                and fact.value == expected
+                and fact.source == BEDROCK_HUD_SAFETY_SOURCE
+                and latest.captured_ns <= fact.observed_ns <= now_ns
+            )
+
+        running = self.executor.run if execution is None else execution.run
+        skill_id = None if running is None else running.skill_id
+
+        # Specific unsafe overlays take precedence over any other retained
+        # scene fact.  Their actuator authority is deliberately narrow.
+        if current_safety_value("scene.death", True):
+            return skill_id == "respawn_after_death"
+        if current_safety_value("scene.away", True):
+            return skill_id == "dismiss_away_overlay"
+        if current_safety_value("scene.inventory_overlay", True):
+            return skill_id in {
+                "activate_visible_gui_control",
+                "close_open_inventory",
+                "craft_wood_planks",
+            }
+        if current_safety_value("scene.ui_overlay", True):
+            return (
+                skill_id == "activate_visible_gui_control"
+                and action.camera_semantics == "cursor"
+            )
+
+        return current_safety_value(
+            "scene.playable", True
+        ) and current_safety_value("scene.mode", "world")
+
     def _materialize_headroom_target(
         self,
         recovery: _HeadroomRecovery,
@@ -2619,6 +2682,10 @@ class AgentRuntime:
                         # Other admission work may wait. Recheck the same owner
                         # clock immediately before the actuator boundary.
                         if callable(operator_admission) and not operator_admission(execution):
+                            return False
+                        if not self._current_scene_admits_motor(action, execution):
+                            self.metrics.scene_interlocks += 1
+                            self._release_and_reconcile_inputs()
                             return False
                         accepted = send_command(
                             "motor-action",
@@ -6331,6 +6398,7 @@ class AgentRuntime:
             "last_motor_ms": round(self.metrics.last_motor_ms, 3),
             "stale_frame_skips": self.metrics.stale_frame_skips,
             "consecutive_stale_frames": self.metrics.consecutive_stale_frames,
+            "scene_interlocks": self.metrics.scene_interlocks,
             "input_release_pending": self._input_release_pending_ns is not None,
             "traversal_escalation": {
                 "pending": bool(self._traversal_escalation_pending),

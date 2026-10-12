@@ -281,6 +281,7 @@ class RuntimeHarness:
     """Real skill executor and AgentRuntime motor boundary; no game input backend."""
 
     _send_motor = AgentRuntime._send_motor
+    _current_scene_admits_motor = AgentRuntime._current_scene_admits_motor
 
     def __init__(self, gateway, database):
         self.state_db, self._direction_gateway = database, gateway
@@ -296,7 +297,7 @@ class RuntimeHarness:
         self._cognition_requested = False
         self.lease_id = "fixture-lease"
         self.trajectory = None
-        self.metrics = SimpleNamespace(motor_actions=0)
+        self.metrics = SimpleNamespace(motor_actions=0, scene_interlocks=0)
         self.runs = []
         self._note_keepalive_prediction = lambda *args: None
 
@@ -331,6 +332,7 @@ class RuntimeHarness:
                     )
                     for key, value in (
                         ("scene.playable", not inventory),
+                        ("scene.mode", "inventory" if inventory else "world"),
                         ("scene.ui_overlay", inventory),
                         ("scene.inventory_overlay", inventory),
                     )

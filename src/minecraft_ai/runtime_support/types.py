@@ -130,6 +130,6 @@ class RuntimeMetrics:
     last_motor_ms: float = 0.0
     stale_frame_skips: int = 0
     consecutive_stale_frames: int = 0
+    scene_interlocks: int = 0
     storage_contentions: int = 0
     last_storage_error: str | None = None
-
