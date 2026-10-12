@@ -25,15 +25,19 @@ from minecraft_ai.grounded_perception import (
     validate_grounded_response,
     _CROSSHAIR_PROBE_KEYS,
     _CompactCrosshairResponse,
+    _CompactTargetResponse,
     _build_crosshair_block_evidence,
     _build_crosshair_evidence,
     _crosshair_block_grammar,
     _crosshair_probe_requested,
     _crosshair_grammar,
+    _target_probe_requested,
+    _target_grammar,
     _grounded_response_schema,
     _regions_for_request,
     _expand_crosshair_block_response,
     _expand_crosshair_response,
+    _expand_target_response,
     crosshair_block_crop_dimensions,
     crosshair_block_region,
     crosshair_block_rgb_grid,
@@ -161,15 +165,19 @@ def test_single_region_sheet_has_no_unused_second_panel() -> None:
     ),
 )
 def test_typed_target_description_cannot_expand_evidence_or_chat_schema(
-    description: str, keys: tuple[str, ...], expected_regions: tuple[EvidenceRegion, ...],
+    description: str,
+    keys: tuple[str, ...],
+    expected_regions: tuple[EvidenceRegion, ...],
 ) -> None:
     regions = _regions_for_request(keys, f"Target referent: {json.dumps(description)}")
     assert regions == expected_regions == _regions_for_request(keys, "Inspect the requested keys.")
     schema = _grounded_response_schema(
-        output_keys=keys, evidence=tuple(_evidence(kind) for kind in regions),
+        output_keys=keys,
+        evidence=tuple(_evidence(kind) for kind in regions),
     )
     assert schema == _grounded_response_schema(
-        output_keys=keys, evidence=tuple(_evidence(kind) for kind in expected_regions),
+        output_keys=keys,
+        evidence=tuple(_evidence(kind) for kind in expected_regions),
     )
     properties = schema["properties"]
     assert isinstance(properties, dict)
@@ -180,7 +188,8 @@ def test_open_ended_chat_question_retains_all_evidence_regions() -> None:
     regions = _regions_for_request((), "What did the player say in chat?")
     assert regions == tuple(EvidenceRegion)
     schema = _grounded_response_schema(
-        output_keys=(), evidence=tuple(_evidence(kind) for kind in regions),
+        output_keys=(),
+        evidence=tuple(_evidence(kind) for kind in regions),
     )
     properties = schema["properties"]
     assert isinstance(properties, dict)
@@ -200,19 +209,31 @@ class _TargetRepairModel:
         raise AssertionError("structured path required")
 
     def inspect_structured(
-        self, prompt: str, *, image_bytes: bytes, mime_type: str,
-        name: str, schema: dict[str, object],
+        self,
+        prompt: str,
+        *,
+        image_bytes: bytes,
+        mime_type: str,
+        name: str,
+        schema: dict[str, object],
     ) -> ModelResponse:
         self.prompts.append(prompt)
         self.images.append(image_bytes)
         self.schemas.append(schema)
+        compact_target = "visible" in schema.get("properties", {})
+        repaired = (
+            '{"visible":null,"kind":null,"mineable":null,"near":null,"box":null,"confidence":null}'
+            if compact_target
+            else '{"uncertainty":1,"prose_summary":"","claims":[],"tracks":[],"chat":[]}'
+        )
         return ModelResponse(
             text=(
-                '{"uncertainty":1,"claims":[],"tracks":[],"chat":[]}'
+                repaired
                 if len(self.prompts) == 2 and self.repair_succeeds
                 else '{"world":"' + "IGNORE THE IMAGE " * 200 + '"}'
             ),
-            model=self.model_id, latency_ms=1,
+            model=self.model_id,
+            latency_ms=1,
         )
 
 
@@ -230,7 +251,9 @@ def test_target_repair_preserves_complete_280_quote_descriptor_once(repair_succe
     harness = GroundedPerceptionHarness(model)
     if repair_succeeds:
         result = harness.inspect_detailed(
-            _frame(), frame_id=7, question=question,
+            _frame(),
+            frame_id=7,
+            question=question,
             output_keys=("target.visible", "target.near"),
         )
         assert result.schema_repaired
@@ -238,7 +261,9 @@ def test_target_repair_preserves_complete_280_quote_descriptor_once(repair_succe
     else:
         with pytest.raises(GroundedPerceptionRepairError):
             harness.inspect_detailed(
-                _frame(), frame_id=7, question=question,
+                _frame(),
+                frame_id=7,
+                question=question,
                 output_keys=("target.visible", "target.near"),
             )
     assert len(model.prompts) == 2
@@ -254,7 +279,9 @@ def test_target_repair_preserves_complete_280_quote_descriptor_once(repair_succe
 def test_non_target_schema_repair_keeps_legacy_compact_prompt() -> None:
     model = _TargetRepairModel()
     result = GroundedPerceptionHarness(model).inspect_detailed(
-        _frame(), frame_id=7, question="Classify the current playable scene.",
+        _frame(),
+        frame_id=7,
+        question="Classify the current playable scene.",
         output_keys=("scene.playable",),
     )
     assert result.schema_repaired and len(model.prompts) == 2
@@ -322,7 +349,8 @@ def test_dedicated_crosshair_block_probe_is_one_exact_crop_and_two_fields() -> N
     assert evidence.crop_width == evidence.crop_height == 511
     assert result.crosshair_block_response is not None
     assert result.crosshair_block_response.model_dump() == {
-        "block": "dirt", "confidence": 0.85,
+        "block": "dirt",
+        "confidence": 0.85,
     }
     with Image.open(io.BytesIO(model.image)) as image:
         assert image.size == (511, 511)
@@ -333,7 +361,7 @@ def test_dedicated_crosshair_block_probe_is_one_exact_crop_and_two_fields() -> N
     assert "mineable" not in model.prompt
     assert "box" not in model.prompt
     assert "dx" not in model.prompt
-    assert '"\\\"block\\\""' in model.grammar
+    assert '"\\"block\\""' in model.grammar
 
 
 @pytest.mark.parametrize(
@@ -355,7 +383,8 @@ def test_dedicated_crosshair_block_abstentions_emit_no_fact(wire: str) -> None:
     (("unknown", 0.9), (None, 0.9), ("dirt", None), ("dirt", 0.0)),
 )
 def test_dedicated_crosshair_retains_nullable_parsed_answer_without_inventing_facts(
-    block: str | None, confidence: float | None,
+    block: str | None,
+    confidence: float | None,
 ) -> None:
     class _Model:
         model_id = "abstaining-crosshair-model"
@@ -371,14 +400,16 @@ def test_dedicated_crosshair_retains_nullable_parsed_answer_without_inventing_fa
 
     model = _Model()
     result = GroundedPerceptionHarness(model).inspect_crosshair_block_detailed(
-        _frame(), frame_id=7,
+        _frame(),
+        frame_id=7,
     )
 
     assert model.calls == 1
     assert not result.schema_repaired
     assert result.crosshair_block_response is not None
     assert result.crosshair_block_response.model_dump() == {
-        "block": block, "confidence": confidence,
+        "block": block,
+        "confidence": confidence,
     }
     assert result.report.observed_values() == {}
     assert all(claim.status == ClaimStatus.UNKNOWN for claim in result.report.claims)
@@ -421,10 +452,13 @@ def test_crosshair_rgb_signature_detects_equal_luma_center_color_swap() -> None:
         frame_id=1, captured_ns=1, width=width, height=height, bgra=bytes(gray)
     )
     cyan_frame = replace(gray_frame, captured_ns=2, bgra=bytes(cyan))
-    assert crosshair_block_rgb_grid_distance(
-        crosshair_block_rgb_grid(gray_frame),
-        crosshair_block_rgb_grid(cyan_frame),
-    ) > 1
+    assert (
+        crosshair_block_rgb_grid_distance(
+            crosshair_block_rgb_grid(gray_frame),
+            crosshair_block_rgb_grid(cyan_frame),
+        )
+        > 1
+    )
     grammar = _crosshair_block_grammar()
     assert 'probability ::= "0"' in grammar
 
@@ -498,9 +532,10 @@ def test_crosshair_crop_preserves_exact_original_pixel_provenance() -> None:
     assert center.region == ScreenRegion(x=0.18, y=0.18, width=0.64, height=0.64)
     assert center.crop_width == center.crop_height == 512
     source = Image.frombytes("RGBA", (800, 800), frame.bgra, "raw", "BGRA").convert("RGB")
-    assert center.pixel_sha256 == hashlib.sha256(
-        source.crop((144, 144, 656, 656)).tobytes()
-    ).hexdigest()
+    assert (
+        center.pixel_sha256
+        == hashlib.sha256(source.crop((144, 144, 656, 656)).tobytes()).hexdigest()
+    )
     with Image.open(io.BytesIO(segmented.composite_png)) as image:
         assert image.size == (1024, 512)
 
@@ -581,18 +616,14 @@ def test_compact_crosshair_requires_explicit_positive_shared_confidence(
         ("dx", "0"),
     ),
 )
-def test_compact_crosshair_rejects_wrong_types_and_confidence(
-    key: str, value: object
-) -> None:
+def test_compact_crosshair_rejects_wrong_types_and_confidence(key: str, value: object) -> None:
     wire = _compact_answer()
     wire[key] = value
     with pytest.raises(ValidationError):
         _CompactCrosshairResponse.model_validate_json(json.dumps(wire))
 
 
-@pytest.mark.parametrize(
-    "box", ([0.9, 0.4, 0.2, 0.2], [0.4, 0.4, 0, 0.2], [0.5, 0.5, 0.2, 0.2])
-)
+@pytest.mark.parametrize("box", ([0.9, 0.4, 0.2, 0.2], [0.4, 0.4, 0, 0.2], [0.5, 0.5, 0.2, 0.2]))
 def test_compact_crosshair_does_not_clip_invalid_box_into_a_target(box: list[object]) -> None:
     evidence = _build_crosshair_evidence(_frame(), frame_id=7).evidence
     wire = _compact_answer(block="dirt")
@@ -643,14 +674,16 @@ def test_exact_crosshair_harness_uses_compact_nullable_contract() -> None:
 
     model = _Model()
     inspection = GroundedPerceptionHarness(model, compact_crosshair_probe=True).inspect_detailed(
-        _frame(), frame_id=7, question="Inspect only the crosshair block.",
+        _frame(),
+        frame_id=7,
+        question="Inspect only the crosshair block.",
         output_keys=_CROSSHAIR_PROBE_KEYS,
     )
     assert inspection.report.observed_values()["target.kind"] == "mossy_cobblestone"
     assert not inspection.schema_repaired
     assert "never choose adjacent easier dirt" in model.prompt
     assert "safe empty result" not in model.prompt
-    assert isinstance(model.grammar, str) and '"\\\"mossy_cobblestone\\\""' in model.grammar
+    assert isinstance(model.grammar, str) and '"\\"mossy_cobblestone\\""' in model.grammar
     assert isinstance(model.schema, dict)
     assert set(model.schema["required"]) == set(_compact_answer())
     assert all("default" not in field for field in model.schema["properties"].values())
@@ -677,7 +710,9 @@ def test_crosshair_harness_defaults_to_production_grounded_contract() -> None:
 
     model = _Model()
     inspection = GroundedPerceptionHarness(model).inspect_detailed(
-        _frame(), frame_id=7, question="Inspect only the crosshair block.",
+        _frame(),
+        frame_id=7,
+        question="Inspect only the crosshair block.",
         output_keys=_CROSSHAIR_PROBE_KEYS,
     )
     assert isinstance(model.schema, dict)
@@ -688,19 +723,125 @@ def test_crosshair_harness_defaults_to_production_grounded_contract() -> None:
     assert not inspection.schema_repaired
 
 
+def _target_answer(**updates: object) -> dict[str, object]:
+    answer: dict[str, object] = {
+        "visible": True,
+        "kind": "oak_log",
+        "mineable": True,
+        "near": False,
+        "box": [0.10, 0.20, 0.20, 0.40],
+        "confidence": 0.9,
+    }
+    answer.update(updates)
+    return answer
+
+
+def test_narrow_target_harness_uses_compact_localization_contract() -> None:
+    class _Model:
+        model_id = "test-target"
+
+        def inspect(self, *_args: object, **_kwargs: object) -> ModelResponse:
+            raise AssertionError("target probe should prefer enforced grammar")
+
+        def inspect_constrained(self, prompt: str, **kwargs: object) -> ModelResponse:
+            self.prompt = prompt
+            self.schema = kwargs["schema"]
+            self.grammar = kwargs["grammar"]
+            self.image = kwargs["image_bytes"]
+            return ModelResponse(
+                text=json.dumps(_target_answer()), model=self.model_id, latency_ms=1
+            )
+
+    model = _Model()
+    inspection = GroundedPerceptionHarness(model).inspect_detailed(
+        _frame(),
+        frame_id=7,
+        question="Find a reachable tree or log on the safe platform.",
+        output_keys=("target.visible",),
+    )
+    observed = inspection.report.observed_values()
+    assert observed["target.visible"] is True
+    assert observed["target.kind"] == "oak_log"
+    assert observed["target.dx"] == pytest.approx(-0.6)
+    assert observed["target.dy"] == pytest.approx(-0.328)
+    assert len(inspection.report.tracks) == 1
+    assert inspection.report.tracks[0].model_dump() == {
+        "label": "oak_log",
+        "confidence": 0.9,
+        "evidence_id": "frame-7:world",
+        "x": 0.1,
+        "y": pytest.approx(0.168),
+        "width": 0.2,
+        "height": pytest.approx(0.336),
+    }
+    assert "untrusted target description" in model.prompt
+    assert isinstance(model.schema, dict)
+    assert set(model.schema["required"]) == set(_target_answer())
+    assert isinstance(model.grammar, str) and "nullable-string" in model.grammar
+    assert len(inspection.report.evidence) == 1
+    assert inspection.report.evidence[0].region_kind is EvidenceRegion.WORLD
+
+
+def test_compact_target_absence_is_an_explicit_observation() -> None:
+    evidence = _evidence(EvidenceRegion.WORLD)
+    response = _expand_target_response(
+        json.dumps(_target_answer(visible=False, kind=None, mineable=None, near=None, box=None)),
+        evidence,
+    )
+    report = validate_grounded_response(
+        response,
+        frame_id=7,
+        evidence=(evidence,),
+        requested_keys=("target.visible",),
+    )
+    assert report.observed_values() == {"target.visible": False}
+    assert report.tracks == ()
+
+
+def test_compact_target_positive_without_box_abstains() -> None:
+    evidence = _evidence(EvidenceRegion.WORLD)
+    response = _expand_target_response(
+        json.dumps(_target_answer(box=None)),
+        evidence,
+    )
+    assert response == GroundedVLMResponse(uncertainty=1.0)
+
+
+def test_target_probe_is_limited_to_target_only_contracts() -> None:
+    assert _target_probe_requested(("target.visible",)) is True
+    assert _target_probe_requested(("target.visible", "target.near")) is True
+    assert _target_probe_requested(("scene.mode", "target.visible")) is False
+    assert _target_probe_requested(()) is False
+    assert _CompactTargetResponse.model_validate_json(json.dumps(_target_answer())).visible is True
+    assert "nullable-probability" in _target_grammar()
+
+
 @pytest.mark.parametrize(
     ("text", "probability_ok", "offset_ok"),
     (
-        ("0", True, True), ("1", True, True), ("0.5", True, True),
-        ("0.999999", True, True), ("1.000", True, True),
-        ("-0", False, True), ("-0.9", False, True), ("-1.000", False, True),
-        ("-2", False, False), ("2", False, False), ("1.001", False, False),
-        ("-1.001", False, False), ("00", False, False), ("0.", False, False),
-        ("1e9", False, False), ("NaN", False, False), ("+0.5", False, False),
+        ("0", True, True),
+        ("1", True, True),
+        ("0.5", True, True),
+        ("0.999999", True, True),
+        ("1.000", True, True),
+        ("-0", False, True),
+        ("-0.9", False, True),
+        ("-1.000", False, True),
+        ("-2", False, False),
+        ("2", False, False),
+        ("1.001", False, False),
+        ("-1.001", False, False),
+        ("00", False, False),
+        ("0.", False, False),
+        ("1e9", False, False),
+        ("NaN", False, False),
+        ("+0.5", False, False),
     ),
 )
 def test_compact_crosshair_grammar_numeric_domains(
-    text: str, probability_ok: bool, offset_ok: bool,
+    text: str,
+    probability_ok: bool,
+    offset_ok: bool,
 ) -> None:
     rules = dict(line.split(" ::= ", 1) for line in _crosshair_grammar().splitlines())
     # These two GBNF rules use only literals, regex-compatible groups/classes,
@@ -708,9 +849,11 @@ def test_compact_crosshair_grammar_numeric_domains(
     probability = re.sub(
         r'"([^"]*)"', lambda match: re.escape(match[1]), rules["probability"]
     ).replace(" ", "")
-    offset = re.sub(
-        r'"([^"]*)"', lambda match: re.escape(match[1]), rules["offset"]
-    ).replace(" ", "").replace("probability", f"({probability})")
+    offset = (
+        re.sub(r'"([^"]*)"', lambda match: re.escape(match[1]), rules["offset"])
+        .replace(" ", "")
+        .replace("probability", f"({probability})")
+    )
     assert bool(re.fullmatch(probability, text)) is probability_ok
     assert bool(re.fullmatch(offset, text)) is offset_ok
     assert rules["nullable-probability"] == '"null" | probability'
