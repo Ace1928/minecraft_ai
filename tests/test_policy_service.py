@@ -255,6 +255,36 @@ def test_router_startup_warmup_skips_specialists_until_first_use() -> None:
     assert gui.warmups == 1
 
 
+def test_router_task_warmup_loads_only_declared_motion_body() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _RoutingPolicy("rocket", key="a")
+    raw_motion = _RoutingPolicy("vpt", key="space")
+    gui = _RoutingPolicy("vpt-gui", key="e")
+    router = GroundedPolicyRouter(
+        primary, grounded=grounded, raw_motion=raw_motion, gui=gui
+    )
+
+    router.warmup_level(ActionLevel.MOTION)
+
+    assert raw_motion.warmups == 1
+    assert primary.warmups == 0
+    assert grounded.warmups == 0
+    assert gui.warmups == 0
+
+
+def test_router_task_warmup_loads_grounded_body_and_observer() -> None:
+    primary = _RoutingPolicy("steve", key="w")
+    grounded = _RoutingPolicy("rocket", key="a")
+    raw_motion = _RoutingPolicy("vpt", key="space")
+    router = GroundedPolicyRouter(primary, grounded=grounded, raw_motion=raw_motion)
+
+    router.warmup_level(ActionLevel.GROUNDED)
+
+    assert primary.warmups == 1
+    assert grounded.warmups == 1
+    assert raw_motion.warmups == 0
+
+
 def test_router_anticipatory_warm_loads_specialist_before_bind() -> None:
     primary = _RoutingPolicy("steve", key="w")
     grounded = _RoutingPolicy("rocket", key="a")

@@ -12,7 +12,8 @@ from pathlib import Path
 
 from minecraft_ai.agent_lifecycle import agent_alive
 from minecraft_ai.config import RuntimeConfig, app_paths, load_config
-from minecraft_ai.eval.arena import ARENA_TASK_IDS, BedrockArenaRunner
+from minecraft_ai.builtin_skills import build_bootstrap_skill_library
+from minecraft_ai.eval.arena import ARENA_TASK_IDS, BedrockArenaRunner, arena_task
 from minecraft_ai.eval.evaluator import EvaluationEvidence, load_evidence
 from minecraft_ai.eval.tasks import BenchmarkTask
 from minecraft_ai.execution import SkillExecutor
@@ -211,7 +212,13 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("arena requires a complete in-world survival HUD")
         policy = _policy(config, perception)
         executor = SkillExecutor(policy)
-        policy.warmup()
+        _, task_binding = arena_task(args.task)
+        skill_library = build_bootstrap_skill_library()
+        for level in dict.fromkeys(
+            skill_library.get(phase.skill_id).action_level
+            for phase in task_binding.phases
+        ):
+            policy.warmup_level(level)
 
         status = send_command("status")
         if status.get("state") != SupervisorState.SAFE_IDLE.value:

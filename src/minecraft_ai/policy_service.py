@@ -1688,6 +1688,23 @@ class GroundedPolicyRouter:
         self._ensure_warm(self.primary)
         self._ensure_warm(self.raw_motion)
 
+    def warmup_level(self, level: ActionLevel) -> None:
+        """Synchronously load only the body and observer required by ``level``.
+
+        Evaluation tasks declare their action abstraction before any live
+        episode begins.  Warming unrelated semantic, GUI, or grounding models
+        there adds latency and can make a fast RAW/MOTION task fail before its
+        selected body is even started.  This explicit path preserves normal
+        runtime startup while letting a frozen task pay only for the experts it
+        will actually exercise.
+        """
+        selected, _, _ = self._body_for_level(level)
+        self._ensure_warm(selected)
+        if level == ActionLevel.GROUNDED:
+            self._ensure_warm(self.grounded)
+        elif level == ActionLevel.GUI:
+            self._ensure_warm(self.gui)
+
     def request_warm(self, level: ActionLevel) -> None:
         """Start warming the body for ``level`` without binding the episode.
 
