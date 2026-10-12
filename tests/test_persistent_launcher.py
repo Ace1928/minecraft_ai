@@ -242,6 +242,9 @@ printf '%s\n' "$((1000 + seconds))"
         "MINECRAFT_AI_FAILURES_BEFORE_RECOVERY": "3",
         "MINECRAFT_AI_AGENT_TRANSITION_GRACE_S": "60",
         "MINECRAFT_AI_CLI_ENTRYPOINT": str(venv_bin / "minecraft-ai"),
+        # Keep established launcher tests independent of host packages. Tests
+        # for automatic selection remove this explicit override.
+        "MINECRAFT_AI_CAPTURE_SOURCE": "x11",
     }
     return root, env, state
 
@@ -292,6 +295,44 @@ def _run_launcher(
         timeout=60,
         check=False,
     )
+
+
+def test_launcher_prefers_native_ffmpeg_window_stream_when_available(
+    tmp_path: Path,
+) -> None:
+    root, env, state = _launcher_harness(tmp_path, constant_role="generalist")
+    env.pop("MINECRAFT_AI_CAPTURE_SOURCE")
+    env["STOP_AFTER_LIVEZ_SUCCESS"] = "1"
+    _write_executable(root / "bin" / "ffmpeg", "#!/usr/bin/env bash\nexit 0\n")
+
+    result = _run_launcher(root, env)
+
+    assert result.returncode == 0, result.stderr
+    run_calls = [
+        call
+        for call in (state / "cli-calls").read_text(encoding="utf-8").splitlines()
+        if call.startswith("run ")
+    ]
+    assert len(run_calls) == 1
+    assert "--capture-source ffmpeg-x11" in run_calls[0]
+
+
+def test_launcher_preserves_explicit_capture_source_override(tmp_path: Path) -> None:
+    root, env, state = _launcher_harness(tmp_path, constant_role="generalist")
+    env["MINECRAFT_AI_CAPTURE_SOURCE"] = "x11"
+    env["STOP_AFTER_LIVEZ_SUCCESS"] = "1"
+    _write_executable(root / "bin" / "ffmpeg", "#!/usr/bin/env bash\nexit 0\n")
+
+    result = _run_launcher(root, env)
+
+    assert result.returncode == 0, result.stderr
+    run_calls = [
+        call
+        for call in (state / "cli-calls").read_text(encoding="utf-8").splitlines()
+        if call.startswith("run ")
+    ]
+    assert len(run_calls) == 1
+    assert "--capture-source x11" in run_calls[0]
 
 
 def test_recovery_reloads_current_configured_role(tmp_path: Path) -> None:

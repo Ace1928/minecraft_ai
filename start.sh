@@ -12,7 +12,17 @@ else
     # able to shadow this checkout with an injected PYTHONPATH.
     CLI=(env -u PYTHONPATH -u PYTHONHOME "$PYTHON" -m minecraft_ai.cli)
 fi
-CAPTURE_SOURCE="${MINECRAFT_AI_CAPTURE_SOURCE:-x11}"
+CAPTURE_SOURCE="${MINECRAFT_AI_CAPTURE_SOURCE:-}"
+if [ -z "$CAPTURE_SOURCE" ]; then
+    # The persistent exact-window FFmpeg stream avoids paying one synchronous
+    # XGetImage round trip per motor tick. Keep the pure-X11 implementation as
+    # a zero-install fallback and preserve an explicit operator override.
+    if command -v ffmpeg >/dev/null 2>&1; then
+        CAPTURE_SOURCE="ffmpeg-x11"
+    else
+        CAPTURE_SOURCE="x11"
+    fi
+fi
 SERVER_NAME="${MINECRAFT_AI_SERVER_NAME:-}"
 CHECK_INTERVAL_S="${MINECRAFT_AI_CHECK_INTERVAL_S:-10}"
 FAILURES_BEFORE_RECOVERY="${MINECRAFT_AI_FAILURES_BEFORE_RECOVERY:-3}"

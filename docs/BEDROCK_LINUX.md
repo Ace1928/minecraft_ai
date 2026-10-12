@@ -243,7 +243,8 @@ minecraft-ai run --live --role generalist
 
 `run --live` performs these steps:
 
-1. parse options, including the shared `--capture-source [pipewire|x11]` choice,
+1. parse options, including the shared
+   `--capture-source [pipewire|x11|ffmpeg-x11]` choice,
    before any runtime mutation, then verify emergency-stop/operator-pause latches;
 2. start/reuse the independent supervisor;
 3. verify the managed headless Bedrock session and virtual-seat input isolation;
@@ -289,18 +290,27 @@ minecraft-ai reset-emergency-stop
 
 ## Capture
 
-`--capture-source` accepts only `pipewire` (default preference) and `x11`. Unknown
-values fail CLI parsing before configuration writes, supervisor startup, capture,
-attachment, calibration or arming. The child parser and capture factory use the
-same supported-source definition. A valid PipeWire preference selects X11 on the
-headless private display; Mutter/PipeWire requires an exact host-monitor binding
-and explicit host capture permission. Host capture does not authorize autonomous
-host input.
+`--capture-source` accepts only `pipewire` (default CLI preference), `x11`, and
+`ffmpeg-x11`. Unknown values fail CLI parsing before configuration writes,
+supervisor startup, capture, attachment, calibration or arming. The child parser
+and capture factory use the same supported-source definition. The one-click
+`start.sh` launcher selects `ffmpeg-x11` when FFmpeg is installed and otherwise
+falls back to `x11`; `MINECRAFT_AI_CAPTURE_SOURCE` remains an explicit override.
+A valid PipeWire preference selects X11 on the headless private display;
+Mutter/PipeWire requires an exact host-monitor binding and explicit host capture
+permission. Host capture does not authorize autonomous host input.
 
 `IsolatedX11Capture` resolves the selected Minecraft drawable on the private X
 server. It tries window-targeted XGetImage, with scoped `mss`/root-image fallbacks,
 and validates complete content geometry before returning BGRA frames. Capture
 timestamps must be monotonic and stale frames are fatal to the motor runtime.
+
+`FFmpegX11Capture` binds the same exact private-display window ID but keeps one
+native `x11grab` process alive at 20 Hz. A sole reader continuously drains raw
+BGRA frames and publishes only the newest complete frame, so a temporarily slow
+policy cannot accumulate stale video in a pipe. Window content geometry is
+revalidated periodically and any stream or geometry failure closes the source;
+it never broadens capture or input to the host desktop.
 
 While a verified live agent owns capture, the spectator dashboard reuses that
 agent's exact BGRA pixels from a private atomic snapshot in the runtime directory.
