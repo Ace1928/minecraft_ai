@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import time
 from dataclasses import replace
 from types import SimpleNamespace
@@ -20,6 +21,12 @@ from minecraft_ai.world_knowledge import WorldMinecraftSearch, minecraft_public_
 from minecraft_ai.social import OperatorMessage, OperatorMessageKind, OperatorMessageStatus
 from minecraft_ai.wiki import WikiEvidence
 from minecraft_ai.models import ModelResponse
+
+
+_linux_private_search = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the authenticated local search owner uses Linux private-file credentials",
+)
 
 
 @pytest.mark.parametrize("query,subject,intent", [
@@ -71,6 +78,7 @@ def _transport(monkeypatch, rows=None, *, payload=None, status=200):
     return connection, factory
 
 
+@_linux_private_search
 def test_shared_authenticated_proxy_yields_version_scoped_general_references(monkeypatch, tmp_path):
     connection, factory = _transport(monkeypatch)
     service = WorldMinecraftSearch(_token(tmp_path))
@@ -91,6 +99,7 @@ def test_shared_authenticated_proxy_yields_version_scoped_general_references(mon
     connection.close.assert_called_once()
 
 
+@_linux_private_search
 @pytest.mark.parametrize("url", [
     "http://minecraft.wiki/w/Copper", "https://example.test/w/Copper",
     "https://minecraft.wiki.evil.test/Copper", "https://user:password@minecraft.wiki/w/Copper",
@@ -103,6 +112,7 @@ def test_search_cannot_promote_untrusted_sources(monkeypatch, tmp_path, url) -> 
     ) == ()
 
 
+@_linux_private_search
 @pytest.mark.parametrize("case", ["expired", "bad_token", "oversize", "http_failure"])
 def test_failed_or_expired_lookup_produces_no_evidence(monkeypatch, tmp_path, case) -> None:
     connection, _ = _transport(
@@ -143,6 +153,7 @@ def _blackboard(*, query="Kid: Where do I find copper ore?", age_ms=0, instance=
     return board
 
 
+@_linux_private_search
 def test_reference_query_is_worker_only_and_does_not_write_observed_facts(monkeypatch, tmp_path):
     _transport(monkeypatch)
     service = WorldMinecraftSearch(_token(tmp_path))
@@ -253,6 +264,7 @@ def test_operator_reference_cannot_replace_authority_or_invent_pack_answers(case
         pack.lookup_live.assert_not_called()
 
 
+@_linux_private_search
 def test_operator_vanilla_question_uses_existing_private_search_filter(monkeypatch, tmp_path):
     connection, _ = _transport(monkeypatch)
     controller = HighLevelController(

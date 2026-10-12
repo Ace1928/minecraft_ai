@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import struct
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +20,11 @@ from minecraft_ai.platforms.bedrock_x11 import (
     IsolationError,
 )
 from minecraft_ai.platforms.frame_cache import PublishedFrameCapture, read_agent_frame
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the private frame cache verifies Linux uid, inode and FIFO semantics",
+)
 
 
 def _owner() -> AgentProcess:

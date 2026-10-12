@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -117,7 +118,8 @@ def test_pause_clear_audit_is_private_durable_and_origin_attributed(
     assert event["remote_peer"] == "127.0.0.1"
     assert event["pause_was_latched"] is True
     assert "secret" not in event
-    assert audit.stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert audit.stat().st_mode & 0o777 == 0o600
     assert not marker.exists()
 
 

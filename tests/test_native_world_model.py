@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import time
 from collections import deque
 from types import SimpleNamespace
@@ -23,6 +24,11 @@ from minecraft_ai.perception import FrameState, PerceptionBlackboard, Perception
 from minecraft_ai.runtime import AgentRuntime
 from minecraft_ai.social import SocialState
 from minecraft_ai.roles import get_role
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the private native World owner uses Linux file ownership and service contracts",
+)
 
 
 def _catalog_payload():

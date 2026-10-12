@@ -161,7 +161,7 @@ def test_camera_settings_include_fov_and_options_fingerprint(tmp_path: Path) -> 
     )
     options.parent.mkdir(parents=True)
     payload = "gfx_field_of_view:70\nctrl_sensitivity2_mouse:0.5\n"
-    options.write_text(payload, encoding="utf-8")
+    options.write_bytes(payload.encode())
 
     settings = read_bedrock_camera_settings(tmp_path)
 

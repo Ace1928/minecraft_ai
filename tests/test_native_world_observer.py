@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import time
 
 import pytest
@@ -12,6 +13,11 @@ from minecraft_ai.native_world_observer import (
     TASK_OUTPUTS,
 )
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the private native World observer verifies Linux owner credentials",
+)
 
 
 def _request(task="resource", **updates):

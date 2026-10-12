@@ -21,6 +21,11 @@ from minecraft_ai import cli, supervisor
 from minecraft_ai.agent import lifecycle, upgrade as u
 from minecraft_ai.config import RuntimeConfig, RuntimeFactoryConfig
 
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the offline handover transport pins Linux procfs and O_PATH identities",
+)
+
 
 @pytest.fixture
 def profiles(tmp_path, monkeypatch):

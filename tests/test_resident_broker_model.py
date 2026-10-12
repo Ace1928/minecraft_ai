@@ -6,6 +6,7 @@ import base64
 import json
 import socketserver
 import struct
+import sys
 import threading
 import time
 
@@ -18,6 +19,11 @@ from minecraft_ai.model_requests import RequestBinding
 from minecraft_ai.models import ModelMessage, OpenAICompatibleLocalModel, local_model_inference_lane
 from minecraft_ai.resident_broker_model import BrokeredLocalModel, configured_model
 from minecraft_ai.resident_broker_transport import CONTRACT, MODEL_ID, UPSTREAM_MODEL, BrokerError
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the private resident broker authenticates Linux Unix-socket peer credentials",
+)
 
 
 MESSAGES = (ModelMessage(role="user", content="fixture command"),)

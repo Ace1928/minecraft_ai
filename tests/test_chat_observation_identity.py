@@ -103,7 +103,7 @@ def test_player_question_authority_preserves_observation_confidence_and_time() -
 
 @pytest.mark.parametrize("overrides", [
     {"confidence": 0.69}, {"speaker": None}, {"speaker": "eIDOS"}, {"speaker": "Console"},
-    {"observed_ns": 1}, {"observed_ns": time.monotonic_ns() + 60_000_000_000},
+    {"observed_ns": 1}, {"observed_ns": 10**30},
 ])
 def test_weak_stale_future_or_self_chat_does_not_authorize_response(overrides) -> None:
     values = dict(
