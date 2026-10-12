@@ -329,6 +329,41 @@ def test_blackboard_rejects_instance_switch_and_stale_fact() -> None:
         raise AssertionError("instance identity changes must be rejected")
 
 
+def test_blackboard_uses_frame_id_when_monotonic_clock_tick_repeats() -> None:
+    board = PerceptionBlackboard()
+    captured_ns = 123_000_000
+    board.publish(
+        FrameState(
+            frame_id=1,
+            captured_ns=captured_ns,
+            instance_id="bedrock:coarse-clock",
+            width=32,
+            height=32,
+        )
+    )
+    board.publish(
+        FrameState(
+            frame_id=2,
+            captured_ns=captured_ns,
+            instance_id="bedrock:coarse-clock",
+            width=32,
+            height=32,
+        )
+    )
+    assert board.raw_latest() is not None
+    assert board.raw_latest().frame_id == 2
+    with pytest.raises(ValueError, match="frame timestamps"):
+        board.publish(
+            FrameState(
+                frame_id=3,
+                captured_ns=captured_ns - 1,
+                instance_id="bedrock:coarse-clock",
+                width=32,
+                height=32,
+            )
+        )
+
+
 def test_game_chat_requires_explicit_perception_authority() -> None:
     decision = CognitionDecision(game_chat="I found the base.")
     board = PerceptionBlackboard()

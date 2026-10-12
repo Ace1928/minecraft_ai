@@ -1155,6 +1155,39 @@ def test_realtime_hotbar_fact_is_bound_to_capture_not_inference_clock(
     assert diagnostic.observed_ns == inference_ns
 
 
+def test_realtime_capture_accepts_repeated_monotonic_clock_tick() -> None:
+    captured_ns = 123_000_000
+
+    class Capture:
+        next_frame_id = 1
+
+        def capture(self) -> CapturedFrame:
+            frame = CapturedFrame(
+                frame_id=self.next_frame_id,
+                captured_ns=captured_ns,
+                width=2,
+                height=2,
+                bgra=b"\0" * 16,
+            )
+            self.next_frame_id += 1
+            return frame
+
+        def close(self) -> None:
+            pass
+
+    board = PerceptionBlackboard()
+    service = RealtimePerceptionService(
+        capture_source=Capture(),
+        blackboard=board,
+        instance_id="bedrock:coarse-clock",
+        fast_perception=None,
+    )
+    first = service.capture_once()
+    second = service.capture_once()
+    assert (first.frame_id, second.frame_id) == (0, 1)
+    assert first.captured_ns == second.captured_ns == captured_ns
+
+
 def test_classic_hotbar_geometry_cache_revalidates_current_pixels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

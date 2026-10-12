@@ -486,7 +486,10 @@ def _headroom_clear_target(
         source != recovery.query_source
         or any(fact is None or fact.source != source for fact in facts)
         or any(fact is None or fact.observed_ns != observed_ns for fact in facts)
-        or observed_ns <= recovery.query_started_ns
+        # The query-specific source, evidence id, frame/crop hashes and pixel
+        # receipt establish causality.  Admit the same monotonic clock tick on
+        # coarse platforms; only an observation older than the query is stale.
+        or observed_ns < recovery.query_started_ns
         or observed_ns > now_ns
         or block.evidence_refs != (evidence_id,)
         or not isinstance(block.value, str)

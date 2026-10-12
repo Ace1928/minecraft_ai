@@ -240,7 +240,11 @@ class PerceptionBlackboard:
                     raise ValueError("perception instance identity changed")
                 if frame.frame_id <= previous.frame_id:
                     raise ValueError("frame ids must increase monotonically")
-                if frame.captured_ns <= previous.captured_ns:
+                # ``time.monotonic_ns`` is monotonic but not guaranteed to
+                # advance on every call.  Windows commonly returns the same
+                # tick for two captures; frame_id remains the strict ordering
+                # key, while a decreasing capture timestamp is still invalid.
+                if frame.captured_ns < previous.captured_ns:
                     raise ValueError("frame timestamps must increase monotonically")
             self._validate_evidence_refs_locked(
                 frame.facts,

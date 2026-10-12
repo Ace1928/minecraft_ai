@@ -967,7 +967,10 @@ class RealtimePerceptionService:
     def capture_once(self) -> FrameState:
         self._last_observation = None
         captured = self.capture_source.capture()
-        if self._last_frame_ns is not None and captured.captured_ns <= self._last_frame_ns:
+        # Some monotonic clocks have coarser resolution than the capture loop.
+        # Equal timestamps are ordered by the generated frame id; only a clock
+        # regression is unsafe.
+        if self._last_frame_ns is not None and captured.captured_ns < self._last_frame_ns:
             raise RuntimeError("capture timestamps are not monotonic")
         self._last_frame_ns = captured.captured_ns
         self._last_capture = captured

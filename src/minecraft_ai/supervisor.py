@@ -106,7 +106,7 @@ def clear_operator_pause(*, origin: str, remote_peer: str | None = None) -> None
         metadata = os.fstat(fd)
         if not stat.S_ISREG(metadata.st_mode):
             raise OSError("operator pause audit target is not a regular file")
-        os.fchmod(fd, 0o600)
+        _set_private_descriptor_mode(fd)
         written = 0
         while written < len(raw):
             count = os.write(fd, raw[written:])
