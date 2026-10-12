@@ -241,8 +241,39 @@ printf '%s\n' "$((1000 + seconds))"
         "MINECRAFT_AI_CHECK_INTERVAL_S": "0",
         "MINECRAFT_AI_FAILURES_BEFORE_RECOVERY": "3",
         "MINECRAFT_AI_AGENT_TRANSITION_GRACE_S": "60",
+        "MINECRAFT_AI_CLI_ENTRYPOINT": str(venv_bin / "minecraft-ai"),
     }
     return root, env, state
+
+
+def test_launcher_defaults_to_repo_module_instead_of_generated_console_script(
+    tmp_path: Path,
+) -> None:
+    root, env, state = _launcher_harness(tmp_path)
+    env.pop("MINECRAFT_AI_CLI_ENTRYPOINT")
+    python = root / ".venv" / "bin" / "python"
+    _write_executable(
+        python,
+        """#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = -m ] && [ "${2:-}" = minecraft_ai.cli ]; then
+    printf '%s\n' "$*" >> "$TEST_STATE/python-module-calls"
+    shift 2
+    exec "$(dirname "$0")/minecraft-ai" "$@"
+fi
+exec """ + shlex.quote(sys.executable) + """ "$@"
+""",
+    )
+    env["STOP_AFTER_LIVEZ_SUCCESS"] = "1"
+
+    result = _run_launcher(root, env)
+
+    assert result.returncode == 0, result.stderr
+    calls = (state / "python-module-calls").read_text(encoding="utf-8").splitlines()
+    assert calls and all(
+        call == "-m minecraft_ai.cli" or call.startswith("-m minecraft_ai.cli ")
+        for call in calls
+    )
 
 
 def _run_launcher(

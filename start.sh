@@ -2,8 +2,16 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLI="$SCRIPT_DIR/.venv/bin/minecraft-ai"
 PYTHON="$SCRIPT_DIR/.venv/bin/python"
+CLI_ENTRYPOINT="${MINECRAFT_AI_CLI_ENTRYPOINT:-}"
+if [ -n "$CLI_ENTRYPOINT" ]; then
+    CLI=("$CLI_ENTRYPOINT")
+else
+    # Execute the repository module with the verified virtual-environment
+    # interpreter. Console scripts are mutable generated files and must not be
+    # able to shadow this checkout with an injected PYTHONPATH.
+    CLI=(env -u PYTHONPATH -u PYTHONHOME "$PYTHON" -m minecraft_ai.cli)
+fi
 CAPTURE_SOURCE="${MINECRAFT_AI_CAPTURE_SOURCE:-x11}"
 SERVER_NAME="${MINECRAFT_AI_SERVER_NAME:-}"
 CHECK_INTERVAL_S="${MINECRAFT_AI_CHECK_INTERVAL_S:-10}"
@@ -18,7 +26,7 @@ input_route_hold_generation=""
 input_route_recovery_adopted=false
 camera_profile_hold_logged=false
 
-if [ ! -x "$CLI" ] || [ ! -x "$PYTHON" ]; then
+if [ ! -x "$PYTHON" ] || { [ -n "$CLI_ENTRYPOINT" ] && [ ! -x "$CLI_ENTRYPOINT" ]; }; then
     echo "Missing repo environment. Run: python3 -m venv .venv && .venv/bin/pip install -e '.[full,dev]'" >&2
     exit 2
 fi
@@ -38,11 +46,11 @@ fi
 RUN_ARGS=("$@")
 
 stop_runtime() {
-    "$CLI" stop --transient >/dev/null 2>&1 || true
+    "${CLI[@]}" stop --transient >/dev/null 2>&1 || true
 }
 
 stop_runtime_required() {
-    if "$CLI" stop --transient >/dev/null; then
+    if "${CLI[@]}" stop --transient >/dev/null; then
         return 0
     fi
     echo "Existing supervisor/agent containment could not be confirmed; startup is blocked." >&2
@@ -50,15 +58,15 @@ stop_runtime_required() {
 }
 
 stop_bedrock() {
-    "$CLI" bedrock stop --transient >/dev/null 2>&1 || true
+    "${CLI[@]}" bedrock stop --transient >/dev/null 2>&1 || true
 }
 
 operator_paused() {
-    "$CLI" status 2>/dev/null | grep -q '"operator_pause_latched": true'
+    "${CLI[@]}" status 2>/dev/null | grep -q '"operator_pause_latched": true'
 }
 
 emergency_latched() {
-    "$CLI" status 2>/dev/null | grep -q '"emergency_stop_latched": true'
+    "${CLI[@]}" status 2>/dev/null | grep -q '"emergency_stop_latched": true'
 }
 
 configured_runtime_role() {
@@ -78,7 +86,7 @@ runtime_role() {
 
 camera_profile_ready() {
     local camera_readiness
-    camera_readiness="$("$CLI" bedrock camera-ready 2>&1)"
+    camera_readiness="$("${CLI[@]}" bedrock camera-ready 2>&1)"
     if [ "$?" -ne 0 ]; then
         if [ "$camera_profile_hold_logged" != true ]; then
             echo "Bedrock camera profile is not ready; holding automatic startup without game input." >&2
@@ -93,7 +101,7 @@ camera_profile_ready() {
 
 healthy_agent_generation() {
     local payload
-    payload="$("$CLI" status 2>/dev/null)" || return 1
+    payload="$("${CLI[@]}" status 2>/dev/null)" || return 1
     printf '%s' "$payload" | "$PYTHON" -c '
 import json
 import sys
@@ -122,7 +130,7 @@ reset_start_failures() {
 input_route_held() {
     local payload observation
     input_route_recovery_adopted=false
-    payload="$("$CLI" status 2>/dev/null)" || payload=""
+    payload="$("${CLI[@]}" status 2>/dev/null)" || payload=""
     observation="$(printf '%s' "$payload" | "$PYTHON" -c '
 import json
 import sys
@@ -243,19 +251,19 @@ trap terminate INT TERM
 readiness_ok() {
     curl --fail --silent --show-error --max-time 5 \
         ${MINECRAFT_OPERATOR_URL:-http://127.0.0.1:8765}/readyz >/dev/null \
-        && "$CLI" model-ready >/dev/null 2>&1
+        && "${CLI[@]}" model-ready >/dev/null 2>&1
 }
 
 runtime_health_ok() {
     curl --fail --silent --show-error --max-time 5 \
         ${MINECRAFT_OPERATOR_URL:-http://127.0.0.1:8765}/livez >/dev/null \
-        && "$CLI" model-ready >/dev/null 2>&1
+        && "${CLI[@]}" model-ready >/dev/null 2>&1
 }
 
 start_support_services() {
     local service plan_json required_services
     local services=(minecraft-ai-dashboard-live.service)
-    if ! plan_json="$("$CLI" model-plan)"; then
+    if ! plan_json="$("${CLI[@]}" model-plan)"; then
         echo "Could not resolve the configured Minecraft model service plan." >&2
         return 1
     fi
@@ -290,7 +298,7 @@ print("\n".join(services))
 wait_for_bedrock_session() {
     local attempt
     for attempt in $(seq 1 45); do
-        if "$CLI" bedrock status 2>/dev/null | grep -q '"alive": true'; then
+        if "${CLI[@]}" bedrock status 2>/dev/null | grep -q '"alive": true'; then
             return 0
         fi
         sleep 1
@@ -300,13 +308,13 @@ wait_for_bedrock_session() {
 }
 
 bedrock_session_alive() {
-    "$CLI" bedrock status 2>/dev/null | grep -q '"alive": true'
+    "${CLI[@]}" bedrock status 2>/dev/null | grep -q '"alive": true'
 }
 
 wait_for_model() {
     local attempt
     for attempt in $(seq 1 60); do
-        if "$CLI" model-ready >/dev/null 2>&1; then
+        if "${CLI[@]}" model-ready >/dev/null 2>&1; then
             return 0
         fi
         sleep 2
@@ -368,7 +376,7 @@ start_live_runtime() {
         echo "Operator pause was requested during cleanup; startup is suspended." >&2
         return 65
     fi
-    "$CLI" bedrock launch
+    "${CLI[@]}" bedrock launch
     result=$?
     if [ "$result" -ne 0 ]; then
         abort_failed_start "$result" true
@@ -393,7 +401,7 @@ start_live_runtime() {
     if [ -n "$SERVER_NAME" ]; then
         navigate_args+=(--server-name "$SERVER_NAME")
     fi
-    "$CLI" bedrock navigate "${navigate_args[@]}"
+    "${CLI[@]}" bedrock navigate "${navigate_args[@]}"
     result=$?
     if [ "$result" -ne 0 ]; then
         abort_failed_start "$result"
@@ -402,7 +410,7 @@ start_live_runtime() {
     if operator_paused; then
         return 65
     fi
-    "$CLI" run \
+    "${CLI[@]}" run \
         --role "$selected_role" \
         --live \
         --capture-source "$CAPTURE_SOURCE" \
@@ -458,7 +466,7 @@ while true; do
 done
 
 if [ "$input_route_recovery_adopted" != true ]; then
-    if ! "$CLI" install; then
+    if ! "${CLI[@]}" install; then
         trap - EXIT INT TERM
         exit 2
     fi
