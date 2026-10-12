@@ -13,7 +13,7 @@ from minecraft_ai.cognition.repair import _reply_only_decision_from_response
 from minecraft_ai.cognition.types import _DecisionRepairBounds, cognition_decision_sha256
 from minecraft_ai.models import ModelMessage, ModelRequestAttempt, ModelResponse
 from minecraft_ai.native_world_model import MODEL_ID, NativeWorldCognitionModel
-from tests.test_cognition_questions import board, context
+from test_cognition_questions import board, context
 
 contract = pytest.importorskip("erais.demo.minecraft_cognition_contract")
 
