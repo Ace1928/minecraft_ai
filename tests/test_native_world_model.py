@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from minecraft_ai.config import ModelConfig, RuntimeConfig
+from minecraft_ai.cognition.types import _DecisionRepairBounds
 from minecraft_ai.models import ModelMessage
 from minecraft_ai.native_world_model import (
     MODEL_ID,
@@ -442,7 +443,7 @@ def test_planner_compacts_against_exact_owner_token_budget_before_inference(monk
     model.complete((ModelMessage(role="user", content=json.dumps(payload)),))
     assert 2 <= len(inspected) <= 64
     assert len(generated) == 1 and generated[0] == inspected[-1]
-    assert len(generated[0].encode()) // 3 + 100 <= 512
+    assert len(generated[0].encode()) // 3 + 100 <= 480
     assert "scene.death" in generated[0] and "scene.playable" in generated[0]
 
 
@@ -494,6 +495,75 @@ def test_exact_token_compaction_fails_boundedly_when_minimum_context_cannot_fit(
     with pytest.raises(ValueError, match="admitted request budget"):
         compact_planner_prompt(messages, fits_prompt=lambda text: inspected.append(text) or False)
     assert 1 <= len(inspected) <= 3 and len(inspected) == len(set(inspected))
+
+
+def test_structured_instruction_keeps_literal_request_within_tight_owner_budget():
+    instruction = (
+        "Make measurable survival progression now. Inspect the visible surroundings, move "
+        "safely out of the current obstruction, find and acquire one nearby log, and stop "
+        "or replan if the observed scene does not support the next step. Use only verified "
+        "game observations and report what actually changed."
+    )
+    message_id = "6954c36c33c34240be436924b8363869"
+    skills = (
+        ("craft_wood_planks", ()),
+        ("escape_confinement", ("allow_attack", "allow_use", "allow_jump")),
+        ("experiment_interactions", ("allow_attack", "allow_use", "allow_jump")),
+        ("explore_forward", ("allow_attack", "allow_use", "allow_jump")),
+        ("survey_surroundings", ()),
+        ("traverse_visible_obstacle", ("allow_attack", "allow_use", "allow_jump")),
+    )
+    bounds = _DecisionRepairBounds(
+        allowed_skills=skills,
+        authority_goal_id=f"operator:{message_id}",
+    ).native_format()
+    payload = {
+        "fresh_facts": {
+            "scene.death": [False, 0.995],
+            "scene.playable": [True, 0.995],
+            "player.health": [20, 0.995],
+            "player.critical_health": [False, 0.995],
+            "environment.underwater": [False, 0.995],
+            "danger.drowning": [False, 0.995],
+        },
+        "skills": [
+            {
+                "skill_id": skill_id,
+                "description": "A sufficiently detailed learned option description.",
+                "parameters": list(parameters),
+                "competence": 0.5,
+            }
+            for skill_id, parameters in skills
+        ],
+    }
+    directive = {
+        "message_id": message_id,
+        "text": instruction,
+        "kind": "instruction",
+        "priority": 0,
+        "status": "delivered",
+    }
+    messages = (
+        ModelMessage(role="user", content=json.dumps(payload)),
+        ModelMessage(
+            role="user",
+            content=(
+                "ACTIVE OPERATOR DIRECTIVE (highest authority; follow this literal current "
+                "request and do not substitute an older task): "
+                + json.dumps(directive, separators=(",", ":"))
+            ),
+        ),
+    )
+
+    prompt = compact_planner_prompt(
+        messages,
+        response_format=bounds,
+        fits_prompt=lambda value: len(value.encode("utf-8")) <= 1500,
+    )
+
+    assert instruction in prompt
+    assert f"operator:{message_id}" in prompt
+    assert len(prompt.encode("utf-8")) <= 1500
 
 
 def test_world_adapter_rejects_malformed_owner_receipts_and_responses(monkeypatch):

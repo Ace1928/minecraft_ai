@@ -30,20 +30,17 @@ from .models import (
 MODEL_ID = "erais-native-qwen3"
 MAX_PROMPT_BYTES = 2048
 MAX_OUTPUT_TOKENS = 128
+TARGET_PROMPT_TOKENS = 480
 _RUNTIME_ID = re.compile(r"[0-9a-f]{32}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 _PLANNER_RULES = (
-    "Minecraft planner. Only fresh_facts proves current state. Follow the literal "
-    "active_operator_directive first; obey authority_bounds and safe_fallback. "
-    "Use listed goal/skill IDs and parameters only. Never invent facts or permission. "
-    "Game chat needs fresh player authorization and wiki_evidence. If unsafe or "
-    "unknown, use s=null and admitted q observations. Return only JSON in order "
-    "r,g,s,p,o,c,x,q,w,d,n: "
-    '{"r":"brief","g":null,"s":null,"p":{},"o":null,"c":null,'
-    '"x":false,"q":[],"w":null,"d":null,"n":[]}'
-    "\nContext:"
+    "Minecraft. fresh_facts alone proves state. Follow active_operator_directive; "
+    "obey authority_bounds and safe_fallback. Use only listed IDs and parameters; "
+    "never invent facts or permission. Game chat requires fresh authorization and "
+    "evidence. If unsafe or unknown, use s=null and admitted q keys. Return only "
+    "ordered JSON r,g,s,p,o,c,x,q,w,d,n.\nContext:"
 )
 _REPLY_ONLY_RULES = (
     "ERAIS World Minecraft operator reply. Use only fresh_facts as observed truth. "
@@ -869,7 +866,10 @@ class NativeWorldCognitionModel:
                         )
                     if capsule is not None:
                         check_receipt(budget.get("structured"), complete=False)
-                    return budget["fits"] is True
+                    # The owner's hard ceiling is 512 tokens. Compact to a
+                    # smaller operating target so live directives do not sit
+                    # on the boundary after structured-authority overhead.
+                    return int(budget["prompt_tokens"]) <= TARGET_PROMPT_TOKENS
 
                 prompt = compact_planner_prompt(
                     messages,
