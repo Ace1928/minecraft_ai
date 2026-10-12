@@ -747,6 +747,7 @@ class DirectionsGateway:
                 "scene.inventory_overlay" if run.skill_id == "open_inventory" else "scene.playable"
             )
             fact = blackboard.fact(key, min_confidence=0.99)
+            state = blackboard.latest()
             if (
                 step is None
                 or step["request_id"] != request_id
@@ -761,10 +762,15 @@ class DirectionsGateway:
                 or fact.value is not True
                 or fact.source != BEDROCK_HUD_SAFETY_SOURCE
                 or capture is None
+                or state is None
+                or state.frame_id != capture.frame_id
+                or state.captured_ns != capture.captured_ns
+                or fact.observed_ns != state.captured_ns
+                or fact not in state.facts
                 # Windows may report the accepted action and the next capture
                 # on the same coarse monotonic tick.  The strictly increasing
-                # frame id below establishes causal order in that case; only a
-                # genuinely older observation is inadmissible.
+                # frame id and exact fact/frame binding establish causal order
+                # in that case; only a genuinely older observation is invalid.
                 or fact.observed_ns < step["action_monotonic_ns"]
                 or capture.captured_ns < step["action_monotonic_ns"]
                 or capture.frame_id <= step["action_frame_id"]

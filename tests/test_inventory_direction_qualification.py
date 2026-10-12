@@ -450,7 +450,17 @@ def test_misattributed_observation_never_becomes_success(gateway, fault):
                 receipt.request_id,
                 "different-attempt",
                 run,
-                SimpleNamespace(fact=lambda *args, **kw: fact),
+                SimpleNamespace(
+                    fact=lambda *args, **kw: fact,
+                    latest=lambda: FrameState(
+                        frame_id=after.frame_id,
+                        captured_ns=after.captured_ns,
+                        instance_id="test-world",
+                        width=1920,
+                        height=1080,
+                        facts=(fact,),
+                    ),
+                ),
                 after,
             )
     else:
@@ -458,7 +468,17 @@ def test_misattributed_observation_never_becomes_success(gateway, fault):
             receipt.request_id,
             receipt.attempt_id,
             run,
-            SimpleNamespace(fact=lambda *args, **kw: fact),
+            SimpleNamespace(
+                fact=lambda *args, **kw: fact,
+                latest=lambda: FrameState(
+                    frame_id=after.frame_id,
+                    captured_ns=after.captured_ns,
+                    instance_id="test-world",
+                    width=1920,
+                    height=1080,
+                    facts=(fact,),
+                ),
+            ),
             after,
         )
     assert gateway.status(receipt.request_id).state != DirectionsState.SUCCEEDED
