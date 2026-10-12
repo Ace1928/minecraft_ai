@@ -856,7 +856,12 @@ class BedrockMenuNavigator:
                             and source != MenuStage.CONNECTION_FAILED
                         )
                         or (
-                            source == MenuStage.CONNECTION_FAILED
+                            source
+                            in {
+                                MenuStage.DISCONNECTED,
+                                MenuStage.CONNECTION_FAILED,
+                                MenuStage.UPDATE_NOTICE,
+                            }
                             and current.stage
                             in {
                                 MenuStage.PLAY,

@@ -1211,6 +1211,42 @@ def test_disconnect_recovery_returns_to_menu_then_only_configured_lan(
     assert clicks.clicks[-2:] == [(3, 500, 320), (4, 500, 200)]
 
 
+def test_disconnect_recovery_accepts_loading_then_play_without_repeat_click() -> None:
+    frames = [_frame(index) for index in range(1, 6)]
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture(frames),
+        text_reader=_MappedTextReader(
+            {
+                1: _disconnected_lines(),
+                2: _lines("Connecting to world"),
+                3: _lines("Play", "Worlds", "LAN Games", "BedrockConnect"),
+                4: _lines("ServerList", "Eidos Local Bedrock"),
+            }
+        ),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        poll_interval_s=0,
+        sleep=lambda _seconds: None,
+        hud_detector=lambda frame: frame.frame_id == 5,
+    )
+
+    result = navigator.run()
+
+    assert result.visited == (
+        MenuStage.DISCONNECTED,
+        MenuStage.PLAY,
+        MenuStage.BEDROCK_CONNECT,
+        MenuStage.IN_WORLD,
+    )
+    assert clicks.clicks == [
+        (1, *_disconnected_lines()[2].center),
+        (3, 500, 320),
+        (4, 500, 200),
+    ]
+
+
 @pytest.mark.parametrize("invalid", ["missing_details", "chat", "low_confidence", "duplicate"])
 def test_disconnect_recovery_requires_complete_positioned_dialog(invalid: str) -> None:
     lines = list(_disconnected_lines())

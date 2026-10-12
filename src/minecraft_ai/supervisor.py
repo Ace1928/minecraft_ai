@@ -722,7 +722,13 @@ class Supervisor:
         """Neutralize current input while preserving the scoped runtime lease."""
         with self._lock:
             self._require_running_lease(lease_id)
-            self.motor.release_inputs(lease_id)
+            # A verified release is also a live-runtime receipt. Refresh only
+            # after the physical backend reports neutral input; no positive
+            # key/button authority is prolonged by this transaction.
+            self.motor.release_inputs(
+                lease_id,
+                accepted_release_ttl_ms=MAX_MOTOR_LEASE_TTL_MS,
+            )
             self._persist_status()
             return {
                 "released": True,

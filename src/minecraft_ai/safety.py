@@ -360,8 +360,23 @@ class MotorGate:
                     raise
                 self._lease = refreshed
 
-    def release_inputs(self, lease_id: str) -> None:
-        """Release held input without revoking an otherwise healthy lease."""
+    def release_inputs(
+        self,
+        lease_id: str,
+        *,
+        accepted_release_ttl_ms: int | None = None,
+    ) -> None:
+        """Release held input and optionally refresh the authenticated lease.
+
+        A physical X11 release sweep can cross the old lease deadline while it
+        owns this gate's lock (for example while the compositor is contending
+        with a local vision model).  Refresh only *after* the backend confirms
+        every input was released.  This cannot extend positive input, but it
+        prevents the watchdog from winning the lock immediately after a slow,
+        successful neutralization and killing an otherwise live runtime.
+        """
+        if accepted_release_ttl_ms is not None:
+            _validate_motor_lease_ttl(accepted_release_ttl_ms)
         with self._lock:
             lease = self._require_lease(lease_id)
             if lease.expired():
@@ -372,6 +387,26 @@ class MotorGate:
             except Exception as exc:
                 self._revoke_after_failure_locked("input-release-failed", exc)
                 raise
+            if accepted_release_ttl_ms is not None:
+                refreshed = MotorLease(
+                    lease_id=lease.lease_id,
+                    session_id=lease.session_id,
+                    target_instance=lease.target_instance,
+                    backend_id=lease.backend_id,
+                    expires_monotonic_ns=(
+                        time.monotonic_ns() + accepted_release_ttl_ms * 1_000_000
+                    ),
+                    allowed_actions=lease.allowed_actions,
+                    max_action_duration_ms=lease.max_action_duration_ms,
+                    first_sequence=lease.first_sequence,
+                )
+                try:
+                    self.backend.bind_lease(refreshed)
+                except Exception as exc:
+                    self._revoke_after_failure_locked("accepted-release-refresh-failed", exc)
+                    raise
+                self._lease = refreshed
+                self._revocation_reason = "active"
 
     def check_expiry(self, now_ns: int | None = None) -> bool:
         with self._lock:

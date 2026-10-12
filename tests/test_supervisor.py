@@ -219,11 +219,13 @@ def test_release_inputs_preserves_running_lease() -> None:
         MotorAction(sequence=0, keys_down=("w",), buttons_down=("left",)),
     )
 
+    previous_expiry = supervisor.motor.lease.expires_monotonic_ns
     result = supervisor.release_inputs(lease_id)
 
     assert result == {"released": True, "lease_active": True}
     assert supervisor.state == SupervisorState.RUNNING
     assert supervisor.motor.lease is not None
+    assert supervisor.motor.lease.expires_monotonic_ns >= previous_expiry
     assert not supervisor.backend.held_keys
     assert not supervisor.backend.held_buttons
 

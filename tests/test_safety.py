@@ -343,6 +343,31 @@ def test_successful_renew_keeps_held_input_and_sequence() -> None:
         gate.apply(lease.lease_id, MotorAction(sequence=4))
 
 
+def test_slow_accepted_release_refreshes_only_after_input_is_neutral(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_ns = [1_000_000_000]
+    monkeypatch.setattr("minecraft_ai.safety.time.monotonic_ns", lambda: clock_ns[0])
+
+    class _DelayedReleaseBackend(FakeInputBackend):
+        def release_all(self) -> None:
+            super().release_all()
+            clock_ns[0] += 60_000_000
+
+    backend = _DelayedReleaseBackend()
+    gate = MotorGate(backend)
+    lease = gate.issue(session_id="test", target_instance="minecraft", ttl_ms=50)
+    gate.apply(lease.lease_id, MotorAction(sequence=0, keys_down=("w",)))
+
+    gate.release_inputs(lease.lease_id, accepted_release_ttl_ms=5_000)
+
+    refreshed = gate.lease
+    assert refreshed is not None
+    assert refreshed.expires_monotonic_ns == clock_ns[0] + 5_000_000_000
+    assert not backend.held_keys and not backend.held_buttons
+    assert gate.revocation_reason == "active"
+
+
 def test_input_release_failure_revokes_capability_and_preserves_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
