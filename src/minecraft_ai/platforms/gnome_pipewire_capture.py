@@ -23,6 +23,7 @@ from .bedrock_x11 import (
     validate_host_monitor_window,
 )
 from .capture_source import BedrockCaptureSource
+from .ffmpeg_x11_capture import FfmpegX11Capture
 
 
 _SYSTEM_PYTHON = Path("/usr/bin/python3")
@@ -387,7 +388,7 @@ def create_bedrock_capture(
     host_monitor_binding: HostMonitorBinding | None = None,
     source: BedrockCaptureSource | str = BedrockCaptureSource.PIPEWIRE,
     capture_budget_ms: int = 500,
-) -> IsolatedX11Capture | MutterPipeWireCapture:
+) -> IsolatedX11Capture | FfmpegX11Capture | MutterPipeWireCapture:
     """Select PipeWire only for a proven host-monitor session.
 
     ``source="x11"`` forces the window-targeted X11 capture (XGetImage) which is
@@ -395,6 +396,13 @@ def create_bedrock_capture(
     """
     source = BedrockCaptureSource(source)
     if host_monitor_binding is None:
+        if source == BedrockCaptureSource.FFMPEG_X11:
+            return FfmpegX11Capture(
+                display_name,
+                target_window_id,
+                allow_host=allow_host,
+                capture_budget_ms=capture_budget_ms,
+            )
         return IsolatedX11Capture(
             display_name,
             target_window_id,
@@ -409,6 +417,13 @@ def create_bedrock_capture(
         raise IsolationError("host-monitor capture window does not match binding")
     if source == BedrockCaptureSource.X11:
         return IsolatedX11Capture(
+            display_name,
+            target_window_id,
+            allow_host=allow_host,
+            capture_budget_ms=capture_budget_ms,
+        )
+    if source == BedrockCaptureSource.FFMPEG_X11:
+        return FfmpegX11Capture(
             display_name,
             target_window_id,
             allow_host=allow_host,

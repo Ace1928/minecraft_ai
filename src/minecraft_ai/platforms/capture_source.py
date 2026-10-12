@@ -6,3 +6,4 @@ class BedrockCaptureSource(StrEnum):
 
     PIPEWIRE = "pipewire"
     X11 = "x11"
+    FFMPEG_X11 = "ffmpeg-x11"

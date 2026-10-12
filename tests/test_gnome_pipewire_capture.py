@@ -85,6 +85,43 @@ def test_capture_factory_honors_explicit_x11_for_host_binding(
     ) is sentinel
 
 
+@pytest.mark.parametrize("binding", [None, _binding()])
+def test_capture_factory_honors_explicit_ffmpeg_window_stream(
+    monkeypatch: pytest.MonkeyPatch,
+    binding: HostMonitorBinding | None,
+) -> None:
+    sentinel = object()
+    calls: list[tuple[str, int, bool, int]] = []
+
+    def fake_ffmpeg(
+        display: str, window_id: int, *, allow_host: bool, capture_budget_ms: int,
+    ) -> object:
+        calls.append((display, window_id, allow_host, capture_budget_ms))
+        return sentinel
+
+    monkeypatch.setattr(
+        "minecraft_ai.platforms.gnome_pipewire_capture.FfmpegX11Capture",
+        fake_ffmpeg,
+    )
+
+    capture = create_bedrock_capture(
+        ":0" if binding is not None else ":12",
+        42 if binding is not None else 7,
+        allow_host=binding is not None,
+        host_monitor_binding=binding,
+        source="ffmpeg-x11",
+        capture_budget_ms=750,
+    )
+
+    assert capture is sentinel
+    assert calls == [(
+        ":0" if binding is not None else ":12",
+        42 if binding is not None else 7,
+        binding is not None,
+        750,
+    )]
+
+
 def test_capture_factory_uses_mutter_only_for_exact_host_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

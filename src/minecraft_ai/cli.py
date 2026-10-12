@@ -505,7 +505,10 @@ def run(
     capture_source: BedrockCaptureSource = typer.Option(
         BedrockCaptureSource.PIPEWIRE,
         "--capture-source",
-        help="Capture source: pipewire (default) or x11 (window-targeted XGetImage).",
+        help=(
+            "Capture source: pipewire (default), x11 (window-targeted XGetImage), "
+            "or ffmpeg-x11 (persistent low-latency window stream)."
+        ),
     ),
     config_file: Path | None = typer.Option(
         None,

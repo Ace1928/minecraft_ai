@@ -21,6 +21,7 @@ from .bedrock_x11 import (
     require_isolated_display,
 )
 from .gnome_pipewire_capture import MutterPipeWireCapture, create_bedrock_capture
+from .ffmpeg_x11_capture import FfmpegX11Capture
 
 __all__ = [
     "BedrockBuild",
@@ -28,6 +29,7 @@ __all__ = [
     "BedrockLinuxInstance",
     "CapturedFrame",
     "HostMonitorBinding",
+    "FfmpegX11Capture",
     "IsolatedX11Capture",
     "IsolatedX11InputBackend",
     "IsolationError",
