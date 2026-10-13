@@ -84,6 +84,7 @@ class TraceMetricAccumulator:
         self.sprint_jump_held_steps = 0
         self.held_keys: set[str] = set()
         self.sequence_violations = 0
+        self.previous_action_sequence: int | None = None
         self.latencies: list[float] = []
         self.longest_static_moving = 0
         self.static_moving = 0
@@ -134,7 +135,12 @@ class TraceMetricAccumulator:
                 self.longest_world_pitch_up_streak,
                 self.world_pitch_up_streak,
             )
-        self.sequence_violations += action.sequence != sample.step.step_index
+        if (
+            self.previous_action_sequence is not None
+            and action.sequence <= self.previous_action_sequence
+        ):
+            self.sequence_violations += 1
+        self.previous_action_sequence = action.sequence
         if sample.step.accepted_ns is not None:
             self.latencies.append((sample.step.accepted_ns - sample.step.captured_ns) / 1_000_000.0)
         moving = bool(keys_down.intersection({"w", "a", "s", "d"}))

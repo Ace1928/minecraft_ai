@@ -543,3 +543,18 @@ def test_trace_metrics_separate_jump_edges_holds_and_world_pitch_drift() -> None
     assert values["camera.world_pitch_up_units"] == 2
     assert values["camera.world_pitch_down_max_streak"] == 2
     assert values["camera.world_pitch_up_max_streak"] == 1
+
+
+def test_trace_sequence_metric_allows_gaps_and_counts_only_nonincreasing_actions() -> None:
+    accumulator = TraceMetricAccumulator()
+    for step_index, sequence in enumerate((10, 12, 11, 11, 15)):
+        step = SimpleNamespace(
+            action=MotorAction(sequence=sequence),
+            step_index=step_index,
+            accepted_ns=None,
+            captured_ns=step_index,
+            frame_hash=str(step_index),
+        )
+        accumulator.add(SimpleNamespace(step=step))
+
+    assert accumulator.finish().values["safety.sequence_violations"] == 2
