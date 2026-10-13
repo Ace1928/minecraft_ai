@@ -90,6 +90,7 @@ class SkillFailureCode(StrEnum):
     """Stable machine-readable causes emitted by deterministic execution guards."""
 
     LOCOMOTION_STALLED = "locomotion.stalled"
+    LOCOMOTION_UNVERIFIED = "locomotion.unverified"
     CONTROLLER_STARVATION = "controller.starvation"
     RESOURCE_PICKUP_UNVERIFIED = "resource.pickup_unverified"
     MINING_UNSAFE_SCENE = "mining.unsafe_scene"
@@ -182,10 +183,14 @@ class SkillLibrary:
                     )
         elif run.outcome == SkillOutcome.FAILED:
             stats.failures += 1
-            # Startup/warmup starvation is not evidence the option is the
-            # wrong work. Counting it as a competence failure exiles VPT
-            # locomotion keepalive after two cold starts.
-            if run.failure_code == SkillFailureCode.CONTROLLER_STARVATION:
+            # Controller starvation and camera-confounded locomotion are not
+            # evidence the option is the wrong work. Counting either as a
+            # competence failure can exile a useful learned controller when
+            # the observation contract, rather than the skill, was incomplete.
+            if run.failure_code in {
+                SkillFailureCode.CONTROLLER_STARVATION,
+                SkillFailureCode.LOCOMOTION_UNVERIFIED,
+            }:
                 stats.censored_failures += 1
             else:
                 stats.consecutive_failures += 1

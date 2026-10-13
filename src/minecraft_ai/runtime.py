@@ -4284,7 +4284,11 @@ class AgentRuntime:
             or newest.context_key not in {goal, _EXPLORE_KEEPALIVE_CONTEXT}
             or any(
                 run.outcome != SkillOutcome.FAILED
-                or run.failure_code != SkillFailureCode.LOCOMOTION_STALLED
+                or run.failure_code
+                not in {
+                    SkillFailureCode.LOCOMOTION_STALLED,
+                    SkillFailureCode.LOCOMOTION_UNVERIFIED,
+                }
                 or run.ended_ns is None
                 or run.started_ns < self._plan_started_ns
                 for run in attempts
@@ -4783,7 +4787,10 @@ class AgentRuntime:
         """
         if run.outcome not in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
             return
-        if run.failure_code == SkillFailureCode.CONTROLLER_STARVATION:
+        if run.failure_code in {
+            SkillFailureCode.CONTROLLER_STARVATION,
+            SkillFailureCode.LOCOMOTION_UNVERIFIED,
+        }:
             return
         if run.context_key == _EXPLORE_KEEPALIVE_CONTEXT:
             return
@@ -4957,7 +4964,11 @@ class AgentRuntime:
             recent is not None
             and recent.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}
             and (
-                recent.failure_code == SkillFailureCode.CONTROLLER_STARVATION
+                recent.failure_code
+                in {
+                    SkillFailureCode.CONTROLLER_STARVATION,
+                    SkillFailureCode.LOCOMOTION_UNVERIFIED,
+                }
                 or getattr(self, "_pending_decision", None) is not None
             )
         ):
@@ -5955,7 +5966,10 @@ class AgentRuntime:
         for run in recent:
             if run.outcome not in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}:
                 continue
-            if run.failure_code == SkillFailureCode.CONTROLLER_STARVATION:
+            if run.failure_code in {
+                SkillFailureCode.CONTROLLER_STARVATION,
+                SkillFailureCode.LOCOMOTION_UNVERIFIED,
+            }:
                 continue
             if context_key is not None and run.context_key != context_key:
                 continue

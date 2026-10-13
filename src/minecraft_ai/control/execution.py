@@ -980,16 +980,27 @@ class SkillExecutor:
             and traversal_verification.status == OutcomeStatus.STALLED
         ):
             starved = traversal_verification.signal == OutcomeSignal.CONTROLLER_STARVATION
-            failure_code = (
-                SkillFailureCode.CONTROLLER_STARVATION
-                if starved else SkillFailureCode.LOCOMOTION_STALLED
+            unverified = (
+                traversal_verification.signal == OutcomeSignal.LOCOMOTION_UNVERIFIED
             )
+            if starved:
+                failure_code = SkillFailureCode.CONTROLLER_STARVATION
+            elif unverified:
+                failure_code = SkillFailureCode.LOCOMOTION_UNVERIFIED
+            else:
+                failure_code = SkillFailureCode.LOCOMOTION_STALLED
             return self._finish(
                 SkillOutcome.FAILED,
                 now,
-                traversal_verification.reason if starved else failure_code.value,
+                (
+                    traversal_verification.reason
+                    if starved or unverified
+                    else failure_code.value
+                ),
                 # No commanded motion means no evidence for a physical
-                # obstacle remedy. Return the actual cause to cognition.
+                # obstacle remedy. Camera-confounded motion can still try a
+                # declared non-destructive learned recovery, but it must not
+                # enter the verified-obstacle/headroom clearing route.
                 recover=not starved,
                 failure_code=failure_code,
                 force_release_keys=_LOCOMOTION_RELEASE_KEYS,

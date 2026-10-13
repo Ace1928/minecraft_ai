@@ -36,6 +36,7 @@ class OutcomeSignal(StrEnum):
     MINING_STALLED = "mining_stalled"
     LOCOMOTION_PROGRESS = "locomotion_progress"
     LOCOMOTION_STALLED = "locomotion_stalled"
+    LOCOMOTION_UNVERIFIED = "locomotion_unverified"
     CONTROLLER_STARVATION = "controller_starvation"
     GUI_TRANSITION_PROGRESS = "gui_transition_progress"
     INVENTORY_OPENED = "inventory_opened"
@@ -90,6 +91,7 @@ class OutcomeVerifierConfig:
     traversal_progress_samples: int = 2
     traversal_stall_ms: int = 2_000
     traversal_controller_starvation_ms: int = 3_000
+    traversal_camera_confounded_ms: int = 5_000
     traversal_min_commanded_ms: int = 250
     camera_quiet_ms: int = 200
     inventory_change_distance: int = 6
@@ -121,6 +123,7 @@ class OutcomeVerifierConfig:
             self.traversal_progress_samples,
             self.traversal_stall_ms,
             self.traversal_controller_starvation_ms,
+            self.traversal_camera_confounded_ms,
             self.traversal_min_commanded_ms,
             self.camera_quiet_ms,
             self.inventory_change_distance,
@@ -177,6 +180,7 @@ class _TraversalState:
     progress_samples: int = 0
     static_samples: int = 0
     last_camera_ns: int = -1
+    camera_confounded_started_ns: int | None = None
     release_luma_after_ns: int | None = None
 
 
@@ -618,6 +622,24 @@ class TemporalOutcomeVerifier:
             or now_ns - state.last_camera_ns >= self.config.camera_quiet_ms * 1_000_000
         )
         if not camera_quiet:
+            if (
+                state.lifetime_commanded_movement_ns
+                >= self.config.traversal_min_commanded_ms * 1_000_000
+            ):
+                if state.camera_confounded_started_ns is None:
+                    state.camera_confounded_started_ns = now_ns
+                elif (
+                    now_ns - state.camera_confounded_started_ns
+                    >= self.config.traversal_camera_confounded_ms * 1_000_000
+                ):
+                    return self._result(
+                        OutcomeStatus.STALLED,
+                        OutcomeSignal.LOCOMOTION_UNVERIFIED,
+                        now_ns,
+                        0.99,
+                        "locomotion progress remained unverifiable under sustained camera motion",
+                        (),
+                    )
             if fresh_luma:
                 assert luma is not None
                 _rebaseline_traversal_luma(state, luma)
@@ -627,6 +649,7 @@ class TemporalOutcomeVerifier:
                 ):
                     state.release_luma_after_ns = None
             return self._pending(now_ns, "camera motion currently confounds translation")
+        state.camera_confounded_started_ns = None
 
         if not fresh_luma:
             return self._pending(now_ns, "waiting for a fresh traversal luma grid")

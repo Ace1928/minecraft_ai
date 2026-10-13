@@ -1151,6 +1151,47 @@ def test_camera_motion_cannot_be_claimed_as_traversal_progress_or_stall() -> Non
     assert verdict.signal == OutcomeSignal.NONE
 
 
+def test_sustained_camera_motion_terminates_as_unverified_not_physical_stall() -> None:
+    now = time.monotonic_ns()
+    board = _board(now)
+    _publish_hashes(board, now, frame_hash="0000000000000000", luma_grid=_LUMA_A)
+    verifier = TemporalOutcomeVerifier(
+        OutcomeVerifierConfig(
+            camera_quiet_ms=500,
+            traversal_camera_confounded_ms=600,
+            traversal_controller_starvation_ms=5_000,
+            traversal_min_commanded_ms=100,
+        )
+    )
+    verifier.begin("walk-camera-confounded", OutcomeKind.TRAVERSAL, board, now_ns=now)
+    verifier.observe(
+        board,
+        action=MotorAction(sequence=1, keys_down=("w",), mouse_dx=20),
+        now_ns=now,
+    )
+
+    verdict = None
+    for index in range(1, 5):
+        sample_ns = now + index * 200_000_000
+        _publish_hashes(
+            board,
+            sample_ns,
+            frame_hash=("ffffffffffffffff" if index % 2 else "0000000000000000"),
+            luma_grid=(_LUMA_B if index % 2 else _LUMA_C),
+        )
+        verdict = verifier.observe(
+            board,
+            action=MotorAction(sequence=index + 1, mouse_dx=10),
+            now_ns=sample_ns,
+        )
+
+    assert verdict is not None
+    assert verdict.status == OutcomeStatus.STALLED
+    assert verdict.signal == OutcomeSignal.LOCOMOTION_UNVERIFIED
+    assert "unverifiable under sustained camera motion" in verdict.reason
+    assert verdict.evidence_keys == ()
+
+
 def test_intermittent_locomotion_accumulates_until_static_luma_stalls() -> None:
     now = time.monotonic_ns()
     board = _board(now)

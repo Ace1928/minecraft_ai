@@ -197,7 +197,16 @@ def test_recovery_never_uses_infeasible_retired_or_unknown_skills() -> None:
     )
 
 
-def test_starvation_counts_in_reporting_not_competence() -> None:
+@pytest.mark.parametrize(
+    "failure_code",
+    (
+        SkillFailureCode.CONTROLLER_STARVATION,
+        SkillFailureCode.LOCOMOTION_UNVERIFIED,
+    ),
+)
+def test_observation_incomplete_failures_count_in_reporting_not_competence(
+    failure_code: SkillFailureCode,
+) -> None:
     library = _library()
     for index in range(8):
         library.record(
@@ -207,7 +216,7 @@ def test_starvation_counts_in_reporting_not_competence() -> None:
                 started_ns=1,
                 outcome=SkillOutcome.FAILED,
                 context_key="wall",
-                failure_code=SkillFailureCode.CONTROLLER_STARVATION,
+                failure_code=failure_code,
             )
         )
     stats = library.stats[("jump", "wall")]

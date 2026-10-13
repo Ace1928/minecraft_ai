@@ -9,7 +9,13 @@ from minecraft_ai.builtin_skills import build_bootstrap_skill_library
 from minecraft_ai.execution import SkillExecutor, drop_item_kind_for_break_kind
 from minecraft_ai.mining_control import MiningGuardDecision
 from minecraft_ai.motor import MotorIntent
-from minecraft_ai.outcome_verifier import OutcomeKind, OutcomeSignal, OutcomeStatus
+from minecraft_ai.outcome_verifier import (
+    OutcomeKind,
+    OutcomeSignal,
+    OutcomeStatus,
+    OutcomeVerifierConfig,
+    TemporalOutcomeVerifier,
+)
 from minecraft_ai.perception import (
     FrameState,
     PerceptionBlackboard,
@@ -1285,6 +1291,43 @@ def test_no_input_traversal_reports_starvation_without_physical_recovery(skill_i
     assert not terminal.action.keys_down and not terminal.action.buttons_down
     assert terminal.action.mouse_dx == terminal.action.mouse_dy == 0
     assert set(terminal.action.keys_up) == {"w", "a", "s", "d", "ctrl", "shift", "space"}
+
+
+def test_camera_confounded_traversal_routes_non_destructive_learned_recovery() -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy(
+        *(MotorAction(sequence=0, keys_down=("w",), mouse_dx=10) for _ in range(5))
+    )
+    executor = SkillExecutor(policy)
+    executor._outcome_verifier = TemporalOutcomeVerifier(
+        OutcomeVerifierConfig(
+            camera_quiet_ms=500,
+            traversal_camera_confounded_ms=600,
+            traversal_controller_starvation_ms=5_000,
+            traversal_min_commanded_ms=100,
+        )
+    )
+    spec = build_bootstrap_skill_library().get("traverse_level_ground")
+    executor.start(spec, run_id="camera-confounded", now_ns=now)
+
+    terminal = None
+    for sequence in range(1, 6):
+        sample_ns = now + (sequence - 1) * 200_000_000
+        terminal = executor.tick(
+            _traversal_board(
+                sample_ns,
+                luma_grid=_LUMA_A if sequence % 2 else _LUMA_B,
+            ),
+            sequence=sequence,
+            now_ns=sample_ns,
+        )
+
+    assert terminal is not None
+    assert terminal.run.outcome == SkillOutcome.FAILED
+    assert terminal.run.failure_code == SkillFailureCode.LOCOMOTION_UNVERIFIED
+    assert terminal.outcome_verification is not None
+    assert terminal.outcome_verification.signal == OutcomeSignal.LOCOMOTION_UNVERIFIED
+    assert terminal.recovery_skills == spec.recovery_skills
 
 
 def test_gather_scan_without_locomotion_does_not_report_traversal_stall() -> None:

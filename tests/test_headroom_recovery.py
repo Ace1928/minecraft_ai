@@ -331,6 +331,31 @@ def test_controller_starvation_does_not_start_headroom_or_body_intervention() ->
     assert sent == []
 
 
+def test_camera_confounded_locomotion_does_not_authorize_headroom_clearing() -> None:
+    runtime, perception, sent = _runtime_for_probe()
+    stalled = _stall_result()
+    assert stalled.outcome_verification is not None
+    unverified = replace(
+        stalled,
+        run=stalled.run.model_copy(update={
+            "failure_code": SkillFailureCode.LOCOMOTION_UNVERIFIED,
+            "failure_reason": "locomotion progress remained unverifiable under camera motion",
+        }),
+        outcome_verification=stalled.outcome_verification.model_copy(update={
+            "signal": OutcomeSignal.LOCOMOTION_UNVERIFIED,
+            "reason": "locomotion progress remained unverifiable under camera motion",
+            "evidence_keys": (),
+        }),
+    )
+
+    assert not _verified_obstacle_stall(unverified)
+    assert not runtime._route_headroom_terminal(unverified)
+    assert runtime._headroom_recovery is None
+    assert runtime.executor.run is None
+    assert perception.requests == []
+    assert sent == []
+
+
 def test_gather_stall_starts_plan_neutral_headroom_with_filtered_parameters() -> None:
     runtime, _, _ = _runtime_for_probe()
     gather = _stall_result(

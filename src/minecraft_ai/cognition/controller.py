@@ -785,7 +785,11 @@ class HighLevelController:
                     run.skill_id
                     for run in context.recent_skill_runs
                     if run.outcome in {SkillOutcome.FAILED, SkillOutcome.TIMED_OUT}
-                    and run.failure_code != SkillFailureCode.CONTROLLER_STARVATION
+                    and run.failure_code
+                    not in {
+                        SkillFailureCode.CONTROLLER_STARVATION,
+                        SkillFailureCode.LOCOMOTION_UNVERIFIED,
+                    }
                 )
                 if candidates:
                     decision = decision.model_copy(

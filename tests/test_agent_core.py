@@ -4112,6 +4112,25 @@ def test_idle_stall_probe_new_qualifying_failure_is_a_new_opportunity(
     assert runtime._idle_stall_probe_run_id(decision) == "stall-new"
 
 
+def test_idle_stall_probe_can_diagnose_repeated_camera_confounded_locomotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _, decision = _runtime_with_idle_stalls(monkeypatch, [10_000_000_000])
+    runtime._recent_skill_runs = deque(
+        run.model_copy(
+            update={
+                "failure_code": SkillFailureCode.LOCOMOTION_UNVERIFIED,
+                "failure_reason": (
+                    "locomotion progress remained unverifiable under sustained camera motion"
+                ),
+            }
+        )
+        for run in runtime._recent_skill_runs
+    )
+
+    assert runtime._idle_stall_probe_run_id(decision) == "stall-1"
+
+
 @pytest.mark.parametrize("operator_owned", (False, True))
 def test_idle_stall_probe_ineligible_idle_is_unchanged(
     monkeypatch: pytest.MonkeyPatch,
