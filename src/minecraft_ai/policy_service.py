@@ -342,12 +342,28 @@ class TemporalPolicyClient:
         """End an option without clearing a capable worker's world memory."""
         return self._reset_scope("actions")
 
+    def reset_for_episode_rebind(self) -> MotorAction:
+        """Reset option memory without consuming the caller's next wire sequence.
+
+        Routers fold this release into the first action of the next episode. The
+        reset command is transport state, not a separately emitted supervisor
+        action, so advancing the local motor sequence here would collide with
+        that first action.
+        """
+
+        return self._reset_scope("actions", advance_sequence=False)
+
     def reset_world(self) -> MotorAction:
         """Reset after caller-confirmed world continuity loss, never an option change."""
         return self._reset_scope("world")
 
-    def _reset_scope(self, scope: Literal["actions", "world"]) -> MotorAction:
-        sequence = self._last_sequence + 1
+    def _reset_scope(
+        self,
+        scope: Literal["actions", "world"],
+        *,
+        advance_sequence: bool = True,
+    ) -> MotorAction:
+        sequence = max(0, self._last_sequence + int(advance_sequence))
         if self._draining or self._retiring:
             self._last_sequence = sequence
             return self._release(sequence, reason="worker-draining")
@@ -1314,6 +1330,7 @@ class GroundedPolicyRouter:
     _active: MotorPolicy = field(init=False)
     _active_route: str = field(default="semantic", init=False)
     _last_sequence: int = field(default=-1, init=False)
+    _sequence_rebases: int = field(default=0, init=False)
     _switches: int = field(default=0, init=False)
     _episode_id: str | None = field(default=None, init=False)
     _episode_level: ActionLevel | None = field(default=None, init=False)
@@ -1373,7 +1390,13 @@ class GroundedPolicyRouter:
         sequence: int,
     ) -> MotorAction:
         if sequence <= self._last_sequence:
-            raise ValueError("motor policy sequence must increase monotonically")
+            # A reset proposal can be rejected before it crosses the supervisor
+            # boundary, leaving the runtime's wire counter unchanged while the
+            # router has already neutralized recurrent/held state. Rebase the
+            # next proposal onto the router's local monotonic frontier. The
+            # runtime adopts the jump only after supervisor acceptance.
+            sequence = self._last_sequence + 1
+            self._sequence_rebases += 1
         self._last_sequence = sequence
         if self._retiring:
             return MotorAction(sequence=sequence)
@@ -1445,7 +1468,8 @@ class GroundedPolicyRouter:
         # A capability-aware client preserves world memory; legacy experts
         # retain their historical recurrent reset. Option IDs are not worlds.
         if self._episode_id is not None or selected is not self._active:
-            release = self._active.reset()
+            rebind = getattr(self._active, "reset_for_episode_rebind", None)
+            release = rebind() if callable(rebind) else self._active.reset()
         if selected is not self._active:
             self._switches += 1
         if self._grounding_active:
@@ -1845,6 +1869,7 @@ class GroundedPolicyRouter:
             "episode_bindings": self._episode_bindings,
             "episode_binding_conflicts": self._episode_binding_conflicts,
             "fallback_bindings": self._fallback_bindings,
+            "sequence_rebases": self._sequence_rebases,
             "grounding_role": (
                 "asynchronous-target-belief-only"
                 if self.grounded is not None

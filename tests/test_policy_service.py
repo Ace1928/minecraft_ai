@@ -89,6 +89,35 @@ class _TargetFeedbackPolicy(_RoutingPolicy):
         return self.observation
 
 
+class _StrictSequencePolicy(_RoutingPolicy):
+    """Test double matching learned clients' monotonic local sequence contract."""
+
+    def __init__(self, policy_id: str, *, key: str) -> None:
+        super().__init__(policy_id, key=key)
+        self.last_sequence = -1
+
+    def act(
+        self,
+        blackboard: PerceptionBlackboard,
+        intent: MotorIntent,
+        *,
+        sequence: int,
+    ) -> MotorAction:
+        if sequence <= self.last_sequence:
+            raise ValueError("motor policy sequence must increase monotonically")
+        self.last_sequence = sequence
+        return super().act(blackboard, intent, sequence=sequence)
+
+    def reset(self) -> MotorAction:
+        self.resets += 1
+        self.last_sequence += 1
+        return MotorAction(sequence=self.last_sequence, keys_up=(self.key,))
+
+    def reset_for_episode_rebind(self) -> MotorAction:
+        self.resets += 1
+        return MotorAction(sequence=self.last_sequence, keys_up=(self.key,))
+
+
 class _RecordingStdin:
     def __init__(self) -> None:
         self.writes: list[str] = []
@@ -463,6 +492,54 @@ def test_router_binds_raw_motion_without_a_grounded_observer() -> None:
     assert status["grounded"] is None
     assert status["grounding_role"] == "unavailable"
     assert router.grounded is None
+
+
+def test_same_expert_episode_reset_keeps_body_sequence_monotonic() -> None:
+    primary = _StrictSequencePolicy("steve", key="w")
+    router = GroundedPolicyRouter(primary)
+    first = MotorIntent(
+        skill_id="survey_surroundings",
+        mode="survey",
+        episode_id="survey-1",
+        action_level=ActionLevel.LATENT,
+    )
+
+    assert router.act(PerceptionBlackboard(), first, sequence=1).sequence == 1
+    second = router.act(
+        PerceptionBlackboard(),
+        first.model_copy(update={"episode_id": "survey-2"}),
+        sequence=2,
+    )
+
+    assert second.sequence == 2
+    assert second.keys_down == ("w",)
+    assert second.keys_up == ("w",)
+    assert router.act(PerceptionBlackboard(), first, sequence=3).sequence == 3
+
+
+def test_rejected_reset_sequence_is_rebased_on_next_proposal() -> None:
+    primary = _StrictSequencePolicy("steve", key="w")
+    router = GroundedPolicyRouter(primary)
+    first = MotorIntent(
+        skill_id="survey_surroundings",
+        mode="survey",
+        episode_id="survey-1",
+        action_level=ActionLevel.LATENT,
+    )
+    assert router.act(PerceptionBlackboard(), first, sequence=1).sequence == 1
+
+    # The reset is proposed at sequence 2 but deliberately not acknowledged by
+    # a caller, reproducing an admission rejection before supervisor actuation.
+    assert router.reset().sequence == 2
+    recovered = router.act(
+        PerceptionBlackboard(),
+        first.model_copy(update={"episode_id": "survey-2"}),
+        sequence=2,
+    )
+
+    assert recovered.sequence == 3
+    assert recovered.keys_down == ("w",)
+    assert router.status()["sequence_rebases"] == 1
 
 
 def test_build_motor_policy_constructs_raw_without_grounded(monkeypatch) -> None:

@@ -161,6 +161,7 @@ from minecraft_ai.runtime_support.helpers import (
     _plan_step_matches_skill,
     _plan_step_requests_inventory_transition,
     _verified_plan_step_completion,
+    _verified_traversal_plan_step_completion,
     _reported_action_level,
     _restore_policy_world_camera,
     _scene_claim_is_fresh,
@@ -4747,6 +4748,11 @@ class AgentRuntime:
         if not (
             _plan_step_matches_skill(run.skill_id, current_step)
             or _verified_plan_step_completion(current_step, outcome_verification)
+            or _verified_traversal_plan_step_completion(
+                run.skill_id,
+                current_step,
+                outcome_verification,
+            )
         ):
             return
         if self._last_decision is not None:

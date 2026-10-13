@@ -1741,6 +1741,17 @@ def test_verified_retry_progress_clears_escalation_and_advances_plan_once() -> N
     )
     assert advances_plan is True
 
+    assert (
+        _headroom_retry_advances_plan(
+            planned_result,
+            planned_recovery,
+            plan_steps=("do unrelated strategic work",),
+            plan_index=0,
+            plan_goal_id="strategic-goal",
+        )
+        is False
+    )
+
     gather_recovery = replace(
         planned_recovery,
         origin_skill_id="gather_nearby_wood",

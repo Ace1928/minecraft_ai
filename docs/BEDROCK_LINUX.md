@@ -305,7 +305,7 @@ server. It tries window-targeted XGetImage, with scoped `mss`/root-image fallbac
 and validates complete content geometry before returning BGRA frames. Capture
 timestamps must be monotonic and stale frames are fatal to the motor runtime.
 
-`FFmpegX11Capture` binds the same exact private-display window ID but keeps one
+`FfmpegX11Capture` binds the same exact private-display window ID but keeps one
 native `x11grab` process alive at 20 Hz. A sole reader continuously drains raw
 BGRA frames and publishes only the newest complete frame, so a temporarily slow
 policy cannot accumulate stale video in a pipe. Window content geometry is

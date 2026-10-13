@@ -218,6 +218,16 @@ def _plan_step_matches_skill(skill_id: str, step: str) -> bool:
     return _normalized_plan_text(skill_id) == _normalized_plan_text(step)
 
 
+def _plan_step_requests_obstacle_traversal(step: str) -> bool:
+    """Match only an explicit free-form obstacle-traversal objective."""
+
+    words = set(_normalized_plan_text(step).split())
+    return bool(
+        words.intersection({"clear", "cross", "navigate", "overcome", "pass", "traverse"})
+        and words.intersection({"barrier", "blockage", "obstacle"})
+    )
+
+
 def _plan_step_requests_inventory_transition(skill_id: str, step: str) -> bool:
     """Require an explicit GUI plan node before its transition can consume progress."""
 
@@ -302,6 +312,24 @@ def _verified_plan_step_completion(
         verification.kind == OutcomeKind.MINING
         and verification.signal == OutcomeSignal.BLOCK_BROKEN
         and bool(words.intersection({"break", "harvest", "mine"}))
+    )
+
+
+def _verified_traversal_plan_step_completion(
+    skill_id: str,
+    step: str,
+    verification: OutcomeVerification | None,
+) -> bool:
+    """Complete only an explicit obstacle node with typed locomotion progress."""
+
+    return bool(
+        skill_id == "traverse_visible_obstacle"
+        and _plan_step_requests_obstacle_traversal(step)
+        and verification is not None
+        and verification.kind == OutcomeKind.TRAVERSAL
+        and verification.status == OutcomeStatus.PROGRESS
+        and verification.signal == OutcomeSignal.LOCOMOTION_PROGRESS
+        and verification.confidence >= 0.9
     )
 
 
@@ -476,7 +504,14 @@ def _headroom_retry_advances_plan(
     if recovery.context_key == _EXPLORE_KEEPALIVE_CONTEXT:
         return False
     expected_context = plan_goal_id or "default"
-    return bool(0 <= plan_index < len(plan_steps) and recovery.context_key == expected_context)
+    return bool(
+        0 <= plan_index < len(plan_steps)
+        and recovery.context_key == expected_context
+        and (
+            _plan_step_matches_skill(recovery.origin_skill_id, plan_steps[plan_index])
+            or _plan_step_requests_obstacle_traversal(plan_steps[plan_index])
+        )
+    )
 
 
 def _headroom_clear_target(

@@ -35,6 +35,8 @@ def _runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[AgentRuntime, list[int], 
     accepted = []
 
     def send(command: str, **payload: object) -> dict:
+        if command == "release-inputs":
+            return {"released": True, "lease_active": True}
         assert command == "motor-action"
         accepted.append(payload)
         return {"world_camera": {"origin_calibrated": True, "estimated_pitch_units": 0}}
@@ -61,6 +63,7 @@ def _runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[AgentRuntime, list[int], 
     runtime._recent_skill_runs = deque()
     runtime._stop = threading.Event()
     runtime._pending_operator_status_updates = {}
+    runtime._input_release_pending_ns = None
     runtime.lease_id = "test-only"
     return runtime, clock, accepted
 
@@ -178,13 +181,14 @@ def test_unqualified_starvation_cannot_rotate(monkeypatch, variant: str) -> None
             with pytest.raises(RuntimeError, match="supervisor rejected"):
                 _prediction(runtime, clock, str(index))
         elif variant in {"old-episode", "wrong-skill"}:
-            with pytest.raises(ValueError, match="skill_.*does not match"):
-                _prediction(runtime, clock, str(index), variant=pred_variant)
+            _prediction(runtime, clock, str(index), variant=pred_variant)
             assert not accepted  # Reject mismatched ownership before actuation, not after it.
         else:
             _prediction(runtime, clock, "repeated" if variant == "same-id" else str(index),
                         variant=pred_variant)
     _finish(runtime, clock, collision=variant == "collision")
+    if variant in {"old-episode", "wrong-skill"}:
+        assert runtime.metrics.stale_policy_action_rejections == 3
     assert runtime._keepalive_rotation_hint is None
     assert runtime._explore_keep_alive().skill_id == "traverse_level_ground"
 

@@ -34,6 +34,7 @@ from minecraft_ai.perception_service import (
     frame_dhash,
 )
 from minecraft_ai.platforms import (
+    FfmpegX11Capture,
     HostMonitorBinding,
     IsolatedX11Capture,
     IsolationError,
@@ -178,7 +179,7 @@ _frame_references: OrderedDict[str, _FrameReference] = OrderedDict()
 _frame_references_lock = threading.Lock()
 _live_capture_lock = threading.Lock()
 _live_capture_key: tuple[object, ...] | None = None
-_live_capture: IsolatedX11Capture | MutterPipeWireCapture | None = None
+_live_capture: IsolatedX11Capture | FfmpegX11Capture | MutterPipeWireCapture | None = None
 
 
 def _cache_frame_reference(frame: CapturedFrame, dhash: str) -> str:
