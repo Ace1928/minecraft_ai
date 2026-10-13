@@ -1292,6 +1292,43 @@ def test_bedrock_air_hud_is_a_calibrated_safety_observation() -> None:
     assert facts["danger.immediate"].source.startswith("safety:")
 
 
+def test_bedrock_air_hud_uses_the_classic_1920_glyph_row() -> None:
+    width, height = 1920, 1080
+    pixels = bytearray(bytes((20, 20, 20, 255)) * width * height)
+    for cell in range(6, 10):
+        x0 = 1004 + cell * 32
+        for y in range(882, 892):
+            for x in range(x0 + 8, x0 + 18):
+                offset = (y * width + x) * 4
+                pixels[offset : offset + 4] = bytes((250, 150, 40, 255))
+    frame = _frame(bytes(pixels), width=width, height=height)
+
+    assert bedrock_air_bubbles(frame) == 4
+    facts = {fact.key: fact for fact in BootstrapFastPerception().infer(frame)}
+    assert facts["player.air_bubbles"].value == 4
+    assert facts["player.air_fraction"].value == 0.4
+    assert facts["environment.underwater"].value is True
+    assert facts["danger.drowning"].value is True
+
+
+@pytest.mark.parametrize("pattern", ("noncontiguous", "solid-blue"))
+def test_bedrock_air_hud_rejects_1920_world_colour_lookalikes(pattern: str) -> None:
+    width, height = 1920, 1080
+    pixels = bytearray(bytes((20, 20, 20, 255)) * width * height)
+    cells = (2, 9) if pattern == "noncontiguous" else tuple(range(10))
+    for cell in cells:
+        x0 = 1004 + cell * 32
+        x_range = range(x0 + 8, x0 + 18) if pattern == "noncontiguous" else range(x0, x0 + 28)
+        y_range = range(882, 892) if pattern == "noncontiguous" else range(876, 912)
+        for y in y_range:
+            for x in x_range:
+                offset = (y * width + x) * 4
+                pixels[offset : offset + 4] = bytes((250, 150, 40, 255))
+    frame = _frame(bytes(pixels), width=width, height=height)
+
+    assert bedrock_air_bubbles(frame) is None
+
+
 def test_bedrock_air_hud_rejects_nonmatching_world_pixels() -> None:
     width, height = 320, 180
     frame = _frame(bytes((200, 180, 120, 255)) * width * height, width=width, height=height)

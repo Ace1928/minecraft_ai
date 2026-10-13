@@ -68,7 +68,7 @@ BEDROCK_HOTBAR_LOG_COUNT_SOURCE = (
 BEDROCK_HOTBAR_DIRT_COUNT_SOURCE = (
     "deterministic:bedrock-1.26.45.1-classic-hud-hotbar-dirt-v1:not-training-label"
 )
-BEDROCK_HUD_SAFETY_SOURCE = "safety:bedrock-hud-v1:not-training-label"
+BEDROCK_HUD_SAFETY_SOURCE = "safety:bedrock-hud-v2:not-training-label"
 BEDROCK_CLASSIC_HEALTH_SOURCE = (
     "safety:bedrock-1.26.52.3-classic-health-1920x1080-4px-v1:not-training-label"
 )
@@ -2456,18 +2456,49 @@ def _hud_palette_ratio(
 def bedrock_air_bubbles(frame: CapturedFrame) -> int | None:
     """Read Bedrock's rendered air HUD without inferring world semantics.
 
-    The palette and normalized HUD band were calibrated against raw 1279x635
-    trajectory frames. Filled bubbles contribute 64 matching pixels at that
-    resolution; scaling the area keeps the count stable at other resolutions.
-    This is a safety observation and is never eligible as a training label.
+    The legacy palette and normalized HUD band were calibrated against raw
+    1279x635 trajectory frames. The active 1920x1080 classic UI instead uses
+    its measured fixed glyph grid because Bedrock does not scale that row with
+    the framebuffer. This is a safety observation and is never eligible as a
+    training label.
     """
     if not frame.bgra or frame.width < 64 or frame.height < 64:
+        return None
+    pixels = _numpy_bgra(frame)
+    if pixels is not None and (frame.width, frame.height) == (1920, 1080):
+        # Bedrock's classic four-pixel UI scale does not grow proportionally
+        # with the framebuffer.  Its air bank sits one row above the hunger
+        # bank: ten 28x36 glyph cells on a 32-pixel pitch, ending at x=1320.
+        # The older area-scaled band below starts at y=.90 and therefore misses
+        # this row entirely at 1920x1080.  Count only a contiguous right-aligned
+        # run of bounded turquoise glyphs.  A flat blue sky/water patch fills a
+        # cell and is rejected by the upper bound; isolated world pixels or a
+        # non-HUD pattern cannot form the required suffix.
+        cell_counts: list[int] = []
+        for index in range(10):
+            x_start = 1004 + index * 32
+            roi = pixels[876:912, x_start : x_start + 28, :3]
+            blue, green, red = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
+            cell_counts.append(
+                int(
+                    (
+                        (blue >= 230)
+                        & (green >= 110)
+                        & (green <= 210)
+                        & (red <= 100)
+                    ).sum()
+                )
+            )
+        visible = tuple(48 <= count <= 260 for count in cell_counts)
+        if any(visible):
+            first = visible.index(True)
+            if all(visible[first:]):
+                return sum(visible)
         return None
     x_start = int(frame.width * 0.50)
     x_end = int(frame.width * 0.66)
     y_start = int(frame.height * 0.90)
     y_end = int(frame.height * 0.97)
-    pixels = _numpy_bgra(frame)
     if pixels is not None:
         roi = pixels[y_start:y_end, x_start:x_end, :3]
         blue, green, red = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
