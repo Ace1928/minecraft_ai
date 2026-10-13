@@ -52,6 +52,17 @@ def test_sanitize_plan_steps_drops_perception_keys_not_actions() -> None:
     ).plan_steps == ("gather_nearby_wood",)
 
 
+def test_sanitize_plan_steps_drops_schema_placeholders_not_freeform_objectives() -> None:
+    assert sanitize_plan_steps(
+        (
+            "explore_forward",
+            "gather_wood_skill_id",
+            "next-option-id",
+            "collect three oak logs",
+        )
+    ) == ("explore_forward", "collect three oak logs")
+
+
 def test_plan_graph_blocks_failed_method_and_exposes_sibling() -> None:
     skills = SkillLibrary()
     skills.register(

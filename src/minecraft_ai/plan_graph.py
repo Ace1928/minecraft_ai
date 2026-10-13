@@ -36,6 +36,10 @@ _SENTINEL_PLAN_STEPS = frozenset(
 )
 
 _FACT_KEY_PLAN_STEP = re.compile(r"^[a-z][a-z0-9_]*\.[a-z0-9_{}*.,-]+$")
+_SCHEMA_PLACEHOLDER_PLAN_STEP = re.compile(
+    r"^(?:[a-z0-9]+[ _-]+)*(?:skill|option|action)[ _-]+id$",
+    re.IGNORECASE,
+)
 
 
 class PlanNodeState(StrEnum):
@@ -210,6 +214,15 @@ def sanitize_plan_steps(steps: tuple[str, ...]) -> tuple[str, ...]:
         # values into the adjacent plan field; admitting those strings creates
         # permanently unbound nodes which no skill can execute.
         if _FACT_KEY_PLAN_STEP.fullmatch(text.casefold()):
+            continue
+        # Structured-model field names and example metavariables are not
+        # executable objectives. A decoder can satisfy the JSON grammar while
+        # copying prose such as ``gather_wood_skill_id`` into ``plan_steps``;
+        # retaining that token creates a permanently unbound node that stalls
+        # the otherwise valid plan. Preserve ordinary free-form objectives,
+        # but fail closed on names whose final component is literally a schema
+        # identifier.
+        if _SCHEMA_PLACEHOLDER_PLAN_STEP.fullmatch(text):
             continue
         if cleaned and _normalized_plan_text(cleaned[-1]) == normalized:
             continue
