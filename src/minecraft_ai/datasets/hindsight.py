@@ -169,18 +169,11 @@ def iter_hindsight_examples(
             events = database.load_runtime_events_for_trajectory(reader.manifest.trajectory_id)
             events_by_run = _events_by_run(events)
             terminal_by_run = _terminal_events(events_by_run)
-            groups: dict[str, list[_ObservedStep]] = defaultdict(list)
-            for observed in _iter_observed_steps(reader):
-                run_id = observed.step.skill_run_id
-                if run_id is not None and run_id in terminal_by_run:
-                    groups[run_id].append(observed)
-            for event in terminal_by_run.values():
-                run_id = _event_text(event, "run_id")
-                if run_id is None:
-                    continue
-                observed_steps = groups.get(run_id, [])
-                if not observed_steps:
-                    continue
+            for run_id, observed_steps in _iter_terminal_run_steps(
+                _iter_observed_steps(reader),
+                terminal_by_run=terminal_by_run,
+            ):
+                event = terminal_by_run[run_id]
                 run_events = events_by_run.get(run_id, ())
                 yield from _examples_for_run(
                     observed_steps,
@@ -189,6 +182,38 @@ def iter_hindsight_examples(
                     history_steps=history_steps,
                     partial_window_steps=partial_window_steps,
                 )
+
+
+def _iter_terminal_run_steps(
+    observed_steps: Iterable[_ObservedStep],
+    *,
+    terminal_by_run: dict[str, RuntimeEvent],
+) -> Iterator[tuple[str, tuple[_ObservedStep, ...]]]:
+    """Yield one sequential, terminal skill episode without retaining a trajectory."""
+
+    current_run_id: str | None = None
+    current_steps: list[_ObservedStep] = []
+    closed_run_ids: set[str] = set()
+    for observed in observed_steps:
+        run_id = observed.step.skill_run_id
+        # Supervisor-only release/safety actions have no skill owner and must
+        # not split the surrounding learned option.
+        if run_id is None:
+            continue
+        if current_run_id is None:
+            current_run_id = run_id
+        elif run_id != current_run_id:
+            if current_steps:
+                yield current_run_id, tuple(current_steps)
+            closed_run_ids.add(current_run_id)
+            if run_id in closed_run_ids:
+                raise ValueError(f"skill run {run_id!r} is not contiguous in trajectory")
+            current_run_id = run_id
+            current_steps = []
+        if run_id in terminal_by_run:
+            current_steps.append(observed)
+    if current_run_id is not None and current_steps:
+        yield current_run_id, tuple(current_steps)
 
 
 def write_hindsight_dataset(

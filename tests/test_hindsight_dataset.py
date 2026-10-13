@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import minecraft_ai.datasets.hindsight as hindsight_module
 from minecraft_ai.datasets import ActionLevel, DatasetSource, DatasetSourceType, TrajectoryManifest
 from minecraft_ai.datasets.hindsight import (
     HindsightLabelSource,
@@ -212,6 +213,28 @@ def test_hindsight_relabels_verified_success_and_failed_run_progress(tmp_path: P
     }
     assert all(example.intended_goal == "mine the visible log" for example in partial)
     assert all(example.policy_id == "learned:openai-vpt:foundation-1x" for example in examples)
+
+
+def test_hindsight_streams_a_completed_run_before_reading_the_whole_trajectory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trajectory, db_path = _record_fixture(tmp_path)
+    original = hindsight_module._iter_observed_steps
+    consumed_indices: list[int] = []
+
+    def tracked(reader):
+        for observed in original(reader):
+            consumed_indices.append(observed.step.step_index)
+            yield observed
+
+    monkeypatch.setattr(hindsight_module, "_iter_observed_steps", tracked)
+    examples = iter_hindsight_examples((trajectory,), state_db_path=db_path)
+
+    first = next(examples)
+
+    assert first.skill_run_id == "success-run"
+    assert consumed_indices == [0, 1, 2]
 
 
 def test_hindsight_artifact_is_content_addressed_and_reproducible(tmp_path: Path) -> None:
