@@ -1807,6 +1807,37 @@ def test_async_policy_releases_continuous_button_at_request_deadline(
     assert hold_status["last_invalidation_reason"] == "request-deadline-expired"
 
 
+def test_hung_worker_watchdog_releases_and_recycles_after_bounded_grace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ns = 100_000_000_000
+    frame = CapturedFrame(frame_id=1, captured_ns=1, width=1, height=1, bgra=b"\0" * 4)
+    client = TemporalPolicyClient(
+        config=_policy_config(tmp_path, deadline_ms=1_000),
+        frame_provider=lambda: frame,
+    )
+    client._pending_request_id = "wedged"
+    client._pending_deadline_ns = now_ns - 30_000_000_001
+    client._held_keys = {"w"}
+    client._held_buttons = {"left"}
+    monkeypatch.setattr(client, "_ensure_started", lambda _size: None)
+    monkeypatch.setattr("minecraft_ai.policy_service.time.monotonic_ns", lambda: now_ns)
+
+    action = client.act(
+        PerceptionBlackboard(),
+        MotorIntent(skill_id="traverse", mode="traverse"),
+        sequence=1,
+    )
+
+    assert action.keys_up == ("w",)
+    assert action.buttons_up == ("left",)
+    assert client._pending_request_id is None
+    assert client.metrics.hung_worker_restarts == 1
+    assert client.status()["hung_worker_restarts"] == 1
+    assert client.metrics.last_error == "learned policy request exceeded worker watchdog"
+
+
 def test_safety_scene_invalidation_releases_learned_state_immediately(
     tmp_path: Path,
 ) -> None:

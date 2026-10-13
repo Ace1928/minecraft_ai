@@ -63,6 +63,7 @@ class PolicyServiceMetrics:
     invalidated_requests: int = 0
     retired_responses: int = 0
     deadline_misses: int = 0
+    hung_worker_restarts: int = 0
     failures: int = 0
     scene_blocks: int = 0
     camera_feedback_waits: int = 0
@@ -261,6 +262,11 @@ class TemporalPolicyClient:
             return self._release(sequence, reason="frame-unavailable")
         try:
             self._ensure_started(len(frame.bgra))
+            if self._hung_request_expired():
+                self.metrics.hung_worker_restarts += 1
+                self.metrics.last_error = "learned policy request exceeded worker watchdog"
+                self.close()
+                return self._release(sequence, reason="hung-worker-restart")
             response = self._consume_pending_response()
             if self._pending_request_id is not None:
                 if time.monotonic_ns() <= self._pending_deadline_ns:
@@ -314,6 +320,14 @@ class TemporalPolicyClient:
             self.metrics.last_error = f"{type(exc).__name__}: {exc}"
             self.close()
             return self._release(sequence, reason="policy-error")
+
+    def _hung_request_expired(self) -> bool:
+        """Fence a worker that failed to finish long after its action deadline."""
+
+        if self._pending_request_id is None or self._pending_deadline_ns <= 0:
+            return False
+        watchdog_ns = max(30_000_000_000, self.config.deadline_ms * 20_000_000)
+        return time.monotonic_ns() > self._pending_deadline_ns + watchdog_ns
 
     def _retire_pending_action(self) -> None:
         if self._pending_request_id is not None:
@@ -528,6 +542,7 @@ class TemporalPolicyClient:
             "invalidated_requests": self.metrics.invalidated_requests,
             "retired_responses": self.metrics.retired_responses,
             "deadline_misses": self.metrics.deadline_misses,
+            "hung_worker_restarts": self.metrics.hung_worker_restarts,
             "failures": self.metrics.failures,
             "scene_blocks": self.metrics.scene_blocks,
             "camera_feedback_waits": self.metrics.camera_feedback_waits,
