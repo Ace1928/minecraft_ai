@@ -326,7 +326,20 @@ class TemporalPolicyClient:
 
         if self._pending_request_id is None or self._pending_deadline_ns <= 0:
             return False
-        watchdog_ns = max(30_000_000_000, self.config.deadline_ms * 20_000_000)
+        # A native learned backend can spend substantially longer compiling or
+        # materialising weights on its first inference than it does once warm.
+        # The normal action deadline still releases every physical input and
+        # fences the late prediction; this extra grace only prevents recycling
+        # a healthy cold worker immediately before it becomes useful.
+        cold_start = self.metrics.responses == 0 and self._accepted_predictions == 0
+        startup_grace_ns = (
+            int(self.config.startup_timeout_s * 1_000_000_000) if cold_start else 0
+        )
+        watchdog_ns = max(
+            30_000_000_000,
+            self.config.deadline_ms * 20_000_000,
+            startup_grace_ns,
+        )
         return time.monotonic_ns() > self._pending_deadline_ns + watchdog_ns
 
     def _retire_pending_action(self) -> None:

@@ -1819,6 +1819,7 @@ def test_hung_worker_watchdog_releases_and_recycles_after_bounded_grace(
     )
     client._pending_request_id = "wedged"
     client._pending_deadline_ns = now_ns - 30_000_000_001
+    client.metrics.responses = 1
     client._held_keys = {"w"}
     client._held_buttons = {"left"}
     monkeypatch.setattr(client, "_ensure_started", lambda _size: None)
@@ -1836,6 +1837,29 @@ def test_hung_worker_watchdog_releases_and_recycles_after_bounded_grace(
     assert client.metrics.hung_worker_restarts == 1
     assert client.status()["hung_worker_restarts"] == 1
     assert client.metrics.last_error == "learned policy request exceeded worker watchdog"
+
+
+def test_hung_worker_watchdog_allows_first_inference_to_finish_cold_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ns = 200_000_000_000
+    client = TemporalPolicyClient(
+        config=_policy_config(tmp_path).model_copy(update={"startup_timeout_s": 75.0}),
+        frame_provider=lambda: None,
+    )
+    client._pending_request_id = "cold-start"
+    monkeypatch.setattr("minecraft_ai.policy_service.time.monotonic_ns", lambda: now_ns)
+
+    client._pending_deadline_ns = now_ns - 30_000_000_001
+    assert not client._hung_request_expired()
+
+    client._pending_deadline_ns = now_ns - 75_000_000_001
+    assert client._hung_request_expired()
+
+    client.metrics.responses = 1
+    client._pending_deadline_ns = now_ns - 30_000_000_001
+    assert client._hung_request_expired()
 
 
 def test_safety_scene_invalidation_releases_learned_state_immediately(
