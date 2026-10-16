@@ -412,6 +412,39 @@ def test_failed_warmup_does_not_admit_a_specialist() -> None:
     assert router.status()["episode_id"] is None
 
 
+def test_failed_grounding_observer_does_not_freeze_semantic_body() -> None:
+    class RejectedObserver(_RoutingPolicy):
+        def warmup(self) -> None:
+            super().warmup()
+            raise RuntimeError("grounding checkpoint identity rejected")
+
+    primary = _RoutingPolicy("steve", key="w")
+    observer = RejectedObserver("rejected-rocket", key="a")
+    router = GroundedPolicyRouter(primary, grounded=observer)
+
+    with pytest.raises(RuntimeError, match="identity rejected"):
+        router._ensure_warm(observer)
+
+    action = router.act(
+        _tracked_board(),
+        MotorIntent(
+            skill_id="gather_nearby_wood",
+            mode="gather_wood",
+            episode_id="gather-1",
+            action_level=ActionLevel.GROUNDED,
+        ),
+        sequence=1,
+    )
+
+    assert action.keys_down == ("w",)
+    assert observer.calls == 0
+    status = router.status()
+    assert status["active_route"] == "semantic"
+    assert status["episode_id"] == "gather-1"
+    assert status["fallback_bindings"] == 1
+    assert status["grounding_role"] == "unavailable-after-warmup-failure"
+
+
 @pytest.mark.parametrize("level", [ActionLevel.GUI, ActionLevel.LATENT])
 def test_episode_binding_does_not_wait_or_reset_a_warming_worker(level: ActionLevel) -> None:
     entered = threading.Event()

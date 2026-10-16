@@ -1465,10 +1465,17 @@ class GroundedPolicyRouter:
                 self._begin_warm(observer, blocking=False)
             with self._warm_lock:
                 warming = {key for key, thread in self._warming.items() if thread.is_alive()}
-                unavailable = any(
-                    id(policy) in warming or id(policy) in self._warm_failed
-                    for policy in (selected, observer) if policy is not None
+                body_unavailable = (
+                    id(selected) in warming or id(selected) in self._warm_failed
                 )
+                # ROCKET is a non-actuating target observer. A cold observer
+                # must finish owning its worker before an option can bind, but
+                # a rejected observer checkpoint must not permanently freeze
+                # an otherwise healthy semantic body. The exact failure stays
+                # visible in telemetry and the body remains subject to the
+                # option's normal outcome verification.
+                observer_loading = observer is not None and id(observer) in warming
+                unavailable = body_unavailable or observer_loading
             if unavailable:
                 # Anticipatory loading must never turn option binding into a
                 # blocking wait on the motor thread. Do not reset its worker.
@@ -1508,8 +1515,9 @@ class GroundedPolicyRouter:
 
         selected, route, used_fallback = self._body_for_level(intent.action_level)
         self._ensure_warm(selected)
+        observer_degraded = False
         if intent.action_level == ActionLevel.GROUNDED:
-            self._ensure_warm(self.grounded)
+            observer_degraded = not self._ensure_optional_observer_warm(self.grounded)
         elif intent.action_level == ActionLevel.GUI:
             self._ensure_warm(self.gui)
         release: MotorAction | None = None
@@ -1528,7 +1536,7 @@ class GroundedPolicyRouter:
         self._episode_id = episode_id
         self._episode_level = intent.action_level
         self._episode_bindings += 1
-        self._fallback_bindings += int(used_fallback)
+        self._fallback_bindings += int(used_fallback or observer_degraded)
         self._last_binding_conflict = None
         return release
 
@@ -1553,7 +1561,7 @@ class GroundedPolicyRouter:
         blackboard: PerceptionBlackboard,
         intent: MotorIntent,
     ) -> None:
-        if self.grounded is None:
+        if self.grounded is None or self._observer_warmup_failed():
             return
         self._grounding_sequence += 1
         # ROCKET's worker is deadline-aware and normally only enqueues/consumes
@@ -1842,6 +1850,30 @@ class GroundedPolicyRouter:
     def _ensure_warm(self, policy: MotorPolicy | None) -> None:
         self._begin_warm(policy, blocking=True)
 
+    def _ensure_optional_observer_warm(self, policy: MotorPolicy | None) -> bool:
+        """Warm a non-actuating observer without making it body-critical."""
+
+        if policy is None:
+            return False
+        with self._warm_lock:
+            if id(policy) in self._warm_failed:
+                return False
+        try:
+            self._ensure_warm(policy)
+        except RuntimeError:
+            with self._warm_lock:
+                if id(policy) in self._warm_failed:
+                    return False
+            raise
+        return True
+
+    def _observer_warmup_failed(self) -> bool:
+        observer = self.grounded
+        if observer is None:
+            return False
+        with self._warm_lock:
+            return id(observer) in self._warm_failed
+
     def _begin_warm(self, policy: MotorPolicy | None, *, blocking: bool) -> None:
         if policy is None:
             return
@@ -1943,7 +1975,9 @@ class GroundedPolicyRouter:
             "fallback_bindings": self._fallback_bindings,
             "sequence_rebases": self._sequence_rebases,
             "grounding_role": (
-                "asynchronous-target-belief-only"
+                "unavailable-after-warmup-failure"
+                if self._observer_warmup_failed()
+                else "asynchronous-target-belief-only"
                 if self.grounded is not None
                 else "unavailable"
             ),
@@ -2153,7 +2187,7 @@ class GroundedPolicyRouter:
         blackboard: PerceptionBlackboard,
         intent: MotorIntent,
     ) -> bool:
-        if self.grounded is None:
+        if self.grounded is None or self._observer_warmup_failed():
             return False
         interaction_id = _rocket_interaction_id(intent.mode)
         if interaction_id < 0:
