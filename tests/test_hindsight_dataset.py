@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -235,6 +236,57 @@ def test_hindsight_streams_a_completed_run_before_reading_the_whole_trajectory(
 
     assert first.skill_run_id == "success-run"
     assert consumed_indices == [0, 1, 2]
+
+
+def test_hindsight_keeps_parent_run_across_interleaved_child_option() -> None:
+    base_ns = time.monotonic_ns()
+
+    def observed(index: int, run_id: str) -> hindsight_module._ObservedStep:
+        return hindsight_module._ObservedStep(
+            step=SimpleNamespace(
+                skill_run_id=run_id,
+                captured_ns=base_ns + index,
+                step_index=index,
+            ),
+            facts={},
+            gui_mode="world",
+        )
+
+    terminals = {
+        "child": RuntimeEvent(
+            event_id="child-terminal",
+            kind=RuntimeEventKind.SKILL_SUCCEEDED,
+            observed_ns=base_ns + 2,
+            payload={"run_id": "child"},
+        ),
+        "parent": RuntimeEvent(
+            event_id="parent-terminal",
+            kind=RuntimeEventKind.SKILL_SUCCEEDED,
+            observed_ns=base_ns + 4,
+            payload={"run_id": "parent"},
+        ),
+    }
+
+    episodes = tuple(
+        hindsight_module._iter_terminal_run_steps(
+            (
+                observed(0, "parent"),
+                observed(1, "child"),
+                observed(2, "parent"),
+                observed(3, "parent"),
+            ),
+            terminal_by_run=terminals,
+        )
+    )
+
+    observed_episodes = [
+        (run_id, tuple(item.step.step_index for item in steps))
+        for run_id, steps in episodes
+    ]
+    assert observed_episodes == [
+        ("child", (1,)),
+        ("parent", (0, 2, 3)),
+    ]
 
 
 def test_hindsight_artifact_is_content_addressed_and_reproducible(tmp_path: Path) -> None:

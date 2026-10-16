@@ -189,31 +189,50 @@ def _iter_terminal_run_steps(
     *,
     terminal_by_run: dict[str, RuntimeEvent],
 ) -> Iterator[tuple[str, tuple[_ObservedStep, ...]]]:
-    """Yield one sequential, terminal skill episode without retaining a trajectory."""
+    """Yield terminal skill episodes while supporting suspended option parents.
 
-    current_run_id: str | None = None
-    current_steps: list[_ObservedStep] = []
-    closed_run_ids: set[str] = set()
+    A hierarchical parent legitimately disappears while a child option owns
+    accepted actions, then resumes under the same run ID. Terminal event time
+    is the trustworthy episode boundary; adjacency in the flat action stream
+    is not. Retain only terminal runs that are concurrently open and flush a
+    run once a later action crosses its terminal timestamp.
+    """
+
+    pending: dict[str, list[_ObservedStep]] = {}
+    yielded: set[str] = set()
     for observed in observed_steps:
         run_id = observed.step.skill_run_id
+        captured_ns = observed.step.captured_ns
+        ready = sorted(
+            (
+                candidate
+                for candidate, steps in pending.items()
+                if steps
+                and candidate != run_id
+                and terminal_by_run[candidate].observed_ns <= captured_ns
+            ),
+            key=lambda candidate: (
+                terminal_by_run[candidate].observed_ns,
+                candidate,
+            ),
+        )
+        for candidate in ready:
+            yield candidate, tuple(pending.pop(candidate))
+            yielded.add(candidate)
         # Supervisor-only release/safety actions have no skill owner and must
-        # not split the surrounding learned option.
+        # not split or become part of a learned option.
         if run_id is None:
             continue
-        if current_run_id is None:
-            current_run_id = run_id
-        elif run_id != current_run_id:
-            if current_steps:
-                yield current_run_id, tuple(current_steps)
-            closed_run_ids.add(current_run_id)
-            if run_id in closed_run_ids:
-                raise ValueError(f"skill run {run_id!r} is not contiguous in trajectory")
-            current_run_id = run_id
-            current_steps = []
+        if run_id in yielded:
+            raise ValueError(f"skill run {run_id!r} has actions after its terminal event")
         if run_id in terminal_by_run:
-            current_steps.append(observed)
-    if current_run_id is not None and current_steps:
-        yield current_run_id, tuple(current_steps)
+            pending.setdefault(run_id, []).append(observed)
+    for run_id in sorted(
+        pending,
+        key=lambda candidate: (terminal_by_run[candidate].observed_ns, candidate),
+    ):
+        if pending[run_id]:
+            yield run_id, tuple(pending[run_id])
 
 
 def write_hindsight_dataset(
