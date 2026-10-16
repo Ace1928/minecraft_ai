@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -8,6 +9,7 @@ import pytest
 
 from minecraft_ai.platforms import ffmpeg_x11_capture
 from minecraft_ai.platforms.ffmpeg_x11_capture import FfmpegX11Capture, _read_exact
+from minecraft_ai.platforms.bedrock_x11 import ImageCaptureTimeout
 
 
 class _Process:
@@ -38,6 +40,19 @@ def test_read_exact_distinguishes_clean_and_partial_eof() -> None:
     assert _read_exact(io.BytesIO(b""), 4) is None
     with pytest.raises(EOFError, match="within a raw frame"):
         _read_exact(io.BytesIO(b"abc"), 4)
+
+
+def test_frame_wait_deadline_is_a_classified_transient_timeout() -> None:
+    capture = object.__new__(FfmpegX11Capture)
+    capture._condition = threading.Condition()
+    capture._returned_sequence = 0
+    capture._latest_sequence = 0
+    capture._reader_error = None
+    capture._closed = False
+    capture._capture_budget_ms = 1
+
+    with pytest.raises(ImageCaptureTimeout, match="frame deadline expired"):
+        capture.capture()
 
 
 def test_persistent_ffmpeg_capture_returns_newest_complete_exact_window_frame(

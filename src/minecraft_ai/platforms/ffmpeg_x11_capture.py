@@ -12,6 +12,7 @@ from typing import Any, Protocol, cast
 
 from .bedrock_x11 import (
     CapturedFrame,
+    ImageCaptureTimeout,
     IsolationError,
     _crop_bgra,
     _wine_content_rect,
@@ -196,7 +197,11 @@ class FfmpegX11Capture:
                     raise IsolationError("FFmpeg X11 capture is closed")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise IsolationError("FFmpeg X11 frame deadline expired")
+                    # A live, exact private FFmpeg stream can miss one frame
+                    # deadline under CPU pressure without losing its capture
+                    # identity. Classify only this wait expiry as recoverable;
+                    # EOF, geometry, ownership and stream faults remain fatal.
+                    raise ImageCaptureTimeout("FFmpeg X11 frame deadline expired")
                 self._condition.wait(remaining)
             sequence = self._latest_sequence
             bgra = self._latest_bgra

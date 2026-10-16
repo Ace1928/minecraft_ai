@@ -20,6 +20,7 @@ from minecraft_ai.platforms.bedrock_x11 import (
     IsolationError,
 )
 from minecraft_ai.platforms.frame_cache import PublishedFrameCapture, read_agent_frame
+from minecraft_ai.platforms.ffmpeg_x11_capture import FfmpegX11Capture
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux",
@@ -158,6 +159,15 @@ def _private_source(results: list) -> IsolatedX11Capture:
     return source
 
 
+def _private_ffmpeg_source(results: list) -> FfmpegX11Capture:
+    source = object.__new__(FfmpegX11Capture)
+    source.display_name = ":2"
+    source.target_window_id = 42
+    source.capture = Mock(side_effect=results)
+    source.close = Mock()
+    return source
+
+
 def _timeout(message: str = "image reply read timed out") -> ImageCaptureTimeout:
     return ImageCaptureTimeout(message)
 
@@ -183,6 +193,33 @@ def test_timeout_drops_frame_then_reopens_once_on_next_capture(
     assert source.capture.call_count == 2
     assert read_agent_frame(_owner(), path=path) == frame
     assert publisher._consecutive_image_timeouts == 0
+
+
+def test_ffmpeg_timeout_drops_frame_then_reuses_exact_persistent_stream(
+    tmp_path: Path,
+) -> None:
+    frame = _frame()
+    source = _private_ffmpeg_source([_timeout("FFmpeg X11 frame deadline expired"), frame])
+    path = tmp_path / "frame"
+    publisher = PublishedFrameCapture(source, _owner(), path=path)
+
+    with pytest.raises(ImageCaptureTimeout):
+        publisher.capture()
+
+    assert not publisher._image_reconnect_pending
+    assert not path.exists()
+    assert publisher.capture() is frame
+    assert source.capture.call_count == 2
+    assert publisher._consecutive_image_timeouts == 0
+
+
+def test_ffmpeg_timeout_refuses_changed_private_owner(tmp_path: Path) -> None:
+    source = _private_ffmpeg_source([_timeout("FFmpeg X11 frame deadline expired")])
+    publisher = PublishedFrameCapture(source, _owner(), path=tmp_path / "frame")
+    publisher.owner = replace(publisher.owner, window_id=99)
+
+    with pytest.raises(IsolationError, match="owner or private target changed"):
+        publisher.capture()
 
 
 @pytest.mark.parametrize("message", [

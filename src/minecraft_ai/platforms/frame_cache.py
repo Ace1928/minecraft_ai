@@ -22,6 +22,7 @@ from minecraft_ai.platforms.bedrock_x11 import (
     IsolatedX11Capture,
     IsolationError,
 )
+from minecraft_ai.platforms.ffmpeg_x11_capture import FfmpegX11Capture
 
 FRAME_CACHE_FILE = RUNTIME_DIR / "agent-frame.bgra"
 MAX_FRAME_BYTES = 32 * 1024 * 1024
@@ -94,6 +95,20 @@ class PublishedFrameCapture:
             raise IsolationError("capture recovery owner or private target changed")
         return source
 
+    def _require_private_ffmpeg_timeout_owner(self) -> FfmpegX11Capture:
+        """Verify a transient FFmpeg wait against its immutable private owner."""
+        source = self.source
+        if (
+            type(source) is not FfmpegX11Capture
+            or source is not self._capture_recovery_source
+            or owner_manifest(self.owner) != self._capture_recovery_owner
+            or self.owner.allow_host_capture is not False
+            or source.display_name != self.owner.display
+            or source.target_window_id != self.owner.window_id
+        ):
+            raise IsolationError("capture recovery owner or private target changed")
+        return source
+
     def capture(self) -> CapturedFrame:
         if self._image_reconnect_pending:
             source = self._require_private_recovery_owner()
@@ -104,11 +119,19 @@ class PublishedFrameCapture:
         try:
             frame = self.source.capture()
         except ImageCaptureTimeout as exc:
-            self._require_private_recovery_owner()
+            ffmpeg_timeout = type(self.source) is FfmpegX11Capture
+            if ffmpeg_timeout:
+                self._require_private_ffmpeg_timeout_owner()
+            else:
+                self._require_private_recovery_owner()
             self._consecutive_image_timeouts += 1
             if self._consecutive_image_timeouts > MAX_CONSECUTIVE_IMAGE_RECONNECTS:
                 raise IsolationError("consecutive image capture recovery budget exhausted") from exc
-            self._image_reconnect_pending = True
+            # XGetImage timeouts poison a request/reply connection and need an
+            # exact-owner reopen. FFmpeg continuously drains the same admitted
+            # stream, so retrying the next tick is sufficient and avoids
+            # replacing a healthy capture process during transient load.
+            self._image_reconnect_pending = not ffmpeg_timeout
             # No inline retry, fake pixels, spectator write or timestamp change.
             raise
         now = time.monotonic_ns()
