@@ -18,6 +18,7 @@ from minecraft_ai.outcome_verifier import (
     OutcomeKind, OutcomeSignal, OutcomeStatus, OutcomeVerification,
 )
 from minecraft_ai.perception import FrameState, PerceptionBlackboard, PerceptionFact
+from minecraft_ai.perception_service import BEDROCK_HUD_SAFETY_SOURCE
 from minecraft_ai.runtime_support.helpers import _accepted_action_provenance
 from minecraft_ai.runtime import AgentRuntime, RuntimeMetrics
 from minecraft_ai.runtime_support.types import SkillStartSource
@@ -48,7 +49,7 @@ def _runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[AgentRuntime, list[int], 
         frame_id=1, captured_ns=clock[0], instance_id="test-world", width=32, height=32,
         facts=tuple(PerceptionFact(
             key=key, value=value, confidence=0.995, observed_ns=clock[0],
-            source="safety:bedrock-hud-v1:not-training-label", expires_after_ms=30_000,
+            source=BEDROCK_HUD_SAFETY_SOURCE, expires_after_ms=30_000,
         ) for key, value in (("scene.mode", "world"), ("scene.playable", True))),
     ))
     runtime.skills = build_bootstrap_skill_library()

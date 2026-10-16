@@ -6554,7 +6554,7 @@ def test_accepted_correction_cannot_install_a_persistent_plan(tmp_path: Path) ->
         database.close()
 
 
-def test_valid_acknowledgement_tombstones_older_pending_message(
+def test_valid_question_acknowledgement_schedules_older_pending_question(
     tmp_path: Path,
 ) -> None:
     database = StateDatabase(tmp_path / "state.sqlite3")
@@ -6564,7 +6564,8 @@ def test_valid_acknowledgement_tombstones_older_pending_message(
                 OperatorMessage(
                     message_id=message_id,
                     created_ns=created_ns,
-                    text=f"Handle {message_id} request.",
+                    text=f"What is the status of the {message_id} request?",
+                    kind=OperatorMessageKind.QUESTION,
                     status=OperatorMessageStatus.DELIVERED,
                     delivered_ns=created_ns,
                 )
@@ -6578,6 +6579,10 @@ def test_valid_acknowledgement_tombstones_older_pending_message(
             database=database,
             pending_message_ids=("first", "second"),
         )
+        runtime._pending_operator_message_kinds = {
+            "first": OperatorMessageKind.QUESTION,
+            "second": OperatorMessageKind.QUESTION,
+        }
 
         runtime._consume_cognition()
 
@@ -6586,9 +6591,9 @@ def test_valid_acknowledgement_tombstones_older_pending_message(
         }
         assert messages["first"].status == OperatorMessageStatus.ACKNOWLEDGED
         assert messages["second"].status == OperatorMessageStatus.DELIVERED
-        assert runtime._cognition_requested is False
+        assert runtime._cognition_requested is True
         assert runtime._cognition_retry_count == 0
-        assert runtime._cognition_retry_not_before_ns == 0
+        assert runtime._cognition_retry_not_before_ns > 0
     finally:
         database.close()
 

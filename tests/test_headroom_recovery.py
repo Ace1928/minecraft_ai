@@ -39,7 +39,11 @@ from minecraft_ai.perception import (
     ScreenRegion,
     Track,
 )
-from minecraft_ai.perception_service import crosshair_block_dhash, frame_dhash
+from minecraft_ai.perception_service import (
+    BEDROCK_HUD_SAFETY_SOURCE,
+    crosshair_block_dhash,
+    frame_dhash,
+)
 from minecraft_ai.platforms.bedrock_x11 import CapturedFrame
 from minecraft_ai.runtime import (
     AgentRuntime,
@@ -216,13 +220,13 @@ def _publish_frame(board: PerceptionBlackboard, frame: CapturedFrame) -> None:
             PerceptionFact(
                 key="scene.playable", value=True, confidence=1.0,
                 observed_ns=observed_ns,
-                source="safety:bedrock-hud-v1:not-training-label",
+                source=BEDROCK_HUD_SAFETY_SOURCE,
                 expires_after_ms=60_000,
             ),
             PerceptionFact(
                 key="scene.mode", value="world", confidence=1.0,
                 observed_ns=observed_ns,
-                source="safety:bedrock-hud-v1:not-training-label",
+                source=BEDROCK_HUD_SAFETY_SOURCE,
                 expires_after_ms=60_000,
             ),
             PerceptionFact(
@@ -1452,7 +1456,7 @@ def test_headroom_requires_current_canonical_full_frame_safety(state: str) -> No
     runtime, _, _ = _runtime_for_probe()
     runtime.blackboard.remove_semantic_facts(
         ("scene.playable", "scene.mode"),
-        expected_source="safety:bedrock-hud-v1:not-training-label",
+        expected_source=BEDROCK_HUD_SAFETY_SOURCE,
     )
     if state == "spoofed":
         now = time.monotonic_ns()
@@ -1479,13 +1483,13 @@ def test_headroom_requires_current_canonical_full_frame_safety(state: str) -> No
                 PerceptionFact(
                     key="scene.playable", value=True, confidence=1.0,
                     observed_ns=old,
-                    source="safety:bedrock-hud-v1:not-training-label",
+                    source=BEDROCK_HUD_SAFETY_SOURCE,
                     expires_after_ms=60_000,
                 ),
                 PerceptionFact(
                     key="scene.mode", value="world", confidence=1.0,
                     observed_ns=old,
-                    source="safety:bedrock-hud-v1:not-training-label",
+                    source=BEDROCK_HUD_SAFETY_SOURCE,
                     expires_after_ms=60_000,
                 ),
             ),
