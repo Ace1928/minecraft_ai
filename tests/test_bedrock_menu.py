@@ -1256,8 +1256,10 @@ def test_disconnect_recovery_requires_complete_positioned_dialog(invalid: str) -
         lines[0] = OcrLine(lines[0].text, 10, 10, 250, 30)
     elif invalid == "low_confidence":
         lines[2] = OcrLine(lines[2].text, 155, 400, 115, 30, 59)
+        lines[3] = OcrLine(lines[3].text, 355, 400, 100, 30, 59)
     else:
         lines.append(lines[2])
+        lines.append(lines[3])
     assert classify_menu_stage(
         _frame(1), tuple(lines), lan_name="BedrockConnect",
         server_name="Eidos Local Bedrock", hud_detector=lambda _frame: False,
@@ -1271,6 +1273,33 @@ def test_disconnect_recovery_does_not_depend_on_noisy_reconnect_ocr() -> None:
         _frame(1), tuple(lines), lan_name="BedrockConnect",
         server_name="Eidos Local Bedrock", hud_detector=lambda _frame: False,
     ) == MenuStage.DISCONNECTED
+
+
+def test_disconnect_recovery_uses_reconnect_when_back_caption_is_corrupted() -> None:
+    disconnected = list(_disconnected_lines())
+    disconnected[2] = OcrLine("k to menu", 155, 400, 115, 30, 81)
+    frames = [_frame(index) for index in range(1, 4)]
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture(frames),
+        text_reader=_MappedTextReader(
+            {
+                1: tuple(disconnected),
+                2: _lines("Connecting to multiplayer game"),
+            }
+        ),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer("Eidos Local Bedrock", "192.168.4.166", 19133),
+        poll_interval_s=0,
+        sleep=lambda _seconds: None,
+        hud_detector=lambda frame: frame.frame_id == 3,
+    )
+
+    result = navigator.run()
+
+    assert result.visited == (MenuStage.DISCONNECTED, MenuStage.IN_WORLD)
+    assert clicks.clicks == [(1, *disconnected[3].center)]
 
 
 def test_disconnect_recovery_never_repeats_beyond_bounded_back_attempts() -> None:

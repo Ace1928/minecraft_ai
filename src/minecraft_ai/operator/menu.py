@@ -720,6 +720,28 @@ class BedrockMenuNavigator:
                 region=(0.25, 0.52, 0.75, 0.72),
             )
         if observation.stage == MenuStage.DISCONNECTED:
+            reconnect = _positioned_disconnected_caption(
+                observation.frame,
+                observation.lines,
+                "reconnect",
+                region=(0.30, 0.64, 0.50, 0.75),
+            )
+            back = _positioned_disconnected_caption(
+                observation.frame,
+                observation.lines,
+                "back to menu",
+                region=(0.12, 0.64, 0.30, 0.75),
+            )
+            if back is None and reconnect is not None:
+                # Prefer the established full menu path when its caption is
+                # readable. If Bedrock's pixel font corrupts only that caption,
+                # a uniquely positioned Reconnect on the independently proven
+                # disconnect dialog safely rejoins the exact previous host.
+                return _Transition(
+                    target_text=("reconnect",),
+                    destination=MenuStage.IN_WORLD,
+                    region=(0.30, 0.64, 0.50, 0.75),
+                )
             return _Transition(
                 target_text=("back to menu",),
                 destination=MenuStage.TITLE,
@@ -1448,22 +1470,56 @@ def _multiplayer_connection_failure_back(
 
 
 def _disconnected_dialog_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bool:
-    """Recognize the retained dialog; only its Back to menu action is allowed."""
-    return all(
-        sum(
-            line.confidence >= 60
-            and _normalized_text(line.text) == text
-            and x0 <= line.center[0] / frame.width <= x1
-            and y0 <= line.center[1] / frame.height <= y1
-            for line in lines
-        )
-        == 1
-        for text, (x0, y0, x1, y1) in (
-            ("disconnected from host", (0.30, 0.22, 0.70, 0.38)),
-            ("back to menu", (0.12, 0.64, 0.30, 0.75)),
-            ("show details", (0.50, 0.64, 0.70, 0.75)),
-        )
+    """Recognize the retained dialog and at least one safe exit action."""
+
+    heading = _positioned_disconnected_caption(
+        frame,
+        lines,
+        "disconnected from host",
+        region=(0.30, 0.22, 0.70, 0.38),
     )
+    details = _positioned_disconnected_caption(
+        frame,
+        lines,
+        "show details",
+        region=(0.50, 0.64, 0.70, 0.75),
+    )
+    back = _positioned_disconnected_caption(
+        frame,
+        lines,
+        "back to menu",
+        region=(0.12, 0.64, 0.30, 0.75),
+    )
+    reconnect = _positioned_disconnected_caption(
+        frame,
+        lines,
+        "reconnect",
+        region=(0.30, 0.64, 0.50, 0.75),
+    )
+    has_safe_action = back is not None or reconnect is not None
+    return heading is not None and details is not None and has_safe_action
+
+
+def _positioned_disconnected_caption(
+    frame: CapturedFrame,
+    lines: tuple[OcrLine, ...],
+    text: str,
+    *,
+    region: tuple[float, float, float, float],
+) -> OcrLine | None:
+    if frame.width <= 0 or frame.height <= 0:
+        return None
+    x0, y0, x1, y1 = region
+    matches = tuple(
+        line
+        for line in lines
+        if math.isfinite(line.confidence)
+        and line.confidence >= 60
+        and _normalized_text(line.text) == text
+        and x0 <= line.center[0] / frame.width <= x1
+        and y0 <= line.center[1] / frame.height <= y1
+    )
+    return matches[0] if len(matches) == 1 else None
 
 
 def _external_connection_heading_visible(observation: MenuObservation) -> bool:
