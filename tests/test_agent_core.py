@@ -6438,6 +6438,47 @@ def test_replan_does_not_acknowledge_delivered_operator_message(tmp_path: Path) 
         database.close()
 
 
+@pytest.mark.parametrize(
+    "kind",
+    (OperatorMessageKind.INSTRUCTION, OperatorMessageKind.CORRECTION),
+)
+def test_command_prose_without_action_does_not_acknowledge_operator_message(
+    tmp_path: Path,
+    kind: OperatorMessageKind,
+) -> None:
+    database = StateDatabase(tmp_path / "state.sqlite3")
+    try:
+        message = OperatorMessage(
+            message_id="wood-without-action",
+            created_ns=1,
+            text="Gather nearby wood.",
+            kind=kind,
+            status=OperatorMessageStatus.DELIVERED,
+            delivered_ns=2,
+        )
+        database.save_operator_message(message)
+        runtime = _runtime_with_completed_decision(
+            CognitionDecision(
+                chosen_goal_id="operator:wood-without-action",
+                reasoning_summary="Search for a nearby tree.",
+                say="Acknowledged. Searching for a nearby tree.",
+            ),
+            database=database,
+            pending_message_ids=("wood-without-action",),
+        )
+        runtime._pending_operator_message_kinds = {"wood-without-action": kind}
+
+        runtime._consume_cognition()
+
+        persisted = database.load_operator_messages(limit=1)[0]
+        assert persisted.status == OperatorMessageStatus.DELIVERED
+        assert persisted.response_text is None
+        assert runtime._cognition_requested is True
+        assert runtime._cognition_retry_count == 1
+    finally:
+        database.close()
+
+
 def test_valid_decision_acknowledges_its_own_delivered_message(tmp_path: Path) -> None:
     database = StateDatabase(tmp_path / "state.sqlite3")
     try:
@@ -6459,6 +6500,9 @@ def test_valid_decision_acknowledges_its_own_delivered_message(tmp_path: Path) -
             database=database,
             pending_message_ids=("status-question",),
         )
+        runtime._pending_operator_message_kinds = {
+            "status-question": OperatorMessageKind.QUESTION
+        }
 
         runtime._consume_cognition()
 

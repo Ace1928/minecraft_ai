@@ -4511,14 +4511,23 @@ class AgentRuntime:
         skill_origin = self._skill_decision_origin(record, decision)
         operator_acknowledged = False
         if self.state_db is not None and self._pending_operator_message_ids:
+            selected_kind = (
+                None
+                if selected_message_id is None
+                else getattr(self, "_pending_operator_message_kinds", {}).get(
+                    selected_message_id
+                )
+            )
+            reply_only_answer = (
+                selected_kind == OperatorMessageKind.QUESTION and bool(decision.say)
+            )
             if (
                 selected_message_id is not None
                 and not missing_target_referent
                 and (
-                    not decision.request_replan
-                    or decision.skill_id is not None
+                    decision.skill_id is not None
                     or bool(decision.plan_steps)
-                    or bool(decision.say)
+                    or reply_only_answer
                 )
             ):
                 response = decision.say or decision.reasoning_summary
