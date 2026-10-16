@@ -87,6 +87,7 @@ class _TraversalPolicy:
         self.actions = list(actions)
         self.last_sequence = -1
         self.held_keys: set[str] = set()
+        self.pending = False
 
     def act(
         self,
@@ -110,6 +111,9 @@ class _TraversalPolicy:
         )
         self.held_keys.clear()
         return action
+
+    def action_generation_pending(self) -> bool:
+        return self.pending
 
 
 class _ScriptedMiningGuard:
@@ -1291,6 +1295,45 @@ def test_no_input_traversal_reports_starvation_without_physical_recovery(skill_i
     assert not terminal.action.keys_down and not terminal.action.buttons_down
     assert terminal.action.mouse_dx == terminal.action.mouse_dy == 0
     assert set(terminal.action.keys_up) == {"w", "a", "s", "d", "ctrl", "shift", "space"}
+
+
+def test_cold_controller_loading_does_not_count_as_traversal_starvation() -> None:
+    now = time.monotonic_ns()
+    policy = _TraversalPolicy()
+    policy.pending = True
+    executor = SkillExecutor(policy)
+    executor.start(
+        build_bootstrap_skill_library().get("traverse_level_ground"),
+        run_id="cold-controller",
+        now_ns=now,
+    )
+
+    for sequence, elapsed_s in enumerate((0.0, 4.0, 10.0), start=1):
+        waiting = executor.tick(
+            _traversal_board(now + int(elapsed_s * 1e9), luma_grid=_LUMA_A),
+            sequence=sequence,
+            now_ns=now + int(elapsed_s * 1e9),
+        )
+        assert waiting.run.outcome == SkillOutcome.RUNNING
+        assert waiting.outcome_verification is None
+
+    policy.pending = False
+    ready_ns = now + 10_100_000_000
+    ready = executor.tick(
+        _traversal_board(ready_ns, luma_grid=_LUMA_A),
+        sequence=4,
+        now_ns=ready_ns,
+    )
+    assert ready.run.outcome == SkillOutcome.RUNNING
+
+    terminal_ns = ready_ns + 3_100_000_000
+    terminal = executor.tick(
+        _traversal_board(terminal_ns, luma_grid=_LUMA_A),
+        sequence=5,
+        now_ns=terminal_ns,
+    )
+    assert terminal.run.outcome == SkillOutcome.FAILED
+    assert terminal.run.failure_code == SkillFailureCode.CONTROLLER_STARVATION
 
 
 def test_camera_confounded_traversal_routes_non_destructive_learned_recovery() -> None:

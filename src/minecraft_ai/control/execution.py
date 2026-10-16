@@ -799,6 +799,8 @@ class SkillExecutor:
             parameters=self.policy_parameters,
         )
         proposed = self.policy.act(blackboard, intent, sequence=sequence)
+        controller_pending = _policy_action_generation_pending(self.policy)
+        policy_status = _policy_status_snapshot(self.policy)
         action = constrain_action(
             proposed, intent.parameters, held_keys=self._mining_guard.held_keys,
             held_buttons=self._mining_guard.held_buttons,
@@ -810,6 +812,11 @@ class SkillExecutor:
             if (emitted.mouse_dx or emitted.mouse_dy or emitted.keys_down
                     or emitted.buttons_down or self._mining_guard.held_keys
                     or self._mining_guard.held_buttons):
+                self._last_active_input_ns = now
+            elif controller_pending:
+                # Legitimate model loading and the first cold inference are
+                # not evidence of a dead controller. Only the short inactivity
+                # detector pauses; the option and every safety deadline advance.
                 self._last_active_input_ns = now
             limit = self._spec.inactivity_timeout_ms
             if limit is not None and now - self._last_active_input_ns >= limit * 1_000_000:
@@ -879,7 +886,7 @@ class SkillExecutor:
         )
         traversal_verification = (
             None
-            if self._gather_mining_started
+            if self._gather_mining_started or controller_pending
             else self._observe_traversal_outcome(
                 blackboard,
                 action=mining.action,
@@ -1011,7 +1018,7 @@ class SkillExecutor:
             action=mining.action,
             motor_intent=intent,
             policy_proposal=proposed,
-            policy_status=_policy_status_snapshot(self.policy),
+            policy_status=policy_status,
             action_origin=(
                 ActionOrigin.SYNTHETIC
                 if mining.synthetic or action != proposed else ActionOrigin.POLICY
@@ -1764,6 +1771,19 @@ def _policy_status_snapshot(policy: MotorPolicy) -> dict[str, object]:
         if isinstance(reported, dict):
             return reported
     return {"policy_id": policy.policy_id}
+
+
+def _policy_action_generation_pending(policy: MotorPolicy) -> bool:
+    """Read optional readiness without granting action or extending safety."""
+
+    pending = getattr(policy, "action_generation_pending", None)
+    if not callable(pending):
+        return False
+    try:
+        return pending() is True
+    except Exception:
+        # A broken observer must not suppress a genuine starvation failure.
+        return False
 
 
 def _skill_instruction(

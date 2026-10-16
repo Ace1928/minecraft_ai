@@ -817,6 +817,27 @@ class TemporalPolicyClient:
             raise RuntimeError("cannot warm learned policy without a captured frame")
         self._ensure_started(len(frame.bgra))
 
+    def action_generation_pending(self) -> bool:
+        """Report bounded cold-start work that cannot yet emit a fresh action.
+
+        This signal can suspend only a caller's inactivity detector. Action
+        deadlines, input releases, worker watchdogs and the option wall-clock
+        deadline remain authoritative.
+        """
+
+        process = self._process
+        loading = bool(
+            not self._startup_verified
+            and process is not None
+            and process.poll() is None
+        )
+        first_inference = bool(
+            self._startup_verified
+            and self.metrics.responses == 0
+            and self._pending_request_id is not None
+        )
+        return loading or first_inference
+
     def _ensure_started(self, required_size: int) -> None:
         if self._draining or self._retiring:
             raise RuntimeError("cannot restart a terminally draining worker")
@@ -1796,6 +1817,28 @@ class GroundedPolicyRouter:
                     return False
         return True
 
+    def action_generation_pending(self) -> bool:
+        """Return whether the current option is waiting on its learned owner."""
+
+        with self._warm_lock:
+            warming = {
+                key for key, thread in self._warming.items() if thread.is_alive()
+            }
+            if self._episode_id is None and warming:
+                return True
+            required = {id(self._active)}
+            if self._episode_level == ActionLevel.GROUNDED and self.grounded is not None:
+                required.add(id(self.grounded))
+            if required.intersection(warming):
+                return True
+        for policy in self._policies():
+            if id(policy) not in required:
+                continue
+            pending = getattr(policy, "action_generation_pending", None)
+            if callable(pending) and pending() is True:
+                return True
+        return False
+
     def _ensure_warm(self, policy: MotorPolicy | None) -> None:
         self._begin_warm(policy, blocking=True)
 
@@ -1886,6 +1929,7 @@ class GroundedPolicyRouter:
             "policy_id": self.policy_id,
             "provider": "grounded-router",
             "active_route": self._active_route,
+            "action_generation_pending": self.action_generation_pending(),
             "switches": self._switches,
             "failed_warmup_policy_ids": [
                 policy.policy_id for policy in self._policies() if id(policy) in self._warm_failed

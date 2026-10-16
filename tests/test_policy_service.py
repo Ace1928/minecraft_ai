@@ -1307,6 +1307,24 @@ def test_temporal_policy_warmup_requires_and_uses_current_frame(
     assert required_sizes == [len(frame.bgra)]
 
 
+def test_temporal_policy_reports_only_bounded_cold_action_generation_pending(
+    tmp_path: Path,
+) -> None:
+    client = TemporalPolicyClient(config=_policy_config(tmp_path), frame_provider=lambda: None)
+    process = _RunningPolicyProcess()
+    client._process = process  # type: ignore[assignment]
+
+    assert client.action_generation_pending()
+
+    client._startup_verified = True
+    assert not client.action_generation_pending()
+    client._pending_request_id = "first-inference"
+    assert client.action_generation_pending()
+
+    client.metrics.responses = 1
+    assert not client.action_generation_pending()
+
+
 def test_goal_instruction_prefers_semantic_skill_contract() -> None:
     assert (
         _intent_instruction(
