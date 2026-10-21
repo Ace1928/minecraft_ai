@@ -579,21 +579,66 @@ def choose_free_display(*, start: int = 70, stop: int = 199) -> str:
     raise IsolationError("no free isolated X display number is available")
 
 
-def _prepare_new_isolated_bedrock_geometry(session: BedrockSession) -> None:
+def require_manual_isolated_launch_authority() -> dict[str, Any]:
+    """Prove a human-owned launch cannot race autonomous game input.
+
+    Manual ownership deliberately keeps the durable operator pause latched. It
+    is only valid while the registered supervisor can prove that it is paused,
+    has no motor lease, holds no input, and has no realtime agent process. The
+    caller receives the status receipt so a CLI can report or audit the exact
+    authority state without weakening this gate.
+    """
+    from ..agent_lifecycle import AGENT_FILE, agent_alive
+    from ..emergency import emergency_stop_latched
+    from ..supervisor import operator_pause_latched, send_command
+
+    if emergency_stop_latched():
+        raise IsolationError("manual Bedrock launch is disabled by the emergency stop")
+    if not operator_pause_latched():
+        raise IsolationError("manual Bedrock launch requires the durable operator pause")
+    if agent_alive() or AGENT_FILE.exists():
+        raise IsolationError("manual Bedrock launch requires the realtime agent to be absent")
+    try:
+        status = send_command("status", timeout_s=1.0)
+    except Exception as exc:
+        raise IsolationError(
+            "manual Bedrock launch requires a verified live supervisor status"
+        ) from exc
+    if status.get("state") != "PAUSED":
+        raise IsolationError("manual Bedrock launch requires the supervisor to be PAUSED")
+    if status.get("motor_lease_active") is not False or status.get("motor_lease_id") is not None:
+        raise IsolationError("manual Bedrock launch requires a revoked motor lease")
+    if status.get("held_keys") != [] or status.get("held_buttons") != []:
+        raise IsolationError("manual Bedrock launch requires all game inputs to be released")
+    return status
+
+
+def _prepare_new_isolated_bedrock_geometry(
+    session: BedrockSession,
+    *,
+    manual_owner: bool = False,
+) -> None:
     """Fresh-launch-only preflight, before a descriptor enables capture/attach."""
     from ..emergency import emergency_stop_latched
     from ..supervisor import operator_pause_latched
 
     if session.mode not in {"weston", "xephyr"}:
         raise IsolationError("geometry preparation requires a new isolated session")
+    def preparation_permitted() -> bool:
+        if not bedrock_session_alive(session) or emergency_stop_latched():
+            return False
+        if manual_owner:
+            try:
+                require_manual_isolated_launch_authority()
+            except IsolationError:
+                return False
+            return True
+        return not operator_pause_latched()
+
     _prepare_new_isolated_window_geometry(
         session.display,
         session.host_display,
-        preparation_permitted=lambda: (
-            bedrock_session_alive(session)
-            and not emergency_stop_latched()
-            and not operator_pause_latched()
-        ),
+        preparation_permitted=preparation_permitted,
     )
 
 
@@ -603,6 +648,7 @@ def launch_xephyr_bedrock_session(
     height: int = DEFAULT_BEDROCK_HEIGHT,
     display: str | None = None,
     launcher_command: tuple[str, ...] | None = None,
+    manual_owner: bool = False,
 ) -> BedrockSession:
     """Launch BedrockOnLinux inside a dedicated nested X server.
 
@@ -702,7 +748,7 @@ def launch_xephyr_bedrock_session(
             launcher_proc_start_ticks=launcher_start,
             launcher_command_sha256=launcher_digest,
         )
-        _prepare_new_isolated_bedrock_geometry(session)
+        _prepare_new_isolated_bedrock_geometry(session, manual_owner=manual_owner)
         session.persist()
         return session
     except Exception as exc:
@@ -723,6 +769,7 @@ def launch_weston_bedrock_session(
     height: int = DEFAULT_BEDROCK_HEIGHT,
     fullscreen: bool = True,
     launcher_command: tuple[str, ...] | None = None,
+    manual_owner: bool = False,
 ) -> BedrockSession:
     """Launch Bedrock in headless GPU Weston with no host input transport."""
     if os.name != "posix" or not Path("/proc").is_dir():
@@ -825,7 +872,7 @@ def launch_weston_bedrock_session(
             launcher_log=str(launcher_log),
         )
         _require_headless_compositor_identity(session)
-        _prepare_new_isolated_bedrock_geometry(session)
+        _prepare_new_isolated_bedrock_geometry(session, manual_owner=manual_owner)
         xwayland = capture_xwayland_identity(
             compositor.pid, display, compositor_start_ticks=xserver_start,
         )
@@ -942,6 +989,7 @@ def launch_isolated_bedrock_session(
     height: int = DEFAULT_BEDROCK_HEIGHT,
     fullscreen: bool = True,
     launcher_command: tuple[str, ...] | None = None,
+    manual_owner: bool = False,
 ) -> BedrockSession:
     """Require headless Weston; never fall back to a host-fed input namespace."""
     return launch_weston_bedrock_session(
@@ -949,6 +997,7 @@ def launch_isolated_bedrock_session(
         height=height,
         fullscreen=fullscreen,
         launcher_command=launcher_command,
+        manual_owner=manual_owner,
     )
 
 

@@ -81,6 +81,7 @@ from .platforms.bedrock_session import (
     bedrock_session_resources_absent,
     bind_direct_session_to_monitor,
     launch_isolated_bedrock_session,
+    require_manual_isolated_launch_authority,
     require_autonomous_input_isolation,
     stop_bedrock_session,
     wait_for_minecraft_window,
@@ -1825,6 +1826,14 @@ def bedrock_launch(
         "--direct-debug",
         help="Launch on the host display for manual debugging; autonomous input stays disabled.",
     ),
+    manual_owner: bool = typer.Option(
+        False,
+        "--manual-owner",
+        help=(
+            "Launch the isolated client for explicit human-owned testing while keeping "
+            "the durable operator pause latched and autonomous input revoked."
+        ),
+    ),
 ) -> None:
     """Launch BedrockOnLinux in an accelerated isolated compositor."""
     # Acquire locks in the same order as durable Bedrock stop, but retain only
@@ -1834,7 +1843,17 @@ def bedrock_launch(
         with operator_intent_lock():
             if emergency_stop_latched():
                 raise typer.BadParameter("Emergency stop is latched; Bedrock launch is disabled.")
-            if operator_pause_latched():
+            if manual_owner and direct:
+                raise typer.BadParameter(
+                    "--manual-owner uses the isolated client and cannot be combined with "
+                    "--direct-debug."
+                )
+            if manual_owner:
+                try:
+                    require_manual_isolated_launch_authority()
+                except IsolationError as exc:
+                    raise typer.BadParameter(str(exc)) from exc
+            elif operator_pause_latched():
                 raise typer.BadParameter("Operator pause is latched; Bedrock launch is disabled.")
             launch_stack.enter_context(bedrock_lifecycle_lock())
         _bedrock_launch_locked(
@@ -1842,6 +1861,7 @@ def bedrock_launch(
             height=height,
             fullscreen=fullscreen,
             direct=direct,
+            manual_owner=manual_owner,
         )
 
 
@@ -1851,6 +1871,7 @@ def _bedrock_launch_locked(
     height: int,
     fullscreen: bool,
     direct: bool,
+    manual_owner: bool = False,
 ) -> None:
     try:
         existing_session = BedrockSession.load()
@@ -1885,6 +1906,7 @@ def _bedrock_launch_locked(
             width=width,
             height=height,
             fullscreen=fullscreen,
+            manual_owner=manual_owner,
         )
     print("[green]Bedrock session launched.[/green]")
     print(json.dumps(_session_payload(session), indent=2, sort_keys=True))

@@ -1015,3 +1015,45 @@ def test_bedrock_launch_refuses_to_overwrite_malformed_descriptor(
             fullscreen=True,
             direct=False,
         )
+
+
+def test_manual_owned_bedrock_launch_retains_pause_and_propagates_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    @contextmanager
+    def lock() -> Iterator[None]:
+        calls.append("lock")
+        yield
+
+    monkeypatch.setattr(cli, "operator_intent_lock", lock)
+    monkeypatch.setattr(cli, "bedrock_lifecycle_lock", lock)
+    monkeypatch.setattr(cli, "emergency_stop_latched", lambda: False)
+    monkeypatch.setattr(cli, "operator_pause_latched", lambda: True)
+    monkeypatch.setattr(
+        cli,
+        "require_manual_isolated_launch_authority",
+        lambda: calls.append("manual-authority") or {"state": "PAUSED"},
+    )
+    monkeypatch.setattr(
+        cli,
+        "_bedrock_launch_locked",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    result = CliRunner().invoke(cli.app, ["bedrock", "launch", "--manual-owner"])
+
+    assert result.exit_code == 0
+    assert calls == [
+        "lock",
+        "manual-authority",
+        "lock",
+        {
+            "width": 1920,
+            "height": 1080,
+            "fullscreen": True,
+            "direct": False,
+            "manual_owner": True,
+        },
+    ]

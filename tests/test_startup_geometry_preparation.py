@@ -8,6 +8,9 @@ import pytest
 
 import minecraft_ai.platforms.bedrock_session as sessions
 import minecraft_ai.platforms.bedrock_x11 as x11
+import minecraft_ai.agent_lifecycle as agent_lifecycle
+import minecraft_ai.emergency as emergency
+import minecraft_ai.supervisor as supervisor
 
 
 @pytest.fixture(autouse=True)
@@ -230,6 +233,104 @@ def test_replaced_drawable_after_correction_is_rejected_without_more_writes(
 def test_host_session_cannot_request_startup_geometry_repair(mode: str) -> None:
     with pytest.raises(x11.IsolationError, match="new isolated"):
         sessions._prepare_new_isolated_bedrock_geometry(SimpleNamespace(mode=mode))
+
+
+def _manual_launch_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    *,
+    status: dict[str, object] | None = None,
+    paused: bool = True,
+    emergency_latched: bool = False,
+    agent_running: bool = False,
+) -> dict[str, object]:
+    observed = status or {
+        "state": "PAUSED",
+        "motor_lease_active": False,
+        "motor_lease_id": None,
+        "held_keys": [],
+        "held_buttons": [],
+    }
+    monkeypatch.setattr(agent_lifecycle, "AGENT_FILE", tmp_path / "agent.json")
+    monkeypatch.setattr(agent_lifecycle, "agent_alive", lambda: agent_running)
+    monkeypatch.setattr(emergency, "emergency_stop_latched", lambda: emergency_latched)
+    monkeypatch.setattr(supervisor, "operator_pause_latched", lambda: paused)
+    monkeypatch.setattr(supervisor, "send_command", lambda *_args, **_kwargs: observed)
+    return observed
+
+
+def test_manual_launch_authority_requires_paused_zero_input_owner(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = _manual_launch_authority(monkeypatch, tmp_path)
+
+    assert sessions.require_manual_isolated_launch_authority() is expected
+
+
+@pytest.mark.parametrize(
+    ("status_update", "paused", "emergency_latched", "agent_running", "message"),
+    [
+        ({"state": "RUNNING"}, True, False, False, "PAUSED"),
+        ({"motor_lease_active": True, "motor_lease_id": "lease"}, True, False, False,
+         "revoked motor lease"),
+        ({"held_keys": ["w"]}, True, False, False, "inputs to be released"),
+        ({}, False, False, False, "operator pause"),
+        ({}, True, True, False, "emergency stop"),
+        ({}, True, False, True, "agent to be absent"),
+    ],
+)
+def test_manual_launch_authority_fails_closed_when_owner_is_not_quiescent(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    status_update: dict[str, object],
+    paused: bool,
+    emergency_latched: bool,
+    agent_running: bool,
+    message: str,
+) -> None:
+    status = {
+        "state": "PAUSED",
+        "motor_lease_active": False,
+        "motor_lease_id": None,
+        "held_keys": [],
+        "held_buttons": [],
+    }
+    status.update(status_update)
+    _manual_launch_authority(
+        monkeypatch,
+        tmp_path,
+        status=status,
+        paused=paused,
+        emergency_latched=emergency_latched,
+        agent_running=agent_running,
+    )
+
+    with pytest.raises(x11.IsolationError, match=message):
+        sessions.require_manual_isolated_launch_authority()
+
+
+def test_manual_geometry_preparation_rechecks_manual_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callbacks: list[bool] = []
+    session = SimpleNamespace(mode="weston", display=":71", host_display=":0")
+    monkeypatch.setattr(sessions, "bedrock_session_alive", lambda _session: True)
+    monkeypatch.setattr(emergency, "emergency_stop_latched", lambda: False)
+    monkeypatch.setattr(
+        sessions,
+        "require_manual_isolated_launch_authority",
+        lambda: {"state": "PAUSED"},
+    )
+
+    def prepare(*_args: object, preparation_permitted: Any) -> None:
+        callbacks.extend((preparation_permitted(), preparation_permitted()))
+
+    monkeypatch.setattr(sessions, "_prepare_new_isolated_window_geometry", prepare)
+
+    sessions._prepare_new_isolated_bedrock_geometry(session, manual_owner=True)
+
+    assert callbacks == [True, True]
 
 
 @pytest.mark.parametrize("bad", [None, "name", "class", "hidden", "ambiguous_client"])
