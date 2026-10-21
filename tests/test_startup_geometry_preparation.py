@@ -333,6 +333,45 @@ def test_manual_geometry_preparation_rechecks_manual_authority(
     assert callbacks == [True, True]
 
 
+def test_geometry_preparation_reports_process_exit_as_process_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(mode="weston", display=":71", host_display=":0")
+    monkeypatch.setattr(sessions, "bedrock_session_alive", lambda _session: False)
+    monkeypatch.setattr(emergency, "emergency_stop_latched", lambda: False)
+
+    def prepare(*_args: object, preparation_permitted: Any) -> None:
+        assert preparation_permitted() is False
+        raise x11.IsolationError("fresh Minecraft geometry preparation lost launch authority")
+
+    monkeypatch.setattr(sessions, "_prepare_new_isolated_window_geometry", prepare)
+
+    with pytest.raises(x11.IsolationError, match="Minecraft exited before"):
+        sessions._prepare_new_isolated_bedrock_geometry(session, manual_owner=True)
+
+
+def test_geometry_preparation_preserves_manual_authority_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = SimpleNamespace(mode="weston", display=":71", host_display=":0")
+    monkeypatch.setattr(sessions, "bedrock_session_alive", lambda _session: True)
+    monkeypatch.setattr(emergency, "emergency_stop_latched", lambda: False)
+    monkeypatch.setattr(
+        sessions,
+        "require_manual_isolated_launch_authority",
+        lambda: (_ for _ in ()).throw(x11.IsolationError("manual authority revoked")),
+    )
+
+    def prepare(*_args: object, preparation_permitted: Any) -> None:
+        assert preparation_permitted() is False
+        raise x11.IsolationError("fresh Minecraft geometry preparation lost launch authority")
+
+    monkeypatch.setattr(sessions, "_prepare_new_isolated_window_geometry", prepare)
+
+    with pytest.raises(x11.IsolationError, match="manual authority revoked"):
+        sessions._prepare_new_isolated_bedrock_geometry(session, manual_owner=True)
+
+
 @pytest.mark.parametrize("bad", [None, "name", "class", "hidden", "ambiguous_client"])
 def test_startup_repair_requires_positive_viewable_exact_game_identity(bad: str | None) -> None:
     root = SimpleNamespace(id=1)

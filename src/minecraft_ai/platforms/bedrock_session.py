@@ -624,22 +624,43 @@ def _prepare_new_isolated_bedrock_geometry(
 
     if session.mode not in {"weston", "xephyr"}:
         raise IsolationError("geometry preparation requires a new isolated session")
+    failure_reason: str | None = None
+
     def preparation_permitted() -> bool:
-        if not bedrock_session_alive(session) or emergency_stop_latched():
+        nonlocal failure_reason
+        if not bedrock_session_alive(session):
+            failure_reason = "Minecraft exited before isolated window preparation completed"
+            return False
+        if emergency_stop_latched():
+            failure_reason = (
+                "fresh Minecraft window preparation was stopped by the emergency latch"
+            )
             return False
         if manual_owner:
             try:
                 require_manual_isolated_launch_authority()
-            except IsolationError:
+            except IsolationError as exc:
+                failure_reason = str(exc)
                 return False
             return True
-        return not operator_pause_latched()
+        if operator_pause_latched():
+            failure_reason = "fresh Minecraft window preparation was revoked by the operator pause"
+            return False
+        return True
 
-    _prepare_new_isolated_window_geometry(
-        session.display,
-        session.host_display,
-        preparation_permitted=preparation_permitted,
-    )
+    try:
+        _prepare_new_isolated_window_geometry(
+            session.display,
+            session.host_display,
+            preparation_permitted=preparation_permitted,
+        )
+    except IsolationError as exc:
+        if (
+            failure_reason is not None
+            and str(exc) == "fresh Minecraft geometry preparation lost launch authority"
+        ):
+            raise IsolationError(failure_reason) from exc
+        raise
 
 
 def launch_xephyr_bedrock_session(
@@ -748,7 +769,10 @@ def launch_xephyr_bedrock_session(
             launcher_proc_start_ticks=launcher_start,
             launcher_command_sha256=launcher_digest,
         )
-        _prepare_new_isolated_bedrock_geometry(session, manual_owner=manual_owner)
+        if manual_owner:
+            _prepare_new_isolated_bedrock_geometry(session, manual_owner=True)
+        else:
+            _prepare_new_isolated_bedrock_geometry(session)
         session.persist()
         return session
     except Exception as exc:
@@ -872,7 +896,10 @@ def launch_weston_bedrock_session(
             launcher_log=str(launcher_log),
         )
         _require_headless_compositor_identity(session)
-        _prepare_new_isolated_bedrock_geometry(session, manual_owner=manual_owner)
+        if manual_owner:
+            _prepare_new_isolated_bedrock_geometry(session, manual_owner=True)
+        else:
+            _prepare_new_isolated_bedrock_geometry(session)
         xwayland = capture_xwayland_identity(
             compositor.pid, display, compositor_start_ticks=xserver_start,
         )
