@@ -1057,3 +1057,76 @@ def test_manual_owned_bedrock_launch_retains_pause_and_propagates_authority(
             "manual_owner": True,
         },
     ]
+
+
+def test_manual_click_is_fresh_frame_bound_and_keeps_autonomous_control_revoked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    @contextmanager
+    def lock() -> Iterator[None]:
+        calls.append("lock")
+        yield
+
+    session = SimpleNamespace(
+        display=":71",
+        host_display=":0",
+        find_window=lambda: 42,
+    )
+    frame = SimpleNamespace(
+        frame_id=7,
+        captured_ns=123,
+        width=100,
+        height=80,
+        bgra=b"fresh-frame",
+    )
+
+    class Input:
+        input_window_id = 43
+
+        def __init__(self, *_args: object, input_permitted: object, **_kwargs: object) -> None:
+            self.permitted = input_permitted
+
+        def click(self, selected: object, x: int, y: int, *, button: str) -> None:
+            assert callable(self.permitted) and self.permitted()
+            calls.append(("click", selected, x, y, button))
+
+        def close(self) -> None:
+            calls.append("input-close")
+
+    class Capture:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def capture(self) -> object:
+            calls.append("capture")
+            return frame
+
+        def close(self) -> None:
+            calls.append("capture-close")
+
+    monkeypatch.setattr(cli, "operator_intent_lock", lock)
+    monkeypatch.setattr(cli, "bedrock_lifecycle_lock", lock)
+    monkeypatch.setattr(cli, "require_manual_isolated_launch_authority", lambda: {
+        "state": "PAUSED", "motor_lease_active": False,
+    })
+    monkeypatch.setattr(cli.BedrockSession, "load", classmethod(lambda _cls: session))
+    monkeypatch.setattr(cli, "bedrock_session_alive", lambda current: current is session)
+    monkeypatch.setattr(cli, "require_autonomous_input_isolation", lambda current: None)
+    monkeypatch.setattr(cli, "wait_for_minecraft_window", lambda *_args, **_kwargs: 42)
+    monkeypatch.setattr(cli, "NestedXTestMenuInput", Input)
+    monkeypatch.setattr(cli, "IsolatedX11Capture", Capture)
+    monkeypatch.setattr(cli, "bedrock_in_world_hud_present", lambda selected: selected is frame)
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["bedrock", "manual-click", "--button", "right", "--x", "0.25", "--y", "0.75"],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        "lock", "lock", "capture", ("click", frame, 25, 59, "right"),
+        "capture-close", "input-close",
+    ]
+    assert '"status": "sent"' in _clean_cli_output(result.output)

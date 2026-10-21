@@ -62,7 +62,7 @@ from .eval import (
     load_evidence,
 )
 from .operator_server import serve_operator_dashboard
-from .perception_service import live_control_arm_reason
+from .perception_service import bedrock_in_world_hud_present, live_control_arm_reason
 from .platforms import (
     CapturedFrame,
     IsolatedX11Capture,
@@ -2036,6 +2036,101 @@ def bedrock_navigate(
             input_backend.close()
         ownership.close()
     print(json.dumps(result.payload(), indent=2, sort_keys=True))
+
+
+@bedrock_app.command("manual-click")
+def bedrock_manual_click(
+    button: Literal["left", "right"] = typer.Option(
+        "right",
+        "--button",
+        help="One mouse button to press and release; no held-input mode is exposed.",
+    ),
+    x: float = typer.Option(
+        0.5,
+        "--x",
+        min=0.0,
+        max=1.0,
+        help="Horizontal position as a fraction of the current captured frame.",
+    ),
+    y: float = typer.Option(
+        0.5,
+        "--y",
+        min=0.0,
+        max=1.0,
+        help="Vertical position as a fraction of the current captured frame.",
+    ),
+) -> None:
+    """Send one fresh-frame-bound click under explicit paused human ownership."""
+
+    input_backend: NestedXTestMenuInput | None = None
+    capture: IsolatedX11Capture | None = None
+    frame: CapturedFrame | None = None
+    pixel_x = pixel_y = 0
+    authority_confirmed_after_release = False
+    try:
+        with operator_intent_lock(), bedrock_lifecycle_lock():
+            require_manual_isolated_launch_authority()
+            session = BedrockSession.load()
+            if not bedrock_session_alive(session):
+                raise IsolationError("the managed Bedrock session is not alive")
+            require_autonomous_input_isolation(session)
+            window_id = wait_for_minecraft_window(session, timeout_s=30.0)
+
+            def input_permitted() -> bool:
+                try:
+                    require_manual_isolated_launch_authority()
+                    current = BedrockSession.load()
+                    if current != session or not bedrock_session_alive(current):
+                        return False
+                    require_autonomous_input_isolation(current)
+                    return current.find_window() == window_id
+                except (IsolationError, OSError, RuntimeError, ValueError, TypeError, KeyError):
+                    return False
+
+            input_backend = NestedXTestMenuInput(
+                session.display,
+                window_id,
+                host_display=session.host_display,
+                input_permitted=input_permitted,
+            )
+            capture = IsolatedX11Capture(
+                session.display,
+                input_backend.input_window_id,
+                host_display=session.host_display,
+                allow_host=False,
+            )
+            frame = capture.capture()
+            if not bedrock_in_world_hud_present(frame):
+                raise IsolationError("manual game click requires a current in-world Survival HUD")
+            pixel_x = round(x * (frame.width - 1))
+            pixel_y = round(y * (frame.height - 1))
+            input_backend.click(frame, pixel_x, pixel_y, button=button)
+            try:
+                require_manual_isolated_launch_authority()
+                authority_confirmed_after_release = True
+            except IsolationError:
+                # The click backend has already unconditionally released the
+                # button. Preserve an honest sent receipt instead of reporting
+                # a pre-action refusal after the one-shot action occurred.
+                authority_confirmed_after_release = False
+    except (IsolationError, MenuNavigationError, OSError, RuntimeError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        if capture is not None:
+            capture.close()
+        if input_backend is not None:
+            input_backend.close()
+    assert frame is not None
+    print(json.dumps({
+        "status": "sent",
+        "button": button,
+        "pixel_x": pixel_x,
+        "pixel_y": pixel_y,
+        "frame_id": frame.frame_id,
+        "captured_ns": frame.captured_ns,
+        "frame_bgra_sha256": hashlib.sha256(frame.bgra).hexdigest(),
+        "authority_confirmed_after_release": authority_confirmed_after_release,
+    }, indent=2, sort_keys=True))
 
 
 @bedrock_app.command("bind-monitor")

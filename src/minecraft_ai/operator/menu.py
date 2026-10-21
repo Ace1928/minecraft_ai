@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from PIL import Image
 
@@ -460,7 +460,17 @@ class NestedXTestMenuInput:
             raise IsolationError("Minecraft menu process identity is unavailable")
         return pid, identity[0]
 
-    def click(self, frame: CapturedFrame, x: int, y: int) -> None:
+    def click(
+        self,
+        frame: CapturedFrame,
+        x: int,
+        y: int,
+        *,
+        button: Literal["left", "right"] = "left",
+    ) -> None:
+        button_id = {"left": 1, "right": 3}.get(button)
+        if button_id is None:
+            raise MenuNavigationError("bounded click button must be left or right")
         if not self._input_permitted() or self._game_identity() != self._game_process_identity:
             raise MenuNavigationError("menu input interlock is not clear; no click was sent")
         now_ns = time.monotonic_ns()
@@ -516,11 +526,11 @@ class NestedXTestMenuInput:
             self._last_clicked_capture_ns = frame.captured_ns
             self._last_click_ns = time.monotonic_ns()
             try:
-                self._xtest.fake_input(self._display, self._x.ButtonPress, 1)
+                self._xtest.fake_input(self._display, self._x.ButtonPress, button_id)
                 self._display.sync()
                 time.sleep(0.075)
             finally:
-                self._xtest.fake_input(self._display, self._x.ButtonRelease, 1)
+                self._xtest.fake_input(self._display, self._x.ButtonRelease, button_id)
                 self._display.sync()
         except MenuNavigationError:
             raise
@@ -532,7 +542,8 @@ class NestedXTestMenuInput:
         if display is None:
             return
         try:
-            self._xtest.fake_input(display, self._x.ButtonRelease, 1)
+            for button_id in (1, 3):
+                self._xtest.fake_input(display, self._x.ButtonRelease, button_id)
             display.sync()
         except Exception:
             pass

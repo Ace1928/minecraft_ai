@@ -1625,6 +1625,41 @@ def test_nested_menu_click_translates_drawable_point_into_private_root(
     assert sleeps == [0.03, 0.075]
 
 
+def test_nested_manual_right_click_is_one_bounded_press_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("minecraft_ai.bedrock_menu.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("minecraft_ai.bedrock_menu.time.monotonic_ns", lambda: 1)
+    window = SimpleNamespace(
+        get_geometry=lambda: SimpleNamespace(width=1000, height=600),
+        get_attributes=lambda: SimpleNamespace(),
+        set_input_focus=lambda _revert, _when: None,
+    )
+    root = SimpleNamespace(
+        translate_coords=lambda _source, x, y: SimpleNamespace(x=x, y=y),
+        warp_pointer=lambda _x, _y: None,
+    )
+    display = SimpleNamespace(screen=lambda: SimpleNamespace(root=root), sync=lambda: None)
+    xtest = _FakeXTest()
+    backend = object.__new__(NestedXTestMenuInput)
+    backend._window = window
+    backend._display = display
+    backend._xtest = xtest
+    backend._input_permitted = lambda: True
+    backend._game_process_identity = (123, 456)
+    backend._game_identity = lambda: (123, 456)
+    backend._x = SimpleNamespace(
+        RevertToParent=1,
+        CurrentTime=0,
+        ButtonPress=4,
+        ButtonRelease=5,
+    )
+
+    backend.click(_frame(1), 500, 405, button="right")
+
+    assert xtest.calls == [(display, 4, 3), (display, 5, 3)]
+
+
 def test_nested_menu_click_rechecks_interlock_at_button_press(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
