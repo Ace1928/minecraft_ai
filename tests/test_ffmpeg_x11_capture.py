@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -57,6 +58,7 @@ def test_frame_wait_deadline_is_a_classified_transient_timeout() -> None:
 
 def test_persistent_ffmpeg_capture_returns_newest_complete_exact_window_frame(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     frame = bytes(range(32))
     process = _Process(frame)
@@ -77,7 +79,8 @@ def test_persistent_ffmpeg_capture_returns_newest_complete_exact_window_frame(
     display.screen.return_value.root = root
     modules = {"Xlib.display": SimpleNamespace(Display=lambda _name: display)}
     monkeypatch.setattr(ffmpeg_x11_capture.importlib, "import_module", modules.__getitem__)
-    monkeypatch.setattr(ffmpeg_x11_capture.shutil, "which", lambda _name: "/usr/bin/ffmpeg")
+    fake_ffmpeg = str((tmp_path / "ffmpeg").resolve())
+    monkeypatch.setattr(ffmpeg_x11_capture.shutil, "which", lambda _name: fake_ffmpeg)
     monkeypatch.setattr(ffmpeg_x11_capture.subprocess, "Popen", popen)
     monkeypatch.setattr(ffmpeg_x11_capture, "require_isolated_display", Mock())
     monkeypatch.setattr(ffmpeg_x11_capture, "_wine_content_rect", lambda *_args: None)

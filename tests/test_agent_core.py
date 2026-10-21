@@ -1071,7 +1071,12 @@ def test_motor_boundary_scopes_current_overlay_authority(
     runtime, _trajectory = _motor_shutdown_runtime()
     old = runtime.blackboard.raw_latest()
     assert old is not None
-    captured_ns = old.captured_ns + 1
+    # Windows' monotonic clock may legitimately return the same tick for
+    # consecutive reads.  Advancing the synthetic capture by one nanosecond
+    # can therefore put the safety fact in the future at the actuator check.
+    # Frame IDs provide strict ordering; timestamps only need to be
+    # non-decreasing.
+    captured_ns = max(old.captured_ns, time.monotonic_ns())
     runtime.blackboard.publish(
         FrameState(
             frame_id=old.frame_id + 1,
