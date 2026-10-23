@@ -2259,3 +2259,51 @@ def test_server_selection_waits_past_guarded_form_and_loading_without_extra_inpu
         MenuStage.UNKNOWN, MenuStage.UNKNOWN, MenuStage.LOADING, MenuStage.IN_WORLD]
     assert observations[-1].frame.frame_id == 5
     assert now >= 0.4
+
+
+def test_lan_world_join_observes_through_transient_obscured_server_form():
+    now = 0.0
+
+    def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    play = _frame(1)
+    obscured = _retained_server_frame("server_list_transfer_1920x1080.png", 2)
+    server_list = _retained_server_frame("server_list_1920x1080.png", 3)
+    if not shutil.which("tesseract"):
+        pytest.skip("retained-frame OCR acceptance requires Tesseract")
+    server_lines = TesseractMenuTextReader().read(server_list)
+    clicks = _RecordingClicks()
+    navigator = BedrockMenuNavigator(
+        capture=_SequenceCapture([play, obscured, server_list, _frame(4)]),
+        text_reader=_MappedTextReader(
+            {
+                1: _lines("Play", "Worlds", "LAN Games", "BedrockConnect"),
+                2: _lines("add-on content warning obscures the form title"),
+                3: server_lines,
+            }
+        ),
+        click_backend=clicks,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer(
+            "Pokemon Family - CobbleDrock", "192.168.4.166", 19136
+        ),
+        timeout_s=60.0,
+        response_timeout_s=8.0,
+        poll_interval_s=10.0,
+        clock=lambda: now,
+        sleep=advance,
+        hud_detector=lambda frame: frame.frame_id == 4,
+    )
+
+    result = navigator.run()
+
+    assert result.visited == (
+        MenuStage.PLAY,
+        MenuStage.BEDROCK_CONNECT,
+        MenuStage.IN_WORLD,
+    )
+    assert result.actions == 2
+    assert [click[0] for click in clicks.clicks] == [1, 3]
+    assert now == 30.0

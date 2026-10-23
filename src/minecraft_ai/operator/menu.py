@@ -802,11 +802,20 @@ class BedrockMenuNavigator:
             x, y = line.center
             clicked_frame = observation.frame
             self.click_backend.click(observation.frame, x, y)
-            response_timeout = (
-                max(20.0, self.response_timeout_s)
-                if source == MenuStage.UPDATE_NOTICE
-                else self.response_timeout_s
-            )
+            response_timeout = self.response_timeout_s
+            if source == MenuStage.UPDATE_NOTICE:
+                response_timeout = max(20.0, response_timeout)
+            elif (
+                source == MenuStage.PLAY
+                and transition.destination == MenuStage.BEDROCK_CONNECT
+            ):
+                # Joining the BedrockConnect LAN world can render its server
+                # chooser underneath several seconds of add-on content-log
+                # warnings. Those transient bands obscure the form title even
+                # though the verified form chrome is already present. Observe
+                # longer, but never infer a target or send a second click from
+                # the obscured frame.
+                response_timeout = max(30.0, response_timeout)
             response_deadline = min(deadline, self.clock() + response_timeout)
             while self.clock() < deadline:
                 self.sleep(self.poll_interval_s)
