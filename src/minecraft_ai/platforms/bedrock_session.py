@@ -52,6 +52,46 @@ _HEADLESS_FORBIDDEN_ENVIRONMENT = frozenset({
     "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH",
 })
 _IS_LINUX = sys.platform.startswith("linux")
+_PROC_SELF_CGROUP = Path("/proc/self/cgroup")
+_CGROUP_V2_ROOT = Path("/sys/fs/cgroup")
+
+
+def _inherit_existing_swap_guard(
+    env: dict[str, str],
+    *,
+    proc_cgroup: Path = _PROC_SELF_CGROUP,
+    cgroup_root: Path = _CGROUP_V2_ROOT,
+) -> bool:
+    """Keep BedrockOnLinux inside an already swap-guarded parent cgroup.
+
+    BedrockOnLinux normally creates a user ``systemd-run`` scope solely to set
+    ``MemorySwapMax=0``.  When Minecraft AI already runs inside a cgroup with
+    that exact limit, the nested scope is redundant and can escape the
+    parent's memory, CPU, task, and wall-clock accounting.  Its documented
+    opt-out preserves the existing parent guard without changing ordinary
+    standalone launches.
+    """
+
+    if not _IS_LINUX:
+        return False
+    try:
+        unified = next(
+            line.removeprefix("0::")
+            for line in proc_cgroup.read_text(encoding="utf-8").splitlines()
+            if line.startswith("0::")
+        )
+        relative = Path(unified.lstrip("/"))
+        if ".." in relative.parts:
+            return False
+        swap_limit = (cgroup_root / relative / "memory.swap.max").read_text(
+            encoding="utf-8"
+        ).strip()
+    except (FileNotFoundError, OSError, StopIteration):
+        return False
+    if swap_limit != "0":
+        return False
+    env["BOL_ALLOW_GAME_SWAP"] = "1"
+    return True
 
 
 def _required_int_attribute(module: object, name: str) -> int:
@@ -736,6 +776,7 @@ def launch_xephyr_bedrock_session(
         # the host display after this point. BedrockOnLinux receives the nested
         # display as its process environment and all descendants inherit it.
         env.pop("BOL_DISPLAY", None)
+        _inherit_existing_swap_guard(env)
         launcher = subprocess.Popen(
             list(launcher_command),
             env=env,
@@ -852,6 +893,7 @@ def launch_weston_bedrock_session(
         env["XDG_SESSION_TYPE"] = "wayland"
         env["BOL_INPUT"] = "x11"
         env.pop("BOL_DISPLAY", None)
+        _inherit_existing_swap_guard(env)
         with launcher_log.open("ab", buffering=0) as log:
             launcher = subprocess.Popen(
                 list(launcher_command),
@@ -1051,6 +1093,7 @@ def launch_direct_bedrock_session(
 
     env = dict(os.environ)
     env["DISPLAY"] = host_display
+    _inherit_existing_swap_guard(env)
     launcher = subprocess.Popen(
         list(launcher_command),
         env=env,

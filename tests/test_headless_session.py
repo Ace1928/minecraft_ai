@@ -14,6 +14,48 @@ from minecraft_ai.platforms.weston_seat import HeadlessSeatArtifact
 from minecraft_ai.platforms.xwayland_identity import XwaylandIdentity
 
 
+def test_existing_zero_swap_cgroup_suppresses_nested_bedrock_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    cgroup_root = tmp_path / "cgroup"
+    guarded = cgroup_root / "user.slice" / "guarded.scope"
+    guarded.mkdir(parents=True)
+    proc_cgroup.write_text("0::/user.slice/guarded.scope\n", encoding="utf-8")
+    (guarded / "memory.swap.max").write_text("0\n", encoding="utf-8")
+    monkeypatch.setattr(sessions, "_IS_LINUX", True)
+    env = {"BOL_ALLOW_GAME_SWAP": "0"}
+
+    assert sessions._inherit_existing_swap_guard(
+        env,
+        proc_cgroup=proc_cgroup,
+        cgroup_root=cgroup_root,
+    )
+    assert env["BOL_ALLOW_GAME_SWAP"] == "1"
+
+
+def test_unbounded_parent_preserves_bedrock_swap_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc_cgroup = tmp_path / "proc-self-cgroup"
+    cgroup_root = tmp_path / "cgroup"
+    unbounded = cgroup_root / "user.slice"
+    unbounded.mkdir(parents=True)
+    proc_cgroup.write_text("0::/user.slice\n", encoding="utf-8")
+    (unbounded / "memory.swap.max").write_text("max\n", encoding="utf-8")
+    monkeypatch.setattr(sessions, "_IS_LINUX", True)
+    env: dict[str, str] = {}
+
+    assert not sessions._inherit_existing_swap_guard(
+        env,
+        proc_cgroup=proc_cgroup,
+        cgroup_root=cgroup_root,
+    )
+    assert "BOL_ALLOW_GAME_SWAP" not in env
+
+
 def _verified_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sessions.BedrockSession:
     command = tuple(
         sessions._weston_command(
@@ -176,6 +218,11 @@ def test_launch_without_host_display_drops_inherited_host_handles_and_verifies_b
     monkeypatch.setattr(sessions.subprocess, "Popen", popen)
     monkeypatch.setattr(sessions, "_wait_for_weston_xwayland", lambda *_args: ":71")
     monkeypatch.setattr(
+        sessions,
+        "_inherit_existing_swap_guard",
+        lambda env: env.__setitem__("BOL_ALLOW_GAME_SWAP", "1") or True,
+    )
+    monkeypatch.setattr(
         sessions, "_required_process_identity", lambda *_args, **_kwargs: (1, "hash")
     )
     monkeypatch.setattr(
@@ -230,6 +277,7 @@ def test_launch_without_host_display_drops_inherited_host_handles_and_verifies_b
         assert name not in compositor_env
     assert launcher_env["DISPLAY"] == ":71"
     assert launcher_env["WAYLAND_DISPLAY"] == session.wayland_socket
+    assert launcher_env["BOL_ALLOW_GAME_SWAP"] == "1"
     assert "WAYLAND_SOCKET" not in launcher_env
 
 
