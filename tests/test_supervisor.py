@@ -66,6 +66,27 @@ def test_supervisor_starts_safe_idle() -> None:
     assert supervisor.status()["motor_lease_active"] is False
 
 
+def test_supervisor_starts_paused_when_operator_pause_is_latched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "OPERATOR_PAUSE"
+    marker.write_text("operator-pause\n", encoding="utf-8")
+    monkeypatch.setattr(supervisor_module, "OPERATOR_PAUSE_FILE", marker)
+    supervisor = Supervisor()
+
+    supervisor.start()
+
+    status = supervisor.status()
+    assert supervisor.state == SupervisorState.PAUSED
+    assert supervisor.motor.lease is None
+    assert supervisor.backend.held_keys == set()
+    assert supervisor.backend.held_buttons == set()
+    assert status["operator_pause_latched"] is True
+    assert status["motor_lease_active"] is False
+    assert status["motor_revocation_reason"] == "operator-pause"
+
+
 def test_pause_revokes_active_lease_and_releases_input() -> None:
     supervisor = Supervisor()
     supervisor.start()

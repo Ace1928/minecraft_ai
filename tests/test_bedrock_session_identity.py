@@ -436,6 +436,71 @@ def test_graceful_window_close_precedes_and_avoids_process_signal(
     assert not descriptor.exists()
 
 
+@pytest.mark.parametrize("exit_state", ["unverifiable", "mismatch"])
+def test_graceful_window_close_accepts_identity_loss_only_after_group_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_state: str,
+) -> None:
+    descriptor = tmp_path / "bedrock-session.json"
+    session = _session()
+    states = iter(("verified-live", exit_state))
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(sessions, "BEDROCK_SESSION_FILE", descriptor)
+    monkeypatch.setattr(
+        sessions,
+        "_session_process_state",
+        lambda *_args, **_kwargs: next(states),
+    )
+    monkeypatch.setattr(sessions, "find_minecraft_window", lambda *_args, **_kwargs: 42)
+    monkeypatch.setattr(sessions, "request_window_close", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sessions, "_process_group_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        sessions.os,
+        "killpg",
+        lambda pid, sent_signal: signals.append((pid, sent_signal)),
+        raising=False,
+    )
+    session.persist()
+
+    sessions.stop_bedrock_session()
+
+    assert signals == []
+    assert not descriptor.exists()
+
+
+def test_graceful_window_close_rejects_identity_change_while_group_lives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = tmp_path / "bedrock-session.json"
+    session = _session()
+    states = iter(("verified-live", "mismatch"))
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(sessions, "BEDROCK_SESSION_FILE", descriptor)
+    monkeypatch.setattr(
+        sessions,
+        "_session_process_state",
+        lambda *_args, **_kwargs: next(states),
+    )
+    monkeypatch.setattr(sessions, "find_minecraft_window", lambda *_args, **_kwargs: 42)
+    monkeypatch.setattr(sessions, "request_window_close", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sessions, "_process_group_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        sessions.os,
+        "killpg",
+        lambda pid, sent_signal: signals.append((pid, sent_signal)),
+        raising=False,
+    )
+    session.persist()
+
+    with pytest.raises(IsolationError, match="identity changed during graceful shutdown"):
+        sessions.stop_bedrock_session()
+
+    assert signals == []
+    assert BedrockSession.load(descriptor) == session
+
+
 def test_prefix_scoped_stop_precedes_process_group_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

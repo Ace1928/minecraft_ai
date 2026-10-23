@@ -1175,6 +1175,26 @@ def _request_bedrock_prefix_stop(session: BedrockSession) -> bool:
     return completed.returncode == 0
 
 
+def _verified_launcher_shutdown_complete(
+    session: BedrockSession,
+    *,
+    observed_state: str,
+) -> bool:
+    """Accept identity loss only after a verified launcher's group is gone.
+
+    ``bedrock-on-linux play`` can become a zombie between closing Minecraft's
+    window and its parent reaping it.  Linux then exposes an empty cmdline, so
+    the identity probe reports ``unverifiable`` even though the recorded
+    process group has already ceased to contain a live process.  This helper is
+    intentionally used only after the stop transaction's initial exact
+    identity check passed.  A still-live recorded group remains a hard refusal.
+    """
+
+    return observed_state in {"dead", "mismatch", "unverifiable"} and not (
+        _process_group_alive(session.launcher_pid)
+    )
+
+
 def stop_bedrock_session(session: BedrockSession | None = None) -> None:
     current = session
     if current is None:
@@ -1231,8 +1251,9 @@ def stop_bedrock_session(session: BedrockSession | None = None) -> None:
                 deadline = time.monotonic() + 8.0
                 while time.monotonic() < deadline:
                     leader_state = _session_process_state(current, launcher=True)
-                    if leader_state == "dead" and not _process_group_alive(
-                        current.launcher_pid
+                    if _verified_launcher_shutdown_complete(
+                        current,
+                        observed_state=leader_state,
                     ):
                         launcher_stopped = True
                         break
@@ -1244,8 +1265,9 @@ def stop_bedrock_session(session: BedrockSession | None = None) -> None:
             deadline = time.monotonic() + 12.0
             while time.monotonic() < deadline:
                 leader_state = _session_process_state(current, launcher=True)
-                if leader_state == "dead" and not _process_group_alive(
-                    current.launcher_pid
+                if _verified_launcher_shutdown_complete(
+                    current,
+                    observed_state=leader_state,
                 ):
                     launcher_stopped = True
                     break

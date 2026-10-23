@@ -74,8 +74,10 @@ def test_control_descriptor_compare_and_unlink_preserves_replacement(
     assert ControlEndpoint.load(path) == replacement
 
 
-def test_start_refuses_to_unlink_verified_unresponsive_owner(
+@pytest.mark.parametrize("owner_state", ["verified-live", "unverifiable"])
+def test_start_refuses_to_unlink_verified_or_unverifiable_owner(
     monkeypatch: pytest.MonkeyPatch,
+    owner_state: str,
 ) -> None:
     existing = _endpoint()
     monkeypatch.setattr(
@@ -83,7 +85,7 @@ def test_start_refuses_to_unlink_verified_unresponsive_owner(
         "load",
         classmethod(lambda _cls, _path=None: existing),
     )
-    monkeypatch.setattr(cli, "control_endpoint_process_state", lambda _item: "verified-live")
+    monkeypatch.setattr(cli, "control_endpoint_process_state", lambda _item: owner_state)
     monkeypatch.setattr(
         cli.subprocess,
         "Popen",

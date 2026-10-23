@@ -223,6 +223,43 @@ def test_child_parser_rejects_invalid_capture_source() -> None:
     assert exc.value.code == 2
 
 
+def test_non_live_run_recovers_only_paused_control_plane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("non-live supervisor recovery reached game or agent authority")
+
+    monkeypatch.setattr(cli, "_ensure_dirs", lambda: calls.append("dirs"))
+    monkeypatch.setattr(cli, "ensure_default_config", lambda: calls.append("config"))
+    monkeypatch.setattr(cli, "emergency_stop_latched", lambda: False)
+    monkeypatch.setattr(cli, "operator_pause_latched", lambda: True)
+    monkeypatch.setattr(cli, "supervisor_alive", lambda: False)
+    monkeypatch.setattr(cli, "_start_supervisor", lambda role: calls.append(f"start:{role}"))
+    monkeypatch.setattr(
+        cli,
+        "send_command",
+        lambda command, **_kwargs: calls.append(command)
+        or {
+            "state": "PAUSED",
+            "operator_pause_latched": True,
+            "motor_lease_active": False,
+            "held_keys": [],
+            "held_buttons": [],
+        },
+    )
+    monkeypatch.setattr(cli, "_command", forbidden)
+    monkeypatch.setattr(cli, "wait_for_minecraft_window", forbidden)
+    monkeypatch.setattr(cli, "launch_agent_process", forbidden)
+
+    result = CliRunner().invoke(cli.app, ["run", "--edition", "bedrock"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["dirs", "config", "start:generalist", "status"]
+    assert "state=PAUSED" in _clean_cli_output(result.output)
+
+
 @pytest.mark.parametrize("contents", [None, "policy: [", "[1, 2]", "policy:\n  camera_scale: -1\n"])
 def test_run_rejects_invalid_explicit_config_before_any_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contents: str | None,

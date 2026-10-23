@@ -339,13 +339,13 @@ class Supervisor:
             self.motor.revoke("emergency-stop-latched")
             self._persist_status()
             raise RuntimeError("emergency stop is latched; explicitly reset it before starting")
-        if operator_pause_latched():
-            self.last_fault = "operator-pause-latched"
-            self.motor.revoke("operator-pause")
-            self._persist_status()
-            raise RuntimeError("operator pause is latched; explicitly resume before starting")
         self.transition(SupervisorState.STARTING)
         self.transition(SupervisorState.SAFE_IDLE)
+        # A durable operator pause blocks actuation, not the safety/control
+        # plane itself.  Starting PAUSED keeps status, disarm and recovery
+        # available after a game/display exit without clearing operator intent.
+        if operator_pause_latched():
+            self.pause()
 
     @staticmethod
     def _actuation_permitted() -> bool:
