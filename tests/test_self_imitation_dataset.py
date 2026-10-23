@@ -34,6 +34,8 @@ def test_self_imitation_deduplicates_actions_and_keeps_verified_success(tmp_path
     )
 
     assert artifact.manifest.source_examples == 7
+    assert artifact.manifest.eligible_prediction_examples == 7
+    assert artifact.manifest.discarded_non_prediction_examples == 0
     assert artifact.manifest.unique_actions == 5
     assert artifact.manifest.examples == 4
     assert artifact.manifest.successful_examples == 2
@@ -47,6 +49,8 @@ def test_self_imitation_deduplicates_actions_and_keeps_verified_success(tmp_path
     assert len(action_ids) == len(examples)
     assert all(example["training_weight"] > 0 for example in examples)
     assert all(example["source_example_id"] == example["example_id"] for example in examples)
+    assert all(example["policy_action_kind"] == "prediction" for example in examples)
+    assert all(example["held_keys"] == ["w"] for example in examples)
 
 
 def test_self_imitation_artifact_is_reproducible(tmp_path: Path) -> None:
@@ -95,4 +99,39 @@ def test_self_imitation_rejects_tampered_hindsight_data(tmp_path: Path) -> None:
         write_self_imitation_dataset(
             (hindsight.manifest_path,),
             output_dir=tmp_path / "self-imitation",
+        )
+
+
+def test_self_imitation_refuses_hold_only_legacy_targets(tmp_path: Path) -> None:
+    hindsight = _hindsight(tmp_path)
+    records = [json.loads(line) for line in hindsight.data_path.read_text().splitlines()]
+    for record in records:
+        record["policy_action_kind"] = "prediction_hold"
+    data = b"".join(
+        json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        for record in records
+    )
+    data_sha256 = hashlib.sha256(data).hexdigest()
+    data_path = hindsight.data_path.parent / f"{data_sha256}.jsonl"
+    data_path.write_bytes(data)
+    manifest = hindsight.manifest.model_copy(
+        update={"data_filename": data_path.name, "data_sha256": data_sha256}
+    )
+    manifest_raw = (
+        json.dumps(
+            manifest.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+    manifest_path = hindsight.manifest_path.parent / (
+        hashlib.sha256(manifest_raw).hexdigest() + ".manifest.json"
+    )
+    manifest_path.write_bytes(manifest_raw)
+
+    with pytest.raises(ValueError, match="no fresh policy predictions"):
+        write_self_imitation_dataset(
+            (manifest_path,),
+            output_dir=tmp_path / "self-imitation-holds",
         )

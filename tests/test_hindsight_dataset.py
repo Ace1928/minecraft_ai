@@ -50,7 +50,13 @@ def _manifest(*, training_allowed: bool = True) -> TrajectoryManifest:
     )
 
 
-def _provenance(run_id: str, skill_id: str, instruction: str) -> ActionProvenance:
+def _provenance(
+    run_id: str,
+    skill_id: str,
+    instruction: str,
+    *,
+    action_kind: str = "prediction",
+) -> ActionProvenance:
     condition = MotorIntent(
         skill_id=skill_id,
         mode="policy",
@@ -63,7 +69,7 @@ def _provenance(run_id: str, skill_id: str, instruction: str) -> ActionProvenanc
         policy_id="learned:openai-vpt:foundation-1x",
         model_version="foundation-1x",
         route_id=route_id,
-        policy_action_kind="prediction",
+        policy_action_kind=action_kind,
         action_level=ActionLevel.MOTION,
         origin=ActionOrigin.POLICY,
         condition_id=motor_condition_id(
@@ -75,7 +81,12 @@ def _provenance(run_id: str, skill_id: str, instruction: str) -> ActionProvenanc
     )
 
 
-def _record_fixture(tmp_path: Path, *, training_allowed: bool = True) -> tuple[Path, Path]:
+def _record_fixture(
+    tmp_path: Path,
+    *,
+    training_allowed: bool = True,
+    success_second_action_kind: str = "prediction",
+) -> tuple[Path, Path]:
     db_path = tmp_path / "state.sqlite3"
     root = tmp_path / "trajectories"
     recorder = TrajectoryRecorder(
@@ -137,10 +148,23 @@ def _record_fixture(tmp_path: Path, *, training_allowed: bool = True) -> tuple[P
             height=12,
             facts=facts,
         )
-        action = MotorAction(sequence=index, keys_down=("w",))
+        action_kind = (
+            success_second_action_kind
+            if index == 1
+            else "prediction"
+        )
+        action = MotorAction(
+            sequence=index,
+            keys_down=() if action_kind == "prediction_hold" else ("w",),
+        )
         assert recorder.record_accepted(
             action=action,
-            provenance=_provenance(run_id, skill_id, instruction),
+            provenance=_provenance(
+                run_id,
+                skill_id,
+                instruction,
+                action_kind=action_kind,
+            ),
             supervisor_response={
                 "accepted_sequence": index,
                 "accepted_monotonic_ns": captured_ns + 1,
@@ -214,6 +238,30 @@ def test_hindsight_relabels_verified_success_and_failed_run_progress(tmp_path: P
     }
     assert all(example.intended_goal == "mine the visible log" for example in partial)
     assert all(example.policy_id == "learned:openai-vpt:foundation-1x" for example in examples)
+    assert all(example.policy_action_kind == "prediction" for example in examples)
+    assert all(example.held_keys == ("w",) for example in examples)
+
+
+def test_hindsight_excludes_repeated_holds_from_motor_targets(tmp_path: Path) -> None:
+    trajectory, db_path = _record_fixture(
+        tmp_path,
+        success_second_action_kind="prediction_hold",
+    )
+
+    examples = tuple(
+        iter_hindsight_examples(
+            (trajectory,),
+            state_db_path=db_path,
+            history_steps=2,
+            partial_window_steps=3,
+        )
+    )
+
+    successful = tuple(example for example in examples if example.success)
+    assert len(successful) == 1
+    assert successful[0].step_index == 0
+    assert successful[0].held_keys == ("w",)
+    assert successful[0].policy_action_kind == "prediction"
 
 
 def test_hindsight_streams_a_completed_run_before_reading_the_whole_trajectory(

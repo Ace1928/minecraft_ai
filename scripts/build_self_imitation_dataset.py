@@ -50,6 +50,12 @@ def main(argv: list[str] | None = None) -> int:
                 "manifest_sha256": artifact.manifest_sha256,
                 "examples": artifact.manifest.examples,
                 "source_examples": artifact.manifest.source_examples,
+                "eligible_prediction_examples": (
+                    artifact.manifest.eligible_prediction_examples
+                ),
+                "discarded_non_prediction_examples": (
+                    artifact.manifest.discarded_non_prediction_examples
+                ),
                 "unique_actions": artifact.manifest.unique_actions,
                 "successful_examples": artifact.manifest.successful_examples,
                 "partial_progress_examples": artifact.manifest.partial_progress_examples,

@@ -37,12 +37,14 @@ class SelfImitationSource(BaseModel):
 class SelfImitationDatasetManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: int = 1
+    schema_version: int = 2
     artifact_type: str = "bedrock-advantage-weighted-self-imitation-dataset"
     data_filename: str
     data_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     examples: int = Field(ge=1)
     source_examples: int = Field(ge=1)
+    eligible_prediction_examples: int = Field(ge=1)
+    discarded_non_prediction_examples: int = Field(ge=0)
     unique_actions: int = Field(ge=1)
     successful_examples: int = Field(ge=0)
     partial_progress_examples: int = Field(ge=0)
@@ -122,7 +124,12 @@ def write_self_imitation_dataset(
             )
         )
 
-    unique = _deduplicate_actions(examples)
+    eligible = tuple(
+        example for example in examples if example.policy_action_kind == "prediction"
+    )
+    if not eligible:
+        raise ValueError("hindsight datasets contain no fresh policy predictions")
+    unique = _deduplicate_actions(eligible)
     ranked = _rank_examples(
         unique,
         beta=beta,
@@ -157,6 +164,8 @@ def write_self_imitation_dataset(
             data_sha256=data_sha256,
             examples=len(ranked),
             source_examples=len(examples),
+            eligible_prediction_examples=len(eligible),
+            discarded_non_prediction_examples=len(examples) - len(eligible),
             unique_actions=len(unique),
             successful_examples=sum(example.success for example in ranked),
             partial_progress_examples=sum(not example.success for example in ranked),

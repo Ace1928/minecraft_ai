@@ -39,7 +39,7 @@ class HindsightExample(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: int = 1
+    schema_version: int = 2
     example_id: str = Field(pattern=r"^[a-f0-9]{64}$")
     trajectory_id: str
     step_index: int = Field(ge=0)
@@ -50,6 +50,8 @@ class HindsightExample(BaseModel):
     history_step_indices: tuple[int, ...]
     previous_action: MotorAction | None = None
     action: MotorAction
+    held_keys: tuple[str, ...] = ()
+    held_buttons: tuple[str, ...] = ()
     action_level: ActionLevel
     behavior_token: int | None = None
     skill_run_id: str
@@ -69,6 +71,7 @@ class HindsightExample(BaseModel):
     policy_id: str
     model_version: str | None = None
     route_id: str
+    policy_action_kind: str | None = None
     condition_id: str | None = None
     condition: dict[str, object] | None = None
     latent_id: str | None = None
@@ -92,7 +95,7 @@ class HindsightTrajectorySource(BaseModel):
 class HindsightDatasetManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: int = 1
+    schema_version: int = 2
     artifact_type: str = "bedrock-hindsight-action-dataset"
     data_filename: str
     data_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -122,6 +125,8 @@ class _ObservedStep:
     step: TrajectoryStep
     facts: dict[str, tuple[str | int | float | bool, float]]
     gui_mode: str
+    held_keys: tuple[str, ...] = ()
+    held_buttons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +346,10 @@ def _examples_for_run(
         observed
         for observed in observed_steps
         if observed.step.action_origin == ActionOrigin.POLICY
+        # Holds and releases are actuator bookkeeping, not fresh model
+        # decisions. Treating them as action labels massively over-samples
+        # zero deltas and teaches a Bedrock adapter to stand still.
+        and observed.step.policy_action_kind == "prediction"
         and observed.step.policy_id is not None
         and observed.step.route_id is not None
         and observed.step.skill_id is not None
@@ -354,6 +363,8 @@ def _examples_for_run(
         for position, observed in enumerate(policy_steps):
             yield _example(
                 observed.step,
+                held_keys=observed.held_keys,
+                held_buttons=observed.held_buttons,
                 history=_history(policy_steps, position, history_steps),
                 intended_goal=intended_goal,
                 achieved_goal=intended_goal,
@@ -393,6 +404,8 @@ def _examples_for_run(
                 for position, policy_step in enumerate(eligible):
                     yield _example(
                         policy_step.step,
+                        held_keys=policy_step.held_keys,
+                        held_buttons=policy_step.held_buttons,
                         history=_history(eligible, position, history_steps),
                         intended_goal=intended_goal,
                         achieved_goal=milestone.achieved_goal,
@@ -411,6 +424,8 @@ def _examples_for_run(
 def _example(
     step: TrajectoryStep,
     *,
+    held_keys: tuple[str, ...],
+    held_buttons: tuple[str, ...],
     history: tuple[int, ...],
     intended_goal: str,
     achieved_goal: str,
@@ -448,6 +463,8 @@ def _example(
         history_step_indices=history,
         previous_action=step.previous_action,
         action=step.action,
+        held_keys=held_keys,
+        held_buttons=held_buttons,
         action_level=step.action_level,
         behavior_token=step.behavior_token,
         skill_run_id=step.skill_run_id,
@@ -467,6 +484,7 @@ def _example(
         policy_id=step.policy_id,
         model_version=step.model_version,
         route_id=step.route_id,
+        policy_action_kind=step.policy_action_kind,
         condition_id=step.condition_id,
         condition=step.condition,
         latent_id=step.latent_id,
@@ -529,6 +547,8 @@ def _fact_true(value: tuple[str | int | float | bool, float] | None) -> bool:
 
 def _iter_observed_steps(reader: TrajectoryReader) -> Iterator[_ObservedStep]:
     expected_index = 0
+    held_keys: set[str] = set()
+    held_buttons: set[str] = set()
     for shard in reader.manifest.shards:
         shard_path = reader.directory / shard.filename
         if not shard_path.is_file():
@@ -570,10 +590,16 @@ def _iter_observed_steps(reader: TrajectoryReader) -> Iterator[_ObservedStep]:
                     fact.key: (fact.value, fact.confidence)
                     for fact in blackboard.facts
                 }
+                held_keys.update(step.action.keys_down)
+                held_keys.difference_update(step.action.keys_up)
+                held_buttons.update(step.action.buttons_down)
+                held_buttons.difference_update(step.action.buttons_up)
                 yield _ObservedStep(
                     step=step,
                     facts=facts,
                     gui_mode=blackboard.player.gui_mode,
+                    held_keys=tuple(sorted(held_keys)),
+                    held_buttons=tuple(sorted(held_buttons)),
                 )
                 expected_index += 1
     if expected_index != reader.manifest.accepted_steps:
