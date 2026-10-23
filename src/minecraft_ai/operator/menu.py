@@ -339,17 +339,21 @@ class TesseractMenuTextReader:
                         for line in self._read_image(caption, input_scale=1, single_line=True)
                     )
                 # A readable title does not imply readable server labels.
-                # Prefer an isolated caption over a duplicate panel reading
-                # of the same text on the same row; distinct rows stay distinct
-                # so ambiguous server names still fail closed at selection.
+                # Prefer an isolated caption over any noisy full-panel reading
+                # on that same row. Preserve the warning lines that authorized
+                # this reread; distinct rows stay distinct so ambiguous server
+                # names still fail closed at selection.
                 source_lines = panel_lines if title_visible else lines
                 remaining = tuple(
                     line
                     for line in source_lines
-                    if not any(
-                        _normalized_text(line.text) == _normalized_text(caption.text)
-                        and abs(line.center[1] - caption.center[1]) < frame.height * 0.035
-                        for caption in captions
+                    if (
+                        "texture warning" in _normalized_text(line.text)
+                        or "item error" in _normalized_text(line.text)
+                        or not any(
+                            abs(line.center[1] - caption.center[1]) < frame.height * 0.035
+                            for caption in captions
+                        )
                     )
                 )
                 return remaining + tuple(captions)

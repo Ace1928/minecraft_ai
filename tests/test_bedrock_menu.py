@@ -2331,6 +2331,8 @@ def test_persistent_content_warnings_recover_verified_server_rows_without_title(
                     OcrLine("[Texture][warning] block missing from registry", 5, 120, 1500, 35),
                     OcrLine("[Texture][warning] blocks.json registry error", 5, 230, 1500, 35),
                     OcrLine("[Item][error] Resource pack item missing", 5, 360, 1500, 35),
+                    OcrLine("Exit 3", 780, 588, 120, 35),
+                    OcrLine("Pokemon Family - Cobbletro", 710, 720, 550, 32),
                 )
             if not single_line:
                 return ()
@@ -2346,6 +2348,7 @@ def test_persistent_content_warnings_recover_verified_server_rows_without_title(
             return (OcrLine(text, 20, 10, 560, 32, confidence=70),)
 
     lines = WarningObscuredReader().read(frame)
+    assert not any(line.text == "Pokemon Family - Cobbletro" for line in lines)
     stage = classify_menu_stage(
         frame,
         lines,
