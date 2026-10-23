@@ -276,20 +276,22 @@ class TesseractMenuTextReader:
                 return lines + headings
         # Sparse full-frame OCR can miss every dark label inside BedrockConnect
         # while recognizing only its ping icon. At native scale its title is
-        # readable; then isolated caption bands avoid the button borders that
-        # Tesseract otherwise treats as empty table cells. Keep all geometry
-        # screenshot-relative and require the exact title before using crops.
+        # normally readable; isolated caption bands then avoid the button
+        # borders that Tesseract otherwise treats as empty table cells. Add-on
+        # warning toasts can persist across the entire title, so a separately
+        # verified warning stack may authorize caption reads, but never a click.
         server_form = bedrock_server_form_bounds(frame)
+        warning_obscured = _persistent_content_warning_overlay_visible(frame, lines)
+        blocking_anchors = (
+            "worlds",
+            "disconnected from host",
+            "you died",
+            "tou died",
+        ) + (() if warning_obscured else ("minecraft",))
         if server_form is not None and not any(
             any(
                 anchor in _normalized_text(line.text)
-                for anchor in (
-                    "minecraft",
-                    "worlds",
-                    "disconnected from host",
-                    "you died",
-                    "tou died",
-                )
+                for anchor in blocking_anchors
             )
             for line in lines
         ):
@@ -310,14 +312,15 @@ class TesseractMenuTextReader:
                 replace(line, left=line.left + panel_left, top=line.top + panel_top)
                 for line in self._read_image(panel, input_scale=1)
             )
-            if any(
+            title_visible = any(
                 _normalized_text(line.text).replace(" ", "") == "serverlist"
                 and math.isfinite(line.confidence)
                 and line.confidence >= 60
                 and 0.13 <= line.center[1] / frame.height <= 0.22
                 and server_form[0] <= line.center[0] / frame.width <= server_form[2]
                 for line in panel_lines
-            ):
+            )
+            if title_visible or warning_obscured:
                 captions: list[OcrLine] = []
                 for row in range(5):
                     center_y = 0.325 + row * 0.1185
@@ -339,9 +342,10 @@ class TesseractMenuTextReader:
                 # Prefer an isolated caption over a duplicate panel reading
                 # of the same text on the same row; distinct rows stay distinct
                 # so ambiguous server names still fail closed at selection.
+                source_lines = panel_lines if title_visible else lines
                 remaining = tuple(
                     line
-                    for line in panel_lines
+                    for line in source_lines
                     if not any(
                         _normalized_text(line.text) == _normalized_text(caption.text)
                         and abs(line.center[1] - caption.center[1]) < frame.height * 0.035
@@ -1149,8 +1153,16 @@ def classify_menu_stage(
     ):
         return MenuStage.STARTUP_POPUP
 
-    if (
-        "serverlist" in compact
+    positioned_server_title = any(
+        _normalized_text(line.text).replace(" ", "") == "serverlist"
+        and math.isfinite(line.confidence)
+        and line.confidence >= 60
+        and 0.20 <= line.center[0] / frame.width <= 0.80
+        and 0.10 <= line.center[1] / frame.height <= 0.25
+        for line in lines
+    )
+    title_server_form = (
+        positioned_server_title
         or "connect to a server" in text
         or (
             _normalized_text(server_name).replace(" ", "") in compact
@@ -1159,6 +1171,11 @@ def classify_menu_stage(
     ) and (
         len(frame.bgra) != frame.width * frame.height * 4
         or bedrock_server_form_bounds(frame) is not None
+    )
+    if title_server_form or _obscured_server_form_visible(
+        frame,
+        lines,
+        server_name=server_name,
     ):
         return MenuStage.BEDROCK_CONNECT
 
@@ -1267,6 +1284,69 @@ def _content_log_visible(frame: CapturedFrame, lines: tuple[OcrLine, ...]) -> bo
         )
         for target, (x0, y0, x1, y1) in anchors
     )
+
+
+def _persistent_content_warning_overlay_visible(
+    frame: CapturedFrame,
+    lines: tuple[OcrLine, ...],
+) -> bool:
+    """Recognize the retained add-on warning stack that can cover a form title."""
+
+    positioned = tuple(
+        _normalized_text(line.text)
+        for line in lines
+        if math.isfinite(line.confidence)
+        and line.confidence >= 60
+        and line.width >= frame.width * 0.45
+        and line.left <= frame.width * 0.08
+        and line.center[1] <= frame.height * 0.50
+    )
+    texture_warnings = sum(
+        "texture warning" in text
+        and ("blocks json" in text or "registry" in text)
+        for text in positioned
+    )
+    item_error = any(
+        "item error" in text and "resource pack" in text
+        for text in positioned
+    )
+    return texture_warnings >= 3 and item_error
+
+
+def _obscured_server_form_visible(
+    frame: CapturedFrame,
+    lines: tuple[OcrLine, ...],
+    *,
+    server_name: str,
+) -> bool:
+    """Prove the server chooser when persistent warning toasts cover its title."""
+
+    form = bedrock_server_form_bounds(frame)
+    if form is None or not _persistent_content_warning_overlay_visible(frame, lines):
+        return False
+    positioned = tuple(
+        line
+        for line in lines
+        if math.isfinite(line.confidence)
+        and line.confidence >= 35
+        and form[0] <= line.center[0] / frame.width <= form[2]
+    )
+    exits = tuple(
+        line
+        for line in positioned
+        if _text_match_score(line.text, "exit server list") >= 0.86
+        and abs(line.center[1] / frame.height - 0.562) <= 0.035
+    )
+    servers = tuple(
+        line
+        for line in positioned
+        if _text_match_score(line.text, server_name) >= 0.86
+        and any(
+            abs(line.center[1] / frame.height - (0.325 + index * 0.1185)) <= 0.035
+            for index in range(5)
+        )
+    )
+    return len(exits) == 1 and len(servers) == 1 and exits[0] != servers[0]
 
 
 def _content_log_close_control(frame: CapturedFrame) -> OcrLine | None:
@@ -1820,14 +1900,23 @@ def _transition_click_target(
         ):
             raise MenuNavigationError("server-form chrome is not verified; no input sent")
         if form is not None:
-            if not any(
+            title_verified = any(
                 math.isfinite(line.confidence)
                 and line.confidence >= 60
                 and _normalized_text(line.text).replace(" ", "") == "serverlist"
                 and form[0] <= line.center[0] / observation.frame.width <= form[2]
                 and 0.13 <= line.center[1] / observation.frame.height <= 0.22
                 for line in observation.lines
-            ):
+            )
+            obscured_verified = (
+                len(transition.target_text) == 1
+                and _obscured_server_form_visible(
+                    observation.frame,
+                    observation.lines,
+                    server_name=transition.target_text[0],
+                )
+            )
+            if not title_verified and not obscured_verified:
                 raise MenuNavigationError("server-form title is not verified; no input sent")
             # A label must be unique inside a real visible row. Do not use a
             # prefix from chat or the half-rendered transfer overlay as authority.

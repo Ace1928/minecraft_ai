@@ -2307,3 +2307,84 @@ def test_lan_world_join_observes_through_transient_obscured_server_form():
     assert result.actions == 2
     assert [click[0] for click in clicks.clicks] == [1, 3]
     assert now == 30.0
+
+
+def test_persistent_content_warnings_recover_verified_server_rows_without_title():
+    from minecraft_ai.operator.menu import (
+        MenuObservation,
+        _text_match_score,
+        _transition_click_target,
+    )
+
+    if not shutil.which("tesseract"):
+        pytest.skip("retained-frame OCR acceptance requires Tesseract")
+    frame = _retained_server_frame("server_list_1920x1080.png")
+
+    class WarningObscuredReader(TesseractMenuTextReader):
+        def __init__(self) -> None:
+            self.caption_index = 0
+
+        def _read_image(self, image, *, input_scale=None, single_line=False):
+            if image.size == (frame.width, frame.height):
+                return (
+                    OcrLine("[Texture][warning] block in blocks.json", 5, 10, 1500, 35),
+                    OcrLine("[Texture][warning] block missing from registry", 5, 120, 1500, 35),
+                    OcrLine("[Texture][warning] blocks.json registry error", 5, 230, 1500, 35),
+                    OcrLine("[Item][error] Resource pack item missing", 5, 360, 1500, 35),
+                )
+            if not single_line:
+                return ()
+            captions = (
+                "Add Server",
+                "unreadable warning-covered row",
+                "Exit Server List",
+                "Fokemon Family - CobbleDrock",
+                "Family Creative - Vanilla",
+            )
+            text = captions[self.caption_index]
+            self.caption_index += 1
+            return (OcrLine(text, 20, 10, 560, 32, confidence=70),)
+
+    lines = WarningObscuredReader().read(frame)
+    stage = classify_menu_stage(
+        frame,
+        lines,
+        lan_name="BedrockConnect",
+        server_name="Pokemon Family - CobbleDrock",
+        hud_detector=lambda _: True,
+    )
+    assert stage is MenuStage.BEDROCK_CONNECT
+    observation = MenuObservation(frame, lines, stage)
+    navigator = BedrockMenuNavigator(
+        capture=None,
+        text_reader=None,
+        click_backend=None,
+        lan_name="BedrockConnect",
+        server=ConfiguredServer(
+            "Pokemon Family - CobbleDrock", "192.168.4.166", 19136
+        ),
+    )
+    target = _transition_click_target(observation, navigator._transition_for(observation))
+    assert _text_match_score(target.text, "Pokemon Family - CobbleDrock") >= 0.86
+    assert 0.64 <= target.center[1] / frame.height <= 0.72
+
+    without_exit = tuple(line for line in lines if "Exit Server List" not in line.text)
+    assert classify_menu_stage(
+        frame,
+        without_exit,
+        lan_name="BedrockConnect",
+        server_name="Pokemon Family - CobbleDrock",
+        hud_detector=lambda _: True,
+    ) is MenuStage.UNKNOWN
+    without_warnings = tuple(
+        line
+        for line in lines
+        if "warning" not in line.text.lower() and "error" not in line.text.lower()
+    )
+    assert classify_menu_stage(
+        frame,
+        without_warnings,
+        lan_name="BedrockConnect",
+        server_name="Pokemon Family - CobbleDrock",
+        hud_detector=lambda _: True,
+    ) is MenuStage.UNKNOWN
